@@ -505,7 +505,7 @@ class BrowserMockEngine {
       opportunity_found: true,
       execution_success: true,
       trade_type: "Spatial Arb",
-      direction: `Buy ${buyVenue} -> Sell ${sellVenue}`,
+      direction: `Buy ${buyVenue} / Sell ${sellVenue}`,
       venue_a: buyVenue,
       venue_b: sellVenue,
       spread_bps: spreadBps,

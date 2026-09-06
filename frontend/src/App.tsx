@@ -107,7 +107,7 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-background overflow-hidden font-sans">
+    <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
       {/* Top Header Bar */}
       <Header
         status={systemStatus}

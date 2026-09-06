@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Play, Pause, StepForward, Activity, CheckCircle2, AlertTriangle } from "lucide-react";
 import type { SimStepResultDto, ExecutionLogEntry } from "../types";
 
 interface SimulationRunnerProps {
@@ -46,13 +45,12 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Simulation Controls Top Bar */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
-            <Activity className="w-4 h-4 text-accent" />
-            <span>High-Frequency Paper Trading Simulation Studio</span>
+          <h2 className="text-sm font-bold font-mono text-slate-900">
+            High-Frequency Paper Trading Simulation Studio
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-500 mt-1">
             Simulates live cross-venue dislocations, atomic multi-leg routing, and automated emergency unwinding.
           </p>
         </div>
@@ -62,43 +60,36 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
           <button
             onClick={handleStep}
             disabled={isRunning}
-            className="px-3.5 py-1.5 bg-surface-raised hover:bg-surface-border border border-surface-border text-white text-xs font-mono font-semibold rounded-lg transition flex items-center space-x-1.5 disabled:opacity-50"
+            className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-700 text-xs font-mono font-medium rounded-lg transition disabled:opacity-50 shadow-xs"
           >
-            <StepForward className="w-3.5 h-3.5 text-accent" />
             <span>Single Step</span>
           </button>
 
           <button
             onClick={() => setIsRunning(!isRunning)}
-            className={`px-4 py-1.5 rounded-lg text-xs font-mono font-bold transition flex items-center space-x-1.5 ${
+            className={`px-4 py-1.5 rounded-lg text-xs font-mono font-medium transition shadow-xs ${
               isRunning
-                ? "bg-loss hover:bg-rose-600 text-white"
-                : "bg-profit hover:bg-emerald-600 text-background glow-green"
+                ? "bg-loss hover:bg-red-700 text-white"
+                : "bg-accent hover:bg-accent-hover text-white"
             }`}
           >
             {isRunning ? (
-              <>
-                <Pause className="w-3.5 h-3.5" />
-                <span>Pause Auto-Run</span>
-              </>
+              <span>Pause Auto-Run</span>
             ) : (
-              <>
-                <Play className="w-3.5 h-3.5" />
-                <span>Start Continuous</span>
-              </>
+              <span>Start Continuous</span>
             )}
           </button>
         </div>
       </div>
 
       {/* Simulation Parameter Controls */}
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-surface p-4 rounded-xl border border-surface-border font-mono text-xs">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-surface p-4 rounded-xl border border-surface-border font-mono text-xs shadow-xs">
         <div>
-          <span className="text-slate-400 text-[10px] uppercase">Asset:</span>
+          <span className="text-slate-500 text-[10px] uppercase">Asset:</span>
           <select
             value={symbol}
             onChange={(e) => setSymbol(e.target.value)}
-            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
             <option value="BTC-USDC">BTC-USDC</option>
             <option value="ETH-USDC">ETH-USDC</option>
@@ -107,33 +98,33 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
         </div>
 
         <div>
-          <span className="text-slate-400 text-[10px] uppercase">Target Spread (BPS):</span>
+          <span className="text-slate-500 text-[10px] uppercase">Target Spread (BPS):</span>
           <input
             type="number"
             step="1"
             value={targetBps}
             onChange={(e) => setTargetBps(parseFloat(e.target.value) || 5)}
-            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           />
         </div>
 
         <div>
-          <span className="text-slate-400 text-[10px] uppercase">Order Qty:</span>
+          <span className="text-slate-500 text-[10px] uppercase">Order Qty:</span>
           <input
             type="number"
             step="0.1"
             value={orderQty}
             onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
-            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           />
         </div>
 
         <div>
-          <span className="text-slate-400 text-[10px] uppercase">Speed Interval:</span>
+          <span className="text-slate-500 text-[10px] uppercase">Speed Interval:</span>
           <select
             value={speedMs}
             onChange={(e) => setSpeedMs(parseInt(e.target.value))}
-            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
             <option value={100}>100ms (Hyper Speed)</option>
             <option value={250}>250ms (Fast)</option>
@@ -145,18 +136,18 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
 
       {/* Stats Summary Bar */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono text-xs">
-        <div className="p-4 bg-surface rounded-xl border border-surface-border">
-          <div className="text-[10px] uppercase text-slate-400">Total Simulation Trades</div>
-          <div className="text-xl font-bold text-white mt-1">{logs.length}</div>
+        <div className="p-4 bg-surface rounded-xl border border-surface-border shadow-xs">
+          <div className="text-[10px] uppercase text-slate-500">Total Simulation Trades</div>
+          <div className="text-xl font-bold text-slate-900 mt-1">{logs.length}</div>
         </div>
 
-        <div className="p-4 bg-surface rounded-xl border border-surface-border">
-          <div className="text-[10px] uppercase text-slate-400">Atomic Win Rate</div>
+        <div className="p-4 bg-surface rounded-xl border border-surface-border shadow-xs">
+          <div className="text-[10px] uppercase text-slate-500">Atomic Win Rate</div>
           <div className="text-xl font-bold text-profit mt-1">{winRate.toFixed(1)}%</div>
         </div>
 
-        <div className="p-4 bg-surface rounded-xl border border-surface-border">
-          <div className="text-[10px] uppercase text-slate-400">Cumulative Realized PnL</div>
+        <div className="p-4 bg-surface rounded-xl border border-surface-border shadow-xs">
+          <div className="text-[10px] uppercase text-slate-500">Cumulative Realized PnL</div>
           <div
             className={`text-xl font-bold mt-1 ${
               totalPnl >= 0 ? "text-profit" : "text-loss"
@@ -166,8 +157,8 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
           </div>
         </div>
 
-        <div className="p-4 bg-surface rounded-xl border border-surface-border">
-          <div className="text-[10px] uppercase text-slate-400">Latest Cycle Status</div>
+        <div className="p-4 bg-surface rounded-xl border border-surface-border shadow-xs">
+          <div className="text-[10px] uppercase text-slate-500">Latest Cycle Status</div>
           <div className="text-sm font-semibold text-accent mt-1 truncate">
             {latestResult ? latestResult.message : "Ready to simulate"}
           </div>
@@ -175,20 +166,20 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
       </div>
 
       {/* Real-Time Execution Trace Log Table */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-4 flex items-center justify-between">
           <span>Atomic Order Coordination Stream</span>
-          <span className="text-slate-500 font-normal lowercase">tokio::join! concurrent leg execution</span>
+          <span className="text-slate-400 font-normal lowercase">tokio::join! concurrent leg execution</span>
         </h3>
 
         {logs.length === 0 ? (
-          <div className="text-center py-12 text-slate-500 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+          <div className="text-center py-12 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-lg">
             No trades executed yet. Click "Single Step" or "Start Continuous".
           </div>
         ) : (
           <div className="overflow-x-auto max-h-96">
             <table className="w-full text-left text-xs font-mono">
-              <thead className="sticky top-0 bg-surface border-b border-surface-border text-slate-400 uppercase text-[10px] tracking-wider">
+              <thead className="sticky top-0 bg-surface border-b border-surface-border text-slate-500 uppercase text-[10px] tracking-wider">
                 <tr>
                   <th className="py-2.5 px-3">Trade ID</th>
                   <th className="py-2.5 px-3">Type</th>
@@ -204,24 +195,22 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
               <tbody className="divide-y divide-surface-border">
                 {logs.map((log) => (
                   <tr key={log.id} className="hover:bg-surface-raised transition">
-                    <td className="py-2 px-3 text-slate-400 font-mono text-[11px]">{log.id}</td>
-                    <td className="py-2 px-3 text-white font-medium">{log.trade_type}</td>
-                    <td className="py-2 px-3 text-slate-300">{log.venue_a} ↔ {log.venue_b}</td>
+                    <td className="py-2 px-3 text-slate-500 font-mono text-[11px]">{log.id}</td>
+                    <td className="py-2 px-3 text-slate-900 font-medium">{log.trade_type}</td>
+                    <td className="py-2 px-3 text-slate-700">{log.venue_a} / {log.venue_b}</td>
                     <td className="py-2 px-3">
                       {log.success ? (
-                        <span className="inline-flex items-center space-x-1 text-profit text-[11px]">
-                          <CheckCircle2 className="w-3 h-3" />
-                          <span>FILLED/FILLED</span>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-profit-dim text-profit text-[10px] font-semibold">
+                          FILLED
                         </span>
                       ) : (
-                        <span className="inline-flex items-center space-x-1 text-loss text-[11px]">
-                          <AlertTriangle className="w-3 h-3" />
-                          <span>UNWOUND</span>
+                        <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-loss-dim text-loss text-[10px] font-semibold">
+                          UNWOUND
                         </span>
                       )}
                     </td>
-                    <td className="py-2 px-3 text-slate-300">${log.gross_profit.toFixed(2)}</td>
-                    <td className="py-2 px-3 text-slate-400">${log.fees.toFixed(2)}</td>
+                    <td className="py-2 px-3 text-slate-700">${log.gross_profit.toFixed(2)}</td>
+                    <td className="py-2 px-3 text-slate-500">${log.fees.toFixed(2)}</td>
                     <td
                       className={`py-2 px-3 font-bold ${
                         log.net_profit >= 0 ? "text-profit" : "text-loss"
@@ -229,8 +218,8 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
                     >
                       {log.net_profit >= 0 ? `+$${log.net_profit.toFixed(2)}` : `-$${Math.abs(log.net_profit).toFixed(2)}`}
                     </td>
-                    <td className="py-2 px-3 text-slate-400">{log.latency_us} µs</td>
-                    <td className="py-2 px-3 text-slate-300 truncate max-w-xs">{log.note}</td>
+                    <td className="py-2 px-3 text-slate-500">{log.latency_us} us</td>
+                    <td className="py-2 px-3 text-slate-600 truncate max-w-xs">{log.note}</td>
                   </tr>
                 ))}
               </tbody>

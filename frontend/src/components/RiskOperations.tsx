@@ -1,5 +1,4 @@
 import React from "react";
-import { ShieldCheck, RotateCcw, AlertOctagon } from "lucide-react";
 import type { RiskOverviewDto } from "../types";
 
 interface RiskOperationsProps {
@@ -27,13 +26,12 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
-            <ShieldCheck className="w-4 h-4 text-profit" />
-            <span>DeltaGuard & Enterprise Risk Engine Controls</span>
+          <h2 className="text-sm font-bold font-mono text-slate-900">
+            DeltaGuard & Enterprise Risk Engine Controls
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-500 mt-1">
             Real-time signed cross-exchange net delta tracking, drawdown tripwires, and maintenance margin proximity.
           </p>
         </div>
@@ -42,17 +40,15 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 border border-amber-500/50 rounded-lg text-xs font-mono font-bold flex items-center space-x-1.5 transition"
+              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs"
             >
-              <RotateCcw className="w-3.5 h-3.5" />
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="px-3 py-1.5 bg-loss/20 hover:bg-loss/30 text-loss border border-loss/50 rounded-lg text-xs font-mono font-bold flex items-center space-x-1.5 transition"
+              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs"
             >
-              <AlertOctagon className="w-3.5 h-3.5" />
               <span>Trigger Manual Trip</span>
             </button>
           )}
@@ -62,14 +58,14 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       {/* 3 Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Card 1: Circuit Breaker */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3">
+        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-400">Circuit Breaker</span>
+            <span className="text-xs font-mono uppercase text-slate-500">Circuit Breaker</span>
             <span
-              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+              className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
                 isTripped
-                  ? "bg-loss/20 text-loss border border-loss/40 animate-pulse"
-                  : "bg-profit/20 text-profit border border-profit/40"
+                  ? "bg-loss-dim text-loss border border-loss-border"
+                  : "bg-profit-dim text-profit border border-profit-border"
               }`}
             >
               {riskData.circuit_breaker_state}
@@ -78,17 +74,17 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
 
           <div className="space-y-1">
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Max Drawdown:</span>
-              <span className="text-white font-bold">${riskData.max_drawdown_limit_usd.toLocaleString()}</span>
+              <span className="text-slate-500">Max Drawdown:</span>
+              <span className="text-slate-900 font-bold">${riskData.max_drawdown_limit_usd.toLocaleString()}</span>
             </div>
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Consecutive Errors:</span>
-              <span className="text-white font-bold">{riskData.consecutive_failures} / {riskData.max_failures_allowed}</span>
+              <span className="text-slate-500">Consecutive Errors:</span>
+              <span className="text-slate-900 font-bold">{riskData.consecutive_failures} / {riskData.max_failures_allowed}</span>
             </div>
           </div>
 
           <div className="pt-2">
-            <div className="h-1.5 w-full bg-surface-raised rounded-full overflow-hidden">
+            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-profit transition-all duration-300"
                 style={{ width: `${Math.max(5, (riskData.consecutive_failures / riskData.max_failures_allowed) * 100)}%` }}
@@ -98,27 +94,27 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 2: Margin Monitor */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3">
+        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-400">Margin Proximity</span>
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-profit/20 text-profit border border-profit/40">
+            <span className="text-xs font-mono uppercase text-slate-500">Margin Proximity</span>
+            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
               {margin.status}
             </span>
           </div>
 
           <div className="space-y-1">
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Margin Ratio:</span>
-              <span className="text-white font-bold">{margin.margin_ratio_pct.toFixed(2)}%</span>
+              <span className="text-slate-500">Margin Ratio:</span>
+              <span className="text-slate-900 font-bold">{margin.margin_ratio_pct.toFixed(2)}%</span>
             </div>
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Liquidation Distance:</span>
+              <span className="text-slate-500">Liquidation Distance:</span>
               <span className="text-profit font-bold">+{margin.liquidation_distance_pct.toFixed(1)}% safe</span>
             </div>
           </div>
 
           <div className="pt-2">
-            <div className="h-1.5 w-full bg-surface-raised rounded-full overflow-hidden">
+            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-accent"
                 style={{ width: `${margin.liquidation_distance_pct}%` }}
@@ -128,25 +124,25 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 3: Portfolio Capital */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3">
+        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-400">Portfolio Capital</span>
-            <span className="text-xs font-mono text-accent font-bold">Consolidated</span>
+            <span className="text-xs font-mono uppercase text-slate-500">Portfolio Capital</span>
+            <span className="text-xs font-mono text-accent font-semibold">Consolidated</span>
           </div>
 
           <div className="space-y-1">
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Total Equity:</span>
-              <span className="text-white font-bold">${riskData.total_portfolio_value_usd.toLocaleString()}</span>
+              <span className="text-slate-500">Total Equity:</span>
+              <span className="text-slate-900 font-bold">${riskData.total_portfolio_value_usd.toLocaleString()}</span>
             </div>
             <div className="flex justify-between text-xs font-mono">
-              <span className="text-slate-400">Maint. Req:</span>
-              <span className="text-slate-300">${margin.maintenance_margin_req_usd.toLocaleString()}</span>
+              <span className="text-slate-500">Maint. Req:</span>
+              <span className="text-slate-700 font-medium">${margin.maintenance_margin_req_usd.toLocaleString()}</span>
             </div>
           </div>
 
           <div className="pt-2">
-            <div className="h-1.5 w-full bg-surface-raised rounded-full overflow-hidden">
+            <div className="h-1.5 w-full bg-slate-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-profit"
                 style={{ width: "95%" }}
@@ -157,16 +153,16 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       </div>
 
       {/* DeltaGuard Net Exposure Table */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-4 flex items-center justify-between">
           <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
-          <span className="text-slate-500 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
+          <span className="text-slate-400 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
         </h3>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
-              <tr className="border-b border-surface-border text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr className="border-b border-surface-border text-slate-500 uppercase text-[10px] tracking-wider">
                 <th className="py-2.5 px-3">Base Asset</th>
                 <th className="py-2.5 px-3">Net Quantity</th>
                 <th className="py-2.5 px-3">USD Exposure</th>
@@ -179,28 +175,28 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
                 const isNeutral = Math.abs(delta.net_exposure_usd) < 500;
                 return (
                   <tr key={delta.asset} className="hover:bg-surface-raised transition">
-                    <td className="py-3 px-3 font-bold text-white">{delta.asset}</td>
-                    <td className="py-3 px-3 text-slate-300">
+                    <td className="py-3 px-3 font-bold text-slate-900">{delta.asset}</td>
+                    <td className="py-3 px-3 text-slate-700">
                       {delta.net_quantity >= 0 ? `+${delta.net_quantity.toFixed(4)}` : delta.net_quantity.toFixed(4)}
                     </td>
                     <td className="py-3 px-3">
                       <span
                         className={`font-semibold ${
-                          delta.net_exposure_usd >= 0 ? "text-slate-200" : "text-amber-300"
+                          delta.net_exposure_usd >= 0 ? "text-slate-800" : "text-warn"
                         }`}
                       >
                         ${delta.net_exposure_usd.toFixed(2)}
                       </span>
                     </td>
-                    <td className="py-3 px-3 text-slate-400">±${delta.delta_limit_usd.toLocaleString()}</td>
+                    <td className="py-3 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString()} limit</td>
                     <td className="py-3 px-3 text-right">
                       {isNeutral ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-profit/20 text-profit border border-profit/30">
-                          DELTA NEUTRAL
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-profit-dim text-profit border border-profit-border">
+                          Delta Neutral
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                          EXPOSURE SKEW
+                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-warn-dim text-warn border border-warn-border">
+                          Exposure Skew
                         </span>
                       )}
                     </td>

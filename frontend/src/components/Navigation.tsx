@@ -39,53 +39,46 @@ export const Navigation: React.FC<NavigationProps> = ({
       label: "Spatial Matrix",
       icon: Layers,
       badge: spatialCount > 0 ? spatialCount : undefined,
-      desc: "Cross-Market Spreads",
     },
     {
       id: "funding" as ActiveTab,
       label: "Funding Radar",
       icon: Percent,
       badge: fundingCount > 0 ? fundingCount : undefined,
-      desc: "Perpetual Carry & APY",
     },
     {
       id: "prediction" as ActiveTab,
       label: "Prediction Parity",
       icon: Target,
       badge: predictionCount > 0 ? predictionCount : undefined,
-      desc: "Synthetic Parity",
     },
     {
       id: "statarb" as ActiveTab,
       label: "Stat-Arb Lab",
       icon: FlaskConical,
-      desc: "Kalman Filter & OU",
     },
     {
       id: "risk" as ActiveTab,
       label: "DeltaGuard & Risk",
       icon: ShieldCheck,
-      desc: "Exposure & Liquidation",
     },
     {
       id: "sim" as ActiveTab,
       label: "Simulation Studio",
       icon: PlaySquare,
-      desc: "HFT Execution Paper",
     },
     {
       id: "settings" as ActiveTab,
       label: "Engine Settings",
       icon: Settings,
-      desc: "Keys & Router Config",
     },
   ];
 
   return (
-    <nav className="w-64 border-r border-surface-border bg-surface flex flex-col justify-between py-4 select-none">
+    <nav className="w-56 border-r border-surface-border bg-surface flex flex-col justify-between py-4 select-none">
       <div className="space-y-1 px-3">
-        <div className="px-3 pb-2 text-[10px] font-mono uppercase tracking-widest text-slate-500">
-          Trading Modules
+        <div className="px-3 pb-2 text-[10px] font-mono uppercase tracking-widest text-slate-400 font-semibold">
+          Modules
         </div>
         {tabs.map((t) => {
           const Icon = t.icon;
@@ -94,26 +87,25 @@ export const Navigation: React.FC<NavigationProps> = ({
             <button
               key={t.id}
               onClick={() => onSelectTab(t.id)}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-xs font-mono transition group text-left ${
+              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono transition group text-left ${
                 isActive
-                  ? "bg-accent/10 text-white border border-accent/30 shadow-sm"
-                  : "text-slate-400 hover:text-white hover:bg-surface-raised border border-transparent"
+                  ? "bg-accent-dim text-accent border border-accent-line/60 font-medium"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-surface-raised border border-transparent"
               }`}
             >
-              <div className="flex items-center space-x-3">
+              <div className="flex items-center space-x-2.5">
                 <Icon
-                  className={`w-4 h-4 transition ${
-                    isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-200"
+                  className={`w-3.5 h-3.5 transition ${
+                    isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
                   }`}
                 />
-                <div>
-                  <div className={`font-medium ${isActive ? "text-accent" : ""}`}>{t.label}</div>
-                  <div className="text-[10px] text-slate-500">{t.desc}</div>
-                </div>
+                <span className={`font-medium ${isActive ? "text-accent" : "text-slate-700"}`}>
+                  {t.label}
+                </span>
               </div>
 
               {t.badge !== undefined && (
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-accent/20 text-accent border border-accent/30">
+                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent-dim text-accent border border-accent-line/60">
                   {t.badge}
                 </span>
               )}
@@ -126,15 +118,15 @@ export const Navigation: React.FC<NavigationProps> = ({
       <div className="px-4 py-3 border-t border-surface-border text-[11px] font-mono text-slate-500 space-y-1">
         <div className="flex justify-between">
           <span>Tauri IPC:</span>
-          <span className="text-accent">Connected</span>
+          <span className="text-accent font-medium">Connected</span>
         </div>
         <div className="flex justify-between">
           <span>Engine Core:</span>
-          <span className="text-profit">Sub-µs Rust</span>
+          <span className="text-profit font-medium">Rust Core</span>
         </div>
         <div className="flex justify-between">
           <span>Router:</span>
-          <span className="text-slate-400">Atomic Multi-Leg</span>
+          <span className="text-slate-600 font-medium">Multi-Leg</span>
         </div>
       </div>
     </nav>

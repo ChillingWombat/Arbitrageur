@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { TrendingUp, Clock, DollarSign, Send, CheckCircle2 } from "lucide-react";
 import type { FundingOpportunityDto } from "../types";
 
 interface FundingRadarProps {
@@ -41,13 +40,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Top Banner & Configuration */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4">
+      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
-            <TrendingUp className="w-4 h-4 text-profit" />
-            <span>Delta-Neutral Perpetual Funding Carry Radar</span>
+          <h2 className="text-sm font-bold font-mono text-slate-900">
+            Delta-Neutral Perpetual Funding Carry Radar
           </h2>
-          <p className="text-xs text-slate-400 mt-1">
+          <p className="text-xs text-slate-500 mt-1">
             Capture continuous funding rate spreads by going Long on low-funding venues and Short on high-funding venues.
           </p>
         </div>
@@ -59,10 +57,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               <button
                 key={s}
                 onClick={() => onSymbolChange(s)}
-                className={`px-3 py-1 text-xs font-mono rounded transition ${
+                className={`px-3 py-1 text-xs font-mono rounded-md transition ${
                   symbol === s
-                    ? "bg-profit text-background font-bold shadow-sm"
-                    : "text-slate-300 hover:text-white"
+                    ? "bg-accent text-white font-semibold shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
                 }`}
               >
                 {s}
@@ -71,15 +69,15 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           </div>
 
           <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs font-mono">
-            <span className="px-2 text-slate-400">Size:</span>
+            <span className="px-2 text-slate-500">Size:</span>
             {quickSizes.map((qs) => (
               <button
                 key={qs}
                 onClick={() => onTradeSizeChange(qs)}
-                className={`px-2.5 py-0.5 rounded transition ${
+                className={`px-2.5 py-0.5 rounded-md transition ${
                   tradeSize === qs
-                    ? "bg-accent/20 text-accent font-bold"
-                    : "text-slate-400 hover:text-white"
+                    ? "bg-accent-dim text-accent border border-accent-line font-semibold"
+                    : "text-slate-600 hover:text-slate-900"
                 }`}
               >
                 ${qs / 1000}k
@@ -90,14 +88,14 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       </div>
 
       {/* Evaluated Carry Opportunities Table */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-4 flex items-center justify-between">
           <span>Ranked Delta-Neutral Carry Opportunities</span>
-          <span className="text-slate-500 font-normal lowercase">compounding APY = (1 + r_hourly)^8760 - 1</span>
+          <span className="text-slate-400 font-normal lowercase">compounding APY = (1 + r_hourly)^8760 - 1</span>
         </h3>
 
         {opportunities.length === 0 ? (
-          <div className="text-center py-12 text-slate-500 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+          <div className="text-center py-12 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-lg">
             No funding rate spreads currently exceeding positive carry threshold.
           </div>
         ) : (
@@ -105,13 +103,13 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             {opportunities.map((opp, idx) => (
               <div
                 key={opp.id}
-                className="bg-surface-raised border border-surface-border hover:border-slate-500 rounded-xl p-5 flex flex-col justify-between space-y-4 transition"
+                className="bg-surface border border-surface-border hover:border-slate-300 rounded-xl p-5 flex flex-col justify-between space-y-4 transition shadow-xs"
               >
                 <div>
                   {/* Badge & Rank */}
                   <div className="flex items-center justify-between mb-3">
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-profit/20 text-profit border border-profit/30">
-                      RANK #{idx + 1}
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-accent-dim text-accent border border-accent-line">
+                      Rank #{idx + 1}
                     </span>
                     <span className="text-xs font-mono font-bold text-accent">
                       {opp.net_apy_pct.toFixed(2)}% APY
@@ -119,14 +117,14 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                   </div>
 
                   {/* Pair Route */}
-                  <div className="p-3 bg-surface rounded-lg border border-surface-border mb-3 font-mono text-xs space-y-2">
+                  <div className="p-3 bg-surface-raised rounded-lg border border-surface-border mb-3 font-mono text-xs space-y-2">
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Long Leg:</span>
-                      <span className="font-semibold text-white">{opp.long_venue}</span>
+                      <span className="text-slate-500">Long Leg:</span>
+                      <span className="font-semibold text-slate-900">{opp.long_venue}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="text-slate-400">Short Leg:</span>
-                      <span className="font-semibold text-white">{opp.short_venue}</span>
+                      <span className="text-slate-500">Short Leg:</span>
+                      <span className="font-semibold text-slate-900">{opp.short_venue}</span>
                     </div>
                     <div className="pt-1 border-t border-surface-border flex items-center justify-between text-profit">
                       <span>Net 8h Rate:</span>
@@ -136,20 +134,18 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
                   {/* Key Metrics */}
                   <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                    <div className="p-2 bg-surface rounded border border-surface-border">
-                      <div className="text-[10px] text-slate-400 flex items-center space-x-1">
-                        <Clock className="w-3 h-3 text-slate-400" />
-                        <span>Fee Breakeven</span>
+                    <div className="p-2 bg-surface-raised rounded border border-surface-border">
+                      <div className="text-[10px] text-slate-500 uppercase">
+                        Fee Breakeven
                       </div>
-                      <div className="font-bold text-white mt-0.5">{opp.break_even_hours.toFixed(1)} hrs</div>
+                      <div className="font-semibold text-slate-900 mt-0.5">{opp.break_even_hours.toFixed(1)} hrs</div>
                     </div>
 
-                    <div className="p-2 bg-surface rounded border border-surface-border">
-                      <div className="text-[10px] text-slate-400 flex items-center space-x-1">
-                        <DollarSign className="w-3 h-3 text-profit" />
-                        <span>Daily Income</span>
+                    <div className="p-2 bg-surface-raised rounded border border-surface-border">
+                      <div className="text-[10px] text-slate-500 uppercase">
+                        Daily Income
                       </div>
-                      <div className="font-bold text-profit mt-0.5">+${opp.estimated_daily_income_usd.toFixed(2)}</div>
+                      <div className="font-semibold text-profit mt-0.5">+${opp.estimated_daily_income_usd.toFixed(2)}</div>
                     </div>
                   </div>
                 </div>
@@ -157,22 +153,20 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                 {/* Return Projection & Action Button */}
                 <div className="pt-3 border-t border-surface-border flex items-center justify-between text-xs font-mono">
                   <div>
-                    <span className="text-slate-400">Annualized APR: </span>
-                    <span className="font-bold text-slate-200">{opp.net_apr_pct.toFixed(2)}%</span>
+                    <span className="text-slate-500">Annualized APR: </span>
+                    <span className="font-semibold text-slate-800">{opp.net_apr_pct.toFixed(2)}%</span>
                   </div>
 
                   {lastExecuted === opp.id ? (
-                    <span className="inline-flex items-center space-x-1 text-profit text-xs font-bold">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      <span>Carry Active</span>
+                    <span className="inline-flex items-center px-2 py-0.5 rounded bg-profit-dim text-profit text-xs font-semibold">
+                      Carry Active
                     </span>
                   ) : (
                     <button
                       onClick={() => handleExecute(opp)}
                       disabled={executingId === opp.id}
-                      className="px-2.5 py-1 bg-profit/20 hover:bg-profit/30 border border-profit/40 text-profit rounded-lg text-xs font-mono font-semibold transition flex items-center space-x-1"
+                      className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white rounded-lg text-xs font-mono font-medium transition flex items-center shadow-xs"
                     >
-                      <Send className="w-3 h-3" />
                       <span>{executingId === opp.id ? "Opening..." : "Open Carry"}</span>
                     </button>
                   )}
@@ -184,10 +178,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       </div>
 
       {/* Interactive Holding Duration Yield Simulator */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-4 flex items-center justify-between">
           <span>Carry Yield Amortization Simulator</span>
-          <span className="text-accent font-bold font-mono text-xs">{holdingDays} Days Target</span>
+          <span className="text-accent font-semibold font-mono text-xs">{holdingDays} Days Target</span>
         </h3>
 
         <div className="space-y-4">
@@ -198,9 +192,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               max="90"
               value={holdingDays}
               onChange={(e) => setHoldingDays(parseInt(e.target.value))}
-              className="w-full h-2 bg-surface-raised rounded-lg appearance-none cursor-pointer accent-accent"
+              className="w-full h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-accent"
             />
-            <div className="flex justify-between text-[10px] font-mono text-slate-500 mt-1">
+            <div className="flex justify-between text-[10px] font-mono text-slate-400 mt-1">
               <span>1 Day</span>
               <span>14 Days</span>
               <span>30 Days</span>
@@ -210,29 +204,29 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-2">
-            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border">
-              <div className="text-[10px] font-mono text-slate-400 uppercase">Deployed Capital</div>
-              <div className="text-lg font-bold font-mono text-white mt-1">
+            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
+              <div className="text-[10px] font-mono text-slate-500 uppercase">Deployed Capital</div>
+              <div className="text-lg font-bold font-mono text-slate-900 mt-1">
                 ${tradeSize.toLocaleString()}
               </div>
             </div>
 
-            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border">
-              <div className="text-[10px] font-mono text-slate-400 uppercase">Gross Funding Collected</div>
+            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
+              <div className="text-[10px] font-mono text-slate-500 uppercase">Gross Funding Collected</div>
               <div className="text-lg font-bold font-mono text-profit mt-1">
                 +${((tradeSize * 0.00021 * 3) * holdingDays).toFixed(2)}
               </div>
             </div>
 
-            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border">
-              <div className="text-[10px] font-mono text-slate-400 uppercase">Roundtrip Trading Fees</div>
+            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
+              <div className="text-[10px] font-mono text-slate-500 uppercase">Roundtrip Trading Fees</div>
               <div className="text-lg font-bold font-mono text-loss mt-1">
                 -${(tradeSize * 0.00035 * 2).toFixed(2)}
               </div>
             </div>
 
-            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border">
-              <div className="text-[10px] font-mono text-slate-400 uppercase">Net Realized PnL</div>
+            <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
+              <div className="text-[10px] font-mono text-slate-500 uppercase">Net Realized PnL</div>
               <div className="text-lg font-bold font-mono text-profit mt-1">
                 +${(((tradeSize * 0.00021 * 3) * holdingDays) - (tradeSize * 0.00035 * 2)).toFixed(2)}
               </div>

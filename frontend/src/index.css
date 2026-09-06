@@ -4,58 +4,59 @@
 
 @layer base {
   :root {
-    --color-bg: #0b0e14;
-    --color-surface: #111622;
-    --color-surface-raised: #171f30;
-    --color-border: #212d45;
-    --color-cyan: #00f0ff;
-    --color-green: #10b981;
-    --color-rose: #f43f5e;
-    --color-amber: #f59e0b;
+    --background: #f8fafc;
+    --foreground: #0f172a;
+    --card: #ffffff;
+    --card-foreground: #0f172a;
+    --border: #e2e8f0;
+    --input: #e2e8f0;
+    --primary: #2563eb;
+    --primary-hover: #1d4ed8;
+    --primary-foreground: #ffffff;
+    --accent-soft: #eff6ff;
+    --accent-line: #bfdbfe;
+    --muted: #f1f5f9;
+    --muted-foreground: #64748b;
+    --ring: #3b82f6;
+    --color-bg: #f8fafc;
+    --color-surface: #ffffff;
+    --color-surface-raised: #f1f5f9;
+    --color-border: #e2e8f0;
+    --color-blue: #2563eb;
+    --color-green: #059669;
+    --color-rose: #dc2626;
+    --color-amber: #d97706;
   }
 
   body {
-    background-color: #0b0e14;
-    color: #e2e8f0;
+    background-color: #f8fafc;
+    color: #0f172a;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     user-select: none;
     -webkit-user-select: none;
   }
 
-  /* Custom scrollbar */
+  /* Clean minimalist scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: #0e131f;
+    background: #f8fafc;
   }
   ::-webkit-scrollbar-thumb {
-    background: #25334d;
+    background: #cbd5e1;
     border-radius: 3px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #384c73;
+    background: #94a3b8;
   }
 }
 
-.glow-cyan {
-  box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
-}
-
-.glow-green {
-  box-shadow: 0 0 15px rgba(16, 185, 129, 0.25);
-}
-
+/* Minimalist utility classes - glows replaced by subtle clean accents */
+.glow-cyan,
+.glow-green,
 .glow-rose {
-  box-shadow: 0 0 15px rgba(244, 63, 94, 0.25);
+  box-shadow: none;
 }
 
-@keyframes pulseSlow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-.animate-pulse-slow {
-  animation: pulseSlow 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
