@@ -25,17 +25,55 @@ pub fn evaluate_prediction_cross_venue(
     venue_b_no: Decimal,
     fee_bps: Decimal,
 ) -> Option<PredictionArbitrageOpportunity> {
+    evaluate_prediction_cross_venue_fees(
+        venue_a_name,
+        venue_a_yes,
+        venue_a_no,
+        fee_bps,
+        venue_b_name,
+        venue_b_yes,
+        venue_b_no,
+        fee_bps,
+    )
+}
+
+/// Evaluates synthetic cross-venue arbitrage with distinct fee schedules for each venue.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_prediction_cross_venue_fees(
+    venue_a_name: &str,
+    venue_a_yes: Decimal,
+    venue_a_no: Decimal,
+    fee_a_bps: Decimal,
+    venue_b_name: &str,
+    venue_b_yes: Decimal,
+    venue_b_no: Decimal,
+    fee_b_bps: Decimal,
+) -> Option<PredictionArbitrageOpportunity> {
+    // Prediction market price sanity bounds: 0 < Price < 1.00
+    if venue_a_yes <= dec!(0)
+        || venue_a_yes >= dec!(1)
+        || venue_a_no <= dec!(0)
+        || venue_a_no >= dec!(1)
+        || venue_b_yes <= dec!(0)
+        || venue_b_yes >= dec!(1)
+        || venue_b_no <= dec!(0)
+        || venue_b_no >= dec!(1)
+    {
+        return None;
+    }
+
     let guaranteed_payout = dec!(1.0);
-    let fee_multiplier = fee_bps / BPS_DIVISOR;
+    let fee_a_mult = fee_a_bps / BPS_DIVISOR;
+    let fee_b_mult = fee_b_bps / BPS_DIVISOR;
 
     // Strategy 1: Buy YES on A, Buy NO on B
     let cost_1 = venue_a_yes + venue_b_no;
-    let fees_1 = cost_1 * fee_multiplier;
+    let fees_1 = venue_a_yes * fee_a_mult + venue_b_no * fee_b_mult;
     let profit_1 = guaranteed_payout - cost_1 - fees_1;
 
     // Strategy 2: Buy YES on B, Buy NO on A
     let cost_2 = venue_b_yes + venue_a_no;
-    let fees_2 = cost_2 * fee_multiplier;
+    let fees_2 = venue_b_yes * fee_b_mult + venue_a_no * fee_a_mult;
     let profit_2 = guaranteed_payout - cost_2 - fees_2;
 
     if profit_1 > dec!(0) && profit_1 >= profit_2 {

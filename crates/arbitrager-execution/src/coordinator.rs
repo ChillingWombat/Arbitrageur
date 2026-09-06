@@ -52,6 +52,14 @@ impl AtomicArbitrageCoordinator {
         }
     }
 
+    pub fn router(&self) -> &SmartOrderRouter {
+        &self.router
+    }
+
+    pub fn circuit_breaker(&self) -> &Arc<CircuitBreaker> {
+        &self.circuit_breaker
+    }
+
     /// Execute atomic two-leg arbitrage concurrently.
     /// Leg A: buy/sell on `exchange_a`
     /// Leg B: opposite side on `exchange_b`
@@ -103,10 +111,18 @@ impl AtomicArbitrageCoordinator {
 
                     let px_a = fill_a.avg_fill_price.unwrap_or(dec!(0));
                     let px_b = fill_b.avg_fill_price.unwrap_or(dec!(0));
-                    let profit = if side_a == Side::Buy {
-                        (px_b - px_a) * fill_a.filled_qty - (fill_a.fee + fill_b.fee)
+                    let matched_qty = fill_a.filled_qty.min(fill_b.filled_qty);
+                    let profit = if side_a == Side::Buy && side_b == Side::Sell {
+                        (px_b - px_a) * matched_qty - (fill_a.fee + fill_b.fee)
+                    } else if side_a == Side::Sell && side_b == Side::Buy {
+                        (px_a - px_b) * matched_qty - (fill_a.fee + fill_b.fee)
+                    } else if side_a == Side::Buy && side_b == Side::Buy {
+                        // Synthetic binary parity / Arrow-Debreu portfolio (Buy YES + Buy NO)
+                        // Guaranteed settlement payout is 1.00 per contract
+                        (dec!(1.0) - px_a - px_b) * matched_qty - (fill_a.fee + fill_b.fee)
                     } else {
-                        (px_a - px_b) * fill_a.filled_qty - (fill_a.fee + fill_b.fee)
+                        // Two-sided sell (e.g. Dutch book outcome shorting)
+                        (px_a + px_b - dec!(1.0)) * matched_qty - (fill_a.fee + fill_b.fee)
                     };
 
                     ArbitrageExecutionResult::Success {

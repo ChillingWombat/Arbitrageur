@@ -92,17 +92,37 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let base_sym = symbol.split('-').next().unwrap_or(symbol);
-        // Map symbol to market_id: e.g. ETH is 0, BTC is 1, SOL is 2
-        let market_id = match base_sym.to_uppercase().as_str() {
-            "ETH" => 0,
-            "BTC" => 1,
-            "SOL" => 2,
-            "DOGE" => 3,
-            "1000PEPE" | "PEPE" => 4,
-            "WLD" => 6,
-            "XRP" => 7,
-            _ => 0,
+        let clean_sym = symbol.replace('/', "-").to_uppercase();
+        let base_sym = clean_sym.split('-').next().unwrap_or(&clean_sym);
+        
+        // Map symbol to market_id: Crypto perps + Lighter Robinhood synthetic equities
+        let market_id = if let Ok(numeric_id) = clean_sym.parse::<u64>() {
+            numeric_id
+        } else {
+            match base_sym {
+                // Perps
+                "ETH" if clean_sym.contains("PERP") || !clean_sym.contains("SPOT") => 0,
+                "BTC" => 1,
+                "SOL" => 2,
+                "DOGE" => 3,
+                "1000PEPE" | "PEPE" => 4,
+                "WLD" => 6,
+                "XRP" => 7,
+                // Robinhood Lighter Tokenized Equities (Web3 -> Traditional)
+                "RHNVDA" | "NVDA" => 2056,
+                "RHSPY" | "SPY" => 2057,
+                "RHQQQ" | "QQQ" => 2058,
+                // Lighter Spot
+                "ETH" => 2048,
+                "LIT" => 2049,
+                "LINK" => 2050,
+                "UNI" => 2051,
+                "AAVE" => 2052,
+                "SKY" => 2053,
+                "LDO" => 2054,
+                "AZTEC" => 2055,
+                _ => 1,
+            }
         };
 
         let res = self.get_json(&format!("/api/v1/orderBookOrders?market_id={}&limit=50", market_id)).await?;
@@ -110,10 +130,13 @@ impl ExchangeAdapter for LighterAdapter {
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
         if let Some(bids) = res.get("bids").and_then(|b| b.as_array()) {
             for b in bids {
-                if let (Some(px), Some(sz)) = (
-                    b.get("price").and_then(|p| p.as_str()),
-                    b.get("size").and_then(|s| s.as_str()),
-                ) {
+                let px_opt = b.get("price").and_then(|p| p.as_str());
+                let sz_opt = b.get("remaining_base_amount")
+                    .or_else(|| b.get("size"))
+                    .or_else(|| b.get("initial_base_amount"))
+                    .and_then(|s| s.as_str());
+
+                if let (Some(px), Some(sz)) = (px_opt, sz_opt) {
                     if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
                         book.bids.push(BookLevel::new(p, s));
                     }
@@ -123,10 +146,13 @@ impl ExchangeAdapter for LighterAdapter {
 
         if let Some(asks) = res.get("asks").and_then(|a| a.as_array()) {
             for a in asks {
-                if let (Some(px), Some(sz)) = (
-                    a.get("price").and_then(|p| p.as_str()),
-                    a.get("size").and_then(|s| s.as_str()),
-                ) {
+                let px_opt = a.get("price").and_then(|p| p.as_str());
+                let sz_opt = a.get("remaining_base_amount")
+                    .or_else(|| a.get("size"))
+                    .or_else(|| a.get("initial_base_amount"))
+                    .and_then(|s| s.as_str());
+
+                if let (Some(px), Some(sz)) = (px_opt, sz_opt) {
                     if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
                         book.asks.push(BookLevel::new(p, s));
                     }

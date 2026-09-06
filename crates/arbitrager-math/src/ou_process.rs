@@ -80,8 +80,8 @@ impl OuModelParams {
         // R^2 calculation
         let y_mean = sum_y / m;
         let mut tss = 0.0;
-        for i in 1..n {
-            let d = series[i] - y_mean;
+        for val in &series[1..n] {
+            let d = *val - y_mean;
             tss += d * d;
         }
         let r_squared = if tss > 1e-15 {

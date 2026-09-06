@@ -191,14 +191,27 @@ impl ExchangeAdapter for SimulatedExchange {
         })?;
 
         let (fill_px, filled_qty) = {
-            let book = book_lock.write();
+            let mut book = book_lock.write();
             match order.side {
                 Side::Buy => {
                     let (vwap, unfilled, _) = book.buy_execution_vwap(order.quantity).ok_or_else(|| {
                         anyhow::anyhow!("[{}] Insufficient ask liquidity for buy order", self.name)
                     })?;
                     let filled = order.quantity - unfilled;
-                    // In a real execution, consume the levels
+                    // Realistically consume ask levels
+                    let mut to_consume = filled;
+                    book.asks.retain_mut(|level| {
+                        if to_consume <= dec!(0) {
+                            true
+                        } else if level.size <= to_consume {
+                            to_consume -= level.size;
+                            false
+                        } else {
+                            level.size -= to_consume;
+                            to_consume = dec!(0);
+                            true
+                        }
+                    });
                     (vwap, filled)
                 }
                 Side::Sell => {
@@ -206,6 +219,20 @@ impl ExchangeAdapter for SimulatedExchange {
                         anyhow::anyhow!("[{}] Insufficient bid liquidity for sell order", self.name)
                     })?;
                     let filled = order.quantity - unfilled;
+                    // Realistically consume bid levels
+                    let mut to_consume = filled;
+                    book.bids.retain_mut(|level| {
+                        if to_consume <= dec!(0) {
+                            true
+                        } else if level.size <= to_consume {
+                            to_consume -= level.size;
+                            false
+                        } else {
+                            level.size -= to_consume;
+                            to_consume = dec!(0);
+                            true
+                        }
+                    });
                     (vwap, filled)
                 }
             }
@@ -214,9 +241,11 @@ impl ExchangeAdapter for SimulatedExchange {
         let notional = filled_qty * fill_px;
         let fee = notional * (self.fee_bps / dec!(10000));
 
-        // Update position in simulated account
+        // Update position and equity with realized PnL in simulated account
         {
             let mut acc = self.account.write();
+            let mut realized_pnl = dec!(0);
+
             let pos_opt = acc.positions.iter_mut().find(|p| p.symbol == order.symbol);
             if let Some(pos) = pos_opt {
                 if pos.side == order.side {
@@ -225,14 +254,33 @@ impl ExchangeAdapter for SimulatedExchange {
                     pos.entry_price = total_cost / total_qty;
                     pos.quantity = total_qty;
                     pos.mark_price = fill_px;
-                } else if pos.quantity > filled_qty {
-                    pos.quantity -= filled_qty;
-                    pos.mark_price = fill_px;
+                    pos.initial_margin = (total_qty * fill_px) / pos.leverage;
+                    pos.maintenance_margin = (total_qty * fill_px) / (pos.leverage * dec!(2));
                 } else {
-                    pos.side = order.side;
-                    pos.quantity = filled_qty - pos.quantity;
-                    pos.entry_price = fill_px;
-                    pos.mark_price = fill_px;
+                    let closing_qty = pos.quantity.min(filled_qty);
+                    let pnl_per_unit = if pos.side == Side::Buy {
+                        fill_px - pos.entry_price
+                    } else {
+                        pos.entry_price - fill_px
+                    };
+                    realized_pnl += pnl_per_unit * closing_qty;
+
+                    if pos.quantity > filled_qty {
+                        pos.quantity -= filled_qty;
+                        pos.mark_price = fill_px;
+                        pos.realized_pnl += realized_pnl;
+                        pos.initial_margin = (pos.quantity * fill_px) / pos.leverage;
+                        pos.maintenance_margin = (pos.quantity * fill_px) / (pos.leverage * dec!(2));
+                    } else {
+                        let remaining_new_qty = filled_qty - pos.quantity;
+                        pos.side = order.side;
+                        pos.quantity = remaining_new_qty;
+                        pos.entry_price = fill_px;
+                        pos.mark_price = fill_px;
+                        pos.realized_pnl += realized_pnl;
+                        pos.initial_margin = (remaining_new_qty * fill_px) / pos.leverage;
+                        pos.maintenance_margin = (remaining_new_qty * fill_px) / (pos.leverage * dec!(2));
+                    }
                 }
             } else {
                 acc.positions.push(Position {
@@ -252,13 +300,21 @@ impl ExchangeAdapter for SimulatedExchange {
                 });
             }
 
-            acc.equity -= fee;
-            acc.free_margin -= fee;
+            // Remove fully closed positions
+            acc.positions.retain(|p| p.quantity > dec!(0));
+
+            acc.equity += realized_pnl - fee;
+            let total_mm: Decimal = acc.positions.iter().map(|p| p.maintenance_margin).sum();
+            acc.maintenance_margin = total_mm;
+            acc.free_margin = (acc.equity - total_mm).max(dec!(0));
+            acc.margin_usage_pct = if acc.equity > dec!(0) { (total_mm / acc.equity) * dec!(100) } else { dec!(0) };
+
             let eq = acc.equity;
             let free = acc.free_margin;
             if let Some(bal) = acc.balances.first_mut() {
                 bal.total = eq;
                 bal.free = free;
+                bal.locked = (eq - free).max(dec!(0));
             }
         }
 

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use tracing::info;
 use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_core::order::OrderRequest;
 use arbitrager_core::types::{dec, Decimal, Side};
 use arbitrager_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrager_math::funding_carry::{evaluate_funding_carry, FundingCarryOpportunity};
@@ -59,21 +58,38 @@ impl FundingRateArbStrategy {
         opp: &FundingCarryOpportunity,
         coordinator: &AtomicArbitrageCoordinator,
     ) -> anyhow::Result<ArbitrageExecutionResult> {
-        let (long_ex, short_ex) = if self.exchange_a.name() == opp.long_venue {
+        let is_a_long = self.exchange_a.venue_id().as_str().eq_ignore_ascii_case(&opp.long_venue)
+            || self.exchange_a.name().eq_ignore_ascii_case(&opp.long_venue);
+        let (long_ex, short_ex) = if is_a_long {
             (&self.exchange_a, &self.exchange_b)
         } else {
             (&self.exchange_b, &self.exchange_a)
         };
 
-        // Determine price to size order
-        let ticker = long_ex.fetch_ticker(&self.symbol).await?;
-        if ticker.ask <= dec!(0) {
-            anyhow::bail!("Invalid ask price for symbol {}", self.symbol);
+        // Determine prices to size order and build protective slippage-bounded IOC orders
+        let (ticker_long, ticker_short) = tokio::try_join!(
+            long_ex.fetch_ticker(&self.symbol),
+            short_ex.fetch_ticker(&self.symbol)
+        )?;
+        if ticker_long.ask <= dec!(0) || ticker_short.bid <= dec!(0) {
+            anyhow::bail!("Invalid price for symbol {}", self.symbol);
         }
-        let qty = self.trade_size_usd / ticker.ask;
+        let qty = self.trade_size_usd / ticker_long.ask;
 
-        let order_long = OrderRequest::new_ioc(long_ex.venue_id(), &self.symbol, Side::Buy, dec!(99999999), qty);
-        let order_short = OrderRequest::new_ioc(short_ex.venue_id(), &self.symbol, Side::Sell, dec!(0.0001), qty);
+        let order_long = coordinator.router().build_ioc_order(
+            long_ex.venue_id(),
+            &self.symbol,
+            Side::Buy,
+            ticker_long.ask,
+            qty,
+        );
+        let order_short = coordinator.router().build_ioc_order(
+            short_ex.venue_id(),
+            &self.symbol,
+            Side::Sell,
+            ticker_short.bid,
+            qty,
+        );
 
         info!(
             "💰 Opening Funding Carry: Long {} on {} and Short on {}. Expected 8h Rate: {:.4}%, APR: {:.2}%",

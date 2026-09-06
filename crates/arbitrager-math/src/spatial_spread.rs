@@ -37,15 +37,18 @@ pub fn evaluate_spatial_spread(
         return None;
     }
 
-    // Calculate actual depth-weighted execution price (VWAP) across orderbook levels
-    let (buy_vwap, buy_unfilled, _buy_slippage) = buy_book.buy_execution_vwap(target_qty)?;
-    let (sell_vwap, sell_unfilled, _sell_slippage) = sell_book.sell_execution_vwap(target_qty)?;
+    // Determine mutually executable depth across both books
+    let available_buy_depth: Decimal = buy_book.asks.iter().map(|l| l.size).sum();
+    let available_sell_depth: Decimal = sell_book.bids.iter().map(|l| l.size).sum();
+    let executable_qty = target_qty.min(available_buy_depth).min(available_sell_depth);
 
-    // Only consider the portion fillable on both sides
-    let executable_qty = target_qty - buy_unfilled.max(sell_unfilled);
     if executable_qty <= dec!(0) {
         return None;
     }
+
+    // Calculate actual depth-weighted execution price (VWAP) for the exact matched quantity
+    let (buy_vwap, _, _) = buy_book.buy_execution_vwap(executable_qty)?;
+    let (sell_vwap, _, _) = sell_book.sell_execution_vwap(executable_qty)?;
 
     let gross_spread = sell_vwap - buy_vwap;
     let gross_spread_bps = (gross_spread / buy_vwap) * BPS_DIVISOR;

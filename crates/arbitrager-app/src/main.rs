@@ -201,9 +201,9 @@ async fn run_simulate(symbol: &str, target_bps: Decimal, iterations: usize) -> a
     let mut total_realized_profit = dec!(0);
 
     for i in 1..=iterations {
-        // Inject price perturbation to simulate market movements
-        let offset = Decimal::from((i % 5) as i64 * 8);
-        ex_lighter.seed_market(symbol, dec!(60020.0) + offset, dec!(60030.0) + offset, dec!(4.0), dec!(0.0001));
+        // Inject price perturbation to simulate market movements and cross-venue dislocations
+        let dislocation = if i % 2 == 1 { dec!(95.0) } else { dec!(130.0) };
+        ex_lighter.seed_market(symbol, dec!(60010.0) + dislocation, dec!(60020.0) + dislocation, dec!(4.0), dec!(0.0001));
 
         // 1. Evaluate spatial price spread
         if let Ok(Some(signal)) = spatial_strat.evaluate_opportunity().await {

@@ -64,15 +64,28 @@ impl StatArbPairsStrategy {
                 .or_else(|| Decimal::from_f64_retain(beta))
                 .unwrap_or(dec!(1.0));
 
+            let abs_beta = beta_dec.abs();
+            if abs_beta <= dec!(0.0001) {
+                return Ok(None);
+            }
+
             let qty_y = self.base_trade_size_y;
-            let qty_x = qty_y * beta_dec;
+            let qty_x = qty_y * abs_beta;
+
+            // If beta >= 0, spread = Y - beta*X: Long spread -> Buy Y, Sell X.
+            // If beta < 0, spread = Y + |beta|*X: Long spread -> Buy Y, Buy X.
+            let (side_x_for_long_y, side_x_for_short_y) = if beta_dec >= dec!(0) {
+                (Side::Sell, Side::Buy)
+            } else {
+                (Side::Buy, Side::Sell)
+            };
 
             if z <= -self.entry_z_score {
-                // Long Spread: Buy Y, Sell X
-                return Ok(Some((Side::Buy, Side::Sell, qty_y, qty_x)));
+                // Long Spread: Buy Y, hedge X
+                return Ok(Some((Side::Buy, side_x_for_long_y, qty_y, qty_x)));
             } else if z >= self.entry_z_score {
-                // Short Spread: Sell Y, Buy X
-                return Ok(Some((Side::Sell, Side::Buy, qty_y, qty_x)));
+                // Short Spread: Sell Y, hedge X
+                return Ok(Some((Side::Sell, side_x_for_short_y, qty_y, qty_x)));
             }
         }
 

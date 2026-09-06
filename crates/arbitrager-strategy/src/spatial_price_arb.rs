@@ -42,6 +42,7 @@ pub struct SpatialPriceArbStrategy {
 }
 
 impl SpatialPriceArbStrategy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         symbol: impl Into<String>,
         exchange_a: Arc<dyn ExchangeAdapter>,
@@ -142,37 +143,71 @@ impl SpatialPriceArbStrategy {
     ) -> ArbitrageExecutionResult {
         match signal.direction {
             SpatialDirection::BuyASellB => {
-                let order_a = OrderRequest::new_ioc(
-                    self.exchange_a.venue_id(),
-                    &self.symbol,
-                    Side::Buy,
-                    dec!(99999999), // Market / aggressive IOC bounded by slippage router
-                    signal.executable_qty,
+                let (ticker_a, ticker_b) = tokio::join!(
+                    self.exchange_a.fetch_ticker(&self.symbol),
+                    self.exchange_b.fetch_ticker(&self.symbol),
                 );
-                let order_b = OrderRequest::new_ioc(
-                    self.exchange_b.venue_id(),
-                    &self.symbol,
-                    Side::Sell,
-                    dec!(0.0001),
-                    signal.executable_qty,
-                );
+                let ref_a = ticker_a.map(|t| t.ask).unwrap_or(dec!(0));
+                let ref_b = ticker_b.map(|t| t.bid).unwrap_or(dec!(0));
+
+                let order_a = if ref_a > dec!(0) {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        ref_a,
+                        signal.executable_qty,
+                    )
+                } else {
+                    OrderRequest::new_ioc(self.exchange_a.venue_id(), &self.symbol, Side::Buy, dec!(99999999), signal.executable_qty)
+                };
+
+                let order_b = if ref_b > dec!(0) {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        ref_b,
+                        signal.executable_qty,
+                    )
+                } else {
+                    OrderRequest::new_ioc(self.exchange_b.venue_id(), &self.symbol, Side::Sell, dec!(0.0001), signal.executable_qty)
+                };
+
                 coordinator.execute_two_leg(&self.exchange_a, order_a, &self.exchange_b, order_b).await
             }
             SpatialDirection::BuyBSellA => {
-                let order_b = OrderRequest::new_ioc(
-                    self.exchange_b.venue_id(),
-                    &self.symbol,
-                    Side::Buy,
-                    dec!(99999999),
-                    signal.executable_qty,
+                let (ticker_b, ticker_a) = tokio::join!(
+                    self.exchange_b.fetch_ticker(&self.symbol),
+                    self.exchange_a.fetch_ticker(&self.symbol),
                 );
-                let order_a = OrderRequest::new_ioc(
-                    self.exchange_a.venue_id(),
-                    &self.symbol,
-                    Side::Sell,
-                    dec!(0.0001),
-                    signal.executable_qty,
-                );
+                let ref_b = ticker_b.map(|t| t.ask).unwrap_or(dec!(0));
+                let ref_a = ticker_a.map(|t| t.bid).unwrap_or(dec!(0));
+
+                let order_b = if ref_b > dec!(0) {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        ref_b,
+                        signal.executable_qty,
+                    )
+                } else {
+                    OrderRequest::new_ioc(self.exchange_b.venue_id(), &self.symbol, Side::Buy, dec!(99999999), signal.executable_qty)
+                };
+
+                let order_a = if ref_a > dec!(0) {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        ref_a,
+                        signal.executable_qty,
+                    )
+                } else {
+                    OrderRequest::new_ioc(self.exchange_a.venue_id(), &self.symbol, Side::Sell, dec!(0.0001), signal.executable_qty)
+                };
+
                 coordinator.execute_two_leg(&self.exchange_b, order_b, &self.exchange_a, order_a).await
             }
         }
