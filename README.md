@@ -119,6 +119,40 @@ pixi run run-prediction
 
 ---
 
+## 🖥️ Modern Desktop Frontend (Tauri v2 + TypeScript + React)
+
+Arbitrager includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
+
+### 🌟 Frontend Capabilities
+- **⚡ Spatial Matrix:** Real-time L2 orderbooks across Hyperliquid, Lighter, Vanta, and Robinhood with depth visualization, volume-weighted average price (VWAP) calculation, and one-click atomic execution.
+- **📈 Funding Carry Radar:** Continuous funding carry opportunities across perpetual venues with normalized 8h / 1h rates, APR, compounded APY, break-even amortization time, and holding duration yield simulation.
+- **🎯 Prediction Parity Hub:** Arrow-Debreu binary synthetic arbitrage pairing Polymarket CTF CLOB and Kalshi CFTC contracts ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$) with guaranteed settlement payoff curves.
+- **🔬 Stat-Arb Lab:** Real-time 2D Kalman filter dynamic hedge ratio ($\beta_t$) and z-score sparkline chart, Bertram (2010) optimal threshold analytic solver, and Ornstein-Uhlenbeck AR(1) MLE fitting.
+- **🛡️ DeltaGuard & Risk Operations:** Real-time signed net delta tracking per asset, circuit breaker tripwires (dollar & percentage drawdown), maintenance margin proximity, and manual emergency kill switch.
+- **🧪 Simulation Studio:** High-frequency paper trading engine with continuous auto-run loop, tick-by-tick order trace, and automated emergency unwind visualization.
+- **⚙️ Hardened Key Management:** Remote HSM signer configuration (Cloudflare Worker / Docker container), DEX router contract allowlists, and smart order routing slippage limits.
+
+### 🚀 Running the Frontend
+
+#### 1. Web Dev Server (Browser Mode with Reactive Mock Engine)
+```bash
+pixi run dev-frontend
+```
+Open `http://localhost:1420` in your browser.
+
+#### 2. Build Production Web Assets
+```bash
+pixi run build-frontend
+```
+
+#### 3. Launch Native Tauri Desktop Application
+```bash
+pixi run desktop
+```
+*(For optimized release desktop binary, run `pixi run desktop-release`)*
+
+---
+
 ## 🔬 Audited Reference Projects
 
 The system integrates insights gained from reverse-engineering and auditing 10 key open-source repositories:

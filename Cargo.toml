@@ -7,6 +7,7 @@ members = [
     "crates/arbitrager-execution",
     "crates/arbitrager-strategy",
     "crates/arbitrager-app",
+    "frontend/src-tauri",
 ]
 resolver = "2"
 

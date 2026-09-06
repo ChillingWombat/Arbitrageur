@@ -18,6 +18,10 @@ run-funding = "cargo run --release --bin arbitrager -- funding"
 run-stat = "cargo run --release --bin arbitrager -- stat-arb"
 run-prediction = "cargo run --release --bin arbitrager -- prediction"
 bench = "cargo run --release --bin arbitrager -- benchmark"
+build-frontend = "cd frontend && npm run build"
+dev-frontend = "cd frontend && npm run dev"
+desktop = "cargo run -p arbitrager-desktop"
+desktop-release = "cargo run --release -p arbitrager-desktop"
 
 [dependencies]
 python = ">=3.11"

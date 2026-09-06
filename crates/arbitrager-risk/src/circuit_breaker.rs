@@ -128,4 +128,55 @@ impl CircuitBreaker {
             }
         }
     }
+
+    /// Get current consecutive errors count
+    pub fn consecutive_errors(&self) -> u32 {
+        self.consecutive_errors.load(Ordering::Relaxed)
+    }
+
+    /// Get configured max consecutive errors
+    pub fn max_consecutive_errors(&self) -> u32 {
+        self.config.max_consecutive_errors
+    }
+
+    /// Get configured max daily dollar drawdown
+    pub fn max_daily_drawdown_usd(&self) -> Decimal {
+        self.config.max_daily_drawdown_usd
+    }
+
+    /// Get starting equity for the day
+    pub fn day_start_equity(&self) -> Decimal {
+        *self.day_start_equity.read()
+    }
+
+    /// Get current equity
+    pub fn current_equity(&self) -> Decimal {
+        *self.current_equity.read()
+    }
+
+    /// Get peak equity observed
+    pub fn peak_equity(&self) -> Decimal {
+        *self.peak_equity.read()
+    }
+
+    /// Calculate current dollar drawdown from day start
+    pub fn current_drawdown_usd(&self) -> Decimal {
+        let start = *self.day_start_equity.read();
+        let cur = *self.current_equity.read();
+        if cur < start {
+            start - cur
+        } else {
+            dec!(0)
+        }
+    }
+
+    /// Check if circuit breaker is currently tripped
+    pub fn is_tripped(&self) -> bool {
+        self.is_tripped.load(Ordering::Relaxed)
+    }
+
+    /// Get optional trip reason string
+    pub fn trip_reason(&self) -> Option<String> {
+        self.trip_reason.read().clone()
+    }
 }

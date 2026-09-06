@@ -1,0 +1,243 @@
+import React, { useState, useEffect, useRef } from "react";
+import { Play, Pause, StepForward, Activity, CheckCircle2, AlertTriangle } from "lucide-react";
+import type { SimStepResultDto, ExecutionLogEntry } from "../types";
+
+interface SimulationRunnerProps {
+  logs: ExecutionLogEntry[];
+  totalPnl: number;
+  onRunStep: (symbol: string, targetBps: number, qty: number) => Promise<SimStepResultDto>;
+}
+
+export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
+  logs,
+  totalPnl,
+  onRunStep,
+}) => {
+  const [isRunning, setIsRunning] = useState(false);
+  const [speedMs, setSpeedMs] = useState(500);
+  const [targetBps, setTargetBps] = useState(10.0);
+  const [orderQty, setOrderQty] = useState(0.5);
+  const [symbol, setSymbol] = useState("BTC-USDC");
+  const [latestResult, setLatestResult] = useState<SimStepResultDto | null>(null);
+
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleStep = async () => {
+    const res = await onRunStep(symbol, targetBps, orderQty);
+    setLatestResult(res);
+  };
+
+  useEffect(() => {
+    if (isRunning) {
+      timerRef.current = setInterval(() => {
+        handleStep();
+      }, speedMs);
+    } else {
+      if (timerRef.current) clearInterval(timerRef.current);
+    }
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [isRunning, speedMs, symbol, targetBps, orderQty]);
+
+  const winCount = logs.filter((l) => l.success).length;
+  const winRate = logs.length > 0 ? (winCount / logs.length) * 100 : 100;
+
+  return (
+    <div className="p-6 space-y-6 overflow-y-auto h-full">
+      {/* Simulation Controls Top Bar */}
+      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
+            <Activity className="w-4 h-4 text-accent" />
+            <span>High-Frequency Paper Trading Simulation Studio</span>
+          </h2>
+          <p className="text-xs text-slate-400 mt-1">
+            Simulates live cross-venue dislocations, atomic multi-leg routing, and automated emergency unwinding.
+          </p>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex items-center space-x-3">
+          <button
+            onClick={handleStep}
+            disabled={isRunning}
+            className="px-3.5 py-1.5 bg-surface-raised hover:bg-surface-border border border-surface-border text-white text-xs font-mono font-semibold rounded-lg transition flex items-center space-x-1.5 disabled:opacity-50"
+          >
+            <StepForward className="w-3.5 h-3.5 text-accent" />
+            <span>Single Step</span>
+          </button>
+
+          <button
+            onClick={() => setIsRunning(!isRunning)}
+            className={`px-4 py-1.5 rounded-lg text-xs font-mono font-bold transition flex items-center space-x-1.5 ${
+              isRunning
+                ? "bg-loss hover:bg-rose-600 text-white"
+                : "bg-profit hover:bg-emerald-600 text-background glow-green"
+            }`}
+          >
+            {isRunning ? (
+              <>
+                <Pause className="w-3.5 h-3.5" />
+                <span>Pause Auto-Run</span>
+              </>
+            ) : (
+              <>
+                <Play className="w-3.5 h-3.5" />
+                <span>Start Continuous</span>
+              </>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Simulation Parameter Controls */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-surface p-4 rounded-xl border border-surface-border font-mono text-xs">
+        <div>
+          <span className="text-slate-400 text-[10px] uppercase">Asset:</span>
+          <select
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value)}
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+          >
+            <option value="BTC-USDC">BTC-USDC</option>
+            <option value="ETH-USDC">ETH-USDC</option>
+            <option value="SOL-USDC">SOL-USDC</option>
+          </select>
+        </div>
+
+        <div>
+          <span className="text-slate-400 text-[10px] uppercase">Target Spread (BPS):</span>
+          <input
+            type="number"
+            step="1"
+            value={targetBps}
+            onChange={(e) => setTargetBps(parseFloat(e.target.value) || 5)}
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+          />
+        </div>
+
+        <div>
+          <span className="text-slate-400 text-[10px] uppercase">Order Qty:</span>
+          <input
+            type="number"
+            step="0.1"
+            value={orderQty}
+            onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+          />
+        </div>
+
+        <div>
+          <span className="text-slate-400 text-[10px] uppercase">Speed Interval:</span>
+          <select
+            value={speedMs}
+            onChange={(e) => setSpeedMs(parseInt(e.target.value))}
+            className="w-full mt-1 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded text-white focus:outline-none focus:border-accent"
+          >
+            <option value={100}>100ms (Hyper Speed)</option>
+            <option value={250}>250ms (Fast)</option>
+            <option value={500}>500ms (Normal)</option>
+            <option value={1000}>1000ms (Slow)</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Stats Summary Bar */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 font-mono text-xs">
+        <div className="p-4 bg-surface rounded-xl border border-surface-border">
+          <div className="text-[10px] uppercase text-slate-400">Total Simulation Trades</div>
+          <div className="text-xl font-bold text-white mt-1">{logs.length}</div>
+        </div>
+
+        <div className="p-4 bg-surface rounded-xl border border-surface-border">
+          <div className="text-[10px] uppercase text-slate-400">Atomic Win Rate</div>
+          <div className="text-xl font-bold text-profit mt-1">{winRate.toFixed(1)}%</div>
+        </div>
+
+        <div className="p-4 bg-surface rounded-xl border border-surface-border">
+          <div className="text-[10px] uppercase text-slate-400">Cumulative Realized PnL</div>
+          <div
+            className={`text-xl font-bold mt-1 ${
+              totalPnl >= 0 ? "text-profit" : "text-loss"
+            }`}
+          >
+            {totalPnl >= 0 ? `+$${totalPnl.toFixed(2)}` : `-$${Math.abs(totalPnl).toFixed(2)}`}
+          </div>
+        </div>
+
+        <div className="p-4 bg-surface rounded-xl border border-surface-border">
+          <div className="text-[10px] uppercase text-slate-400">Latest Cycle Status</div>
+          <div className="text-sm font-semibold text-accent mt-1 truncate">
+            {latestResult ? latestResult.message : "Ready to simulate"}
+          </div>
+        </div>
+      </div>
+
+      {/* Real-Time Execution Trace Log Table */}
+      <div className="bg-surface rounded-xl border border-surface-border p-5">
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-4 flex items-center justify-between">
+          <span>Atomic Order Coordination Stream</span>
+          <span className="text-slate-500 font-normal lowercase">tokio::join! concurrent leg execution</span>
+        </h3>
+
+        {logs.length === 0 ? (
+          <div className="text-center py-12 text-slate-500 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+            No trades executed yet. Click "Single Step" or "Start Continuous".
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-96">
+            <table className="w-full text-left text-xs font-mono">
+              <thead className="sticky top-0 bg-surface border-b border-surface-border text-slate-400 uppercase text-[10px] tracking-wider">
+                <tr>
+                  <th className="py-2.5 px-3">Trade ID</th>
+                  <th className="py-2.5 px-3">Type</th>
+                  <th className="py-2.5 px-3">Venues</th>
+                  <th className="py-2.5 px-3">Leg Status</th>
+                  <th className="py-2.5 px-3">Gross</th>
+                  <th className="py-2.5 px-3">Fees</th>
+                  <th className="py-2.5 px-3">Net Profit</th>
+                  <th className="py-2.5 px-3">Latency</th>
+                  <th className="py-2.5 px-3">Coordination Note</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-border">
+                {logs.map((log) => (
+                  <tr key={log.id} className="hover:bg-surface-raised transition">
+                    <td className="py-2 px-3 text-slate-400 font-mono text-[11px]">{log.id}</td>
+                    <td className="py-2 px-3 text-white font-medium">{log.trade_type}</td>
+                    <td className="py-2 px-3 text-slate-300">{log.venue_a} ↔ {log.venue_b}</td>
+                    <td className="py-2 px-3">
+                      {log.success ? (
+                        <span className="inline-flex items-center space-x-1 text-profit text-[11px]">
+                          <CheckCircle2 className="w-3 h-3" />
+                          <span>FILLED/FILLED</span>
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center space-x-1 text-loss text-[11px]">
+                          <AlertTriangle className="w-3 h-3" />
+                          <span>UNWOUND</span>
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-2 px-3 text-slate-300">${log.gross_profit.toFixed(2)}</td>
+                    <td className="py-2 px-3 text-slate-400">${log.fees.toFixed(2)}</td>
+                    <td
+                      className={`py-2 px-3 font-bold ${
+                        log.net_profit >= 0 ? "text-profit" : "text-loss"
+                      }`}
+                    >
+                      {log.net_profit >= 0 ? `+$${log.net_profit.toFixed(2)}` : `-$${Math.abs(log.net_profit).toFixed(2)}`}
+                    </td>
+                    <td className="py-2 px-3 text-slate-400">{log.latency_us} µs</td>
+                    <td className="py-2 px-3 text-slate-300 truncate max-w-xs">{log.note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};

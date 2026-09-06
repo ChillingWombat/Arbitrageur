@@ -17,6 +17,16 @@ impl DeltaGuard {
         }
     }
 
+    /// Get current max unhedged USD exposure limit
+    pub fn max_unhedged_usd_per_asset(&self) -> Decimal {
+        self.max_unhedged_usd_per_asset
+    }
+
+    /// Set max unhedged USD exposure limit
+    pub fn set_max_unhedged_usd_per_asset(&mut self, limit: Decimal) {
+        self.max_unhedged_usd_per_asset = limit;
+    }
+
     /// Aggregates positions across all venues by base currency and returns net delta and USD exposure.
     pub fn calculate_net_delta(&self, positions: &[Position]) -> HashMap<String, (Decimal, Decimal)> {
         let mut delta_map: HashMap<String, (Decimal, Decimal)> = HashMap::new();

@@ -1,0 +1,291 @@
+import React, { useState } from "react";
+import { ArrowRight, RefreshCw, Send, CheckCircle2 } from "lucide-react";
+import type { VenueOrderBookDto, SpatialOpportunityDto } from "../types";
+
+interface LiveMatrixProps {
+  symbol: string;
+  onSymbolChange: (symbol: string) => void;
+  orderbooks: VenueOrderBookDto[];
+  opportunities: SpatialOpportunityDto[];
+  onRefresh: () => void;
+  onExecuteTrade: (opp: SpatialOpportunityDto) => Promise<void>;
+  loading: boolean;
+}
+
+export const LiveMatrix: React.FC<LiveMatrixProps> = ({
+  symbol,
+  onSymbolChange,
+  orderbooks,
+  opportunities,
+  onRefresh,
+  onExecuteTrade,
+  loading,
+}) => {
+  const [orderQty, setOrderQty] = useState(0.5);
+  const [minBps, setMinBps] = useState(5.0);
+  const [executingId, setExecutingId] = useState<string | null>(null);
+  const [lastExecuted, setLastExecuted] = useState<string | null>(null);
+
+  const symbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC"];
+
+  const handleExecute = async (opp: SpatialOpportunityDto) => {
+    setExecutingId(opp.id);
+    try {
+      await onExecuteTrade(opp);
+      setLastExecuted(opp.id);
+      setTimeout(() => setLastExecuted(null), 3000);
+    } finally {
+      setExecutingId(null);
+    }
+  };
+
+  return (
+    <div className="p-6 space-y-6 overflow-y-auto h-full">
+      {/* Top Bar: Controls */}
+      <div className="flex flex-wrap items-center justify-between gap-4 bg-surface p-4 rounded-xl border border-surface-border">
+        <div className="flex items-center space-x-3">
+          <span className="text-xs font-mono uppercase text-slate-400">Target Asset:</span>
+          <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border">
+            {symbols.map((s) => (
+              <button
+                key={s}
+                onClick={() => onSymbolChange(s)}
+                className={`px-3 py-1 text-xs font-mono rounded transition ${
+                  symbol === s
+                    ? "bg-accent text-background font-bold shadow-sm"
+                    : "text-slate-300 hover:text-white"
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="flex items-center space-x-4">
+          <div className="flex items-center space-x-2 text-xs font-mono">
+            <span className="text-slate-400">Order Qty:</span>
+            <input
+              type="number"
+              step="0.1"
+              min="0.01"
+              value={orderQty}
+              onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
+              className="w-20 px-2.5 py-1 bg-surface-raised border border-surface-border rounded text-white font-mono text-xs focus:outline-none focus:border-accent"
+            />
+          </div>
+
+          <div className="flex items-center space-x-2 text-xs font-mono">
+            <span className="text-slate-400">Min Net BPS:</span>
+            <input
+              type="number"
+              step="1"
+              value={minBps}
+              onChange={(e) => setMinBps(parseFloat(e.target.value) || 0)}
+              className="w-16 px-2.5 py-1 bg-surface-raised border border-surface-border rounded text-white font-mono text-xs focus:outline-none focus:border-accent"
+            />
+          </div>
+
+          <button
+            onClick={onRefresh}
+            disabled={loading}
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface-raised hover:bg-surface-border border border-surface-border rounded-lg text-xs font-mono text-slate-300 transition"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
+            <span>Scan Orderbooks</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 4-Venue Orderbook Comparison Grid */}
+      <div>
+        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 mb-3 flex items-center justify-between">
+          <span>Cross-Venue L2 Orderbook Depth & VWAP</span>
+          <span className="text-slate-500 font-normal lowercase">calculated with benchmark size: {orderQty} {symbol.split("-")[0]}</span>
+        </h3>
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          {orderbooks.map((book) => {
+            const spreadColor = book.spread_bps < 10 ? "text-profit" : "text-amber-400";
+            return (
+              <div
+                key={book.venue_id}
+                className="bg-surface border border-surface-border rounded-xl p-4 flex flex-col justify-between hover:border-slate-600 transition"
+              >
+                <div>
+                  {/* Card Header */}
+                  <div className="flex items-center justify-between border-b border-surface-border pb-2 mb-3">
+                    <div>
+                      <span className="font-mono text-xs font-bold text-white">{book.venue_name}</span>
+                      <div className="text-[10px] font-mono text-slate-500">
+                        8h Funding: {(book.funding_rate_8h_pct).toFixed(4)}%
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] font-mono text-slate-400">Spread:</span>{" "}
+                      <span className={`font-mono text-xs font-semibold ${spreadColor}`}>
+                        {book.spread_bps.toFixed(1)} BPS
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Asks (Red) */}
+                  <div className="space-y-1 mb-2">
+                    <div className="text-[10px] font-mono text-slate-500 flex justify-between px-1">
+                      <span>ASK (SELL)</span>
+                      <span>SIZE</span>
+                    </div>
+                    {book.asks.slice(0, 3).reverse().map(([price, size], idx) => {
+                      const widthPct = Math.min(100, (size / (book.total_ask_depth || 1)) * 100);
+                      return (
+                        <div key={idx} className="relative flex justify-between text-xs font-mono px-2 py-0.5 rounded overflow-hidden">
+                          <div
+                            className="absolute inset-y-0 right-0 bg-loss/15"
+                            style={{ width: `${widthPct}%` }}
+                          />
+                          <span className="text-loss relative z-10">${price.toFixed(2)}</span>
+                          <span className="text-slate-400 relative z-10">{size.toFixed(3)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Mid / VWAP Bar */}
+                  <div className="py-1.5 my-1 px-2 rounded bg-surface-raised border border-surface-border text-center font-mono text-[11px] flex justify-between items-center">
+                    <span className="text-slate-400">Mid: ${book.mid_price.toFixed(2)}</span>
+                    <span className="text-accent text-[10px]">VWAP: ${book.vwap_ask.toFixed(2)}</span>
+                  </div>
+
+                  {/* Bids (Green) */}
+                  <div className="space-y-1">
+                    <div className="text-[10px] font-mono text-slate-500 flex justify-between px-1">
+                      <span>BID (BUY)</span>
+                      <span>SIZE</span>
+                    </div>
+                    {book.bids.slice(0, 3).map(([price, size], idx) => {
+                      const widthPct = Math.min(100, (size / (book.total_bid_depth || 1)) * 100);
+                      return (
+                        <div key={idx} className="relative flex justify-between text-xs font-mono px-2 py-0.5 rounded overflow-hidden">
+                          <div
+                            className="absolute inset-y-0 right-0 bg-profit/15"
+                            style={{ width: `${widthPct}%` }}
+                          />
+                          <span className="text-profit relative z-10">${price.toFixed(2)}</span>
+                          <span className="text-slate-400 relative z-10">{size.toFixed(3)}</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Best B/A Summary Footer */}
+                <div className="mt-4 pt-2 border-t border-surface-border text-[10px] font-mono text-slate-400 flex justify-between">
+                  <span>Best: ${book.best_bid.toFixed(2)}</span>
+                  <span>${book.best_ask.toFixed(2)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Pairwise Arbitrage Opportunities */}
+      <div className="bg-surface rounded-xl border border-surface-border p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h3 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
+              <span>Arbitrage Dislocation Matrix</span>
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-accent/20 text-accent border border-accent/40 font-semibold">
+                {opportunities.length} Active
+              </span>
+            </h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Net spreads calculated after venue taker fees & slippage verification.
+            </p>
+          </div>
+        </div>
+
+        {opportunities.length === 0 ? (
+          <div className="text-center py-12 text-slate-500 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+            No spatial price discrepancies currently exceeding {minBps} BPS threshold.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono">
+              <thead>
+                <tr className="border-b border-surface-border text-slate-400 uppercase text-[10px] tracking-wider">
+                  <th className="py-2.5 px-3">Route (Buy → Sell)</th>
+                  <th className="py-2.5 px-3">Buy Price</th>
+                  <th className="py-2.5 px-3">Sell Price</th>
+                  <th className="py-2.5 px-3">Gross Spread</th>
+                  <th className="py-2.5 px-3">Roundtrip Fees</th>
+                  <th className="py-2.5 px-3">Net Spread</th>
+                  <th className="py-2.5 px-3">Est. Profit</th>
+                  <th className="py-2.5 px-3 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-border">
+                {opportunities.map((opp) => {
+                  const isExec = opp.is_executable;
+                  const isLast = lastExecuted === opp.id;
+                  return (
+                    <tr
+                      key={opp.id}
+                      className={`hover:bg-surface-raised transition ${
+                        isExec ? "bg-accent/5" : ""
+                      }`}
+                    >
+                      <td className="py-3 px-3 font-medium text-white flex items-center space-x-2">
+                        <span className="text-slate-200">{opp.buy_venue}</span>
+                        <ArrowRight className="w-3.5 h-3.5 text-accent" />
+                        <span className="text-slate-200">{opp.sell_venue}</span>
+                      </td>
+                      <td className="py-3 px-3 text-loss">${opp.buy_price.toFixed(2)}</td>
+                      <td className="py-3 px-3 text-profit">${opp.sell_price.toFixed(2)}</td>
+                      <td className="py-3 px-3 text-slate-300">
+                        {opp.gross_spread_bps.toFixed(1)} BPS (${opp.gross_spread.toFixed(2)})
+                      </td>
+                      <td className="py-3 px-3 text-slate-400">{opp.fee_bps.toFixed(1)} BPS</td>
+                      <td className="py-3 px-3">
+                        <span
+                          className={`font-bold ${
+                            opp.net_spread_bps >= minBps ? "text-profit" : "text-slate-400"
+                          }`}
+                        >
+                          {opp.net_spread_bps.toFixed(2)} BPS
+                        </span>
+                      </td>
+                      <td className="py-3 px-3 font-bold text-profit">
+                        +${opp.estimated_profit_usd.toFixed(2)}
+                      </td>
+                      <td className="py-3 px-3 text-right">
+                        {isLast ? (
+                          <span className="inline-flex items-center space-x-1 text-profit text-xs font-bold">
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Filled</span>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleExecute(opp)}
+                            disabled={executingId === opp.id || !isExec}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition flex items-center space-x-1.5 ml-auto ${
+                              isExec
+                                ? "bg-accent hover:bg-cyan-400 text-background glow-cyan shadow-sm"
+                                : "bg-surface-raised text-slate-500 cursor-not-allowed border border-surface-border"
+                            }`}
+                          >
+                            <Send className="w-3 h-3" />
+                            <span>{executingId === opp.id ? "Routing..." : "Atomic Exec"}</span>
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};

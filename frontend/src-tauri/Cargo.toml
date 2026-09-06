@@ -1,0 +1,29 @@
+[package]
+name = "arbitrager-desktop"
+version = "0.1.0"
+edition = "2021"
+authors = ["David"]
+license = "MIT OR Apache-2.0"
+
+[build-dependencies]
+tauri-build = { version = "2.1", features = [] }
+
+[dependencies]
+tauri = { version = "2.1", features = [] }
+tauri-plugin-opener = "2.2"
+arbitrager-core = { path = "../../crates/arbitrager-core" }
+arbitrager-math = { path = "../../crates/arbitrager-math" }
+arbitrager-exchanges = { path = "../../crates/arbitrager-exchanges" }
+arbitrager-risk = { path = "../../crates/arbitrager-risk" }
+arbitrager-execution = { path = "../../crates/arbitrager-execution" }
+arbitrager-strategy = { path = "../../crates/arbitrager-strategy" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rust_decimal = { workspace = true }
+rust_decimal_macros = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+parking_lot = { workspace = true }

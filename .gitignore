@@ -26,6 +26,14 @@ keychain.toml
 *.swp
 *.swo
 
+# Frontend artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/src-tauri/target/
+
+# Local sysroot dependencies
+.sysroot/
+
 # Logs & data
 logs/
 *.log
