@@ -1,0 +1,90 @@
+# Failure Modes, Bugs, Solutions & Operational Runbook
+
+This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, our engineered solutions, and an operational runbook for live deployments.
+
+---
+
+## 1. Bugs Discovered in Reference Repositories & Engineered Solutions
+
+### 1.1 Bug 1: Legging Risk / Asymmetric Execution Failure
+- **Symptom:** The bot buys on Exchange A, but the order on Exchange B is rejected or times out due to network jitter. The bot is left holding a naked directional position, suffering catastrophic drawdowns if the market dumps.
+- **Root Cause:** Sequential order dispatch (`await place_a(); await place_b();`) without atomic failure rollback.
+- **Our Solution:**
+  1. **Concurrent Dispatch:** Dispatches both legs simultaneously using `tokio::join!`.
+  2. **Automated Emergency Unwind:** If Leg B rejects while Leg A fills, `EmergencyUnwindHandler::unwind_leg` instantly places a market order to close Leg A, restoring flat delta within milliseconds.
+  3. **Circuit Breaker Trip:** Consecutive execution discrepancies trip the `CircuitBreaker`, halting new order entries until operator review.
+
+---
+
+### 1.2 Bug 2: 429 Too Many Requests & Sudden Exchange IP Bans
+- **Symptom:** Polling account balance or orderbook every 100ms triggers Cloudflare or exchange rate limiters, resulting in HTTP 429 responses and dropped connections.
+- **Root Cause:** Uncoordinated polling across multiple strategy loops.
+- **Our Solution:**
+  1. **AccountRequestCoordinator:** As reverse-engineered from PandaZhai and hardened in Rust, requests pass through a token-bucket coordinator with minimum interval throttling (e.g. 150ms).
+  2. **TTL In-Memory Cache:** Cached balances are returned within TTL (e.g. 2000ms) without hitting the network.
+  3. **Exponential Backoff with Jitter:** On 429 or 5xx errors, backoff automatically scales exponentially:
+     $$\text{Backoff}(k) = \min(\text{Backoff}_{\max}, \text{Backoff}_{\text{base}} \times 2^k)$$
+
+---
+
+### 1.3 Bug 3: Quote Staleness & Skewed Multi-Exchange Timestamp Desynchronization
+- **Symptom:** Orderbooks from Exchange A and Exchange B are compared using wall-clock time, but Exchange B's feed has delayed packets by 500ms, triggering phantom arbitrage signals on already-consumed prices.
+- **Root Cause:** Relying on local receive timestamps rather than event-driven sequence tags and depth validation.
+- **Our Solution:**
+  1. **Depth VWAP Verification:** Evaluates whether target size $Q$ is actually available in the orderbook at acceptable slippage before firing.
+  2. **Rolling Spread Baseline:** Compares against a rolling window of recent spreads; sudden anomalous spikes exceeding 250 BPS are filtered out as toxic price artifacts.
+
+---
+
+### 1.4 Bug 4: Funding Rate Period Mismatch (1-Hour vs 8-Hour)
+- **Symptom:** Bot computes $F_A - F_B$ directly. Since Hyperliquid quotes 1-hour funding ($0.03\%$) while Lighter quotes 8-hour funding ($0.01\%$), naive calculation believes the spread is only $0.02\%$, when in reality Hyperliquid's 8-hour equivalent is $0.24\%$, miscalculating carry returns by an order of magnitude.
+- **Root Cause:** Failure to normalize funding periods.
+- **Our Solution:**
+  `FundingCarry` normalizes all rates to continuous hourly rates before comparison:
+  $$r_{\text{hourly}} = \frac{F}{\text{Interval Hours}}$$
+  $$\text{APR} = r_{\text{hourly}} \times 8{,}760$$
+
+---
+
+### 1.5 Bug 5: Net Delta Exposure Drift & Liquidation Cascades
+- **Symptom:** Subtle differences in contract lot sizes or decimal precision cause long and short quantities to diverge slightly (e.g. +1.02 BTC vs -0.98 BTC). Over hundreds of trades, cumulative unhedged delta grows until account equity is wiped out.
+- **Root Cause:** Absence of global portfolio delta reconciliation.
+- **Our Solution:**
+  1. **DeltaGuard:** Continuously computes net signed quantity and USD exposure per asset across all venues.
+  2. **Delta Limits:** If $| \text{Net USD Exposure} | > \text{Max Allowed}$ (e.g. $500), opening trades are blocked until positions are rebalanced.
+  3. **MarginMonitor:** Tracks distance to liquidation on each leg; triggers alerts if buffer drops below 15%.
+
+---
+
+## 2. Operational Runbook
+
+### 2.1 Pre-Flight Deployment Checklist
+1. **Verify Environment:**
+   ```bash
+   pixi run check
+   pixi run test
+   ```
+2. **Review Risk Limits in Configuration:**
+   - `max_daily_drawdown_usd`: Maximum dollar loss before full system shutdown.
+   - `max_slippage_bps`: Maximum allowable slippage (typically 10-15 BPS).
+   - `max_unhedged_usd_per_asset`: Allowed delta drift tolerance ($200 - $500).
+3. **Execute High-Speed Simulation:**
+   ```bash
+   pixi run run-sim
+   ```
+4. **Inspect Live Spreads & Funding Rates:**
+   ```bash
+   pixi run run-monitor
+   pixi run run-funding
+   ```
+
+---
+
+### 2.2 Incident Response Procedures
+
+| Trigger Event | Automated System Response | Operator Action |
+|---|---|---|
+| **Leg B Reject** | Leg A automatically unwound with Market order | Verify both exchange balances show 0 delta. |
+| **Circuit Breaker Tripped** | All new orders halted, process stays active | Inspect logs for root cause; once resolved, run reset. |
+| **Margin Warning (< 15%)** | Warning logged, opening trades restricted | Transfer collateral to the margin-deficient exchange. |
+| **HTTP 429 Rate Limit** | Request coordinator enforces exponential backoff | Lower poll frequency in config to increase interval. |

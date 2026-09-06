@@ -1,0 +1,33 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Pixi environment
+.pixi/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+venv/
+.venv/
+
+# Environment variables & secrets
+.env
+*.env
+*.key
+*.pem
+keychain.toml
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs & data
+logs/
+*.log
+data/cache/
+data/captures/

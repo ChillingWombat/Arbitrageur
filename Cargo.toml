@@ -1,0 +1,57 @@
+[workspace]
+members = [
+    "crates/arbitrager-core",
+    "crates/arbitrager-math",
+    "crates/arbitrager-exchanges",
+    "crates/arbitrager-risk",
+    "crates/arbitrager-execution",
+    "crates/arbitrager-strategy",
+    "crates/arbitrager-app",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["David"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/arbitrager/arbitrager"
+
+[workspace.dependencies]
+tokio = { version = "1.38", features = ["full"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rust_decimal = { version = "1.35", features = ["serde-float", "maths"] }
+rust_decimal_macros = "1.35"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1.0"
+thiserror = "1.0"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3"
+uuid = { version = "1.8", features = ["v4", "serde"] }
+parking_lot = "0.12"
+dashmap = "6.0"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+sha2 = "0.10"
+sha3 = "0.10"
+k256 = { version = "0.13", features = ["ecdsa"] }
+hex = "0.4"
+hmac = "0.12"
+config = "0.14"
+crossterm = "0.27"
+ratatui = "0.27"
+rand = "0.8"
+
+# Internal crates
+arbitrager-core = { path = "crates/arbitrager-core" }
+arbitrager-math = { path = "crates/arbitrager-math" }
+arbitrager-exchanges = { path = "crates/arbitrager-exchanges" }
+arbitrager-risk = { path = "crates/arbitrager-risk" }
+arbitrager-execution = { path = "crates/arbitrager-execution" }
+arbitrager-strategy = { path = "crates/arbitrager-strategy" }

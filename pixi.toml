@@ -1,0 +1,28 @@
+[workspace]
+name = "arbitrager"
+version = "0.1.0"
+description = "Ultra-Fast Modular Cross-Market Arbitrage Tool for Price & Funding Rate Spreads"
+authors = ["David"]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[tasks]
+build = "cargo build --release"
+build-dev = "cargo build"
+test = "cargo test --all"
+check = "cargo check --all"
+clippy = "cargo clippy --all -- -D warnings"
+run-monitor = "cargo run --release --bin arbitrager -- monitor"
+run-sim = "cargo run --release --bin arbitrager -- simulate"
+run-funding = "cargo run --release --bin arbitrager -- funding"
+run-stat = "cargo run --release --bin arbitrager -- stat-arb"
+run-prediction = "cargo run --release --bin arbitrager -- prediction"
+bench = "cargo run --release --bin arbitrager -- benchmark"
+
+[dependencies]
+python = ">=3.11"
+numpy = ">=1.26"
+pandas = ">=2.2"
+scipy = ">=1.12"
+maturin = ">=1.5"
+pytest = ">=8.0"
