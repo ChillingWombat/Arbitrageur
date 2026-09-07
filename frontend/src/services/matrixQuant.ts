@@ -578,46 +578,46 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
   const net = cell.netSpreadBps;
   const delta = cell.deltaBps;
 
-  let deltaClass = "text-white/50";
-  let deltaBadgeBg = "bg-white/[0.05] text-white/60 border border-white/[0.08]";
+  let deltaClass = "text-slate-500";
+  let deltaBadgeBg = "bg-slate-100 text-slate-600 border border-slate-200";
   if (delta > 0.05) {
-    deltaClass = "text-emerald-400 font-bold";
-    deltaBadgeBg = "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30";
+    deltaClass = "text-emerald-700 font-bold";
+    deltaBadgeBg = "bg-emerald-100 text-emerald-800 border border-emerald-200";
   } else if (delta < -0.05) {
-    deltaClass = "text-rose-400 font-bold";
-    deltaBadgeBg = "bg-rose-500/15 text-rose-300 border border-rose-500/30";
+    deltaClass = "text-rose-700 font-bold";
+    deltaBadgeBg = "bg-rose-100 text-rose-800 border border-rose-200";
   }
 
   // If Double-Way convergence unwind is active
   if (cell.isConvergenceUnwind) {
     return {
-      bgClass: "bg-cyan-500/15 hover:bg-cyan-500/25 active:bg-cyan-500/30",
-      borderClass: "border-cyan-500/40 shadow-[0_0_12px_rgba(34,211,238,0.2)]",
-      textClass: "text-cyan-300 font-bold",
-      deltaClass: "text-cyan-300 font-semibold",
-      deltaBadgeBg: "bg-cyan-500/20 text-cyan-200 border border-cyan-500/40",
-      highlightRing: "ring-1 ring-cyan-400/50",
+      bgClass: "bg-blue-50/90 hover:bg-blue-100 active:bg-blue-200/80",
+      borderClass: "border-blue-400 shadow-xs",
+      textClass: "text-blue-700 font-bold",
+      deltaClass: "text-blue-600 font-semibold",
+      deltaBadgeBg: "bg-blue-100 text-blue-800 border border-blue-200",
+      highlightRing: "ring-2 ring-blue-500/50",
     };
   }
 
   if (net >= minBps) {
     // High conviction executable arbitrage
     return {
-      bgClass: "bg-emerald-500/15 hover:bg-emerald-500/25 active:bg-emerald-500/30",
-      borderClass: "border-emerald-500/40 shadow-[0_0_14px_rgba(52,211,153,0.2)]",
-      textClass: "text-emerald-300 font-bold",
+      bgClass: "bg-emerald-50/90 hover:bg-emerald-100 active:bg-emerald-200/80",
+      borderClass: "border-emerald-400 shadow-xs",
+      textClass: "text-emerald-700 font-bold",
       deltaClass,
       deltaBadgeBg,
-      highlightRing: "ring-1 ring-emerald-400/50",
+      highlightRing: "ring-2 ring-emerald-500/50",
     };
   }
 
   if (net > 0) {
     // Positive spread below minBps threshold
     return {
-      bgClass: "bg-cyan-500/[0.07] hover:bg-cyan-500/[0.14] active:bg-cyan-500/20",
-      borderClass: "border-cyan-500/25",
-      textClass: "text-cyan-200/90 font-semibold",
+      bgClass: "bg-sky-50/80 hover:bg-sky-100/80 active:bg-sky-200/70",
+      borderClass: "border-sky-300",
+      textClass: "text-sky-700 font-semibold",
       deltaClass,
       deltaBadgeBg,
       highlightRing: "",
@@ -627,9 +627,9 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
   if (net >= -5.0) {
     // Slight negative / friction range
     return {
-      bgClass: "bg-white/[0.03] hover:bg-white/[0.06] active:bg-white/[0.08]",
-      borderClass: "border-white/[0.06]",
-      textClass: "text-white/60 font-medium",
+      bgClass: "bg-surface hover:bg-surface-raised active:bg-surface-raised",
+      borderClass: "border-surface-border",
+      textClass: "text-slate-600 font-medium",
       deltaClass,
       deltaBadgeBg,
       highlightRing: "",
@@ -638,9 +638,9 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
 
   // Deep negative spread
   return {
-    bgClass: "bg-rose-500/[0.08] hover:bg-rose-500/[0.14] active:bg-rose-500/20",
-    borderClass: "border-rose-500/20",
-    textClass: "text-rose-300/80 font-medium",
+    bgClass: "bg-rose-50/50 hover:bg-rose-100/60 active:bg-rose-100",
+    borderClass: "border-rose-200",
+    textClass: "text-rose-600 font-medium",
     deltaClass,
     deltaBadgeBg,
     highlightRing: "",
