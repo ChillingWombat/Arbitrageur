@@ -18,7 +18,7 @@ export type ActiveTab =
   | "sim"
   | "settings";
 
-interface NavigationProps {
+export interface NavigationProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   spatialCount?: number;
@@ -36,99 +36,85 @@ export const Navigation: React.FC<NavigationProps> = ({
   const tabs = [
     {
       id: "spatial" as ActiveTab,
-      label: "Spatial Matrix",
+      shortLabel: "Spatial",
+      fullLabel: "Matrix",
       icon: Layers,
       badge: spatialCount > 0 ? spatialCount : undefined,
     },
     {
       id: "funding" as ActiveTab,
-      label: "Funding Radar",
+      shortLabel: "Funding",
+      fullLabel: "Radar",
       icon: Percent,
       badge: fundingCount > 0 ? fundingCount : undefined,
     },
     {
       id: "prediction" as ActiveTab,
-      label: "Prediction Parity",
+      shortLabel: "Prediction",
+      fullLabel: "Parity",
       icon: Target,
       badge: predictionCount > 0 ? predictionCount : undefined,
     },
     {
       id: "statarb" as ActiveTab,
-      label: "Stat-Arb Lab",
+      shortLabel: "Stat-Arb",
+      fullLabel: "Lab",
       icon: FlaskConical,
     },
     {
       id: "risk" as ActiveTab,
-      label: "DeltaGuard & Risk",
+      shortLabel: "DeltaGuard",
+      fullLabel: "& Risk",
       icon: ShieldCheck,
     },
     {
       id: "sim" as ActiveTab,
-      label: "Simulation Studio",
+      shortLabel: "Simulation",
+      fullLabel: "Studio",
       icon: PlaySquare,
     },
     {
       id: "settings" as ActiveTab,
-      label: "Engine Settings",
+      shortLabel: "Settings",
+      fullLabel: "",
       icon: Settings,
     },
   ];
 
   return (
-    <nav className="w-56 border-r border-surface-border bg-surface flex flex-col justify-between py-4 select-none">
-      <div className="space-y-1 px-3">
-        <div className="px-3 pb-2 text-[10px] font-mono uppercase tracking-widest text-slate-400 font-semibold">
-          Modules
-        </div>
-        {tabs.map((t) => {
-          const Icon = t.icon;
-          const isActive = activeTab === t.id;
-          return (
-            <button
-              key={t.id}
-              onClick={() => onSelectTab(t.id)}
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-mono transition group text-left ${
-                isActive
-                  ? "bg-accent-dim text-accent border border-accent-line/60 font-medium"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-surface-raised border border-transparent"
+    <nav className="flex items-center space-x-1 overflow-x-auto py-1 px-1.5 bg-surface-raised/80 rounded-xl border border-surface-border select-none">
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const isActive = activeTab === t.id;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onSelectTab(t.id)}
+            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition whitespace-nowrap group shrink-0 ${
+              isActive
+                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
+                : "text-slate-600 hover:text-slate-900 hover:bg-surface/60 border border-transparent"
+            }`}
+            title={`${t.shortLabel} ${t.fullLabel}`.trim()}
+          >
+            <Icon
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
               }`}
-            >
-              <div className="flex items-center space-x-2.5">
-                <Icon
-                  className={`w-3.5 h-3.5 transition ${
-                    isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
-                  }`}
-                />
-                <span className={`font-medium ${isActive ? "text-accent" : "text-slate-700"}`}>
-                  {t.label}
-                </span>
-              </div>
+            />
+            <span>
+              <span>{t.shortLabel}</span>
+              {t.fullLabel && <span className="hidden 2xl:inline"> {t.fullLabel}</span>}
+            </span>
 
-              {t.badge !== undefined && (
-                <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-accent-dim text-accent border border-accent-line/60">
-                  {t.badge}
-                </span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-
-      {/* Footer info */}
-      <div className="px-4 py-3 border-t border-surface-border text-[11px] font-mono text-slate-500 space-y-1">
-        <div className="flex justify-between">
-          <span>Tauri IPC:</span>
-          <span className="text-accent font-medium">Connected</span>
-        </div>
-        <div className="flex justify-between">
-          <span>Engine Core:</span>
-          <span className="text-profit font-medium">Rust Core</span>
-        </div>
-        <div className="flex justify-between">
-          <span>Router:</span>
-          <span className="text-slate-600 font-medium">Multi-Leg</span>
-        </div>
-      </div>
+            {t.badge !== undefined && (
+              <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] font-bold bg-accent-dim text-accent border border-accent-line/60 shrink-0">
+                {t.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
     </nav>
   );
 };

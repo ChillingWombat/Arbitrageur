@@ -1,5 +1,6 @@
-import React, { useState } from "react";
-import type { FundingOpportunityDto } from "../types";
+import React, { useState, useMemo } from "react";
+import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
+import { PERP_TICKERS, formatCurrencyPnl } from "../types/tickers";
 
 interface FundingRadarProps {
   opportunities: FundingOpportunityDto[];
@@ -9,6 +10,7 @@ interface FundingRadarProps {
   onTradeSizeChange: (size: number) => void;
   onExecuteCarry?: (opp: FundingOpportunityDto) => Promise<void>;
   loading: boolean;
+  executionLogs?: ExecutionLogEntry[];
 }
 
 export const FundingRadar: React.FC<FundingRadarProps> = ({
@@ -18,11 +20,44 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   tradeSize,
   onTradeSizeChange,
   onExecuteCarry,
+  executionLogs = [],
 }) => {
   const [holdingDays, setHoldingDays] = useState(14);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
-  const symbols = ["ETH-USDC", "BTC-USDC", "SOL-USDC"];
+
+  const activeTicker = PERP_TICKERS.find((t) => t.symbol === symbol) || {
+    symbol,
+    base: symbol.split("-")[0],
+    quote: symbol.split("-")[1] || "USDC",
+    name: symbol,
+    venues: ["HL", "LGT", "VNT"],
+    basePrice: 100,
+  };
+
+  // Derive execution stats for the currently selected ticker
+  const tickerStats = useMemo(() => {
+    let count = 0;
+    let pnl = 0;
+    const symKey = symbol.toUpperCase();
+    const baseKey = symKey.split(/[-_/]/)[0];
+
+    for (const log of executionLogs) {
+      if (!log.symbol) continue;
+      const logKey = log.symbol.toUpperCase();
+      const logBase = logKey.split(/[-_/]/)[0];
+      if (logKey === symKey || logBase === baseKey) {
+        count += 1;
+        pnl += log.net_profit || 0;
+      }
+    }
+    return { count, pnl: Math.round(pnl * 100) / 100 };
+  }, [executionLogs, symbol]);
+
+  const quickSymbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "SUI-USDC", "ARB-USDC"];
+  const displayedSymbols = quickSymbols.includes(symbol)
+    ? quickSymbols
+    : [symbol, ...quickSymbols.slice(0, 5)];
   const quickSizes = [10000, 25000, 50000, 100000];
 
   const handleExecute = async (opp: FundingOpportunityDto) => {
@@ -52,18 +87,51 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
         {/* Inputs */}
         <div className="flex flex-wrap items-center gap-3">
-          <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border">
-            {symbols.map((s) => (
+          <div className="flex items-center space-x-2">
+            <span className="text-xs font-mono uppercase text-slate-500 font-semibold">Active:</span>
+            <div className="text-xs font-mono font-bold text-slate-900 bg-surface-raised px-2.5 py-1.5 rounded-md border border-surface-border flex items-center space-x-2">
+              <span>{symbol}</span>
+              <span className="flex space-x-1">
+                {activeTicker.venues.map((v) => (
+                  <span key={v} className="text-[9px] px-1 py-0.2 rounded font-semibold bg-accent-dim text-accent border border-accent-line/40">
+                    {v}
+                  </span>
+                ))}
+              </span>
+              <span
+                className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-surface-border font-medium text-slate-700"
+                title={`${tickerStats.count} strategy executions`}
+              >
+                {tickerStats.count} tx{tickerStats.count === 1 ? "" : "s"}
+              </span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
+                  tickerStats.pnl > 0
+                    ? "text-profit bg-profit-dim border border-profit-border"
+                    : tickerStats.pnl < 0
+                    ? "text-loss bg-loss-dim border border-loss-border"
+                    : "text-slate-500 bg-surface border border-surface-border"
+                }`}
+                title={`Strategy Net PnL: ${formatCurrencyPnl(tickerStats.pnl)}`}
+              >
+                {formatCurrencyPnl(tickerStats.pnl)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-1 bg-surface-raised p-1 rounded-lg border border-surface-border">
+            {displayedSymbols.map((s) => (
               <button
                 key={s}
                 onClick={() => onSymbolChange(s)}
-                className={`px-3 py-1 text-xs font-mono rounded-md transition ${
+                className={`px-2.5 py-0.5 text-xs font-mono rounded-md transition ${
                   symbol === s
                     ? "bg-accent text-white font-semibold shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 }`}
+                title={`Switch to ${s}`}
               >
-                {s}
+                {s.split("-")[0]}
               </button>
             ))}
           </div>
@@ -227,9 +295,14 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
             <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
               <div className="text-[10px] font-mono text-slate-500 uppercase">Net Realized PnL</div>
-              <div className="text-lg font-bold font-mono text-profit mt-1">
-                +${(((tradeSize * 0.00021 * 3) * holdingDays) - (tradeSize * 0.00035 * 2)).toFixed(2)}
-              </div>
+              {(() => {
+                const net = ((tradeSize * 0.00021 * 3) * holdingDays) - (tradeSize * 0.00035 * 2);
+                return (
+                  <div className={`text-lg font-bold font-mono mt-1 ${net >= 0 ? "text-profit" : "text-loss"}`}>
+                    {net >= 0 ? `+$${net.toFixed(2)}` : `-$${Math.abs(net).toFixed(2)}`}
+                  </div>
+                );
+              })()}
             </div>
           </div>
         </div>

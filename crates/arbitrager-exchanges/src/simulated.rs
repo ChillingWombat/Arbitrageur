@@ -93,6 +93,11 @@ impl SimulatedExchange {
             },
         );
     }
+
+    /// Check if a symbol market has been seeded.
+    pub fn has_market(&self, symbol: &str) -> bool {
+        self.books.contains_key(symbol)
+    }
 }
 
 #[async_trait]

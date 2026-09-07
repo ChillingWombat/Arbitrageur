@@ -1,15 +1,23 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { RefreshCw } from "lucide-react";
-import type { VenueOrderBookDto, SpatialOpportunityDto } from "../types";
+import type { VenueOrderBookDto, SpatialOpportunityDto, ExecutionLogEntry } from "../types";
+import {
+  PERP_TICKERS,
+  formatCurrencyPrice,
+  formatCurrencyPnl,
+  formatSpreadPrice,
+  getDefaultOrderQty,
+} from "../types/tickers";
 
 interface LiveMatrixProps {
   symbol: string;
   onSymbolChange: (symbol: string) => void;
   orderbooks: VenueOrderBookDto[];
   opportunities: SpatialOpportunityDto[];
-  onRefresh: () => void;
+  onRefresh: (qty?: number, minBps?: number) => void;
   onExecuteTrade: (opp: SpatialOpportunityDto) => Promise<void>;
   loading: boolean;
+  executionLogs?: ExecutionLogEntry[];
 }
 
 export const LiveMatrix: React.FC<LiveMatrixProps> = ({
@@ -20,13 +28,50 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   onRefresh,
   onExecuteTrade,
   loading,
+  executionLogs = [],
 }) => {
-  const [orderQty, setOrderQty] = useState(0.5);
+  const activeTicker = PERP_TICKERS.find((t) => t.symbol === symbol) || {
+    symbol,
+    base: symbol.split("-")[0],
+    quote: symbol.split("-")[1] || "USDC",
+    name: symbol,
+    venues: ["HL", "LGT", "VNT"],
+    basePrice: 100,
+  };
+
+  const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
   const [minBps, setMinBps] = useState(5.0);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
 
-  const symbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC"];
+  // Automatically sync benchmark order quantity when active asset changes
+  useEffect(() => {
+    setOrderQty(getDefaultOrderQty(activeTicker.basePrice));
+  }, [symbol, activeTicker.basePrice]);
+
+  // Derive execution stats for the currently selected ticker
+  const tickerStats = useMemo(() => {
+    let count = 0;
+    let pnl = 0;
+    const symKey = symbol.toUpperCase();
+    const baseKey = symKey.split(/[-_/]/)[0];
+
+    for (const log of executionLogs) {
+      if (!log.symbol) continue;
+      const logKey = log.symbol.toUpperCase();
+      const logBase = logKey.split(/[-_/]/)[0];
+      if (logKey === symKey || logBase === baseKey) {
+        count += 1;
+        pnl += log.net_profit || 0;
+      }
+    }
+    return { count, pnl: Math.round(pnl * 100) / 100 };
+  }, [executionLogs, symbol]);
+
+  const quickSymbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "SUI-USDC", "ARB-USDC"];
+  const displayedSymbols = quickSymbols.includes(symbol)
+    ? quickSymbols
+    : [symbol, ...quickSymbols.slice(0, 5)];
 
   const handleExecute = async (opp: SpatialOpportunityDto) => {
     setExecutingId(opp.id);
@@ -44,19 +89,51 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       {/* Top Bar: Controls */}
       <div className="flex flex-wrap items-center justify-between gap-4 bg-surface p-4 rounded-xl border border-surface-border shadow-xs">
         <div className="flex items-center space-x-3">
-          <span className="text-xs font-mono uppercase text-slate-500">Target Asset:</span>
-          <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border">
-            {symbols.map((s) => (
+          <div className="flex items-center space-x-2">
+            <span className="text-xs font-mono uppercase text-slate-500 font-semibold">Active:</span>
+            <div className="text-xs font-mono font-bold text-slate-900 bg-surface-raised px-2.5 py-1.5 rounded-md border border-surface-border flex items-center space-x-2">
+              <span>{symbol}</span>
+              <span className="flex space-x-1">
+                {activeTicker.venues.map((v) => (
+                  <span key={v} className="text-[9px] px-1 py-0.2 rounded font-semibold bg-accent-dim text-accent border border-accent-line/40">
+                    {v}
+                  </span>
+                ))}
+              </span>
+              <span
+                className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-surface-border font-medium text-slate-700"
+                title={`${tickerStats.count} strategy executions`}
+              >
+                {tickerStats.count} tx{tickerStats.count === 1 ? "" : "s"}
+              </span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
+                  tickerStats.pnl > 0
+                    ? "text-profit bg-profit-dim border border-profit-border"
+                    : tickerStats.pnl < 0
+                    ? "text-loss bg-loss-dim border border-loss-border"
+                    : "text-slate-500 bg-surface border border-surface-border"
+                }`}
+                title={`Strategy Net PnL: ${formatCurrencyPnl(tickerStats.pnl)}`}
+              >
+                {formatCurrencyPnl(tickerStats.pnl)}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-1 bg-surface-raised p-1 rounded-lg border border-surface-border">
+            {displayedSymbols.map((s) => (
               <button
                 key={s}
                 onClick={() => onSymbolChange(s)}
-                className={`px-3 py-1 text-xs font-mono rounded-md transition ${
+                className={`px-2.5 py-0.5 text-xs font-mono rounded-md transition ${
                   symbol === s
                     ? "bg-accent text-white font-semibold shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 }`}
+                title={`Switch to ${s}`}
               >
-                {s}
+                {s.split("-")[0]}
               </button>
             ))}
           </div>
@@ -67,11 +144,11 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             <span className="text-slate-500">Order Qty:</span>
             <input
               type="number"
-              step="0.1"
-              min="0.01"
+              step={orderQty >= 1000 ? "100" : orderQty >= 10 ? "1" : orderQty >= 1 ? "0.1" : "0.001"}
+              min="0.00000001"
               value={orderQty}
               onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
-              className="w-20 px-2.5 py-1 bg-surface border border-surface-border rounded-md text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+              className="w-28 px-2.5 py-1 bg-surface border border-surface-border rounded-md text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
             />
           </div>
 
@@ -87,7 +164,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           </div>
 
           <button
-            onClick={onRefresh}
+            onClick={() => onRefresh(orderQty, minBps)}
             disabled={loading}
             className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-700 font-medium transition shadow-xs"
           >
@@ -142,7 +219,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             className="absolute inset-y-0 right-0 bg-loss-dim"
                             style={{ width: `${widthPct}%` }}
                           />
-                          <span className="text-loss font-medium relative z-10">${price.toFixed(2)}</span>
+                          <span className="text-loss font-medium relative z-10">{formatCurrencyPrice(price)}</span>
                           <span className="text-slate-500 relative z-10">{size.toFixed(3)}</span>
                         </div>
                       );
@@ -151,8 +228,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
                   {/* Mid / VWAP Bar */}
                   <div className="py-1.5 my-1 px-2 rounded bg-surface-raised border border-surface-border text-center font-mono text-[11px] flex justify-between items-center">
-                    <span className="text-slate-600">Mid: ${book.mid_price.toFixed(2)}</span>
-                    <span className="text-accent font-medium text-[10px]">VWAP: ${book.vwap_ask.toFixed(2)}</span>
+                    <span className="text-slate-600">Mid: {formatCurrencyPrice(book.mid_price)}</span>
+                    <span className="text-accent font-medium text-[10px]">VWAP: {formatCurrencyPrice(book.vwap_ask)}</span>
                   </div>
 
                   {/* Bids (Green) */}
@@ -169,7 +246,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             className="absolute inset-y-0 right-0 bg-profit-dim"
                             style={{ width: `${widthPct}%` }}
                           />
-                          <span className="text-profit font-medium relative z-10">${price.toFixed(2)}</span>
+                          <span className="text-profit font-medium relative z-10">{formatCurrencyPrice(price)}</span>
                           <span className="text-slate-500 relative z-10">{size.toFixed(3)}</span>
                         </div>
                       );
@@ -179,8 +256,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
                 {/* Best B/A Summary Footer */}
                 <div className="mt-4 pt-2 border-t border-surface-border text-[10px] font-mono text-slate-500 flex justify-between">
-                  <span>Best: ${book.best_bid.toFixed(2)}</span>
-                  <span>${book.best_ask.toFixed(2)}</span>
+                  <span>Best: {formatCurrencyPrice(book.best_bid)}</span>
+                  <span>{formatCurrencyPrice(book.best_ask)}</span>
                 </div>
               </div>
             );
@@ -239,10 +316,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                         <span className="text-slate-400 text-xs">/</span>
                         <span className="text-slate-800">{opp.sell_venue}</span>
                       </td>
-                      <td className="py-3 px-3 text-loss font-medium">${opp.buy_price.toFixed(2)}</td>
-                      <td className="py-3 px-3 text-profit font-medium">${opp.sell_price.toFixed(2)}</td>
+                      <td className="py-3 px-3 text-loss font-medium">{formatCurrencyPrice(opp.buy_price)}</td>
+                      <td className="py-3 px-3 text-profit font-medium">{formatCurrencyPrice(opp.sell_price)}</td>
                       <td className="py-3 px-3 text-slate-700">
-                        {opp.gross_spread_bps.toFixed(1)} BPS (${opp.gross_spread.toFixed(2)})
+                        {opp.gross_spread_bps.toFixed(1)} BPS ({formatSpreadPrice(opp.gross_spread)})
                       </td>
                       <td className="py-3 px-3 text-slate-500">{opp.fee_bps.toFixed(1)} BPS</td>
                       <td className="py-3 px-3">
@@ -254,8 +331,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                           {opp.net_spread_bps.toFixed(2)} BPS
                         </span>
                       </td>
-                      <td className="py-3 px-3 font-bold text-profit">
-                        +${opp.estimated_profit_usd.toFixed(2)}
+                      <td className={`py-3 px-3 font-bold ${opp.estimated_profit_usd >= 0 ? "text-profit" : "text-loss"}`}>
+                        {opp.estimated_profit_usd >= 0
+                          ? `+$${opp.estimated_profit_usd.toFixed(2)}`
+                          : `-$${Math.abs(opp.estimated_profit_usd).toFixed(2)}`}
                       </td>
                       <td className="py-3 px-3 text-right">
                         {isLast ? (

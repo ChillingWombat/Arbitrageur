@@ -1,28 +1,69 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import type { SimStepResultDto, ExecutionLogEntry } from "../types";
+import { PERP_TICKERS, formatCurrencyPnl, getDefaultOrderQty } from "../types/tickers";
 
 interface SimulationRunnerProps {
   logs: ExecutionLogEntry[];
   totalPnl: number;
   onRunStep: (symbol: string, targetBps: number, qty: number) => Promise<SimStepResultDto>;
+  symbol?: string;
+  onSymbolChange?: (s: string) => void;
 }
 
 export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
   logs,
   totalPnl,
   onRunStep,
+  symbol: symbolProp,
+  onSymbolChange,
 }) => {
   const [isRunning, setIsRunning] = useState(false);
   const [speedMs, setSpeedMs] = useState(500);
   const [targetBps, setTargetBps] = useState(10.0);
-  const [orderQty, setOrderQty] = useState(0.5);
-  const [symbol, setSymbol] = useState("BTC-USDC");
+  const [localSymbol, setLocalSymbol] = useState("BTC-USDC");
+  const currentSymbol = symbolProp || localSymbol;
+  const handleSymbolChange = onSymbolChange || setLocalSymbol;
+
+  const activeTicker = PERP_TICKERS.find((t) => t.symbol === currentSymbol) || {
+    symbol: currentSymbol,
+    base: currentSymbol.split("-")[0],
+    quote: currentSymbol.split("-")[1] || "USDC",
+    name: currentSymbol,
+    venues: ["HL", "LGT", "VNT"],
+    basePrice: 100,
+  };
+
+  const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
   const [latestResult, setLatestResult] = useState<SimStepResultDto | null>(null);
+
+  // Sync orderQty when current symbol changes
+  useEffect(() => {
+    setOrderQty(getDefaultOrderQty(activeTicker.basePrice));
+  }, [currentSymbol, activeTicker.basePrice]);
+
+  // Derive execution stats for the currently selected ticker
+  const tickerStats = useMemo(() => {
+    let count = 0;
+    let pnl = 0;
+    const symKey = currentSymbol.toUpperCase();
+    const baseKey = symKey.split(/[-_/]/)[0];
+
+    for (const log of logs) {
+      if (!log.symbol) continue;
+      const logKey = log.symbol.toUpperCase();
+      const logBase = logKey.split(/[-_/]/)[0];
+      if (logKey === symKey || logBase === baseKey) {
+        count += 1;
+        pnl += log.net_profit || 0;
+      }
+    }
+    return { count, pnl: Math.round(pnl * 100) / 100 };
+  }, [logs, currentSymbol]);
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   const handleStep = async () => {
-    const res = await onRunStep(symbol, targetBps, orderQty);
+    const res = await onRunStep(currentSymbol, targetBps, orderQty);
     setLatestResult(res);
   };
 
@@ -37,7 +78,7 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
     };
-  }, [isRunning, speedMs, symbol, targetBps, orderQty]);
+  }, [isRunning, speedMs, currentSymbol, targetBps, orderQty]);
 
   const winCount = logs.filter((l) => l.success).length;
   const winRate = logs.length > 0 ? (winCount / logs.length) * 100 : 100;
@@ -47,10 +88,37 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
       {/* Simulation Controls Top Bar */}
       <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-slate-900">
-            High-Frequency Paper Trading Simulation Studio
-          </h2>
-          <p className="text-xs text-slate-500 mt-1">
+          <div className="flex items-center space-x-3 mb-1">
+            <h2 className="text-sm font-bold font-mono text-slate-900">
+              High-Frequency Paper Trading Simulation Studio
+            </h2>
+            {/* Active Ticker Tag with venues, trade count, and PnL */}
+            <div className="text-xs font-mono font-bold text-slate-900 bg-surface-raised px-2.5 py-1 rounded-md border border-surface-border flex items-center space-x-2">
+              <span>{currentSymbol}</span>
+              <span className="flex space-x-1">
+                {activeTicker.venues.map((v) => (
+                  <span key={v} className="text-[9px] px-1 py-0.2 rounded font-semibold bg-accent-dim text-accent border border-accent-line/40">
+                    {v}
+                  </span>
+                ))}
+              </span>
+              <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-surface-border font-medium text-slate-700">
+                {tickerStats.count} tx{tickerStats.count === 1 ? "" : "s"}
+              </span>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
+                  tickerStats.pnl > 0
+                    ? "text-profit bg-profit-dim border border-profit-border"
+                    : tickerStats.pnl < 0
+                    ? "text-loss bg-loss-dim border border-loss-border"
+                    : "text-slate-500 bg-surface border border-surface-border"
+                }`}
+              >
+                {formatCurrencyPnl(tickerStats.pnl)}
+              </span>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">
             Simulates live cross-venue dislocations, atomic multi-leg routing, and automated emergency unwinding.
           </p>
         </div>
@@ -85,15 +153,17 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
       {/* Simulation Parameter Controls */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4 bg-surface p-4 rounded-xl border border-surface-border font-mono text-xs shadow-xs">
         <div>
-          <span className="text-slate-500 text-[10px] uppercase">Asset:</span>
+          <span className="text-slate-500 text-[10px] uppercase">Asset ({PERP_TICKERS.length} Tickers):</span>
           <select
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
+            value={currentSymbol}
+            onChange={(e) => handleSymbolChange(e.target.value)}
             className="w-full mt-1 px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
           >
-            <option value="BTC-USDC">BTC-USDC</option>
-            <option value="ETH-USDC">ETH-USDC</option>
-            <option value="SOL-USDC">SOL-USDC</option>
+            {PERP_TICKERS.map((t) => (
+              <option key={t.symbol} value={t.symbol}>
+                {t.symbol} ({t.name})
+              </option>
+            ))}
           </select>
         </div>
 

@@ -13,6 +13,8 @@ import type {
   EngineSettingsDto,
 } from "../types";
 
+import { PERP_TICKERS } from "../types/tickers";
+
 // Check if running inside Tauri IPC environment
 function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
@@ -34,7 +36,7 @@ class BrowserMockEngine {
   private logs: ExecutionLogEntry[] = [
     {
       id: "exec-1",
-      timestamp: new Date(Date.now() - 60000).toISOString(),
+      timestamp: new Date(Date.now() - 360000).toISOString(),
       trade_type: "Spatial",
       symbol: "BTC-USDC",
       venue_a: "Hyperliquid",
@@ -50,7 +52,7 @@ class BrowserMockEngine {
     },
     {
       id: "exec-2",
-      timestamp: new Date(Date.now() - 30000).toISOString(),
+      timestamp: new Date(Date.now() - 300000).toISOString(),
       trade_type: "Funding",
       symbol: "ETH-USDC",
       venue_a: "Hyperliquid",
@@ -63,6 +65,166 @@ class BrowserMockEngine {
       net_profit: 30.2,
       latency_us: 98,
       note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)",
+    },
+    {
+      id: "exec-3",
+      timestamp: new Date(Date.now() - 240000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "BTC-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Robinhood EVM",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 41.0,
+      fees: 1.9,
+      net_profit: 39.1,
+      latency_us: 120,
+      note: "Atomic multi-leg routing on BTC basis dislocation",
+    },
+    {
+      id: "exec-4",
+      timestamp: new Date(Date.now() - 180000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "SOL-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 20.0,
+      fees: 1.8,
+      net_profit: 18.2,
+      latency_us: 105,
+      note: "Executed atomically at spread 16.4 BPS",
+    },
+    {
+      id: "exec-5",
+      timestamp: new Date(Date.now() - 150000).toISOString(),
+      trade_type: "Funding",
+      symbol: "ETH-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 13.9,
+      fees: 1.8,
+      net_profit: 12.1,
+      latency_us: 88,
+      note: "Carry opened: Short HL + Long LGT",
+    },
+    {
+      id: "exec-6",
+      timestamp: new Date(Date.now() - 120000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "SUI-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 12.0,
+      fees: 1.7,
+      net_profit: 10.3,
+      latency_us: 92,
+      note: "Sui perp dislocation captured",
+    },
+    {
+      id: "exec-7",
+      timestamp: new Date(Date.now() - 90000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "AVAX-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Vanta.exchange",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 7.5,
+      fees: 1.1,
+      net_profit: 6.4,
+      latency_us: 110,
+      note: "AVAX perp basis captured",
+    },
+    {
+      id: "exec-8",
+      timestamp: new Date(Date.now() - 70000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "SOL-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Vanta.exchange",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 7.7,
+      fees: 1.8,
+      net_profit: 5.9,
+      latency_us: 102,
+      note: "Solana cross-venue basis capture",
+    },
+    {
+      id: "exec-9",
+      timestamp: new Date(Date.now() - 50000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "SUI-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Vanta.exchange",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 6.8,
+      fees: 1.3,
+      net_profit: 5.5,
+      latency_us: 95,
+      note: "Sui liquidity arb captured",
+    },
+    {
+      id: "exec-10",
+      timestamp: new Date(Date.now() - 30000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "ARB-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "REJECTED",
+      success: false,
+      gross_profit: 0.0,
+      fees: 0.5,
+      net_profit: -0.5,
+      latency_us: 130,
+      note: "DeltaGuard safety unwind on Leg B rejection",
+    },
+    {
+      id: "exec-11",
+      timestamp: new Date(Date.now() - 20000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "ARB-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Vanta.exchange",
+      leg_a_status: "FILLED",
+      leg_b_status: "REJECTED",
+      success: false,
+      gross_profit: 0.0,
+      fees: 0.3,
+      net_profit: -0.3,
+      latency_us: 125,
+      note: "Slippage tolerance boundary reached, position cleanly unwound",
+    },
+    {
+      id: "exec-12",
+      timestamp: new Date(Date.now() - 10000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "DOGE-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "REJECTED",
+      success: false,
+      gross_profit: 0.0,
+      fees: 1.5,
+      net_profit: -1.5,
+      latency_us: 145,
+      note: "Emergency unwind on venue latency spike",
     },
   ];
 
@@ -93,122 +255,108 @@ class BrowserMockEngine {
   }
 
   fetchOrderbooks(symbol: string): VenueOrderBookDto[] {
-    const basePrices: Record<string, number> = {
-      "BTC-USDC": 64200.0,
-      "ETH-USDC": 3450.0,
-      "SOL-USDC": 152.2,
-    };
-    const base = basePrices[symbol] || 64200.0;
-    const jitter = (Math.random() - 0.5) * (base * 0.0004);
+    const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
+    const base = ticker ? ticker.basePrice : 100.0;
+    const jitter = (Math.random() - 0.5) * (base * 0.0003);
+
+    const hlSpreadHalf = Math.max(0.000001, base * 0.00012);
+    const hlBid = base + jitter - hlSpreadHalf;
+    const hlAsk = base + jitter + hlSpreadHalf;
+
+    const lgtDisloc = base * 0.00026;
+    const lgtBid = base + jitter + lgtDisloc - hlSpreadHalf;
+    const lgtAsk = base + jitter + lgtDisloc + hlSpreadHalf;
+
+    const vntDisloc = base * 0.00008;
+    const vntBid = base + jitter + vntDisloc - hlSpreadHalf * 1.1;
+    const vntAsk = base + jitter + vntDisloc + hlSpreadHalf * 1.1;
+
+    const rhDisloc = base * 0.00005;
+    const rhBid = base + jitter + rhDisloc - hlSpreadHalf * 1.2;
+    const rhAsk = base + jitter + rhDisloc + hlSpreadHalf * 1.2;
+
+    const mkBids = (best: number, stepBps: number): [number, number][] => [
+      [best, 5.0],
+      [best * (1 - stepBps * 0.0001), 8.5],
+      [best * (1 - stepBps * 0.0002), 12.0],
+      [best * (1 - stepBps * 0.0003), 15.0],
+    ];
+
+    const mkAsks = (best: number, stepBps: number): [number, number][] => [
+      [best, 5.2],
+      [best * (1 + stepBps * 0.0001), 9.0],
+      [best * (1 + stepBps * 0.0002), 13.5],
+      [best * (1 + stepBps * 0.0003), 16.0],
+    ];
 
     return [
       {
         venue_id: "hyperliquid",
         venue_name: "Hyperliquid (L1)",
         symbol,
-        best_bid: base + jitter - 2.0,
-        best_ask: base + jitter + 2.5,
-        spread: 4.5,
-        spread_bps: (4.5 / base) * 10000,
-        mid_price: base + jitter + 0.25,
-        total_bid_depth: 18.5,
-        total_ask_depth: 22.0,
-        vwap_bid: base + jitter - 2.8,
-        vwap_ask: base + jitter + 3.2,
+        best_bid: hlBid,
+        best_ask: hlAsk,
+        spread: hlAsk - hlBid,
+        spread_bps: ((hlAsk - hlBid) / base) * 10000,
+        mid_price: (hlBid + hlAsk) / 2,
+        total_bid_depth: 40.5,
+        total_ask_depth: 43.7,
+        vwap_bid: hlBid * 0.9998,
+        vwap_ask: hlAsk * 1.0002,
         funding_rate_8h_pct: 0.024,
-        bids: [
-          [base + jitter - 2.0, 2.5],
-          [base + jitter - 4.5, 4.2],
-          [base + jitter - 7.0, 5.8],
-          [base + jitter - 10.0, 6.0],
-        ],
-        asks: [
-          [base + jitter + 2.5, 3.1],
-          [base + jitter + 5.0, 5.5],
-          [base + jitter + 8.5, 6.4],
-          [base + jitter + 12.0, 7.0],
-        ],
+        bids: mkBids(hlBid, 1.5),
+        asks: mkAsks(hlAsk, 1.5),
       },
       {
         venue_id: "lighter",
         venue_name: "Lighter (zkDEX)",
         symbol,
-        best_bid: base + jitter + 12.0,
-        best_ask: base + jitter + 16.5,
-        spread: 4.5,
-        spread_bps: (4.5 / base) * 10000,
-        mid_price: base + jitter + 14.25,
-        total_bid_depth: 14.2,
-        total_ask_depth: 19.8,
-        vwap_bid: base + jitter + 11.2,
-        vwap_ask: base + jitter + 17.5,
+        best_bid: lgtBid,
+        best_ask: lgtAsk,
+        spread: lgtAsk - lgtBid,
+        spread_bps: ((lgtAsk - lgtBid) / base) * 10000,
+        mid_price: (lgtBid + lgtAsk) / 2,
+        total_bid_depth: 35.0,
+        total_ask_depth: 38.0,
+        vwap_bid: lgtBid * 0.9998,
+        vwap_ask: lgtAsk * 1.0002,
         funding_rate_8h_pct: 0.008,
-        bids: [
-          [base + jitter + 12.0, 1.8],
-          [base + jitter + 9.5, 3.4],
-          [base + jitter + 7.0, 4.5],
-          [base + jitter + 4.0, 4.5],
-        ],
-        asks: [
-          [base + jitter + 16.5, 2.9],
-          [base + jitter + 19.0, 4.8],
-          [base + jitter + 22.0, 5.6],
-          [base + jitter + 25.0, 6.5],
-        ],
+        bids: mkBids(lgtBid, 1.5),
+        asks: mkAsks(lgtAsk, 1.5),
       },
       {
         venue_id: "vanta",
         venue_name: "Vanta.exchange",
         symbol,
-        best_bid: base + jitter + 3.0,
-        best_ask: base + jitter + 8.0,
-        spread: 5.0,
-        spread_bps: (5.0 / base) * 10000,
-        mid_price: base + jitter + 5.5,
-        total_bid_depth: 25.0,
-        total_ask_depth: 27.5,
-        vwap_bid: base + jitter + 2.1,
-        vwap_ask: base + jitter + 9.2,
+        best_bid: vntBid,
+        best_ask: vntAsk,
+        spread: vntAsk - vntBid,
+        spread_bps: ((vntAsk - vntBid) / base) * 10000,
+        mid_price: (vntBid + vntAsk) / 2,
+        total_bid_depth: 45.0,
+        total_ask_depth: 48.0,
+        vwap_bid: vntBid * 0.9997,
+        vwap_ask: vntAsk * 1.0003,
         funding_rate_8h_pct: 0.012,
-        bids: [
-          [base + jitter + 3.0, 3.5],
-          [base + jitter + 0.5, 6.0],
-          [base + jitter - 2.0, 7.5],
-          [base + jitter - 5.0, 8.0],
-        ],
-        asks: [
-          [base + jitter + 8.0, 4.2],
-          [base + jitter + 11.0, 6.8],
-          [base + jitter + 14.5, 7.5],
-          [base + jitter + 18.0, 9.0],
-        ],
+        bids: mkBids(vntBid, 1.8),
+        asks: mkAsks(vntAsk, 1.8),
       },
       {
         venue_id: "robinhood",
         venue_name: "Robinhood EVM",
         symbol,
-        best_bid: base + jitter + 1.0,
-        best_ask: base + jitter + 6.5,
-        spread: 5.5,
-        spread_bps: (5.5 / base) * 10000,
-        mid_price: base + jitter + 3.75,
-        total_bid_depth: 12.0,
-        total_ask_depth: 15.0,
-        vwap_bid: base + jitter + 0.2,
-        vwap_ask: base + jitter + 7.8,
+        best_bid: rhBid,
+        best_ask: rhAsk,
+        spread: rhAsk - rhBid,
+        spread_bps: ((rhAsk - rhBid) / base) * 10000,
+        mid_price: (rhBid + rhAsk) / 2,
+        total_bid_depth: 28.0,
+        total_ask_depth: 32.0,
+        vwap_bid: rhBid * 0.9996,
+        vwap_ask: rhAsk * 1.0004,
         funding_rate_8h_pct: 0.007,
-        bids: [
-          [base + jitter + 1.0, 1.5],
-          [base + jitter - 1.5, 3.2],
-          [base + jitter - 4.0, 4.3],
-          [base + jitter - 7.0, 3.0],
-        ],
-        asks: [
-          [base + jitter + 6.5, 2.2],
-          [base + jitter + 9.5, 3.8],
-          [base + jitter + 13.0, 4.5],
-          [base + jitter + 17.0, 4.5],
-        ],
+        bids: mkBids(rhBid, 2.0),
+        asks: mkAsks(rhAsk, 2.0),
       },
     ];
   }
@@ -425,14 +573,10 @@ class BrowserMockEngine {
 
   runSimStep(symbol: string, targetBps: number, orderQty: number): SimStepResultDto {
     this.simCycle += 1;
-    const basePrices: Record<string, number> = {
-      "BTC-USDC": 64200.0,
-      "ETH-USDC": 3450.0,
-      "SOL-USDC": 152.2,
-    };
-    const base = basePrices[symbol] || 64200.0;
+    const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
+    const base = ticker ? ticker.basePrice : 100.0;
     const spreadBps = targetBps + 4.5 + Math.random() * 5.0;
-    const profit = (spreadBps / 10000) * base * orderQty - 2.1;
+    const profit = Math.max(0.5, (spreadBps / 10000) * base * orderQty - 2.1);
     this.pnl += profit;
 
     const log: ExecutionLogEntry = {
@@ -470,12 +614,8 @@ class BrowserMockEngine {
 
   executeSpatialArbitrage(symbol: string, buyVenue: string, sellVenue: string, orderQty: number): SimStepResultDto {
     this.simCycle += 1;
-    const basePrices: Record<string, number> = {
-      "BTC-USDC": 64200.0,
-      "ETH-USDC": 3450.0,
-      "SOL-USDC": 152.2,
-    };
-    const base = basePrices[symbol] || 64200.0;
+    const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
+    const base = ticker ? ticker.basePrice : 100.0;
     const spreadBps = 14.8 + Math.random() * 5.2;
     const grossProfit = (spreadBps / 10000) * base * orderQty;
     const fees = 2.1;

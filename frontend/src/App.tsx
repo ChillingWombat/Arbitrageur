@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Header } from "./components/Header";
-import { Navigation, type ActiveTab } from "./components/Navigation";
+import { TickerExplorer } from "./components/TickerExplorer";
+import type { ActiveTab } from "./components/Navigation";
 import { LiveMatrix } from "./components/LiveMatrix";
 import { FundingRadar } from "./components/FundingRadar";
 import { PredictionHub } from "./components/PredictionHub";
@@ -19,6 +20,8 @@ import type {
   ExecutionLogEntry,
 } from "./types";
 
+import { PERP_TICKERS, getDefaultOrderQty } from "./types/tickers";
+
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("spatial");
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
@@ -34,13 +37,17 @@ export const App: React.FC = () => {
   const [refreshing, setRefreshing] = useState(false);
 
   // Load baseline status and telemetry
-  const refreshAllData = useCallback(async () => {
+  const refreshAllData = useCallback(async (customQty?: number, customMinBps?: number) => {
     setRefreshing(true);
     try {
+      const ticker = PERP_TICKERS.find((t) => t.symbol === selectedSymbol);
+      const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
+      const minBps = customMinBps ?? 5.0;
+
       const [status, books, spatial, funding, prediction, risk, logs] = await Promise.all([
         api.getSystemStatus(),
         api.fetchOrderbooks(selectedSymbol),
-        api.scanSpatialOpportunities(selectedSymbol, 5.0, 0.5),
+        api.scanSpatialOpportunities(selectedSymbol, minBps, qty),
         api.scanFundingOpportunities(selectedSymbol, fundingTradeSize),
         api.scanPredictionOpportunities(""),
         api.getRiskOverview(),
@@ -108,24 +115,27 @@ export const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
-      {/* Top Header Bar */}
+      {/* Top Header Bar with Section Switcher Navigation */}
       <Header
         status={systemStatus}
         onResetCircuitBreaker={handleResetCircuitBreaker}
         onEmergencyKillswitch={handleEmergencyKillswitch}
         onToggleLiveMode={handleToggleLiveMode}
         refreshing={refreshing}
+        activeTab={activeTab}
+        onSelectTab={setActiveTab}
+        spatialCount={spatialOpps.filter((o) => o.is_executable).length}
+        fundingCount={fundingOpps.length}
+        predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
 
       {/* Main Workspace Body */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Left Navigation Bar */}
-        <Navigation
-          activeTab={activeTab}
-          onSelectTab={setActiveTab}
-          spatialCount={spatialOpps.filter((o) => o.is_executable).length}
-          fundingCount={fundingOpps.length}
-          predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
+        {/* Left Ticker Explorer Panel (Union of Perp DEX Tickers >= 2 Venues) */}
+        <TickerExplorer
+          selectedSymbol={selectedSymbol}
+          onSelectTicker={setSelectedSymbol}
+          executionLogs={executionLogs}
         />
 
         {/* Workspace Content Pane */}
@@ -139,6 +149,7 @@ export const App: React.FC = () => {
               onRefresh={refreshAllData}
               onExecuteTrade={handleExecuteTrade}
               loading={refreshing}
+              executionLogs={executionLogs}
             />
           )}
 
@@ -151,6 +162,7 @@ export const App: React.FC = () => {
               onTradeSizeChange={setFundingTradeSize}
               onExecuteCarry={handleExecuteCarry}
               loading={refreshing}
+              executionLogs={executionLogs}
             />
           )}
 
@@ -189,6 +201,8 @@ export const App: React.FC = () => {
               logs={executionLogs}
               totalPnl={systemStatus?.total_realized_pnl ?? 0}
               onRunStep={handleRunSimStep}
+              symbol={selectedSymbol}
+              onSymbolChange={setSelectedSymbol}
             />
           )}
 

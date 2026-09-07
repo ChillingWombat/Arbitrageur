@@ -87,6 +87,33 @@ impl AppEngineState {
         ex_vanta.seed_market("SOL-USDC", dec!(152.4), dec!(152.6), dec!(400.0), dec!(0.0002));
         ex_robinhood.seed_market("SOL-USDC", dec!(152.3), dec!(152.5), dec!(200.0), dec!(0.00025));
 
+        // Seed comprehensive union of 52 perp DEX tickers (each on >= 2 venues)
+        let other_tickers = [
+            "AVAX-USDC", "BNB-USDC", "ARB-USDC", "OP-USDC", "SUI-USDC", "NEAR-USDC",
+            "APT-USDC", "LINK-USDC", "DOGE-USDC", "PEPE-USDC", "WIF-USDC", "POL-USDC",
+            "TIA-USDC", "SEI-USDC", "INJ-USDC", "RENDER-USDC", "FTM-USDC", "ATOM-USDC",
+            "ADA-USDC", "XRP-USDC", "DOT-USDC", "LTC-USDC", "BCH-USDC", "UNI-USDC",
+            "AAVE-USDC", "CRV-USDC", "MKR-USDC", "LDO-USDC", "JUP-USDC", "PYTH-USDC",
+            "ONDO-USDC", "KAS-USDC", "TON-USDC", "NOT-USDC", "PENDLE-USDC", "FET-USDC",
+            "TAO-USDC", "WLD-USDC", "BLUR-USDC", "STX-USDC", "RUNE-USDC", "DYDX-USDC",
+            "ENA-USDC", "STRK-USDC", "JTO-USDC", "BONK-USDC", "FLOKI-USDC", "SHIB-USDC",
+            "AR-USDC",
+        ];
+
+        for &sym in &other_tickers {
+            let base = crate::commands::symbol_base_price(sym);
+            let depth = (dec!(500_000.0) / base).max(dec!(50.0));
+            let half_spread = base * dec!(0.00015);
+            let lgt_disloc = base * dec!(0.00028);
+            let vnt_disloc = base * dec!(0.00010);
+            let rh_disloc = base * dec!(0.00005);
+
+            ex_hl.seed_market(sym, base - half_spread, base + half_spread, depth, dec!(0.00025));
+            ex_lighter.seed_market(sym, base + lgt_disloc - half_spread, base + lgt_disloc + half_spread, depth * dec!(0.8), dec!(0.00008));
+            ex_vanta.seed_market(sym, base + vnt_disloc - half_spread, base + vnt_disloc + half_spread, depth * dec!(1.2), dec!(0.00015));
+            ex_robinhood.seed_market(sym, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
+        }
+
         let live_hl = Arc::new(HyperliquidAdapter::new(None, None, None));
         let live_lighter = Arc::new(LighterAdapter::new(None, None, None));
         let live_vanta = Arc::new(VantaAdapter::new(None, None, None, None));
@@ -114,6 +141,137 @@ impl AppEngineState {
             robinhood_router: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba".into(),
         });
 
+        let initial_logs = vec![
+            ExecutionLogEntry {
+                id: "exec-init-1".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "BTC-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 48.5,
+                fees: 2.1,
+                net_profit: 46.4,
+                latency_us: 114,
+                note: "Executed atomically at spread 18.2 BPS".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-2".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Funding".into(),
+                symbol: "ETH-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Vanta.exchange".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 32.0,
+                fees: 1.8,
+                net_profit: 30.2,
+                latency_us: 98,
+                note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-3".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "BTC-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Robinhood EVM".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 41.0,
+                fees: 1.9,
+                net_profit: 39.1,
+                latency_us: 120,
+                note: "Cross-venue spatial spread captured".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-4".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "SOL-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 20.0,
+                fees: 1.8,
+                net_profit: 18.2,
+                latency_us: 105,
+                note: "Executed atomically at spread 16.4 BPS".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-5".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "SUI-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 12.0,
+                fees: 1.7,
+                net_profit: 10.3,
+                latency_us: 92,
+                note: "Sui perp dislocation captured".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-6".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "AVAX-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Vanta.exchange".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 7.5,
+                fees: 1.1,
+                net_profit: 6.4,
+                latency_us: 110,
+                note: "AVAX perp basis captured".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-7".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "ARB-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "REJECTED".into(),
+                success: false,
+                gross_profit: 0.0,
+                fees: 0.8,
+                net_profit: -0.8,
+                latency_us: 130,
+                note: "DeltaGuard safety unwind on Leg B rejection".into(),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-8".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "DOGE-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "REJECTED".into(),
+                success: false,
+                gross_profit: 0.0,
+                fees: 1.5,
+                net_profit: -1.5,
+                latency_us: 145,
+                note: "Emergency unwind on venue latency spike".into(),
+            },
+        ];
+
         Self {
             ex_hl,
             ex_lighter,
@@ -131,10 +289,29 @@ impl AppEngineState {
             kalman_filter,
             is_live_mode: RwLock::new(false),
             total_realized_profit: RwLock::new(dec!(0)),
-            execution_logs: RwLock::new(Vec::new()),
-            sim_step_counter: RwLock::new(0),
+            execution_logs: RwLock::new(initial_logs),
+            sim_step_counter: RwLock::new(8),
             settings,
         }
+    }
+
+    /// Ensure market is seeded dynamically if queried
+    pub fn ensure_market(&self, symbol: &str) {
+        if self.ex_hl.has_market(symbol) {
+            return;
+        }
+
+        let base = crate::commands::symbol_base_price(symbol);
+        let depth = (dec!(500_000.0) / base).max(dec!(50.0));
+        let half_spread = base * dec!(0.00015);
+        let lgt_disloc = base * dec!(0.00028);
+        let vnt_disloc = base * dec!(0.00010);
+        let rh_disloc = base * dec!(0.00005);
+
+        self.ex_hl.seed_market(symbol, base - half_spread, base + half_spread, depth, dec!(0.00025));
+        self.ex_lighter.seed_market(symbol, base + lgt_disloc - half_spread, base + lgt_disloc + half_spread, depth * dec!(0.8), dec!(0.00008));
+        self.ex_vanta.seed_market(symbol, base + vnt_disloc - half_spread, base + vnt_disloc + half_spread, depth * dec!(1.2), dec!(0.00015));
+        self.ex_robinhood.seed_market(symbol, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
     }
 
     /// Returns active venue list dynamically based on simulated vs live mode

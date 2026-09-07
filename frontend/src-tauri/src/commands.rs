@@ -206,16 +206,63 @@ fn venue_fee_bps(vid: &str) -> Decimal {
     }
 }
 
-fn symbol_base_price(symbol: &str) -> Decimal {
+pub fn symbol_base_price(symbol: &str) -> Decimal {
     let s = symbol.to_uppercase();
-    if s.contains("BTC") {
-        dec!(64200.0)
-    } else if s.contains("ETH") {
-        dec!(3450.0)
-    } else if s.contains("SOL") {
-        dec!(152.2)
-    } else {
-        dec!(100.0)
+    let base = s.split('-').next().unwrap_or(&s);
+    match base {
+        "BTC" => dec!(64200.0),
+        "ETH" => dec!(3450.0),
+        "SOL" => dec!(152.2),
+        "AVAX" => dec!(28.5),
+        "BNB" => dec!(585.0),
+        "ARB" => dec!(0.58),
+        "OP" => dec!(1.45),
+        "SUI" => dec!(1.82),
+        "NEAR" => dec!(4.65),
+        "APT" => dec!(8.40),
+        "LINK" => dec!(11.80),
+        "DOGE" => dec!(0.125),
+        "PEPE" => dec!(0.0000095),
+        "WIF" => dec!(1.75),
+        "POL" | "MATIC" => dec!(0.38),
+        "TIA" => dec!(5.20),
+        "SEI" => dec!(0.32),
+        "INJ" => dec!(21.50),
+        "RENDER" => dec!(5.80),
+        "FTM" => dec!(0.68),
+        "ATOM" => dec!(4.85),
+        "ADA" => dec!(0.36),
+        "XRP" => dec!(0.58),
+        "DOT" => dec!(4.40),
+        "LTC" => dec!(65.50),
+        "BCH" => dec!(340.0),
+        "UNI" => dec!(7.20),
+        "AAVE" => dec!(145.0),
+        "CRV" => dec!(0.28),
+        "MKR" => dec!(1650.0),
+        "LDO" => dec!(1.15),
+        "JUP" => dec!(0.85),
+        "PYTH" => dec!(0.34),
+        "ONDO" => dec!(0.72),
+        "KAS" => dec!(0.16),
+        "TON" => dec!(5.40),
+        "NOT" => dec!(0.0082),
+        "PENDLE" => dec!(4.10),
+        "FET" => dec!(1.35),
+        "TAO" => dec!(320.0),
+        "WLD" => dec!(1.65),
+        "BLUR" => dec!(0.22),
+        "STX" => dec!(1.75),
+        "RUNE" => dec!(4.90),
+        "DYDX" => dec!(1.05),
+        "ENA" => dec!(0.35),
+        "STRK" => dec!(0.42),
+        "JTO" => dec!(2.30),
+        "BONK" => dec!(0.000021),
+        "FLOKI" => dec!(0.00014),
+        "SHIB" => dec!(0.000014),
+        "AR" => dec!(20.50),
+        _ => dec!(100.0),
     }
 }
 
@@ -274,6 +321,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
 }
 
 pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Result<Vec<VenueOrderBookDto>, String> {
+    state.ensure_market(symbol);
     let venues = state.get_venues();
     let mut result = Vec::new();
 
@@ -341,6 +389,7 @@ pub async fn scan_spatial_opportunities_impl(
     order_qty: f64,
     state: &AppEngineState,
 ) -> Result<Vec<SpatialOpportunityDto>, String> {
+    state.ensure_market(symbol);
     let venues = state.get_venues();
     let mut books = Vec::new();
     for (vid, vname, adapter) in &venues {
@@ -395,6 +444,7 @@ pub async fn scan_funding_opportunities_impl(
     trade_size_usd: f64,
     state: &AppEngineState,
 ) -> Result<Vec<FundingOpportunityDto>, String> {
+    state.ensure_market(symbol);
     let venues = state.get_venues();
     let size_dec = Decimal::from_f64_retain(trade_size_usd).unwrap_or(dec!(25000.0));
     let mut rates = Vec::new();
@@ -584,6 +634,7 @@ pub async fn run_simulation_step_impl(
     order_qty: f64,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
+    state.ensure_market(symbol);
     let i = {
         let mut step = state.sim_step_counter.write();
         *step += 1;
@@ -595,11 +646,14 @@ pub async fn run_simulation_step_impl(
     let dislocation_pct = if i % 2 == 1 { dec!(0.0016) } else { dec!(0.0022) };
     let dislocation = base_price * dislocation_pct;
 
+    let target_qty = Decimal::from_f64_retain(order_qty).unwrap_or(dec!(0.5));
+    let market_depth = (target_qty * dec!(3.0)).max(dec!(500_000.0) / base_price).max(dec!(50.0));
+
     state.ex_lighter.seed_market(
         symbol,
         base_price + dislocation,
         base_price + dislocation + (base_price * dec!(0.00015)),
-        dec!(5.0),
+        market_depth,
         dec!(0.0001),
     );
 
@@ -742,6 +796,7 @@ pub async fn execute_spatial_arbitrage_impl(
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
     }
+    state.ensure_market(symbol);
 
     let buy_adapter = state.get_adapter(buy_venue).ok_or_else(|| format!("Buy venue '{}' not found", buy_venue))?;
     let sell_adapter = state.get_adapter(sell_venue).ok_or_else(|| format!("Sell venue '{}' not found", sell_venue))?;
@@ -869,6 +924,7 @@ pub async fn execute_funding_carry_impl(
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
     }
+    state.ensure_market(symbol);
 
     let long_adapter = state.get_adapter(long_venue).ok_or_else(|| format!("Long venue '{}' not found", long_venue))?;
     let short_adapter = state.get_adapter(short_venue).ok_or_else(|| format!("Short venue '{}' not found", short_venue))?;
@@ -1503,5 +1559,80 @@ mod tests {
         assert_eq!(updated.max_slippage_bps, 20.0);
         assert_eq!(updated.min_depth_ratio, 4.0);
         assert_eq!(updated.hsm_url, "http://hsm.internal:9000");
+    }
+
+    #[tokio::test]
+    async fn test_multi_dex_ticker_orderbooks() {
+        let state = AppEngineState::new();
+
+        // Test AVAX
+        let books_avax = fetch_orderbooks_impl("AVAX-USDC", &state).await.expect("avax books");
+        assert_eq!(books_avax.len(), 4);
+        for b in &books_avax {
+            assert!(b.best_bid > 0.0);
+            assert!(b.best_ask >= b.best_bid);
+            assert!(b.total_bid_depth > 0.0);
+        }
+
+        // Test SUI
+        let books_sui = fetch_orderbooks_impl("SUI-USDC", &state).await.expect("sui books");
+        assert_eq!(books_sui.len(), 4);
+        assert!(books_sui[0].mid_price > 0.5 && books_sui[0].mid_price < 5.0);
+
+        // Test PEPE (micro-price asset)
+        let books_pepe = fetch_orderbooks_impl("PEPE-USDC", &state).await.expect("pepe books");
+        assert_eq!(books_pepe.len(), 4);
+        assert!(books_pepe[0].best_bid > 0.0);
+        assert!(books_pepe[0].best_ask > books_pepe[0].best_bid);
+    }
+
+    #[tokio::test]
+    async fn test_multi_dex_ticker_spatial_and_funding() {
+        let state = AppEngineState::new();
+
+        // Spatial opportunities for SUI
+        let opps_sui = scan_spatial_opportunities_impl("SUI-USDC", 0.0, 100.0, &state).await.expect("sui spatial");
+        assert!(!opps_sui.is_empty());
+
+        // Funding opportunities for AVAX
+        let opps_avax = scan_funding_opportunities_impl("AVAX-USDC", 10000.0, &state).await.expect("avax funding");
+        assert!(!opps_avax.is_empty());
+        assert!(opps_avax[0].net_apr_pct > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_initial_execution_logs_presence() {
+        let state = AppEngineState::new();
+        let logs = get_execution_logs_impl(&state).expect("execution logs");
+        assert!(logs.len() >= 8);
+
+        // Verify positive profit entries exist
+        let btc_logs: Vec<_> = logs.iter().filter(|l| l.symbol == "BTC-USDC").collect();
+        assert!(btc_logs.len() >= 2);
+        let btc_profit: f64 = btc_logs.iter().map(|l| l.net_profit).sum();
+        assert!(btc_profit > 0.0);
+
+        // Verify negative profit entries exist (e.g. ARB or DOGE protected unwinds)
+        let arb_logs: Vec<_> = logs.iter().filter(|l| l.symbol == "ARB-USDC").collect();
+        assert!(!arb_logs.is_empty());
+        let arb_profit: f64 = arb_logs.iter().map(|l| l.net_profit).sum();
+        assert!(arb_profit < 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_simulation_and_execution_dynamic_market_seeding() {
+        let state = AppEngineState::new();
+
+        // Dynamic simulation step for LINK-USDC
+        let sim_res = run_simulation_step_impl("LINK-USDC", 5.0, 100.0, &state).await.expect("sim step on link");
+        assert!(sim_res.opportunity_found);
+
+        // Dynamic execution on DOT-USDC
+        let exec_res = execute_spatial_arbitrage_impl("DOT-USDC", "Hyperliquid", "Lighter", 50.0, &state).await.expect("spatial exec on dot");
+        assert!(exec_res.execution_success);
+
+        // Dynamic funding carry on NEAR-USDC
+        let carry_res = execute_funding_carry_impl("NEAR-USDC", "Hyperliquid", "Vanta.exchange", 10000.0, &state).await.expect("funding carry on near");
+        assert!(carry_res.execution_success);
     }
 }
