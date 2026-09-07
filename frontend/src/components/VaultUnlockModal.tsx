@@ -59,18 +59,18 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 select-none">
-      <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 select-none animate-in fade-in duration-200">
+      <div className="glass-panel-raised border border-white/[0.12] rounded-2xl p-6 max-w-md w-full shadow-[0_0_50px_rgba(0,0,0,0.8)] space-y-5 animate-in zoom-in-95 duration-150">
         <div className="flex items-start justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
+            <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 shadow-[0_0_15px_rgba(34,211,238,0.2)]">
               {isInitializing ? <KeyRound className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
             </div>
             <div>
-              <h3 className="text-base font-bold font-mono text-slate-900">
+              <h3 className="text-base font-bold font-mono text-white">
                 {isInitializing ? "Initialize Secure Vault" : "Unlock Secure Vault"}
               </h3>
-              <p className="text-xs text-slate-500 font-mono">
+              <p className="text-xs text-white/50 font-mono mt-0.5">
                 {isInitializing
                   ? "Set master encryption password for API credentials"
                   : "Enter master password to access sensitive exchange keys"}
@@ -80,7 +80,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
         </div>
 
         {error && (
-          <div className="p-3 bg-loss-dim border border-loss-border rounded-xl flex items-center space-x-2 text-xs font-mono text-loss">
+          <div className="p-3 bg-rose-500/15 border border-rose-500/30 rounded-xl flex items-center space-x-2 text-xs font-mono text-rose-300">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>{error}</span>
           </div>
@@ -88,7 +88,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-[11px] uppercase font-mono font-semibold text-slate-600 mb-1">
+            <label className="block text-[11px] uppercase font-mono font-semibold text-white/60 mb-1.5">
               Master Password
             </label>
             <div className="relative">
@@ -98,21 +98,21 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 onChange={(e) => setPassword(e.target.value)}
                 autoFocus
                 placeholder="Enter master password..."
-                className="w-full bg-surface-raised border border-surface-border rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition pr-10"
+                className="w-full bg-black/50 border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-xs font-mono text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 transition pr-10"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/80 transition"
               >
-                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4 text-cyan-400" />}
               </button>
             </div>
           </div>
 
           {isInitializing && (
             <div>
-              <label className="block text-[11px] uppercase font-mono font-semibold text-slate-600 mb-1">
+              <label className="block text-[11px] uppercase font-mono font-semibold text-white/60 mb-1.5">
                 Confirm Master Password
               </label>
               <input
@@ -120,14 +120,14 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Confirm master password..."
-                className="w-full bg-surface-raised border border-surface-border rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
+                className="w-full bg-black/50 border border-white/[0.1] rounded-xl px-3.5 py-2.5 text-xs font-mono text-white placeholder:text-white/30 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 transition"
               />
             </div>
           )}
 
-          <div className="p-3 rounded-xl bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-[11px] text-slate-600">
-            <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
-            <span>
+          <div className="p-3 rounded-xl bg-cyan-500/10 border border-cyan-500/20 flex items-start space-x-2.5 text-[11px] text-white/70">
+            <Shield className="w-4 h-4 text-cyan-300 shrink-0 mt-0.5" />
+            <span className="leading-relaxed">
               All API keys are encrypted at rest locally (AES-256-GCM with PBKDF2 key derivation). Decrypted strictly in-memory during active sessions.
             </span>
           </div>
@@ -136,14 +136,14 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-mono font-medium transition"
+              className="px-4 py-2 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.08] text-white/70 hover:text-white rounded-xl text-xs font-mono font-medium transition"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading || password.length === 0}
-              className="px-5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+              className="px-5 py-2 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-[0_0_16px_rgba(34,211,238,0.3)] flex items-center space-x-1.5"
             >
               {loading ? (
                 <span className="animate-pulse">Processing...</span>

@@ -20,7 +20,7 @@ import { api } from "../services/api";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 
-type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
+type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "about" | "all";
 type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "polymarket" | "kalshi";
 
 interface EngineSettingsProps {
@@ -157,25 +157,25 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
         setHyperliquidPrivateKey(s.hyperliquid_private_key || "");
         setHyperliquidUrl(s.hyperliquid_url || "https://api.hyperliquid.xyz");
-        setHyperliquidAccountIndex(s.hyperliquid_account_index?.toString() ?? "");
-        setHyperliquidSubaccountIndex(s.hyperliquid_subaccount_index?.toString() ?? "");
+        setHyperliquidAccountIndex(s.hyperliquid_account_index !== undefined ? String(s.hyperliquid_account_index) : "");
+        setHyperliquidSubaccountIndex(s.hyperliquid_subaccount_index !== undefined ? String(s.hyperliquid_subaccount_index) : "");
 
         setLighterAccountIndex(s.lighter_account_index || "0");
         setLighterApiKey(s.lighter_api_key || "");
         setLighterUrl(s.lighter_url || "https://mainnet.zklighter.elliot.ai");
-        setLighterSubaccountIndex(s.lighter_subaccount_index?.toString() ?? "");
+        setLighterSubaccountIndex(s.lighter_subaccount_index !== undefined ? String(s.lighter_subaccount_index) : "");
 
         setVantaAccountId(s.vanta_account_id || "");
         setVantaOrderlyKey(s.vanta_orderly_key || "");
         setVantaOrderlySecret(s.vanta_orderly_secret || "");
         setVantaUrl(s.vanta_url || "https://api-evm.orderly.org");
-        setVantaSubaccountIndex(s.vanta_subaccount_index?.toString() ?? "");
+        setVantaSubaccountIndex(s.vanta_subaccount_index !== undefined ? String(s.vanta_subaccount_index) : "");
 
         setRobinhoodWallet(s.robinhood_wallet || "");
         setRobinhoodPrivateKey(s.robinhood_private_key || "");
         setRobinhoodRpcUrl(s.robinhood_rpc_url || "https://rpc.robinhood.network");
         setRobinhoodRouter(s.robinhood_router || "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
-        setRobinhoodSubaccountIndex(s.robinhood_subaccount_index?.toString() ?? "");
+        setRobinhoodSubaccountIndex(s.robinhood_subaccount_index !== undefined ? String(s.robinhood_subaccount_index) : "");
 
         setPolymarketApiKey(s.polymarket_api_key || "");
         setPolymarketSecret(s.polymarket_secret || "");
@@ -186,17 +186,17 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         setKalshiPrivateKey(s.kalshi_private_key || "");
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
 
-        setReferralLighter(s.referral_lighter || "https://app.lighter.xyz/?referral=SOLO&source=none");
-        setReferralRobinhood(s.referral_robinhood || "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
-        setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
-        setVersion(s.version || "v1.2.0");
-        setGitRepo(s.git_repo || "https://github.com/arbitrager/arbitrager");
+        if (s.referral_lighter) setReferralLighter(s.referral_lighter);
+        if (s.referral_robinhood) setReferralRobinhood(s.referral_robinhood);
+        if (s.sponsor_link) setSponsorLink(s.sponsor_link);
+        if (s.version) setVersion(s.version);
+        if (s.git_repo) setGitRepo(s.git_repo);
 
-        if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
+        if (systemStatus?.active_venues) {
           setLiveVenues(systemStatus.active_venues);
         } else {
-          api.getSystemStatus().then((sys) => {
-            if (sys?.active_venues) setLiveVenues(sys.active_venues);
+          api.getSystemStatus().then((s) => {
+            if (s?.active_venues && s.active_venues.length > 0) setLiveVenues(s.active_venues);
           }).catch(() => {});
         }
       } catch (err) {
@@ -339,30 +339,30 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full max-w-5xl select-none">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-2xl border border-surface-border shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="glass-panel p-5 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <div className="flex items-center space-x-2">
-            <h2 className="text-base font-bold font-mono text-slate-900">
+          <div className="flex items-center space-x-2.5">
+            <h2 className="text-base font-bold font-mono text-white tracking-tight">
               Arbitrager System Engine Settings
             </h2>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+            <span className="chip chip-info text-[10px] font-mono">
               {configuredCount} / 6 Venues Active
             </span>
           </div>
-          <p className="text-xs text-slate-500 font-mono mt-1">
+          <p className="text-xs text-white/50 font-mono mt-1">
             Zero-seed secure local vault, cross-venue API configuration, network ports, and execution safety
           </p>
         </div>
 
         {/* Section Tabs */}
-        <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-mono border border-slate-200 overflow-x-auto self-start md:self-auto">
+        <div className="flex items-center bg-white/[0.04] p-1 rounded-xl text-xs font-mono border border-white/[0.08] overflow-x-auto self-start md:self-auto">
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
             className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "exchanges"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                : "text-white/60 hover:text-white/90 hover:bg-white/[0.04]"
             }`}
           >
             <Key className="w-3.5 h-3.5" />
@@ -373,8 +373,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             onClick={() => setActiveTab("balances")}
             className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "balances"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                : "text-white/60 hover:text-white/90 hover:bg-white/[0.04]"
             }`}
           >
             <Wallet className="w-3.5 h-3.5" />
@@ -385,8 +385,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             onClick={() => setActiveTab("execution")}
             className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "execution"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                : "text-white/60 hover:text-white/90 hover:bg-white/[0.04]"
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
@@ -397,8 +397,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             onClick={() => setActiveTab("network")}
             className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "network"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                : "text-white/60 hover:text-white/90 hover:bg-white/[0.04]"
             }`}
           >
             <Globe className="w-3.5 h-3.5" />
@@ -409,8 +409,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             onClick={() => setActiveTab("about")}
             className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "about"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)]"
+                : "text-white/60 hover:text-white/90 hover:bg-white/[0.04]"
             }`}
           >
             <Shield className="w-3.5 h-3.5" />
@@ -420,14 +420,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
       </div>
 
       {errorMsg && (
-        <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+        <div className="p-4 bg-rose-500/15 border border-rose-500/30 text-rose-300 rounded-xl text-xs font-mono flex items-center space-x-2">
           <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{errorMsg}</span>
         </div>
       )}
 
       {saved && (
-        <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+        <div className="p-4 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200 shadow-[0_0_15px_rgba(52,211,153,0.15)]">
           <CheckCircle2 className="w-4 h-4 shrink-0" />
           <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
         </div>
@@ -440,13 +440,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         {(activeTab === "exchanges" || activeTab === "all") && (
           <div className="space-y-4">
             {/* Referral Links Promotion Card */}
-            <div className="p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-blue-50/70 border border-blue-200 rounded-2xl shadow-xs">
+            <div className="p-4 glass-panel bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-purple-500/10 border border-cyan-500/25 rounded-2xl shadow-[0_0_25px_rgba(34,211,238,0.06)]">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
+                  <h4 className="text-xs font-bold font-mono text-cyan-300 flex items-center space-x-1.5">
                     <span>⚡ Exchange Referral Links (Fee Tier Discounts)</span>
                   </h4>
-                  <p className="text-[11px] text-slate-600 font-mono mt-0.5">
+                  <p className="text-[11px] text-white/60 font-mono mt-0.5">
                     Create accounts with zero taker surcharges and support project maintenance:
                   </p>
                 </div>
@@ -455,7 +455,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     href={referralLighter}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
+                    className="px-3 py-1.5 glass-panel bg-white/[0.04] hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 hover:text-white rounded-xl text-xs font-mono font-semibold transition flex items-center space-x-1.5 shadow-[0_0_12px_rgba(34,211,238,0.12)]"
                   >
                     <span>Lighter (SOLO)</span>
                     <ExternalLink className="w-3 h-3" />
@@ -464,7 +464,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     href={referralRobinhood}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
+                    className="px-3 py-1.5 glass-panel bg-white/[0.04] hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 hover:text-white rounded-xl text-xs font-mono font-semibold transition flex items-center space-x-1.5 shadow-[0_0_12px_rgba(34,211,238,0.12)]"
                   >
                     <span>Robinhood Chain (SOLO)</span>
                     <ExternalLink className="w-3 h-3" />
@@ -474,31 +474,31 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             </div>
 
             {/* Local Encrypted Vault Banner */}
-            <div className="p-4 bg-surface border border-surface-border rounded-2xl shadow-xs flex items-center justify-between gap-4">
-              <div className="flex items-center space-x-3">
+            <div className="p-4 glass-panel border border-white/[0.08] rounded-2xl flex items-center justify-between gap-4">
+              <div className="flex items-center space-x-3.5">
                 <div
                   className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                    isVaultLocked ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+                    isVaultLocked
+                      ? "bg-amber-500/15 text-amber-300 border border-amber-500/30 shadow-[0_0_12px_rgba(245,158,11,0.2)]"
+                      : "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shadow-[0_0_12px_rgba(52,211,153,0.2)]"
                   }`}
                 >
                   {isVaultLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
                 </div>
                 <div>
                   <div className="flex items-center space-x-2">
-                    <h4 className="text-xs font-bold font-mono text-slate-900">
+                    <h4 className="text-xs font-bold font-mono text-white/95">
                       Local Secure Vault: {isVaultLocked ? "Locked" : "Unlocked"}
                     </h4>
                     <span
-                      className={`px-2 py-0.2 rounded text-[10px] font-mono font-semibold ${
-                        isVaultLocked
-                          ? "bg-amber-50 text-amber-800 border border-amber-300"
-                          : "bg-emerald-50 text-emerald-800 border border-emerald-300"
+                      className={`chip text-[10px] font-mono ${
+                        isVaultLocked ? "chip-warn" : "chip-pos"
                       }`}
                     >
                       AES-256-GCM Encrypted
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                  <p className="text-[11px] text-white/50 font-mono mt-0.5">
                     {isVaultLocked
                       ? "Master password required to view or edit exchange private keys"
                       : "Vault unlocked in-memory. Sensitive fields can be viewed and edited."}
@@ -511,7 +511,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                   <button
                     type="button"
                     onClick={() => setShowVaultModal(true)}
-                    className="px-4 py-2 bg-accent hover:bg-blue-600 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+                    className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white rounded-xl text-xs font-mono font-medium transition shadow-[0_0_16px_rgba(34,211,238,0.25)] flex items-center space-x-1.5"
                   >
                     <Key className="w-3.5 h-3.5" />
                     <span>Unlock Vault</span>
@@ -520,7 +520,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                   <button
                     type="button"
                     onClick={handleLockVault}
-                    className="px-3 py-1.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border rounded-xl text-xs font-mono font-medium transition shadow-xs"
+                    className="px-3.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] text-white/80 border border-white/[0.1] rounded-xl text-xs font-mono font-medium transition"
                   >
                     Lock Vault Now
                   </button>
@@ -529,17 +529,17 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             </div>
 
             {/* Exchange Filter Selector */}
-            <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-xs font-mono">
-              <span className="text-slate-500 text-[11px] mr-2">Filter Venue:</span>
+            <div className="flex items-center space-x-1.5 overflow-x-auto pb-1 text-xs font-mono">
+              <span className="text-white/40 text-[11px] mr-1.5">Filter Venue:</span>
               {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => (
                 <button
                   key={vf}
                   type="button"
                   onClick={() => setVenueFilter(vf)}
-                  className={`px-2.5 py-1 rounded-lg transition capitalize ${
+                  className={`px-3 py-1 rounded-lg transition capitalize ${
                     venueFilter === vf
-                      ? "bg-accent text-white font-semibold shadow-xs"
-                      : "bg-surface text-slate-600 hover:bg-surface-raised border border-surface-border"
+                      ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 font-semibold shadow-[0_0_10px_rgba(34,211,238,0.2)]"
+                      : "bg-white/[0.03] text-white/50 hover:text-white/80 hover:bg-white/[0.06] border border-white/[0.06]"
                   }`}
                 >
                   {vf}
@@ -549,43 +549,43 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
             {/* Exchange 1: Hyperliquid */}
             {(venueFilter === "all" || venueFilter === "hyperliquid") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
                       Hyperliquid (L1 Perp DEX)
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                    <span className="chip chip-info text-[10px]">
                       Subaccount & EVM Key
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
                     Fee: {getVenueInfo("hyperliquid")?.fee_bps ?? 2.0} BPS
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                   <div>
-                    <label className="text-slate-600 block mb-1">Trading EOA Wallet Address:</label>
+                    <label className="text-white/60 block mb-1">Trading EOA Wallet Address:</label>
                     <input
                       type="text"
                       disabled={loading || isVaultLocked}
                       value={hyperliquidWallet}
                       placeholder="0x..."
                       onChange={(e) => setHyperliquidWallet(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Trading Agent Private Key:</label>
+                      <label className="text-white/60">Trading Agent Private Key:</label>
                       <button
                         type="button"
                         onClick={() => toggleSecret("hl_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
                       >
-                        {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
                         <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
                       </button>
                     </div>
@@ -595,31 +595,31 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value={hyperliquidPrivateKey}
                       placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
                       onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Account Index (Optional):</label>
+                    <label className="text-white/60 block mb-1">Account Index (Optional):</label>
                     <input
                       type="number"
                       disabled={loading || isVaultLocked}
                       value={hyperliquidAccountIndex}
                       placeholder="Default: 0"
                       onChange={(e) => setHyperliquidAccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono tabular-nums"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <label className="text-white/60 block mb-1">Subaccount Index (Optional):</label>
                     <input
                       type="number"
                       disabled={loading || isVaultLocked}
                       value={hyperliquidSubaccountIndex}
                       placeholder="Default: None"
                       onChange={(e) => setHyperliquidSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono tabular-nums"
                     />
                   </div>
                 </div>
@@ -628,42 +628,42 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
             {/* Exchange 2: Lighter */}
             {(venueFilter === "all" || venueFilter === "lighter") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
                       Lighter (zkDEX Rollup)
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                    <span className="chip chip-info text-[10px]">
                       zk-Rollup CLOB
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
                     Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                   <div>
-                    <label className="text-slate-600 block mb-1">Account Index:</label>
+                    <label className="text-white/60 block mb-1">Account Index:</label>
                     <input
                       type="text"
                       disabled={loading || isVaultLocked}
                       value={lighterAccountIndex}
                       onChange={(e) => setLighterAccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono tabular-nums"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">API Private Key / Signer Token:</label>
+                      <label className="text-white/60">API Private Key / Signer Token:</label>
                       <button
                         type="button"
                         onClick={() => toggleSecret("lgt_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
                       >
-                        {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
                         <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
                       </button>
                     </div>
@@ -673,30 +673,30 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value={lighterApiKey}
                       placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
                       onChange={(e) => setLighterApiKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <label className="text-white/60 block mb-1">Subaccount Index (Optional):</label>
                     <input
                       type="number"
                       disabled={loading || isVaultLocked}
                       value={lighterSubaccountIndex}
                       placeholder="e.g. 1"
                       onChange={(e) => setLighterSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono tabular-nums"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                    <label className="text-white/60 block mb-1">Endpoint URL:</label>
                     <input
                       type="text"
                       disabled={loading}
                       value={lighterUrl}
                       onChange={(e) => setLighterUrl(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
                 </div>
@@ -705,55 +705,55 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
             {/* Exchange 3: Vanta */}
             {(venueFilter === "all" || venueFilter === "vanta") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
                       Vanta.exchange (Orderly Network)
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                    <span className="chip chip-info text-[10px]">
                       Ed25519 Orderly
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
                     Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                   <div>
-                    <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
+                    <label className="text-white/60 block mb-1">Orderly Account ID:</label>
                     <input
                       type="text"
                       disabled={loading || isVaultLocked}
                       value={vantaAccountId}
                       placeholder="0x..."
                       onChange={(e) => setVantaAccountId(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
+                    <label className="text-white/60 block mb-1">Orderly ED25519 Key:</label>
                     <input
                       type="text"
                       disabled={loading || isVaultLocked}
                       value={vantaOrderlyKey}
                       placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
                       onChange={(e) => setVantaOrderlyKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Orderly Secret:</label>
+                      <label className="text-white/60">Orderly Secret:</label>
                       <button
                         type="button"
                         onClick={() => toggleSecret("vanta_secret")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
                       >
-                        {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
                         <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
                       </button>
                     </div>
@@ -763,19 +763,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value={vantaOrderlySecret}
                       placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
                       onChange={(e) => setVantaOrderlySecret(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <label className="text-white/60 block mb-1">Subaccount Index (Optional):</label>
                     <input
                       type="number"
                       disabled={loading || isVaultLocked}
                       value={vantaSubaccountIndex}
                       placeholder="e.g. 0"
                       onChange={(e) => setVantaSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono tabular-nums"
                     />
                   </div>
                 </div>
@@ -784,43 +784,43 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
             {/* Exchange 4: Robinhood EVM */}
             {(venueFilter === "all" || venueFilter === "robinhood") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
                       Robinhood Chain (Arbitrum L2 EVM)
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                    <span className="chip chip-info text-[10px]">
                       DEX Aggregator Router
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
                     Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
                   </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                   <div>
-                    <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
+                    <label className="text-white/60 block mb-1">EVM Signer Address:</label>
                     <input
                       type="text"
                       disabled={loading || isVaultLocked}
                       value={robinhoodWallet}
                       placeholder="0x..."
                       onChange={(e) => setRobinhoodWallet(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
 
                   <div>
                     <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Signer Private Key:</label>
+                      <label className="text-white/60">Signer Private Key:</label>
                       <button
                         type="button"
                         onClick={() => toggleSecret("rh_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
                       >
-                        {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
                         <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
                       </button>
                     </div>
@@ -830,7 +830,117 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value={robinhoodPrivateKey}
                       placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
                       onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Exchange 5: Polymarket */}
+            {(venueFilter === "all" || venueFilter === "polymarket") && (
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
+                      Polymarket (CTF CLOB)
+                    </h3>
+                    <span className="chip chip-info text-[10px]">
+                      Prediction Market
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
+                    Fee: {getVenueInfo("polymarket")?.fee_bps ?? 0.0} BPS
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-white/60 block mb-1">API Key:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={polymarketApiKey}
+                      placeholder="API Key..."
+                      onChange={(e) => setPolymarketApiKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-white/60">API Secret:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("poly_secret")}
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["poly_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
+                        <span>{showSecrets["poly_secret"] ? "Hide" : "Show"}</span>
+                      </button>
+                    </div>
+                    <input
+                      type={showSecrets["poly_secret"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={polymarketSecret}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "Secret..."}
+                      onChange={(e) => setPolymarketSecret(e.target.value)}
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Exchange 6: Kalshi */}
+            {(venueFilter === "all" || venueFilter === "kalshi") && (
+              <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+                <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-white/95">
+                      Kalshi (CFTC Regulated)
+                    </h3>
+                    <span className="chip chip-info text-[10px]">
+                      Prediction Market
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-white/40 tabular-nums">
+                    Fee: {getVenueInfo("kalshi")?.fee_bps ?? 10.0} BPS
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-white/60 block mb-1">API Key ID:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={kalshiApiKeyId}
+                      placeholder="Key ID..."
+                      onChange={(e) => setKalshiApiKeyId(e.target.value)}
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-white/60">RSA Private Key:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("kalshi_key")}
+                        className="text-white/40 hover:text-white/80 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-cyan-400" />}
+                        <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
+                      </button>
+                    </div>
+                    <input
+                      type={showSecrets["kalshi_key"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={kalshiPrivateKey}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
+                      onChange={(e) => setKalshiPrivateKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 placeholder:text-white/20 focus:outline-none focus:ring-1 focus:ring-cyan-400 focus:border-cyan-400 font-mono"
                     />
                   </div>
                 </div>
@@ -843,14 +953,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         {/* SECTION 2: BALANCES & ASYMMETRIC REBALANCE                         */}
         {/* =================================================================== */}
         {(activeTab === "balances" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-            <div className="flex items-center justify-between border-b border-surface-border pb-3">
+          <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+            <div className="flex items-center justify-between border-b border-white/[0.06] pb-3">
               <div>
-                <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
-                  <Wallet className="w-4 h-4 text-accent" />
+                <h3 className="text-xs font-mono font-bold uppercase text-white/95 flex items-center space-x-2">
+                  <Wallet className="w-4 h-4 text-cyan-400" />
                   <span>Venue Balances & Asymmetric Depletion Alert</span>
                 </h3>
-                <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                <p className="text-[11px] text-white/50 font-mono mt-0.5">
                   Tracks free margin across venues to prevent single-leg fill failure from one-sided executions
                 </p>
               </div>
@@ -859,9 +969,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                 type="button"
                 onClick={loadVenueBalances}
                 disabled={loadingBalances}
-                className="px-3 py-1 bg-surface-raised border border-surface-border hover:bg-slate-200 rounded-lg text-xs font-mono flex items-center space-x-1 text-slate-700"
+                className="px-3 py-1 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.08] rounded-lg text-xs font-mono flex items-center space-x-1.5 text-white/80 transition"
               >
-                <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-accent" : ""}`} />
+                <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-cyan-400" : ""}`} />
                 <span>Refresh</span>
               </button>
             </div>
@@ -874,17 +984,15 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     key={b.venue}
                     className={`p-4 rounded-xl border ${
                       isWarning
-                        ? "bg-amber-50/60 border-amber-300"
-                        : "bg-surface-raised/60 border-surface-border"
+                        ? "bg-amber-500/10 border-amber-500/30 shadow-[0_0_15px_rgba(245,158,11,0.1)]"
+                        : "glass-panel border-white/[0.08]"
                     } space-y-2`}
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold font-mono text-slate-900 uppercase">{b.venue}</span>
+                      <span className="text-xs font-bold font-mono text-white/90 uppercase">{b.venue}</span>
                       <span
-                        className={`px-2 py-0.2 rounded text-[10px] font-mono font-bold ${
-                          isWarning
-                            ? "bg-amber-200 text-amber-900"
-                            : "bg-emerald-100 text-emerald-800"
+                        className={`chip text-[10px] font-mono font-bold ${
+                          isWarning ? "chip-warn" : "chip-pos"
                         }`}
                       >
                         {b.status}
@@ -892,19 +1000,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     </div>
 
                     <div className="space-y-0.5">
-                      <span className="text-[10px] uppercase font-mono text-slate-400 block">Free Margin</span>
-                      <span className="text-base font-bold font-mono text-slate-900">
+                      <span className="text-[10px] uppercase font-mono text-white/40 block">Free Margin</span>
+                      <span className="text-base font-bold font-mono text-white tabular-nums">
                         ${b.balance_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                       </span>
                     </div>
 
-                    <div className="text-[10px] font-mono text-slate-500 pt-1 border-t border-surface-border/60">
+                    <div className="text-[10px] font-mono text-white/50 pt-1 border-t border-white/[0.06] tabular-nums">
                       <span>Safety Floor: ${b.min_required_usd.toFixed(0)}</span>
                     </div>
 
                     {b.recommended_action && (
-                      <div className="p-2 bg-amber-100/80 border border-amber-300 rounded-lg text-[10px] font-mono text-amber-900 flex items-start space-x-1.5">
-                        <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0 mt-0.5" />
+                      <div className="p-2 bg-amber-500/15 border border-amber-500/30 rounded-lg text-[10px] font-mono text-amber-200 flex items-start space-x-1.5">
+                        <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0 mt-0.5" />
                         <span>{b.recommended_action}</span>
                       </div>
                     )}
@@ -919,26 +1027,26 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
         {/* =================================================================== */}
         {(activeTab === "execution" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-            <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
-                <Sliders className="w-4 h-4 text-accent" />
+          <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+            <div className="border-b border-white/[0.06] pb-3">
+              <h3 className="text-xs font-mono font-bold uppercase text-white/95 flex items-center space-x-2">
+                <Sliders className="w-4 h-4 text-cyan-400" />
                 <span>Execution Modes & Cache Warm-Up Guardrails</span>
               </h3>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+              <p className="text-[11px] text-white/50 font-mono mt-0.5">
                 Configure live order execution vs paper simulation and orderbook persistence
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
               {/* Trading Mode Radio Card */}
-              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
-                <label className="text-slate-800 font-bold block text-xs">Trading Mode</label>
-                <p className="text-[11px] text-slate-500">
+              <div className="p-4 glass-panel border border-white/[0.08] rounded-xl space-y-2">
+                <label className="text-white/90 font-bold block text-xs">Trading Mode</label>
+                <p className="text-[11px] text-white/50">
                   Switch between risk-free simulation and active DEX order placement:
                 </p>
 
-                <div className="flex items-center space-x-3 pt-1">
+                <div className="flex items-center space-x-4 pt-1">
                   <label className="flex items-center space-x-2 cursor-pointer">
                     <input
                       type="radio"
@@ -946,9 +1054,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value="paper"
                       checked={tradingMode === "paper"}
                       onChange={() => setTradingMode("paper")}
-                      className="text-accent focus:ring-accent"
+                      className="text-cyan-400 focus:ring-cyan-400"
                     />
-                    <span className="font-semibold text-slate-800">Paper Trading (Live Feeds)</span>
+                    <span className="font-semibold text-white/80">Paper Trading (Live Feeds)</span>
                   </label>
                   <label className="flex items-center space-x-2 cursor-pointer">
                     <input
@@ -957,25 +1065,25 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                       value="real"
                       checked={tradingMode === "real"}
                       onChange={() => setTradingMode("real")}
-                      className="text-amber-600 focus:ring-amber-500"
+                      className="text-amber-400 focus:ring-amber-400"
                     />
-                    <span className="font-semibold text-amber-800">Real Trading (Live Execution)</span>
+                    <span className="font-semibold text-amber-300">Real Trading (Live Execution)</span>
                   </label>
                 </div>
               </div>
 
               {/* Orderbook Fast Warm-up Toggle */}
-              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
+              <div className="p-4 glass-panel border border-white/[0.08] rounded-xl space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
+                  <label className="text-white/90 font-bold block text-xs">Orderbook Cache Warm-Up</label>
                   <input
                     type="checkbox"
                     checked={fastWarmupEnabled}
                     onChange={(e) => setFastWarmupEnabled(e.target.checked)}
-                    className="w-4 h-4 text-accent rounded focus:ring-accent"
+                    className="w-4 h-4 text-cyan-400 rounded focus:ring-cyan-400"
                   />
                 </div>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[11px] text-white/50">
                   {fastWarmupEnabled
                     ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
                     : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
@@ -984,7 +1092,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
               {/* Max Slippage */}
               <div>
-                <label className="text-slate-600 block mb-1">Max Slippage Tolerance (BPS):</label>
+                <label className="text-white/60 block mb-1">Max Slippage Tolerance (BPS):</label>
                 <input
                   type="number"
                   step="1"
@@ -992,13 +1100,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                   disabled={loading}
                   value={maxSlippageBps}
                   onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 15)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400 tabular-nums font-mono"
                 />
               </div>
 
               {/* Venue Rebalance Threshold */}
               <div>
-                <label className="text-slate-600 block mb-1">Venue Rebalance Warning Threshold ($ USD):</label>
+                <label className="text-white/60 block mb-1">Venue Rebalance Warning Threshold ($ USD):</label>
                 <input
                   type="number"
                   step="50"
@@ -1006,7 +1114,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                   disabled={loading}
                   value={venueRebalanceThresholdUsd}
                   onChange={(e) => setVenueRebalanceThresholdUsd(parseFloat(e.target.value) || 500)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400 tabular-nums font-mono"
                 />
               </div>
             </div>
@@ -1017,66 +1125,66 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
         {(activeTab === "network" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-            <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
-                <Globe className="w-4 h-4 text-accent" />
+          <div className="glass-panel rounded-2xl p-5 space-y-4 border border-white/[0.08]">
+            <div className="border-b border-white/[0.06] pb-3">
+              <h3 className="text-xs font-mono font-bold uppercase text-white/95 flex items-center space-x-2">
+                <Globe className="w-4 h-4 text-cyan-400" />
                 <span>Engine Ports & 24/7 VPS Background Daemon</span>
               </h3>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+              <p className="text-[11px] text-white/50 font-mono mt-0.5">
                 Configure RPC / WebSocket listener ports and deploy headlessly on cloud servers
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
               <div>
-                <label className="text-slate-600 block mb-1">Engine RPC Port:</label>
+                <label className="text-white/60 block mb-1">Engine RPC Port:</label>
                 <input
                   type="number"
                   disabled={loading}
                   value={engineRpcPort}
                   onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400 tabular-nums font-mono"
                 />
               </div>
 
               <div>
-                <label className="text-slate-600 block mb-1">Engine WebSocket Port:</label>
+                <label className="text-white/60 block mb-1">Engine WebSocket Port:</label>
                 <input
                   type="number"
                   disabled={loading}
                   value={engineWsPort}
                   onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400 tabular-nums font-mono"
                 />
               </div>
 
               <div>
-                <label className="text-slate-600 block mb-1">Bind Address:</label>
+                <label className="text-white/60 block mb-1">Bind Address:</label>
                 <input
                   type="text"
                   disabled={loading}
                   value={bindAddress}
                   placeholder="127.0.0.1 or 0.0.0.0"
                   onChange={(e) => setBindAddress(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  className="w-full px-3 py-2 bg-black/40 border border-white/[0.1] rounded-xl text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400 font-mono"
                 />
               </div>
             </div>
 
             {/* VPS Daemon Deployment Guide */}
-            <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-xs font-mono text-slate-700">
-              <h4 className="font-bold text-slate-900 flex items-center space-x-1.5">
+            <div className="p-4 glass-panel border border-white/[0.08] rounded-xl space-y-2 text-xs font-mono text-white/70">
+              <h4 className="font-bold text-white flex items-center space-x-1.5">
                 <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
               </h4>
-              <p className="text-[11px] text-slate-600">
+              <p className="text-[11px] text-white/60">
                 To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
-              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-[11px] overflow-x-auto select-text font-mono">
+              <div className="p-2.5 bg-black/60 border border-white/[0.08] text-cyan-300 rounded-lg text-[11px] overflow-x-auto select-text font-mono">
                 <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787 --ws-port 8789</code>
               </div>
-              <p className="text-[10px] text-slate-500">
-                You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded">systemctl start arbitrager</code>) to auto-restart on server reboot.
+              <p className="text-[10px] text-white/40">
+                You can create a systemd service (e.g. <code className="bg-white/[0.08] px-1 py-0.5 rounded text-white/80">systemctl start arbitrager</code>) to auto-restart on server reboot.
               </p>
             </div>
           </div>
@@ -1087,17 +1195,17 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         {/* =================================================================== */}
         {(activeTab === "about" || activeTab === "all") && (
           <div className="space-y-4">
-            <div className="bg-surface border border-surface-border rounded-2xl p-6 shadow-xs space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
+            <div className="glass-panel border border-white/[0.08] rounded-2xl p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/[0.06] pb-4">
                 <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
+                  <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.25)]">
                     <Shield className="w-5 h-5" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold font-mono text-slate-900">
+                    <h3 className="text-sm font-bold font-mono text-white">
                       About Arbitrager ({version})
                     </h3>
-                    <p className="text-xs text-slate-500 font-mono mt-0.5">
+                    <p className="text-xs text-white/50 font-mono mt-0.5">
                       High-frequency cross-venue statistical & spatial arbitrage platform
                     </p>
                   </div>
@@ -1108,9 +1216,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.08] text-white/90 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
                   >
-                    <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
+                    <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-cyan-400" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
                   </button>
 
@@ -1118,7 +1226,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                     href={gitRepo}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.08] text-white/90 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
                   >
                     <span>Git Repository</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -1127,25 +1235,25 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
               </div>
 
               {updateMsg && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-mono flex items-center space-x-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 rounded-xl text-xs font-mono flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                   <span>{updateMsg}</span>
                 </div>
               )}
 
               {/* Sponsor Card: Buy me a SOLO */}
-              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+              <div className="p-5 glass-panel bg-gradient-to-r from-amber-500/15 via-yellow-500/10 to-amber-500/15 border border-amber-500/30 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-[0_0_30px_rgba(245,158,11,0.12)]">
                 <div className="flex items-center space-x-4">
                   <img
                     src="/solo_can.jpg"
                     alt="Can of Australian SOLO Lemon Soda"
-                    className="w-14 h-14 object-contain rounded-xl shadow-xs border border-amber-200 bg-white"
+                    className="w-14 h-14 object-contain rounded-xl shadow-[0_0_16px_rgba(245,158,11,0.25)] border border-amber-500/30 bg-black/40 p-1"
                   />
                   <div>
-                    <h4 className="text-sm font-bold font-mono text-slate-900">
+                    <h4 className="text-sm font-bold font-mono text-amber-200">
                       Enjoying the tool? Buy me a SOLO!
                     </h4>
-                    <p className="text-xs text-slate-600 font-mono mt-0.5">
+                    <p className="text-xs text-white/70 font-mono mt-0.5">
                       Fuel the research and development of ultra-low latency quantitative arbitrage strategies.
                     </p>
                   </div>
@@ -1155,7 +1263,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
                   href={sponsorLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-xl transition shadow-xs flex items-center space-x-2 shrink-0"
+                  className="px-5 py-2.5 bg-gradient-to-r from-amber-500 to-yellow-500 hover:from-amber-400 hover:to-yellow-400 text-slate-950 font-bold text-xs font-mono rounded-xl transition shadow-[0_0_20px_rgba(245,158,11,0.4)] flex items-center space-x-2 shrink-0"
                 >
                   <span>Buy me a SOLO ($5)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -1163,9 +1271,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
               </div>
 
               {/* Legal & Financial Disclaimer */}
-              <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-[11px] font-mono text-slate-600 leading-relaxed">
-                <div className="flex items-center space-x-1.5 font-bold text-slate-800 uppercase text-[10px]">
-                  <Scale className="w-3.5 h-3.5 text-slate-500" />
+              <div className="p-4 glass-panel border border-white/[0.06] rounded-xl space-y-2 text-[11px] font-mono text-white/50 leading-relaxed">
+                <div className="flex items-center space-x-1.5 font-bold text-white/70 uppercase text-[10px]">
+                  <Scale className="w-3.5 h-3.5 text-white/50" />
                   <span>Legal & Financial Risk Disclaimer</span>
                 </div>
                 <p>
@@ -1181,15 +1289,15 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
 
         {/* Save Bar */}
         <div className="flex items-center justify-between pt-2">
-          <div className="text-[11px] font-mono text-slate-500 flex items-center space-x-1.5">
-            <Lock className="w-3 h-3 text-slate-400" />
+          <div className="text-[11px] font-mono text-white/50 flex items-center space-x-1.5">
+            <Lock className="w-3 h-3 text-white/40" />
             <span>Config changes immediately affect live atomic coordinator execution.</span>
           </div>
 
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-6 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
+            className="px-6 py-2.5 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white font-semibold text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-[0_0_20px_rgba(34,211,238,0.25)] disabled:opacity-50"
           >
             {saving ? (
               <span>Saving...</span>

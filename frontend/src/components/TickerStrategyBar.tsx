@@ -78,13 +78,13 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg p-3 text-xs font-mono shadow-xs mb-3 space-y-2.5">
+    <div className="glass-panel p-3 text-xs font-mono rounded-xl mb-3 space-y-2.5 text-white/90">
       {/* Top Row: Quantitative Parameters and Controls */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         {/* Target Profit and Nominal Hurdle */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
-            <span className="text-slate-500 font-medium">Target Profit:</span>
+          <div className="flex items-center space-x-1.5 bg-white/[0.04] px-2.5 py-1 rounded-lg border border-white/[0.08]">
+            <span className="text-white/50 font-medium">Target Profit:</span>
             <input
               type="number"
               step="0.5"
@@ -92,34 +92,34 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
               max="100"
               value={config.targetProfitBps}
               onChange={(e) => handleTargetProfitChange(parseFloat(e.target.value) || 0.1)}
-              className="w-14 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-14 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.12] rounded text-white font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
-            <span className="text-slate-500">bps</span>
+            <span className="text-white/50">bps</span>
           </div>
 
           {/* Nominal Hurdle Breakdown Badge */}
           <div
-            className="flex items-center space-x-1.5 bg-blue-50/70 border border-blue-200 px-2.5 py-1 rounded text-blue-900"
+            className="flex items-center space-x-1.5 bg-cyan-500/10 border border-cyan-500/25 px-2.5 py-1 rounded-lg text-cyan-200"
             title="Nominal Hurdle = 2×Comm (roundtrip) + Closing Spread Friction + Target Profit"
           >
-            <span className="text-slate-500">Nominal Hurdle:</span>
-            <span className="font-bold text-blue-700">{nominalHurdleBps.toFixed(1)} bps</span>
-            <span className="text-[10px] text-slate-500">
+            <span className="text-white/50">Nominal Hurdle:</span>
+            <span className="font-bold text-cyan-300 tabular-nums">{nominalHurdleBps.toFixed(1)} bps</span>
+            <span className="text-[10px] text-white/40 tabular-nums">
               ({avgFeeBps.toFixed(1)} fee + {avgSpreadBps.toFixed(1)} friction + {config.targetProfitBps.toFixed(1)} tp)
             </span>
           </div>
         </div>
 
         {/* Window Percentile Filter (min 50%) */}
-        <div className="flex items-center space-x-2 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
-          <span className="text-slate-500 font-medium">Window Percentile:</span>
+        <div className="flex items-center space-x-2 bg-white/[0.04] px-2.5 py-1 rounded-lg border border-white/[0.08]">
+          <span className="text-white/50 font-medium">Window Percentile:</span>
           <select
             value={config.windowPercentile}
             onChange={(e) => handlePercentileChange(parseInt(e.target.value, 10))}
-            className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
+            className="bg-[#0C1019] border border-white/[0.12] rounded px-2 py-0.5 text-xs text-white/95 font-medium focus:outline-none focus:ring-1 focus:ring-cyan-400"
           >
             {PERCENTILE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+              <option key={opt.value} value={opt.value} className="bg-[#0C1019] text-white">
                 {opt.label}
               </option>
             ))}
@@ -127,14 +127,14 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
         </div>
 
         {/* Execution Mode: Single-Way vs Double-Way */}
-        <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded border border-slate-200 text-xs">
+        <div className="flex items-center space-x-1 bg-white/[0.03] p-0.5 rounded-lg border border-white/[0.08] text-xs">
           <button
             type="button"
             onClick={() => handleModeChange("SINGLE_WAY")}
-            className={`px-2 py-1 rounded transition ${
+            className={`px-2.5 py-1 rounded-md transition ${
               config.executionMode === "SINGLE_WAY"
-                ? "bg-white text-blue-700 font-semibold shadow-xs border border-slate-200"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-white/[0.12] text-cyan-300 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)] border border-cyan-500/30"
+                : "text-white/50 hover:text-white/90"
             }`}
             title="Single-Way: Enter orders only when price divergence increases"
           >
@@ -143,10 +143,10 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           <button
             type="button"
             onClick={() => handleModeChange("DOUBLE_WAY")}
-            className={`px-2 py-1 rounded transition ${
+            className={`px-2.5 py-1 rounded-md transition ${
               config.executionMode === "DOUBLE_WAY"
-                ? "bg-white text-blue-700 font-semibold shadow-xs border border-slate-200"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-white/[0.12] text-cyan-300 font-semibold shadow-[0_0_12px_rgba(34,211,238,0.2)] border border-cyan-500/30"
+                : "text-white/50 hover:text-white/90"
             }`}
             title="Double-Way: Enter on divergence and automatically unwind when price difference converges to 0"
           >
@@ -156,24 +156,24 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
       </div>
 
       {/* Bottom Row: Position Sizing, Max Grid Units, and Futures Leverage */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-100 text-[11px]">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/[0.06] text-[11px]">
         {/* Unit Sizing with Minimum Compatible Badge */}
         <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Unit Size:</span>
+          <div className="flex items-center space-x-1.5 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.08]">
+            <span className="text-white/50">Unit Size:</span>
             <input
               type="number"
               step={minCompatible.stepSize}
               min={minCompatible.minCompatibleSize}
               value={config.unitSize}
               onChange={(e) => handleUnitSizeChange(parseFloat(e.target.value) || minCompatible.minCompatibleSize)}
-              className="w-20 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-20 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.12] rounded text-white font-medium tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
-            <span className="text-slate-600 font-medium">{ticker.base}</span>
+            <span className="text-white/80 font-medium">{ticker.base}</span>
           </div>
 
           <span
-            className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200"
+            className="px-2 py-0.5 rounded-md bg-white/[0.04] text-white/60 border border-white/[0.08] tabular-nums"
             title={`Minimum cross-exchange compatible lot size across ${venues.join(", ")}`}
           >
             Min Compatible: {minCompatible.minCompatibleSize} {ticker.base}
@@ -182,8 +182,8 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
 
         {/* Max Accumulated Units / Grid Scaling */}
         <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Max Grid Units:</span>
+          <div className="flex items-center space-x-1.5 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.08]">
+            <span className="text-white/50">Max Grid Units:</span>
             <input
               type="number"
               step="1"
@@ -191,20 +191,20 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
               max="20"
               value={config.maxAccumulatedUnits}
               onChange={(e) => handleMaxUnitsChange(parseInt(e.target.value, 10) || 1)}
-              className="w-12 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-12 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.12] rounded text-white font-medium tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
           </div>
 
           {/* Units Status Indicator */}
-          <div className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-50 border border-slate-200">
-            <span className="text-slate-500">Accumulated:</span>
+          <div className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-white/[0.04] border border-white/[0.08]">
+            <span className="text-white/50">Accumulated:</span>
             <span
-              className={`font-semibold ${
+              className={`font-semibold tabular-nums ${
                 config.currentAccumulatedUnits >= config.maxAccumulatedUnits
-                  ? "text-amber-700"
+                  ? "text-amber-400"
                   : config.currentAccumulatedUnits > 0
-                  ? "text-blue-700"
-                  : "text-slate-700"
+                  ? "text-cyan-400"
+                  : "text-white/70"
               }`}
             >
               {config.currentAccumulatedUnits} / {config.maxAccumulatedUnits} Units
@@ -214,8 +214,8 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
 
         {/* Automatic Safe Futures Leverage & Margin Computation */}
         <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Target Lev:</span>
+          <div className="flex items-center space-x-1.5 bg-white/[0.04] px-2 py-1 rounded-lg border border-white/[0.08]">
+            <span className="text-white/50">Target Lev:</span>
             <input
               type="number"
               step="1"
@@ -223,25 +223,25 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
               max="50"
               value={config.userTargetLeverage}
               onChange={(e) => handleLeverageTargetChange(parseInt(e.target.value, 10) || 10)}
-              className="w-12 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
+              className="w-12 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.12] rounded text-white font-medium tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
-            <span className="text-slate-500">x</span>
+            <span className="text-white/50">x</span>
           </div>
 
           <div
-            className="flex items-center space-x-2 bg-blue-50/60 border border-blue-200 px-2.5 py-1 rounded text-blue-900"
+            className="flex items-center space-x-2 bg-indigo-500/10 border border-indigo-500/25 px-2.5 py-1 rounded-lg text-indigo-200"
             title={`Effective leverage clamped to the most restrictive exchange among active venues (${venues.join(", ")})`}
           >
             <span>
-              Safe Lev: <strong className="text-blue-700">{safeLeverage.effectiveLeverage}x</strong>
+              Safe Lev: <strong className="text-indigo-300 tabular-nums">{safeLeverage.effectiveLeverage}x</strong>
             </span>
-            <span className="text-slate-300">|</span>
+            <span className="text-white/20">|</span>
             <span>
-              Margin: <strong className="text-slate-800">${safeLeverage.totalMarginRequiredUsd.toFixed(2)}</strong> USD/unit
+              Margin: <strong className="text-white/95 tabular-nums">${safeLeverage.totalMarginRequiredUsd.toFixed(2)}</strong> USD/unit
             </span>
-            <span className="text-slate-300">|</span>
+            <span className="text-white/20">|</span>
             <span>
-              Buffer: <strong className="text-emerald-700">{safeLeverage.liquidationBufferPct.toFixed(1)}%</strong>
+              Buffer: <strong className="text-emerald-400 tabular-nums">{safeLeverage.liquidationBufferPct.toFixed(1)}%</strong>
             </span>
           </div>
         </div>

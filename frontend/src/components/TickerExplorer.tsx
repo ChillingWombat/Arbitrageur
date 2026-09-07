@@ -130,51 +130,50 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   const venueBadgeColor = (v: string) => {
     switch (v) {
       case "HL":
-        return "bg-teal-500/10 text-teal-600 border-teal-500/20";
+        return "bg-teal-400/10 text-teal-300 border-teal-400/20";
       case "LGT":
-        return "bg-indigo-500/10 text-indigo-600 border-indigo-500/20";
+        return "bg-indigo-400/10 text-indigo-300 border-indigo-400/20";
       case "VNT":
-        return "bg-emerald-500/10 text-emerald-600 border-emerald-500/20";
+        return "bg-emerald-400/10 text-emerald-300 border-emerald-400/20";
       case "RH":
-        return "bg-amber-500/10 text-amber-600 border-amber-500/20";
+        return "bg-amber-400/10 text-amber-300 border-amber-400/20";
       default:
-        return "bg-slate-500/10 text-slate-600 border-slate-500/20";
+        return "bg-white/5 text-white/60 border-white/10";
     }
   };
 
-
   return (
-    <aside className="w-80 border-r border-surface-border bg-surface flex flex-col justify-between select-none h-full overflow-hidden">
+    <aside className="w-80 border-r border-white/[0.08] bg-[#080B14]/60 backdrop-blur-xl flex flex-col justify-between select-none h-full overflow-hidden text-white/90">
       {/* Top Header & Search */}
-      <div className="p-3 border-b border-surface-border space-y-2.5">
+      <div className="p-3 border-b border-white/[0.08] space-y-2.5">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-900 flex items-center space-x-1.5">
+            <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-white/90 flex items-center space-x-1.5">
               <span>Perp Tickers</span>
-              <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{PERP_TICKERS.length})</span>
+              <span className="text-[10px] font-normal text-white/50">({processedTickers.length}/{PERP_TICKERS.length})</span>
             </div>
-            <div className="text-[10px] text-slate-600">Cross-DEX Union (≥2 Venues)</div>
+            <div className="text-[10px] text-white/50">Cross-DEX Union (≥2 Venues)</div>
           </div>
           <div className="flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
-            <span className="text-[10px] font-mono font-semibold text-profit">Live</span>
+            <span className="w-1.5 h-1.5 rounded-full bg-pos shadow-[0_0_6px_#34D399]" />
+            <span className="text-[10px] font-mono font-semibold text-pos">Live</span>
           </div>
         </div>
 
         {/* Search Bar */}
         <div className="relative">
-          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-white/40 pointer-events-none" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search 52 tickers (e.g. BTC, SOL)..."
-            className="w-full pl-8 pr-7 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition"
+            className="w-full pl-8 pr-7 py-1.5 bg-white/[0.04] border border-white/[0.08] rounded-xl text-xs font-mono text-white/90 placeholder-white/40 focus:outline-none focus:ring-1 focus:ring-accent-cyan focus:border-accent-cyan/60 transition backdrop-blur-md"
           />
           {searchQuery && (
             <button
               onClick={() => setSearchQuery("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/80 p-0.5"
             >
               <X className="w-3 h-3" />
             </button>
@@ -182,13 +181,13 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         </div>
 
         {/* Sorting Controls */}
-        <div className="grid grid-cols-3 gap-1 bg-surface-raised p-1 rounded-lg border border-surface-border text-[11px] font-mono">
+        <div className="grid grid-cols-3 gap-1 bg-white/[0.03] p-1 rounded-xl border border-white/[0.06] text-[11px] font-mono">
           <button
             onClick={() => setSortOption("alpha")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
+            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded-lg transition ${
               sortOption === "alpha"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-white/[0.08] text-white font-semibold shadow-[0_0_10px_rgba(129,140,248,0.25)] border border-white/[0.14]"
+                : "text-white/50 hover:text-white/80"
             }`}
             title="Sort alphabetically (A-Z)"
           >
@@ -198,10 +197,10 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
           <button
             onClick={() => setSortOption("trades")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
+            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded-lg transition ${
               sortOption === "trades"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-white/[0.08] text-white font-semibold shadow-[0_0_10px_rgba(129,140,248,0.25)] border border-white/[0.14]"
+                : "text-white/50 hover:text-white/80"
             }`}
             title="Sort by strategy transaction count (highest first)"
           >
@@ -211,10 +210,10 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
           <button
             onClick={() => setSortOption("pnl")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
+            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded-lg transition ${
               sortOption === "pnl"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
+                ? "bg-white/[0.08] text-white font-semibold shadow-[0_0_10px_rgba(129,140,248,0.25)] border border-white/[0.14]"
+                : "text-white/50 hover:text-white/80"
             }`}
             title="Sort by strategy net profit: positive first, then negative, then zero"
           >
@@ -227,7 +226,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Scrollable Ticker List */}
       <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
         {processedTickers.length === 0 ? (
-          <div className="py-8 text-center text-xs font-mono text-slate-600">
+          <div className="py-8 text-center text-xs font-mono text-white/40">
             No tickers matching &quot;{searchQuery}&quot;
           </div>
         ) : (
@@ -241,25 +240,25 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
               <button
                 key={ticker.symbol}
                 onClick={() => onSelectTicker(ticker.symbol)}
-                className={`w-full p-2.5 rounded-lg border text-left transition relative group font-mono ${
+                className={`w-full p-2.5 rounded-xl border text-left transition relative group font-mono backdrop-blur-md ${
                   isSelected
-                    ? "bg-accent-dim/60 border-accent shadow-xs text-slate-900"
-                    : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700"
+                    ? "bg-white/[0.08] border-accent-cyan/60 shadow-[0_0_20px_rgba(34,211,238,0.15)] text-white ring-1 ring-accent-cyan/30"
+                    : "bg-white/[0.03] hover:bg-white/[0.06] border-white/[0.06] hover:border-white/[0.14] text-white/80"
                 }`}
               >
                 {/* Active Indicator Strip */}
                 {isSelected && (
-                  <div className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-accent rounded-r" />
+                  <div className="absolute left-0 top-2 bottom-2 w-1 bg-accent-cyan rounded-r shadow-[0_0_8px_#22D3EE]" />
                 )}
 
                 {/* Top Row: Symbol, Name & Venue Tags */}
                 <div className="flex items-center justify-between mb-1.5 gap-1.5">
                   <div className="flex items-center space-x-1.5 min-w-0 whitespace-nowrap">
-                    <span className="font-bold text-xs text-slate-900 tracking-tight shrink-0">
+                    <span className="font-bold text-xs text-white tracking-tight shrink-0">
                       {ticker.base}
                     </span>
-                    <span className="text-[10px] text-slate-500 font-mono shrink-0">-{ticker.quote}</span>
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-slate-200/60 text-slate-600 font-medium shrink-0">
+                    <span className="text-[10px] text-white/40 font-mono shrink-0">-{ticker.quote}</span>
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-white/5 text-white/50 font-medium border border-white/10 shrink-0">
                       PERP
                     </span>
                   </div>
@@ -281,8 +280,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                 </div>
 
                 {/* Bottom Row: Price, Strategy Trade Count, Net PnL */}
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-surface-border/50">
-                  <span className="text-slate-600 text-[10px]">
+                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-white/[0.06]">
+                  <span className="text-white/50 text-[10px] tabular-numbers">
                     {formatCurrencyPrice(ticker.basePrice)}
                   </span>
 
@@ -291,8 +290,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     <span
                       className={`text-[10px] px-1.5 py-0.2 rounded ${
                         hasTrades
-                          ? "bg-surface-raised font-medium text-slate-700 border border-surface-border"
-                          : "text-slate-500"
+                          ? "bg-white/5 font-medium text-white/70 border border-white/10"
+                          : "text-white/40"
                       }`}
                       title={`${ticker.tradeCount} transactions executed by strategy`}
                     >
@@ -301,12 +300,12 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
                     {/* Net Profit */}
                     <span
-                      className={`text-[10px] font-semibold px-1.5 py-0.2 rounded ${
+                      className={`text-[10px] font-semibold px-1.5 py-0.2 rounded tabular-numbers ${
                         isProfit
-                          ? "text-profit bg-profit-dim border border-profit-border"
+                          ? "text-pos bg-pos/15 border border-pos/30"
                           : isLoss
-                          ? "text-loss bg-loss-dim border border-loss-border"
-                          : "text-slate-500 bg-surface-raised border border-surface-border"
+                          ? "text-neg bg-neg/15 border border-neg/30"
+                          : "text-white/40 bg-white/5 border border-white/10"
                       }`}
                       title={`Net profit generated: ${formatCurrencyPnl(ticker.netProfit)}`}
                     >
@@ -324,14 +323,14 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                   const maxUnits = Number(cfg.maxAccumulatedUnits ?? cfg.max_accumulated_units ?? 3);
                   const mode = cfg.executionMode ?? cfg.execution_mode ?? "SINGLE_WAY";
                   return (
-                    <div className="flex items-center space-x-1.5 pt-1 text-[9px] font-mono text-slate-500">
-                      <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
+                    <div className="flex items-center space-x-1.5 pt-1.5 text-[9px] font-mono text-white/50 border-t border-white/[0.04] mt-1">
+                      <span className="bg-accent-cyan/10 text-accent-cyan px-1 py-0.2 rounded border border-accent-cyan/25 font-medium">
                         TP {isNaN(tp) ? "5.0" : tp.toFixed(1)} bps
                       </span>
-                      <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
+                      <span className="bg-white/5 text-white/70 px-1 py-0.2 rounded border border-white/10">
                         {curUnits}/{maxUnits}u
                       </span>
-                      <span className="text-slate-400">
+                      <span className="text-white/40">
                         {mode === "DOUBLE_WAY" ? "DW" : "SW"}
                       </span>
                     </div>
@@ -344,21 +343,21 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       </div>
 
       {/* Bottom Panel Status & Venues */}
-      <div className="p-3 border-t border-surface-border bg-surface-raised text-[10px] font-mono text-slate-600 space-y-1">
+      <div className="p-3 border-t border-white/[0.08] bg-white/[0.02] text-[10px] font-mono text-white/50 space-y-1">
         <div className="flex justify-between items-center">
-          <span className="text-slate-600">Tauri Core:</span>
-          <span className="text-accent font-semibold flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+          <span>Tauri Core:</span>
+          <span className="text-accent-cyan font-semibold flex items-center space-x-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent-cyan shadow-[0_0_6px_#22D3EE]" />
             <span>IPC Connected</span>
           </span>
         </div>
         <div className="flex justify-between items-center">
-          <span className="text-slate-600">Perp DEXes:</span>
-          <span className="text-slate-700 font-medium">HL · LGT · VNT · RH</span>
+          <span>Perp DEXes:</span>
+          <span className="text-white/70 font-medium">HL · LGT · VNT · RH</span>
         </div>
         <div className="flex justify-between items-center">
-          <span className="text-slate-600">Union Coverage:</span>
-          <span className="text-profit font-medium">52 Pairs (≥2 Venues)</span>
+          <span>Union Coverage:</span>
+          <span className="text-pos font-medium">52 Pairs (≥2 Venues)</span>
         </div>
       </div>
     </aside>

@@ -4,59 +4,195 @@
 
 @layer base {
   :root {
-    --background: #f8fafc;
-    --foreground: #0f172a;
-    --card: #ffffff;
-    --card-foreground: #0f172a;
-    --border: #e2e8f0;
-    --input: #e2e8f0;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
-    --primary-foreground: #ffffff;
-    --accent-soft: #eff6ff;
-    --accent-line: #bfdbfe;
-    --muted: #f1f5f9;
-    --muted-foreground: #64748b;
-    --ring: #3b82f6;
-    --color-bg: #f8fafc;
-    --color-surface: #ffffff;
-    --color-surface-raised: #f1f5f9;
-    --color-border: #e2e8f0;
-    --color-blue: #2563eb;
-    --color-green: #059669;
-    --color-rose: #dc2626;
-    --color-amber: #d97706;
+    /* Base backgrounds */
+    --bg-page: #080B14;
+    --bg-page-2: #0C1019;
+
+    /* Glass surfaces (translucent over dark bg) */
+    --glass-1: rgba(255, 255, 255, 0.04);
+    --glass-2: rgba(255, 255, 255, 0.06);
+    --glass-3: rgba(255, 255, 255, 0.08);
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --glass-border-strong: rgba(255, 255, 255, 0.14);
+
+    /* Text hierarchy */
+    --text-1: rgba(255, 255, 255, 0.95);
+    --text-2: rgba(255, 255, 255, 0.62);
+    --text-3: rgba(255, 255, 255, 0.40);
+
+    /* Neon iridescent accent */
+    --accent-1: #22D3EE;
+    --accent-2: #818CF8;
+    --accent-3: #E879F9;
+    --accent-grad: linear-gradient(135deg, #22D3EE 0%, #818CF8 50%, #E879F9 100%);
+    --accent-glow: rgba(129, 140, 248, 0.45);
+
+    /* Status colors */
+    --pos: #34D399;
+    --pos-bg: rgba(52, 211, 153, 0.14);
+    --warn: #FBBF24;
+    --warn-bg: rgba(251, 191, 36, 0.14);
+    --neg: #FB7185;
+    --neg-bg: rgba(251, 113, 133, 0.14);
+    --info: #818CF8;
+    --info-bg: rgba(129, 140, 248, 0.14);
   }
 
   body {
-    background-color: #f8fafc;
-    color: #0f172a;
+    background-color: #080B14;
+    color: rgba(255, 255, 255, 0.95);
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     user-select: none;
     -webkit-user-select: none;
+    overflow-x: hidden;
   }
 
-  /* Clean minimalist scrollbar */
+  /* Dark glass minimalist scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: #f8fafc;
+    background: #080B14;
   }
   ::-webkit-scrollbar-thumb {
-    background: #cbd5e1;
-    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #94a3b8;
+    background: rgba(255, 255, 255, 0.25);
   }
 }
 
-/* Minimalist utility classes - glows replaced by subtle clean accents */
-.glow-cyan,
-.glow-green,
+/* Glassmorphism Card Core */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.glass-panel-raised {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+.glass-panel:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Iridescent Signature Holographic Card */
+.payment-card-iridescent {
+  position: relative;
+  border-radius: 18px;
+  padding: 22px;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg,
+      rgba(34, 211, 238, 0.22) 0%,
+      rgba(129, 140, 248, 0.26) 40%,
+      rgba(232, 121, 249, 0.24) 70%,
+      rgba(52, 211, 153, 0.18) 100%),
+    rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+    0 8px 40px rgba(129, 140, 248, 0.35);
+}
+
+/* Animated sheen sweep */
+.payment-card-iridescent::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg,
+    transparent 30%,
+    rgba(255, 255, 255, 0.12) 50%,
+    transparent 70%);
+  transform: translateX(-100%);
+  animation: sheen 6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes sheen {
+  0%, 60% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+/* Status Chips */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+}
+
+.chip-pos {
+  color: #34D399;
+  background: rgba(52, 211, 153, 0.14);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+}
+
+.chip-warn {
+  color: #FBBF24;
+  background: rgba(251, 191, 36, 0.14);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.chip-neg {
+  color: #FB7185;
+  background: rgba(251, 113, 133, 0.14);
+  border: 1px solid rgba(251, 113, 133, 0.25);
+}
+
+.chip-info {
+  color: #818CF8;
+  background: rgba(129, 140, 248, 0.14);
+  border: 1px solid rgba(129, 140, 248, 0.25);
+}
+
+/* Neon glow accent helpers */
+.glow-accent {
+  box-shadow: 0 0 20px rgba(129, 140, 248, 0.40);
+}
+
+.glow-cyan {
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.40);
+}
+
+.glow-green {
+  box-shadow: 0 0 20px rgba(52, 211, 153, 0.35);
+}
+
 .glow-rose {
-  box-shadow: none;
+  box-shadow: 0 0 20px rgba(251, 113, 133, 0.35);
+}
+
+/* Tabular number font utility */
+.tabular-numbers {
+  font-variant-numeric: tabular-nums;
 }
 

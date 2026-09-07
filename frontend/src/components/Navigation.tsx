@@ -101,7 +101,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   ];
 
   return (
-    <nav className="flex items-center space-x-1 overflow-x-auto py-1 px-1.5 bg-surface-raised/80 rounded-xl border border-surface-border select-none">
+    <nav className="flex items-center space-x-1 overflow-x-auto py-1 px-1.5 bg-white/[0.03] backdrop-blur-xl rounded-2xl border border-white/[0.08] select-none">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = activeTab === t.id;
@@ -109,16 +109,16 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             key={t.id}
             onClick={() => onSelectTab(t.id)}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition whitespace-nowrap group shrink-0 ${
+            className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-mono font-medium transition-all duration-200 whitespace-nowrap group shrink-0 ${
               isActive
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900 hover:bg-surface/60 border border-transparent"
+                ? "bg-white/[0.08] text-white font-semibold shadow-[0_0_16px_rgba(129,140,248,0.3)] border border-white/[0.18] ring-1 ring-white/[0.06]"
+                : "text-white/60 hover:text-white/95 hover:bg-white/[0.04] border border-transparent"
             }`}
             title={`${t.shortLabel} ${t.fullLabel}`.trim()}
           >
             <Icon
-              className={`w-3.5 h-3.5 transition shrink-0 ${
-                isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              className={`w-3.5 h-3.5 transition-colors shrink-0 ${
+                isActive ? "text-accent-cyan" : "text-white/40 group-hover:text-white/70"
               }`}
             />
             <span>
@@ -127,7 +127,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             </span>
 
             {t.badge !== undefined && (
-              <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] font-bold bg-accent-dim text-accent border border-accent-line/60 shrink-0">
+              <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-accent-cyan/15 text-accent-cyan border border-accent-cyan/30 shadow-[0_0_8px_rgba(34,211,238,0.25)] shrink-0">
                 {t.badge}
               </span>
             )}

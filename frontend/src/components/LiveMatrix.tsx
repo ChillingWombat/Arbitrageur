@@ -449,43 +449,43 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   }, [autoExecute, executing, venueMatrix.grid, currentStrategyConfig]);
 
   return (
-    <div className="p-6 space-y-4 overflow-y-auto h-full text-slate-900">
+    <div className="p-6 space-y-4 overflow-y-auto h-full text-white/95">
       {/* Title & Automated Execution Header Banner */}
-      <div className="bg-surface rounded-2xl border border-surface-border p-4 shadow-2xs flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <div className="glass-panel p-4 rounded-2xl flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
-            <span className="p-1.5 bg-blue-50 text-accent rounded-lg border border-blue-200">
-              <Layers className="w-5 h-5 text-accent" />
+            <span className="p-1.5 bg-cyan-500/10 text-cyan-300 rounded-lg border border-cyan-500/20">
+              <Layers className="w-5 h-5 text-cyan-400" />
             </span>
-            <h1 className="text-base font-bold text-slate-900 tracking-tight font-sans">
+            <h1 className="text-base font-bold text-white tracking-tight font-sans">
               Futures Spread Convergence Matrix
             </h1>
-            <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-accent border border-blue-200">
+            <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-500/10 text-cyan-300 border border-cyan-500/25">
               Auto-Execution Basis Arb
             </span>
           </div>
-          <p className="text-xs text-slate-500 font-sans mt-1">
+          <p className="text-xs text-white/50 font-sans mt-1">
             Automated cross-venue perpetual basis spread convergence engine. Continuously scans live orderbooks and auto-executes atomic legs whenever Net Spread ≥ Hurdle.
           </p>
         </div>
 
         {/* Auto-Execution Engine Control */}
         <div className="flex items-center space-x-3 shrink-0">
-          <div className="flex items-center space-x-2 bg-surface-raised px-3 py-1.5 rounded-xl border border-surface-border">
+          <div className="flex items-center space-x-2.5 bg-white/[0.04] px-3.5 py-1.5 rounded-xl border border-white/[0.08]">
             <span
               className={`w-2 h-2 rounded-full ${
-                autoExecute ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
+                autoExecute ? "bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(52,211,153,0.8)]" : "bg-white/30"
               }`}
             />
-            <span className="text-xs font-mono font-bold text-slate-700">
-              {autoExecute ? "AUTO-EXECUTION BOT: ACTIVE" : "AUTO-EXECUTION BOT: PAUSED"}
+            <span className="text-xs font-mono font-bold text-white/80">
+              {autoExecute ? "AUTO-BOT: ACTIVE" : "AUTO-BOT: PAUSED"}
             </span>
             <button
               onClick={() => setAutoExecute((prev) => !prev)}
               className={`ml-2 px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition ${
                 autoExecute
-                  ? "bg-emerald-600 text-white shadow-2xs hover:bg-emerald-700"
-                  : "bg-surface border border-surface-border text-slate-600 hover:text-slate-900"
+                  ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30 shadow-[0_0_12px_rgba(52,211,153,0.2)]"
+                  : "bg-white/[0.06] border border-white/[0.1] text-white/70 hover:text-white"
               }`}
             >
               {autoExecute ? "Pause Auto-Bot" : "Enable Auto-Bot"}
@@ -495,18 +495,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       </div>
 
       {lastAutoExecMsg && (
-        <div className="px-4 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-mono text-emerald-800 flex items-center justify-between">
+        <div className="px-4 py-2 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-xs font-mono text-emerald-300 flex items-center justify-between shadow-[0_0_12px_rgba(52,211,153,0.15)]">
           <span>{lastAutoExecMsg}</span>
-          <button onClick={() => setLastAutoExecMsg(null)} className="text-emerald-600 hover:text-emerald-900 text-xs font-bold">×</button>
+          <button onClick={() => setLastAutoExecMsg(null)} className="text-emerald-400 hover:text-white text-xs font-bold">×</button>
         </div>
       )}
 
       {/* Top Bar: Mode Selector & Quant Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-4 bg-surface p-4 rounded-xl border border-surface-border shadow-xs">
+      <div className="flex flex-wrap items-center justify-between gap-4 glass-panel p-4 rounded-xl">
         {/* Left Side: Mode Toggle & Active Ticker */}
         <div className="flex flex-wrap items-center gap-3">
           {/* Matrix Mode Toggle */}
-          <div className="flex items-center bg-surface-raised p-1 rounded-lg border border-surface-border">
+          <div className="flex items-center bg-white/[0.03] p-1 rounded-lg border border-white/[0.08]">
             <button
               onClick={() => {
                 setMatrixMode("cross-venue");
@@ -514,8 +514,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               }}
               className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-medium transition ${
                 matrixMode === "cross-venue"
-                  ? "bg-surface text-accent shadow-xs border border-surface-border"
-                  : "text-slate-600 hover:text-slate-900"
+                  ? "bg-white/[0.12] text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.2)] border border-cyan-500/30"
+                  : "text-white/50 hover:text-white/90"
               }`}
             >
               <Grid3X3 className="w-3.5 h-3.5" />
@@ -528,8 +528,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               }}
               className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-md text-xs font-mono font-medium transition ${
                 matrixMode === "cross-ticker"
-                  ? "bg-surface text-accent shadow-xs border border-surface-border"
-                  : "text-slate-600 hover:text-slate-900"
+                  ? "bg-white/[0.12] text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.2)] border border-cyan-500/30"
+                  : "text-white/50 hover:text-white/90"
               }`}
             >
               <Layers className="w-3.5 h-3.5" />
@@ -538,31 +538,31 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           </div>
 
           {/* Active Ticker Badge */}
-          <div className="text-xs font-mono font-bold text-slate-900 bg-surface-raised px-2.5 py-1.5 rounded-md border border-surface-border flex items-center space-x-2">
+          <div className="text-xs font-mono font-bold text-white bg-white/[0.04] px-2.5 py-1.5 rounded-md border border-white/[0.08] flex items-center space-x-2">
             <span>{symbol}</span>
             <span className="flex space-x-1">
               {activeTicker.venues.map((v) => (
                 <span
                   key={v}
-                  className="text-[9px] px-1 py-0.2 rounded font-semibold bg-accent-dim text-accent border border-accent-line/40"
+                  className="text-[9px] px-1.5 py-0.2 rounded font-semibold bg-white/[0.06] text-cyan-300 border border-cyan-500/20"
                 >
                   {v}
                 </span>
               ))}
             </span>
             <span
-              className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-surface-border font-medium text-slate-700"
+              className="text-[10px] px-1.5 py-0.2 rounded bg-white/[0.04] border border-white/[0.08] font-medium text-white/70 tabular-nums"
               title={`${tickerStats.count} strategy executions`}
             >
               {tickerStats.count} tx{tickerStats.count === 1 ? "" : "s"}
             </span>
             <span
-              className={`text-[10px] px-1.5 py-0.2 rounded font-semibold ${
+              className={`text-[10px] px-1.5 py-0.2 rounded font-semibold tabular-nums ${
                 tickerStats.pnl > 0
-                  ? "text-profit bg-profit-dim border border-profit-border"
+                  ? "text-emerald-400 bg-emerald-500/10 border border-emerald-500/20"
                   : tickerStats.pnl < 0
-                  ? "text-loss bg-loss-dim border border-loss-border"
-                  : "text-slate-500 bg-surface border border-surface-border"
+                  ? "text-rose-400 bg-rose-500/10 border border-rose-500/20"
+                  : "text-white/50 bg-white/[0.04] border border-white/[0.08]"
               }`}
               title={`Strategy Net PnL: ${formatCurrencyPnl(tickerStats.pnl)}`}
             >
@@ -572,18 +572,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
           {/* Cross-Ticker Presets (only shown in Cross-Ticker mode) */}
           {matrixMode === "cross-ticker" && (
-            <div className="flex items-center space-x-1.5 bg-surface-raised px-2 py-1 rounded-md border border-surface-border text-xs font-mono">
-              <span className="text-slate-500 text-[11px]">Preset:</span>
+            <div className="flex items-center space-x-1.5 bg-white/[0.04] px-2 py-1 rounded-md border border-white/[0.08] text-xs font-mono">
+              <span className="text-white/40 text-[11px]">Preset:</span>
               <select
                 value={selectedPreset}
                 onChange={(e) => {
                   setSelectedPreset(e.target.value);
                   setSelectedPair(null);
                 }}
-                className="bg-surface border border-surface-border rounded px-2 py-0.5 text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+                className="bg-[#0C1019] border border-white/[0.1] rounded px-2 py-0.5 text-xs font-mono text-white/90 focus:outline-none focus:ring-1 focus:ring-cyan-400"
               >
                 {Object.keys(TICKER_PRESETS).map((p) => (
-                  <option key={p} value={p}>
+                  <option key={p} value={p} className="bg-[#0C1019] text-white">
                     {p}
                   </option>
                 ))}
@@ -595,16 +595,16 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
         {/* Right Side: Sliding Window Selector, Inputs, and Scan */}
         <div className="flex flex-wrap items-center gap-3">
           {/* Predefined Sliding Window Selector */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs font-mono">
-            <span className="text-slate-500 text-[10px] uppercase font-semibold px-1.5">Window:</span>
+          <div className="flex items-center space-x-1 bg-white/[0.03] p-1 rounded-lg border border-white/[0.08] text-xs font-mono">
+            <span className="text-white/40 text-[10px] uppercase font-semibold px-1.5">Window:</span>
             {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
               <button
                 key={w}
                 onClick={() => setWindowOption(w)}
                 className={`px-2 py-1 rounded text-xs font-mono font-medium transition ${
                   windowOption === w
-                    ? "bg-accent text-white shadow-xs"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-surface"
+                    ? "bg-indigo-500/30 text-indigo-200 border border-indigo-500/50 shadow-[0_0_12px_rgba(129,140,248,0.3)]"
+                    : "text-white/50 hover:text-white/90 hover:bg-white/[0.04]"
                 }`}
                 title={`Track baseline over rolling ${w}`}
               >
@@ -614,27 +614,27 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           </div>
 
           {/* Benchmark Order Qty */}
-          <div className="flex items-center space-x-1.5 text-xs font-mono bg-surface-raised px-2 py-1 rounded-md border border-surface-border">
-            <span className="text-slate-500">Qty:</span>
+          <div className="flex items-center space-x-1.5 text-xs font-mono bg-white/[0.04] px-2.5 py-1 rounded-md border border-white/[0.08]">
+            <span className="text-white/40">Qty:</span>
             <input
               type="number"
               step={orderQty >= 1000 ? "100" : orderQty >= 10 ? "1" : orderQty >= 1 ? "0.1" : "0.001"}
               min="0.00000001"
               value={orderQty}
               onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
-              className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              className="w-20 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.1] rounded text-white font-mono text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
           </div>
 
           {/* Min Net BPS Filter */}
-          <div className="flex items-center space-x-1.5 text-xs font-mono bg-surface-raised px-2 py-1 rounded-md border border-surface-border">
-            <span className="text-slate-500">Min BPS:</span>
+          <div className="flex items-center space-x-1.5 text-xs font-mono bg-white/[0.04] px-2.5 py-1 rounded-md border border-white/[0.08]">
+            <span className="text-white/40">Min BPS:</span>
             <input
               type="number"
               step="1"
               value={minBps}
               onChange={(e) => setMinBps(parseFloat(e.target.value) || 0)}
-              className="w-14 px-1.5 py-0.5 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+              className="w-14 px-1.5 py-0.5 bg-white/[0.06] border border-white/[0.1] rounded text-white font-mono text-xs tabular-nums focus:outline-none focus:ring-1 focus:ring-cyan-400"
             />
           </div>
 
@@ -642,9 +642,9 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           <button
             onClick={() => onRefresh(orderQty, minBps)}
             disabled={loading}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-700 font-medium transition shadow-xs"
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.1] rounded-lg text-xs font-mono text-white/90 font-medium transition shadow-xs"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : "text-slate-500"}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-cyan-400" : "text-white/50"}`} />
             <span>Scan</span>
           </button>
         </div>
@@ -662,62 +662,62 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       {matrixMode === "cross-venue" && (
         <div>
           <div className="flex items-center justify-between mb-3">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 font-semibold">
+            <h3 className="text-xs font-mono uppercase tracking-wider text-white/40 font-semibold">
               Venue Market Quotes (Top of Book)
             </h3>
-            <span className="text-[11px] font-mono text-slate-400">Target: {symbol}</span>
+            <span className="text-[11px] font-mono text-white/40">Target: {symbol}</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             {orderbooks.map((book) => {
-              const spreadColor = book.spread_bps < 10 ? "text-profit" : "text-warn";
+              const spreadColor = book.spread_bps < 10 ? "text-emerald-400" : "text-amber-400";
               const topBidSize = book.bids.length > 0 ? book.bids[0][1] : 0;
               const topAskSize = book.asks.length > 0 ? book.asks[0][1] : 0;
 
               return (
                 <div
                   key={book.venue_id}
-                  className="bg-surface border border-surface-border rounded-xl p-4 flex flex-col justify-between hover:border-slate-300 transition shadow-xs"
+                  className="glass-panel rounded-xl p-4 flex flex-col justify-between hover:border-white/[0.18] transition"
                 >
-                  <div className="flex items-center justify-between border-b border-surface-border pb-2.5 mb-3">
+                  <div className="flex items-center justify-between border-b border-white/[0.08] pb-2.5 mb-3">
                     <div>
-                      <span className="font-mono text-xs font-bold text-slate-900">{book.venue_name}</span>
-                      <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                      <span className="font-mono text-xs font-bold text-white/95">{book.venue_name}</span>
+                      <div className="text-[10px] font-mono text-white/40 mt-0.5 tabular-nums">
                         8h Funding: {book.funding_rate_8h_pct.toFixed(4)}%
                       </div>
                     </div>
                     <div className="text-right">
-                      <span className="text-[10px] font-mono text-slate-400">Spread:</span>{" "}
-                      <span className={`font-mono text-xs font-semibold ${spreadColor}`}>
+                      <span className="text-[10px] font-mono text-white/40">Spread:</span>{" "}
+                      <span className={`font-mono text-xs font-semibold tabular-nums ${spreadColor}`}>
                         {book.spread_bps.toFixed(1)} BPS
                       </span>
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 bg-surface-raised p-2.5 rounded-lg border border-surface-border mb-3">
+                  <div className="grid grid-cols-2 gap-2 bg-white/[0.03] p-2.5 rounded-lg border border-white/[0.06] mb-3">
                     <div>
-                      <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wide flex justify-between">
+                      <div className="text-[10px] font-mono text-white/40 uppercase tracking-wide flex justify-between">
                         <span>Bid (Buy)</span>
-                        <span className="text-slate-500">{topBidSize > 0 ? topBidSize.toFixed(2) : ""}</span>
+                        <span className="text-white/40 tabular-nums">{topBidSize > 0 ? topBidSize.toFixed(2) : ""}</span>
                       </div>
-                      <div className="text-sm font-mono font-bold text-profit mt-1">
+                      <div className="text-sm font-mono font-bold text-emerald-400 mt-1 tabular-nums">
                         {formatCurrencyPrice(book.best_bid)}
                       </div>
                     </div>
 
-                    <div className="border-l border-surface-border pl-2.5">
-                      <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wide flex justify-between">
+                    <div className="border-l border-white/[0.08] pl-2.5">
+                      <div className="text-[10px] font-mono text-white/40 uppercase tracking-wide flex justify-between">
                         <span>Ask (Sell)</span>
-                        <span className="text-slate-500">{topAskSize > 0 ? topAskSize.toFixed(2) : ""}</span>
+                        <span className="text-white/40 tabular-nums">{topAskSize > 0 ? topAskSize.toFixed(2) : ""}</span>
                       </div>
-                      <div className="text-sm font-mono font-bold text-loss mt-1">
+                      <div className="text-sm font-mono font-bold text-rose-400 mt-1 tabular-nums">
                         {formatCurrencyPrice(book.best_ask)}
                       </div>
                     </div>
                   </div>
 
-                  <div className="pt-2 border-t border-surface-border text-[11px] font-mono text-slate-500 flex justify-between items-center">
+                  <div className="pt-2 border-t border-white/[0.06] text-[11px] font-mono text-white/40 flex justify-between items-center">
                     <span>Mid Price</span>
-                    <span className="font-semibold text-slate-700">{formatCurrencyPrice(book.mid_price)}</span>
+                    <span className="font-semibold text-white/80 tabular-nums">{formatCurrencyPrice(book.mid_price)}</span>
                   </div>
                 </div>
               );
@@ -727,60 +727,61 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       )}
 
       {/* Real 2D Interactive Matrix Grid */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs space-y-4">
+      {/* Real 2D Interactive Matrix Grid */}
+      <div className="glass-panel p-5 space-y-4 rounded-2xl">
         {/* Header with Title and Quant Legend */}
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border pb-3">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.08] pb-3">
           <div>
-            <h3 className="text-sm font-bold font-mono text-slate-900 flex items-center space-x-2">
+            <h3 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
               <span>
                 {matrixMode === "cross-venue"
                   ? `Arbitrage Dislocation Matrix — [Cross-Venue: ${symbol}]`
                   : `Cross-Ticker Relative Value Matrix — [Preset: ${selectedPreset}]`}
               </span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] bg-accent-dim text-accent border border-accent-line font-medium">
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium">
                 Rolling {windowOption} Window
               </span>
             </h3>
-            <p className="text-xs text-slate-500 mt-1">
-              Y-Axis = <strong>LONG (Buy Leg)</strong> · X-Axis = <strong>SHORT (Sell Leg)</strong>. Cell shows{" "}
-              <strong>Net BPS</strong> after taker fees &amp; closing spread friction, and <strong>Δ BPS</strong> vs rolling {windowOption} baseline.
+            <p className="text-xs text-white/50 mt-1">
+              Y-Axis = <strong className="text-white/80">LONG (Buy Leg)</strong> · X-Axis = <strong className="text-white/80">SHORT (Sell Leg)</strong>. Cell shows{" "}
+              <strong className="text-cyan-300">Net BPS</strong> after taker fees &amp; closing spread friction, and <strong className="text-white/80">Δ BPS</strong> vs rolling {windowOption} baseline.
             </p>
           </div>
 
           {/* Color Legend */}
           <div className="flex items-center space-x-3 text-[11px] font-mono">
-            <div className="flex items-center space-x-1">
-              <span className="w-2.5 h-2.5 rounded bg-emerald-100 border border-emerald-400 inline-block"></span>
-              <span className="text-emerald-800 font-medium">Net ≥ {minBps} BPS (Executable)</span>
+            <div className="flex items-center space-x-1.5">
+              <span className="w-2.5 h-2.5 rounded bg-emerald-500/20 border border-emerald-400 inline-block shadow-[0_0_8px_rgba(52,211,153,0.5)]"></span>
+              <span className="text-emerald-300 font-medium">Net ≥ {minBps} BPS (Executable)</span>
             </div>
-            <div className="flex items-center space-x-1">
-              <span className="w-2.5 h-2.5 rounded bg-sky-100 border border-sky-300 inline-block"></span>
-              <span className="text-sky-800 font-medium">0 &lt; Net &lt; {minBps} BPS</span>
+            <div className="flex items-center space-x-1.5">
+              <span className="w-2.5 h-2.5 rounded bg-cyan-500/15 border border-cyan-400 inline-block"></span>
+              <span className="text-cyan-300 font-medium">0 &lt; Net &lt; {minBps} BPS</span>
             </div>
-            <div className="flex items-center space-x-1">
-              <span className="w-2.5 h-2.5 rounded bg-slate-100 border border-slate-300 inline-block"></span>
-              <span className="text-slate-600">Net ≤ 0</span>
+            <div className="flex items-center space-x-1.5">
+              <span className="w-2.5 h-2.5 rounded bg-white/[0.04] border border-white/[0.1] inline-block"></span>
+              <span className="text-white/50">Net ≤ 0</span>
             </div>
-            <div className="flex items-center space-x-1">
-              <span className="w-2.5 h-2.5 rounded bg-surface-raised border border-surface-border inline-block"></span>
-              <span className="text-slate-400">— (Diagonal)</span>
+            <div className="flex items-center space-x-1.5">
+              <span className="w-2.5 h-2.5 rounded bg-white/[0.02] border border-white/[0.05] inline-block"></span>
+              <span className="text-white/30">— (Diagonal)</span>
             </div>
           </div>
         </div>
 
         {/* The 2D Interactive Matrix Table */}
-        <div className="overflow-auto max-h-[640px] rounded-lg border border-surface-border">
+        <div className="overflow-auto max-h-[640px] rounded-xl border border-white/[0.08]">
           {matrixMode === "cross-venue" ? (
             /* Cross-Venue Matrix Grid */
             venueMatrix.grid.length === 0 ? (
-              <div className="py-12 text-center text-slate-400 font-mono text-xs">
+              <div className="py-12 text-center text-white/40 font-mono text-xs">
                 Scanning orderbooks for {symbol}...
               </div>
             ) : (
-              <table className="w-full border-collapse font-mono text-xs">
-                <thead className="sticky top-0 z-20 bg-surface-raised shadow-xs">
-                  <tr className="bg-surface-raised border-b border-surface-border">
-                    <th className="p-3 text-left font-semibold text-slate-500 uppercase text-[10px] tracking-wider border-r border-b border-surface-border min-w-[140px] sticky top-0 left-0 bg-surface-raised z-30">
+              <table className="w-full border-collapse font-mono text-xs tabular-nums">
+                <thead className="sticky top-0 z-20 bg-[#0C1019] shadow-xs">
+                  <tr className="bg-[#0C1019] border-b border-white/[0.08]">
+                    <th className="p-3 text-left font-semibold text-white/40 uppercase text-[10px] tracking-wider border-r border-b border-white/[0.08] min-w-[140px] sticky top-0 left-0 bg-[#0C1019] z-30">
                       <div className="flex items-center justify-between">
                         <span>LONG (Y) ↓</span>
                         <span>SHORT (X) →</span>
@@ -791,10 +792,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                       return (
                         <th
                           key={colVenue}
-                          className="p-3 text-center font-bold text-slate-800 border-r border-b border-surface-border last:border-r-0 min-w-[130px] sticky top-0 bg-surface-raised z-20"
+                          className="p-3 text-center font-bold text-white/90 border-r border-b border-white/[0.08] last:border-r-0 min-w-[130px] sticky top-0 bg-[#0C1019] z-20"
                         >
-                          <div className="text-[11px] text-slate-900">{colVenue}</div>
-                          <div className="text-[10px] font-normal text-profit mt-0.5">
+                          <div className="text-[11px] text-white/95">{colVenue}</div>
+                          <div className="text-[10px] font-normal text-emerald-400 mt-0.5 tabular-nums">
                             Sell @ {formatCurrencyPrice(sellPrice)}
                           </div>
                         </th>
@@ -802,17 +803,17 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                     })}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-surface-border">
+                <tbody className="divide-y divide-white/[0.06]">
                   {venueMatrix.grid.map((row, i) => {
                     const rowLabel = venueMatrix.venueLabels[i];
                     const buyPrice = orderbooks[i]?.best_ask ?? 0;
 
                     return (
-                      <tr key={venueMatrix.venues[i]} className="hover:bg-surface-raised/40 transition">
+                      <tr key={venueMatrix.venues[i]} className="hover:bg-white/[0.02] transition">
                         {/* Row Header (Long Leg) */}
-                        <td className="p-3 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10">
-                          <div className="text-[11px] font-bold text-slate-900">{rowLabel}</div>
-                          <div className="text-[10px] font-normal text-loss mt-0.5">
+                        <td className="p-3 font-semibold text-white/95 border-r border-white/[0.08] bg-[#0C1019]/95 sticky left-0 z-10">
+                          <div className="text-[11px] font-bold text-white/95">{rowLabel}</div>
+                          <div className="text-[10px] font-normal text-rose-400 mt-0.5 tabular-nums">
                             Buy @ {formatCurrencyPrice(buyPrice)}
                           </div>
                         </td>
@@ -827,9 +828,9 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             return (
                               <td
                                 key={`${cell.rowId}-${cell.colId}`}
-                                className="p-3 text-center border-r border-surface-border last:border-r-0 bg-surface-raised/40 select-none"
+                                className="p-3 text-center border-r border-white/[0.06] last:border-r-0 bg-white/[0.02] select-none"
                               >
-                                <span className="text-slate-400 font-mono text-base">—</span>
+                                <span className="text-white/20 font-mono text-base">—</span>
                               </td>
                             );
                           }
@@ -838,21 +839,21 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             <td
                               key={`${cell.rowId}-${cell.colId}`}
                               onClick={() => setSelectedPair({ rowId: cell.rowId, colId: cell.colId })}
-                              className={`p-2.5 text-center border-r border-surface-border last:border-r-0 cursor-pointer transition select-none ${
+                              className={`p-2.5 text-center border-r border-white/[0.06] last:border-r-0 cursor-pointer transition select-none ${
                                 visuals.bgClass
-                              } ${isSelected ? "ring-2 ring-accent shadow-sm" : ""}`}
+                              } ${isSelected ? "ring-2 ring-cyan-400 shadow-[0_0_16px_rgba(34,211,238,0.4)]" : ""}`}
                               title={`Click to inspect & execute: Long ${cell.rowLabel} / Short ${cell.colLabel}`}
                             >
                               <div className="flex flex-col items-center justify-center space-y-1">
                                 {/* Net Spread BPS */}
-                                <div className={`text-xs font-mono font-bold ${visuals.textClass}`}>
+                                <div className={`text-xs font-mono font-bold tabular-nums ${visuals.textClass}`}>
                                   {cell.netSpreadBps > 0 ? "+" : ""}
                                   {cell.netSpreadBps.toFixed(1)} BPS
                                 </div>
 
                                 {/* Window Difference Δ BPS */}
                                 <div
-                                  className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${visuals.deltaBadgeBg}`}
+                                  className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-mono tabular-nums ${visuals.deltaBadgeBg}`}
                                 >
                                   {cell.deltaBps > 0 ? (
                                     <TrendingUp className="w-2.5 h-2.5 inline" />
@@ -877,14 +878,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           ) : (
             /* Cross-Ticker Matrix Grid */
             crossTickerMatrix.grid.length === 0 ? (
-              <div className="py-12 text-center text-slate-400 font-mono text-xs">
+              <div className="py-12 text-center text-white/40 font-mono text-xs">
                 Building multi-market matrix for {selectedPreset}...
               </div>
             ) : (
-              <table className="w-full border-collapse font-mono text-xs">
-                <thead className="sticky top-0 z-20 bg-surface-raised shadow-xs">
-                  <tr className="bg-surface-raised border-b border-surface-border">
-                    <th className="p-3 text-left font-semibold text-slate-500 uppercase text-[10px] tracking-wider border-r border-b border-surface-border min-w-[140px] sticky top-0 left-0 bg-surface-raised z-30">
+              <table className="w-full border-collapse font-mono text-xs tabular-nums">
+                <thead className="sticky top-0 z-20 bg-[#0C1019] shadow-xs">
+                  <tr className="bg-[#0C1019] border-b border-white/[0.08]">
+                    <th className="p-3 text-left font-semibold text-white/40 uppercase text-[10px] tracking-wider border-r border-b border-white/[0.08] min-w-[140px] sticky top-0 left-0 bg-[#0C1019] z-30">
                       <div className="flex items-center justify-between">
                         <span>LONG (Y) ↓</span>
                         <span>SHORT (X) →</span>
@@ -896,10 +897,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                       return (
                         <th
                           key={sym}
-                          className="p-3 text-center font-bold text-slate-800 border-r border-b border-surface-border last:border-r-0 min-w-[124px] sticky top-0 bg-surface-raised z-20"
+                          className="p-3 text-center font-bold text-white/90 border-r border-b border-white/[0.08] last:border-r-0 min-w-[124px] sticky top-0 bg-[#0C1019] z-20"
                         >
-                          <div className="text-[11px] text-slate-900">{colSymbol}</div>
-                          <div className="text-[10px] font-normal text-profit mt-0.5">
+                          <div className="text-[11px] text-white/95">{colSymbol}</div>
+                          <div className="text-[10px] font-normal text-emerald-400 mt-0.5 tabular-nums">
                             Bid: {quote ? formatCurrencyPrice(quote.bestBid) : "..."}
                           </div>
                         </th>
@@ -907,18 +908,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                     })}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-surface-border">
+                <tbody className="divide-y divide-white/[0.06]">
                   {crossTickerMatrix.grid.map((row, i) => {
                     const rowLabel = crossTickerMatrix.symbolLabels[i];
                     const rowSym = crossTickerMatrix.symbols[i];
                     const quote = tickerQuotesMap.get(rowSym);
 
                     return (
-                      <tr key={rowSym} className="hover:bg-surface-raised/40 transition">
+                      <tr key={rowSym} className="hover:bg-white/[0.02] transition">
                         {/* Row Header (Long Leg) */}
-                        <td className="p-3 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10">
-                          <div className="text-[11px] font-bold text-slate-900">{rowLabel}</div>
-                          <div className="text-[10px] font-normal text-loss mt-0.5">
+                        <td className="p-3 font-semibold text-white/95 border-r border-white/[0.08] bg-[#0C1019]/95 sticky left-0 z-10">
+                          <div className="text-[11px] font-bold text-white/95">{rowLabel}</div>
+                          <div className="text-[10px] font-normal text-rose-400 mt-0.5 tabular-nums">
                             Ask: {quote ? formatCurrencyPrice(quote.bestAsk) : "..."}
                           </div>
                         </td>
@@ -933,9 +934,9 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             return (
                               <td
                                 key={`${cell.rowId}-${cell.colId}`}
-                                className="p-3 text-center border-r border-surface-border last:border-r-0 bg-surface-raised/40 select-none"
+                                className="p-3 text-center border-r border-white/[0.06] last:border-r-0 bg-white/[0.02] select-none"
                               >
-                                <span className="text-slate-400 font-mono text-base">—</span>
+                                <span className="text-white/20 font-mono text-base">—</span>
                               </td>
                             );
                           }
@@ -944,19 +945,19 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             <td
                               key={`${cell.rowId}-${cell.colId}`}
                               onClick={() => setSelectedPair({ rowId: cell.rowId, colId: cell.colId })}
-                              className={`p-2.5 text-center border-r border-surface-border last:border-r-0 cursor-pointer transition select-none ${
+                              className={`p-2.5 text-center border-r border-white/[0.06] last:border-r-0 cursor-pointer transition select-none ${
                                 visuals.bgClass
-                              } ${isSelected ? "ring-2 ring-accent shadow-sm" : ""}`}
+                              } ${isSelected ? "ring-2 ring-cyan-400 shadow-[0_0_16px_rgba(34,211,238,0.4)]" : ""}`}
                               title={`Click to inspect & execute: Long ${cell.rowLabel} / Short ${cell.colLabel}`}
                             >
                               <div className="flex flex-col items-center justify-center space-y-1">
-                                <div className={`text-xs font-mono font-bold ${visuals.textClass}`}>
+                                <div className={`text-xs font-mono font-bold tabular-nums ${visuals.textClass}`}>
                                   {cell.netSpreadBps > 0 ? "+" : ""}
                                   {cell.netSpreadBps.toFixed(1)} BPS
                                 </div>
 
                                 <div
-                                  className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${visuals.deltaBadgeBg}`}
+                                  className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] font-mono tabular-nums ${visuals.deltaBadgeBg}`}
                                 >
                                   {cell.deltaBps > 0 ? (
                                     <TrendingUp className="w-2.5 h-2.5 inline" />
@@ -984,20 +985,20 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
       {/* Selected Cell Trade Details & One-Click Execution Card */}
       {selectedCell && !selectedCell.isDiagonal && (
-        <div className="bg-surface rounded-xl border border-accent-line/80 p-5 shadow-md bg-gradient-to-r from-surface to-accent-dim/20 space-y-4">
-          <div className="flex items-center justify-between border-b border-surface-border pb-3">
+        <div className="glass-panel-raised border border-cyan-500/30 p-5 rounded-2xl shadow-[0_0_30px_rgba(34,211,238,0.1)] space-y-4">
+          <div className="flex items-center justify-between border-b border-white/[0.08] pb-3">
             <div className="flex items-center space-x-2">
-              <Zap className="w-4 h-4 text-accent" />
-              <h4 className="text-sm font-bold font-mono text-slate-900">
+              <Zap className="w-4 h-4 text-cyan-400" />
+              <h4 className="text-sm font-bold font-mono text-white">
                 Atomic Execution &amp; Spread Analytics
               </h4>
-              <span className="text-xs px-2 py-0.5 rounded font-mono font-semibold bg-surface border border-surface-border text-slate-700">
+              <span className="text-xs px-2 py-0.5 rounded font-mono font-semibold bg-white/[0.04] border border-white/[0.08] text-white/70">
                 {matrixMode === "cross-venue" ? "Cross-Venue Spatial Arbitrage" : "Cross-Ticker Statistical Relative Value"}
               </span>
             </div>
             <button
               onClick={() => setSelectedPair(null)}
-              className="text-slate-400 hover:text-slate-700 p-1 rounded-md transition"
+              className="text-white/40 hover:text-white p-1 rounded-md transition"
               title="Close panel"
             >
               <X className="w-4 h-4" />
@@ -1005,32 +1006,32 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           </div>
 
           {/* Trade Route Banner */}
-          <div className="flex flex-wrap items-center justify-between gap-4 bg-surface-raised p-3.5 rounded-lg border border-surface-border font-mono text-xs">
+          <div className="flex flex-wrap items-center justify-between gap-4 bg-white/[0.03] p-3.5 rounded-xl border border-white/[0.06] font-mono text-xs">
             <div className="flex items-center space-x-3">
               <div className="flex items-center space-x-1.5">
-                <span className="px-2 py-0.5 rounded bg-loss-dim text-loss font-bold border border-loss-border">
+                <span className="px-2 py-0.5 rounded bg-rose-500/15 text-rose-300 font-bold border border-rose-500/30">
                   BUY / LONG
                 </span>
-                <span className="font-bold text-slate-900">{selectedCell.rowLabel}</span>
-                <span className="text-slate-500">({selectedCell.longVenue})</span>
-                <span className="font-semibold text-loss">@{formatCurrencyPrice(selectedCell.longPrice)}</span>
+                <span className="font-bold text-white">{selectedCell.rowLabel}</span>
+                <span className="text-white/40">({selectedCell.longVenue})</span>
+                <span className="font-semibold text-rose-400 tabular-nums">@{formatCurrencyPrice(selectedCell.longPrice)}</span>
               </div>
 
-              <ArrowRight className="w-4 h-4 text-slate-400" />
+              <ArrowRight className="w-4 h-4 text-white/30" />
 
               <div className="flex items-center space-x-1.5">
-                <span className="px-2 py-0.5 rounded bg-profit-dim text-profit font-bold border border-profit-border">
+                <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 font-bold border border-emerald-500/30">
                   SELL / SHORT
                 </span>
-                <span className="font-bold text-slate-900">{selectedCell.colLabel}</span>
-                <span className="text-slate-500">({selectedCell.shortVenue})</span>
-                <span className="font-semibold text-profit">@{formatCurrencyPrice(selectedCell.shortPrice)}</span>
+                <span className="font-bold text-white">{selectedCell.colLabel}</span>
+                <span className="text-white/40">({selectedCell.shortVenue})</span>
+                <span className="font-semibold text-emerald-400 tabular-nums">@{formatCurrencyPrice(selectedCell.shortPrice)}</span>
               </div>
             </div>
 
             <div className="text-right">
-              <span className="text-slate-500">Order Quantity: </span>
-              <span className="font-bold text-slate-900">
+              <span className="text-white/40">Order Quantity: </span>
+              <span className="font-bold text-white tabular-nums">
                 {selectedCell.orderQty} {selectedCell.longSymbol.split("-")[0]}
               </span>
             </div>
@@ -1039,55 +1040,55 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           {/* Quant Breakdown Metric Cards */}
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3 font-mono">
             {/* Gross Spread */}
-            <div className="bg-surface p-3 rounded-lg border border-surface-border">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wide">Gross Spread</div>
-              <div className="text-sm font-bold text-slate-900 mt-1">
+            <div className="bg-white/[0.04] p-3.5 rounded-xl border border-white/[0.08]">
+              <div className="text-[10px] text-white/40 uppercase tracking-wide">Gross Spread</div>
+              <div className="text-sm font-bold text-white mt-1 tabular-nums">
                 +{selectedCell.grossSpreadBps.toFixed(2)} BPS
               </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">Top-of-book dislocation</div>
+              <div className="text-[10px] text-white/40 mt-0.5">Top-of-book dislocation</div>
             </div>
 
             {/* Deductions: Taker Fees & Closing Friction */}
-            <div className="bg-surface p-3 rounded-lg border border-surface-border">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wide">Deductions (Friction)</div>
-              <div className="text-sm font-bold text-loss mt-1">
+            <div className="bg-white/[0.04] p-3.5 rounded-xl border border-white/[0.08]">
+              <div className="text-[10px] text-white/40 uppercase tracking-wide">Deductions (Friction)</div>
+              <div className="text-sm font-bold text-rose-400 mt-1 tabular-nums">
                 -{(selectedCell.feeBps + selectedCell.closingFrictionBps).toFixed(2)} BPS
               </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">
+              <div className="text-[10px] text-white/40 mt-0.5 tabular-nums">
                 Fees: {selectedCell.feeBps.toFixed(1)} | Exit: {selectedCell.closingFrictionBps.toFixed(1)} BPS
               </div>
             </div>
 
             {/* Net Spread */}
-            <div className="bg-surface p-3 rounded-lg border border-surface-border">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wide">Net Spread</div>
+            <div className="bg-white/[0.04] p-3.5 rounded-xl border border-white/[0.08]">
+              <div className="text-[10px] text-white/40 uppercase tracking-wide">Net Spread</div>
               <div
-                className={`text-sm font-bold mt-1 ${
+                className={`text-sm font-bold mt-1 tabular-nums ${
                   selectedCell.netSpreadBps >= minBps
-                    ? "text-profit"
+                    ? "text-emerald-400"
                     : selectedCell.netSpreadBps > 0
-                    ? "text-accent"
-                    : "text-slate-500"
+                    ? "text-cyan-300"
+                    : "text-white/50"
                 }`}
               >
                 {selectedCell.netSpreadBps > 0 ? "+" : ""}
                 {selectedCell.netSpreadBps.toFixed(2)} BPS
               </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">After all trading friction</div>
+              <div className="text-[10px] text-white/40 mt-0.5">After all trading friction</div>
             </div>
 
             {/* Rolling Window Baseline */}
-            <div className="bg-surface p-3 rounded-lg border border-surface-border">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wide">
+            <div className="bg-white/[0.04] p-3.5 rounded-xl border border-white/[0.08]">
+              <div className="text-[10px] text-white/40 uppercase tracking-wide">
                 Rolling {windowOption} Baseline
               </div>
-              <div className="text-sm font-bold text-slate-900 mt-1">
+              <div className="text-sm font-bold text-white mt-1 tabular-nums">
                 {selectedCell.baselineMeanBps > 0 ? "+" : ""}
                 {selectedCell.baselineMeanBps.toFixed(2)} BPS
               </div>
-              <div className="text-[10px] text-slate-500 mt-0.5">
+              <div className="text-[10px] text-white/50 mt-0.5 tabular-nums">
                 Δ vs Mean:{" "}
-                <span className={selectedCell.deltaBps >= 0 ? "text-profit font-semibold" : "text-loss font-semibold"}>
+                <span className={selectedCell.deltaBps >= 0 ? "text-emerald-400 font-semibold" : "text-rose-400 font-semibold"}>
                   {selectedCell.deltaBps > 0 ? "+" : ""}
                   {selectedCell.deltaBps.toFixed(2)} BPS
                 </span>
@@ -1095,25 +1096,25 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             </div>
 
             {/* Est Profit */}
-            <div className="bg-surface p-3 rounded-lg border border-surface-border">
-              <div className="text-[10px] text-slate-500 uppercase tracking-wide">Estimated Profit</div>
+            <div className="bg-white/[0.04] p-3.5 rounded-xl border border-white/[0.08]">
+              <div className="text-[10px] text-white/40 uppercase tracking-wide">Estimated Profit</div>
               <div
-                className={`text-sm font-bold mt-1 ${
-                  selectedCell.estProfitUsd >= 0 ? "text-profit" : "text-loss"
+                className={`text-sm font-bold mt-1 tabular-nums ${
+                  selectedCell.estProfitUsd >= 0 ? "text-emerald-400" : "text-rose-400"
                 }`}
               >
                 {formatCurrencyPnl(selectedCell.estProfitUsd)}
               </div>
-              <div className="text-[10px] text-slate-400 mt-0.5">
+              <div className="text-[10px] text-white/40 mt-0.5">
                 {selectedCell.isExecutable ? "Target met (≥ min)" : "Sub-threshold"}
               </div>
             </div>
           </div>
 
           {/* Action Bar: Status & One-Click Execution Button */}
-          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-surface-border">
-            <div className="text-xs font-mono text-slate-600 flex items-center space-x-2">
-              <Info className="w-3.5 h-3.5 text-accent inline" />
+          <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-white/[0.08]">
+            <div className="text-xs font-mono text-white/50 flex items-center space-x-2">
+              <Info className="w-3.5 h-3.5 text-cyan-400 inline" />
               <span>
                 Atomic two-leg IOC orders dispatched concurrently with DeltaGuard slippage protection.
               </span>
@@ -1122,10 +1123,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             <div className="flex items-center space-x-3">
               {executionResult && (
                 <div
-                  className={`text-xs font-mono px-3 py-1 rounded-lg border flex items-center space-x-1.5 ${
+                  className={`text-xs font-mono px-3 py-1.5 rounded-lg border flex items-center space-x-1.5 ${
                     executionResult.success
-                      ? "bg-profit-dim text-profit border-profit-border"
-                      : "bg-loss-dim text-loss border-loss-border"
+                      ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                      : "bg-rose-500/15 text-rose-300 border-rose-500/30"
                   }`}
                 >
                   {executionResult.success && <CheckCircle2 className="w-3.5 h-3.5" />}
@@ -1136,12 +1137,12 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               <button
                 onClick={() => handleExecuteCellTrade(selectedCell)}
                 disabled={executing || loading}
-                className={`px-4 py-2 rounded-lg text-xs font-mono font-bold transition flex items-center space-x-2 shadow-xs ${
+                className={`px-5 py-2.5 rounded-xl text-xs font-mono font-bold transition flex items-center space-x-2 ${
                   executing
-                    ? "bg-slate-300 text-slate-500 cursor-not-allowed"
+                    ? "bg-white/20 text-white/40 cursor-not-allowed"
                     : selectedCell.isExecutable
-                    ? "bg-accent hover:bg-accent-hover text-white cursor-pointer"
-                    : "bg-surface-raised hover:bg-surface border border-surface-border text-slate-800 cursor-pointer"
+                    ? "bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white shadow-[0_0_20px_rgba(34,211,238,0.35)] cursor-pointer"
+                    : "bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.1] text-white/80 cursor-pointer"
                 }`}
               >
                 <Zap className={`w-3.5 h-3.5 ${executing ? "animate-spin" : ""}`} />
@@ -1157,20 +1158,20 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       )}
 
       {/* Collapsible Ranked Arbitrage Opportunities List (Sorted Table) */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
-        <div className="flex items-center justify-between mb-4">
+      <div className="glass-panel rounded-2xl p-5 space-y-4">
+        <div className="flex items-center justify-between mb-2">
           <div>
             <button
               onClick={() => setShowRankedList(!showRankedList)}
-              className="text-sm font-bold font-mono text-slate-900 flex items-center space-x-2 hover:text-accent transition"
+              className="text-sm font-bold font-mono text-white flex items-center space-x-2 hover:text-cyan-300 transition"
             >
               <span>Ranked Arbitrage Opportunities</span>
-              <span className="px-2 py-0.5 rounded-full text-[10px] bg-accent-dim text-accent border border-accent-line font-medium">
+              <span className="px-2 py-0.5 rounded-full text-[10px] bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-medium tabular-nums">
                 {opportunities.length} Active
               </span>
-              {showRankedList ? <ChevronUp className="w-4 h-4 text-slate-500" /> : <ChevronDown className="w-4 h-4 text-slate-500" />}
+              {showRankedList ? <ChevronUp className="w-4 h-4 text-white/40" /> : <ChevronDown className="w-4 h-4 text-white/40" />}
             </button>
-            <p className="text-xs text-slate-500 mt-0.5">
+            <p className="text-xs text-white/40 mt-0.5">
               Instantaneous cross-venue sorted spread rankings for {symbol}.
             </p>
           </div>
@@ -1178,14 +1179,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
         {showRankedList && (
           opportunities.length === 0 ? (
-            <div className="text-center py-8 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+            <div className="text-center py-8 text-white/40 font-mono text-xs border border-dashed border-white/[0.08] rounded-xl">
               No spatial price discrepancies currently exceeding {minBps} BPS threshold.
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs font-mono">
+              <table className="w-full text-left text-xs font-mono tabular-nums">
                 <thead>
-                  <tr className="border-b border-surface-border text-slate-500 uppercase text-[10px] tracking-wider">
+                  <tr className="border-b border-white/[0.08] text-white/40 uppercase text-[10px] tracking-wider">
                     <th className="py-2.5 px-3">Route (Buy / Sell)</th>
                     <th className="py-2.5 px-3">Buy Price</th>
                     <th className="py-2.5 px-3">Sell Price</th>
@@ -1196,39 +1197,39 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                     <th className="py-2.5 px-3 text-right">Action</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-surface-border">
+                <tbody className="divide-y divide-white/[0.06]">
                   {opportunities.map((opp) => {
                     const isExec = opp.is_executable;
                     return (
                       <tr
                         key={opp.id}
-                        className={`hover:bg-surface-raised transition ${
-                          isExec ? "bg-accent-dim/30" : ""
+                        className={`hover:bg-white/[0.04] transition ${
+                          isExec ? "bg-cyan-500/[0.04]" : ""
                         }`}
                       >
-                        <td className="py-3 px-3 font-medium text-slate-900 flex items-center space-x-1.5">
-                          <span className="text-slate-800">{opp.buy_venue}</span>
-                          <span className="text-slate-400 text-xs">/</span>
-                          <span className="text-slate-800">{opp.sell_venue}</span>
+                        <td className="py-3 px-3 font-medium text-white flex items-center space-x-1.5">
+                          <span className="text-white/90">{opp.buy_venue}</span>
+                          <span className="text-white/30 text-xs">/</span>
+                          <span className="text-white/90">{opp.sell_venue}</span>
                         </td>
-                        <td className="py-3 px-3 text-loss font-medium">{formatCurrencyPrice(opp.buy_price)}</td>
-                        <td className="py-3 px-3 text-profit font-medium">{formatCurrencyPrice(opp.sell_price)}</td>
-                        <td className="py-3 px-3 text-slate-700">
+                        <td className="py-3 px-3 text-rose-400 font-medium tabular-nums">{formatCurrencyPrice(opp.buy_price)}</td>
+                        <td className="py-3 px-3 text-emerald-400 font-medium tabular-nums">{formatCurrencyPrice(opp.sell_price)}</td>
+                        <td className="py-3 px-3 text-white/70 tabular-nums">
                           {opp.gross_spread_bps.toFixed(1)} BPS ({formatSpreadPrice(opp.gross_spread)})
                         </td>
-                        <td className="py-3 px-3 text-slate-500">{opp.fee_bps.toFixed(1)} BPS</td>
+                        <td className="py-3 px-3 text-white/40 tabular-nums">{opp.fee_bps.toFixed(1)} BPS</td>
                         <td className="py-3 px-3">
                           <span
-                            className={`font-bold ${
-                              opp.net_spread_bps >= minBps ? "text-profit" : "text-slate-500"
+                            className={`font-bold tabular-nums ${
+                              opp.net_spread_bps >= minBps ? "text-emerald-400" : "text-white/50"
                             }`}
                           >
                             {opp.net_spread_bps.toFixed(2)} BPS
                           </span>
                         </td>
                         <td
-                          className={`py-3 px-3 font-bold ${
-                            opp.estimated_profit_usd >= 0 ? "text-profit" : "text-loss"
+                          className={`py-3 px-3 font-bold tabular-nums ${
+                            opp.estimated_profit_usd >= 0 ? "text-emerald-400" : "text-rose-400"
                           }`}
                         >
                           {formatCurrencyPnl(opp.estimated_profit_usd)}
@@ -1250,8 +1251,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             disabled={!isExec || loading}
                             className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition flex items-center ml-auto shadow-xs ${
                               isExec
-                                ? "bg-accent hover:bg-accent-hover text-white"
-                                : "bg-surface-raised text-slate-400 cursor-not-allowed border border-surface-border"
+                                ? "bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white shadow-[0_0_12px_rgba(34,211,238,0.25)]"
+                                : "bg-white/[0.04] text-white/30 cursor-not-allowed border border-white/[0.06]"
                             }`}
                           >
                             <span>Execute</span>

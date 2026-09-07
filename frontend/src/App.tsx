@@ -150,7 +150,7 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
+    <div className="flex flex-col h-screen w-screen bg-background text-white/95 overflow-hidden font-sans">
       {/* Top Header Bar with Section Switcher Navigation */}
       <Header
         status={systemStatus}

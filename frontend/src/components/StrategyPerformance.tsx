@@ -71,22 +71,22 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
   const getStrategyIcon = (id: string) => {
     switch (id) {
       case "spatial_spread":
-        return <Layers className="w-4 h-4 text-blue-600" />;
+        return <Layers className="w-4 h-4 text-cyan-400" />;
       case "funding_rate":
-        return <Percent className="w-4 h-4 text-emerald-600" />;
+        return <Percent className="w-4 h-4 text-emerald-400" />;
       case "prediction_parity":
-        return <Target className="w-4 h-4 text-purple-600" />;
+        return <Target className="w-4 h-4 text-purple-400" />;
       case "stat_arb":
-        return <FlaskConical className="w-4 h-4 text-indigo-600" />;
+        return <FlaskConical className="w-4 h-4 text-indigo-400" />;
       default:
-        return <Activity className="w-4 h-4 text-slate-600" />;
+        return <Activity className="w-4 h-4 text-white/60" />;
     }
   };
 
   const formatStrategyName = (id: string) => {
     switch (id) {
       case "spatial_spread":
-        return "Spatial Spread Dislocation Arb";
+        return "Futures Spread Convergence";
       case "stat_arb":
         return "Statistical Cointegration Spread (OU/Kalman)";
       case "funding_rate":
@@ -99,15 +99,17 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
   };
 
   return (
-    <div className="space-y-6 pb-12 select-none">
+    <div className="p-6 space-y-6 overflow-y-auto h-full max-w-6xl select-none">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-white/[0.08] pb-4">
         <div>
-          <div className="flex items-center space-x-2">
-            <TrendingUp className="w-5 h-5 text-accent" />
-            <h2 className="text-lg font-bold font-mono text-slate-900">Portfolio & Strategy Performance</h2>
+          <div className="flex items-center space-x-2.5">
+            <div className="w-8 h-8 rounded-lg bg-cyan-500/15 border border-cyan-500/30 flex items-center justify-center text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.25)]">
+              <TrendingUp className="w-4 h-4" />
+            </div>
+            <h2 className="text-lg font-bold font-mono text-white tracking-tight">Portfolio & Strategy Performance</h2>
           </div>
-          <p className="text-xs text-slate-500 font-mono mt-0.5">
+          <p className="text-xs text-white/50 font-mono mt-1">
             Round-trip closed cycle attribution, risk-adjusted returns, and automatic Walk-Forward Calibration
           </p>
         </div>
@@ -116,83 +118,83 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           <button
             onClick={loadMetrics}
             disabled={loading}
-            className="px-3 py-1.5 bg-surface border border-surface-border hover:bg-surface-raised text-slate-700 rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+            className="px-3.5 py-1.5 glass-panel bg-white/[0.04] border border-white/[0.08] hover:bg-white/[0.08] text-white/90 rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-cyan-400" : ""}`} />
             <span>Refresh Telemetry</span>
           </button>
         </div>
       </div>
 
       {/* Aggregate Portfolio KPI Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
         {/* Total Realized PnL */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Total Realized PnL</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Total Realized PnL</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className={`text-base font-bold font-mono ${totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
+            <span className={`text-base font-bold font-mono tabular-nums ${totalPnlUsd >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
               {totalPnlUsd >= 0 ? `+$${totalPnlUsd.toFixed(2)}` : `-$${Math.abs(totalPnlUsd).toFixed(2)}`}
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">Net of taker fees & slippage</span>
+          <span className="text-[10px] text-white/40 font-mono">Net of taker fees & slippage</span>
         </div>
 
         {/* Win Rate */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Win Rate</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Win Rate</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className="text-base font-bold font-mono text-slate-900">{overallWinRate.toFixed(1)}%</span>
-            <span className="text-[10px] text-slate-400 font-mono">({totalWinning}/{totalCompleted})</span>
+            <span className="text-base font-bold font-mono tabular-nums text-white">{overallWinRate.toFixed(1)}%</span>
+            <span className="text-[10px] text-white/40 font-mono">({totalWinning}/{totalCompleted})</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">Profitable closed cycles</span>
+          <span className="text-[10px] text-white/40 font-mono">Profitable closed cycles</span>
         </div>
 
         {/* Closed Cycles */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Cycles Completed</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Cycles Completed</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className="text-base font-bold font-mono text-slate-900">{totalCompleted}</span>
-            <span className="text-[10px] text-slate-400 font-mono">/ {totalInitiated} initiated</span>
+            <span className="text-base font-bold font-mono tabular-nums text-white">{totalCompleted}</span>
+            <span className="text-[10px] text-white/40 font-mono">/ {totalInitiated} initiated</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">100% two-leg atomic fills</span>
+          <span className="text-[10px] text-white/40 font-mono">100% two-leg atomic fills</span>
         </div>
 
         {/* Sharpe Ratio */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Sharpe Ratio</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Sharpe Ratio</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className="text-base font-bold font-mono text-accent">{avgSharpe.toFixed(2)}</span>
-            <span className="text-[10px] text-slate-400 font-mono">Ann.</span>
+            <span className="text-base font-bold font-mono tabular-nums text-cyan-300">{avgSharpe.toFixed(2)}</span>
+            <span className="text-[10px] text-white/40 font-mono">Ann.</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">Risk-adjusted return</span>
+          <span className="text-[10px] text-white/40 font-mono">Risk-adjusted return</span>
         </div>
 
         {/* Max Drawdown */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Max Drawdown</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Max Drawdown</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className="text-base font-bold font-mono text-amber-600">
+            <span className="text-base font-bold font-mono tabular-nums text-amber-300">
               ${maxMddUsd.toFixed(2)} ({maxMddPct.toFixed(2)}%)
             </span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">Peak-to-trough capital dip</span>
+          <span className="text-[10px] text-white/40 font-mono">Peak-to-trough capital dip</span>
         </div>
 
         {/* APR / APY */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-xl shadow-xs">
-          <span className="text-[10px] uppercase font-mono text-slate-500 font-semibold block">Est. APR / APY</span>
+        <div className="p-3.5 glass-panel border border-white/[0.08] rounded-xl shadow-xs">
+          <span className="text-[10px] uppercase font-mono text-white/40 font-semibold block">Est. APR / APY</span>
           <div className="mt-1 flex items-baseline space-x-1">
-            <span className="text-base font-bold font-mono text-slate-900">{avgApr.toFixed(0)}%</span>
-            <span className="text-[10px] text-slate-400 font-mono">/ {avgApy.toFixed(0)}%</span>
+            <span className="text-base font-bold font-mono tabular-nums text-white">{avgApr.toFixed(0)}%</span>
+            <span className="text-[10px] text-white/40 font-mono">/ {avgApy.toFixed(0)}%</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">Annualized compounded run-rate</span>
+          <span className="text-[10px] text-white/40 font-mono">Annualized compounded run-rate</span>
         </div>
       </div>
 
       {/* Strategy Breakdown Cards */}
       <div className="space-y-3">
-        <h3 className="text-sm font-bold font-mono text-slate-900 flex items-center space-x-2">
-          <BarChart2 className="w-4 h-4 text-accent" />
+        <h3 className="text-sm font-bold font-mono text-white flex items-center space-x-2">
+          <BarChart2 className="w-4 h-4 text-cyan-400" />
           <span>Strategy Breakdown & Virtual Lots Ledger</span>
         </h3>
 
@@ -200,48 +202,48 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           {metrics.map((s) => (
             <div
               key={s.strategy_id}
-              className="p-4 bg-surface border border-surface-border rounded-xl shadow-xs space-y-3 hover:border-accent-line/80 transition"
+              className="p-4 glass-panel border border-white/[0.08] hover:border-cyan-500/40 rounded-2xl shadow-xs space-y-3 transition duration-200"
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center space-x-2.5">
-                  <div className="p-2 rounded-lg bg-surface-raised border border-surface-border">
+                  <div className="p-2 rounded-xl bg-white/[0.04] border border-white/[0.08]">
                     {getStrategyIcon(s.strategy_id)}
                   </div>
                   <div>
-                    <h4 className="text-xs font-bold font-mono text-slate-900">{formatStrategyName(s.strategy_id)}</h4>
-                    <span className="text-[10px] text-slate-400 font-mono uppercase tracking-wider">
+                    <h4 className="text-xs font-bold font-mono text-white">{formatStrategyName(s.strategy_id)}</h4>
+                    <span className="text-[10px] text-white/40 font-mono uppercase tracking-wider">
                       Strategy ID: {s.strategy_id}
                     </span>
                   </div>
                 </div>
 
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-profit-dim text-profit border border-profit-border">
+                <span className="chip chip-pos text-[10px] font-mono">
                   ACTIVE
                 </span>
               </div>
 
-              <div className="grid grid-cols-4 gap-2 pt-1 border-t border-surface-border/60 text-center font-mono">
-                <div className="p-1.5 rounded-lg bg-surface-raised/60">
-                  <span className="text-[9px] uppercase text-slate-400 block">Win Rate</span>
-                  <span className="text-xs font-bold text-slate-900">{s.win_rate_pct.toFixed(1)}%</span>
+              <div className="grid grid-cols-4 gap-2 pt-1 border-t border-white/[0.06] text-center font-mono">
+                <div className="p-2 rounded-xl bg-white/[0.03] border border-white/[0.04]">
+                  <span className="text-[9px] uppercase text-white/40 block">Win Rate</span>
+                  <span className="text-xs font-bold text-white tabular-nums">{s.win_rate_pct.toFixed(1)}%</span>
                 </div>
-                <div className="p-1.5 rounded-lg bg-surface-raised/60">
-                  <span className="text-[9px] uppercase text-slate-400 block">Net PnL</span>
-                  <span className={`text-xs font-bold ${s.total_pnl_usd >= 0 ? "text-profit" : "text-loss"}`}>
+                <div className="p-2 rounded-xl bg-white/[0.03] border border-white/[0.04]">
+                  <span className="text-[9px] uppercase text-white/40 block">Net PnL</span>
+                  <span className={`text-xs font-bold tabular-nums ${s.total_pnl_usd >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
                     +${s.total_pnl_usd.toFixed(1)}
                   </span>
                 </div>
-                <div className="p-1.5 rounded-lg bg-surface-raised/60">
-                  <span className="text-[9px] uppercase text-slate-400 block">Avg / Trade</span>
-                  <span className="text-xs font-bold text-accent">+{s.avg_pnl_bps.toFixed(1)} BPS</span>
+                <div className="p-2 rounded-xl bg-white/[0.03] border border-white/[0.04]">
+                  <span className="text-[9px] uppercase text-white/40 block">Avg / Trade</span>
+                  <span className="text-xs font-bold text-cyan-300 tabular-nums">+{s.avg_pnl_bps.toFixed(1)} BPS</span>
                 </div>
-                <div className="p-1.5 rounded-lg bg-surface-raised/60">
-                  <span className="text-[9px] uppercase text-slate-400 block">Sharpe</span>
-                  <span className="text-xs font-bold text-slate-900">{s.sharpe_ratio.toFixed(2)}</span>
+                <div className="p-2 rounded-xl bg-white/[0.03] border border-white/[0.04]">
+                  <span className="text-[9px] uppercase text-white/40 block">Sharpe</span>
+                  <span className="text-xs font-bold text-white tabular-nums">{s.sharpe_ratio.toFixed(2)}</span>
                 </div>
               </div>
 
-              <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 pt-1">
+              <div className="flex items-center justify-between text-[11px] font-mono text-white/50 pt-1 tabular-nums">
                 <span>Cycles: {s.total_cycles_completed} completed / {s.total_cycles_initiated} tried</span>
                 <span>MDD: ${s.max_drawdown_usd.toFixed(1)} ({s.max_drawdown_pct.toFixed(2)}%)</span>
                 <span>APR: {s.annualized_apr_pct.toFixed(0)}%</span>
@@ -252,22 +254,22 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
       </div>
 
       {/* Built-in Algorithmic Calibration Toolkit (WFO) */}
-      <div className="p-5 bg-surface border border-surface-border rounded-2xl shadow-xs space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-surface-border pb-3">
+      <div className="p-5 glass-panel border border-white/[0.08] rounded-2xl shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/[0.08] pb-3">
           <div className="flex items-center space-x-2.5">
-            <div className="p-2 rounded-xl bg-accent-dim border border-accent-line text-accent">
+            <div className="p-2 rounded-xl bg-cyan-500/15 border border-cyan-500/30 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.2)]">
               <Cpu className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-sm font-bold font-mono text-slate-900">
+                <h3 className="text-sm font-bold font-mono text-white">
                   Algorithmic Walk-Forward Calibration Toolkit
                 </h3>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-blue-50 text-accent border border-blue-200">
+                <span className="chip chip-info text-[10px]">
                   Active for: {activeSymbol}
                 </span>
               </div>
-              <p className="text-xs text-slate-500 font-mono mt-0.5">
+              <p className="text-xs text-white/50 font-mono mt-0.5">
                 Evaluates candidate spread estimators (SMA, EMA, WMA, VWMA, SMMA) across quote update windows
               </p>
             </div>
@@ -276,7 +278,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           <button
             onClick={runCalibration}
             disabled={calibrating}
-            className="px-4 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0"
+            className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-[0_0_16px_rgba(34,211,238,0.25)] flex items-center space-x-2 shrink-0"
           >
             <Sliders className={`w-3.5 h-3.5 ${calibrating ? "animate-spin" : ""}`} />
             <span>{calibrating ? "Optimizing..." : `Run WFO for ${activeSymbol}`}</span>
@@ -286,56 +288,56 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         {wfoResult && (
           <div className="space-y-4 pt-1">
             {/* Recommendation Highlight Box */}
-            <div className="p-4 rounded-xl bg-blue-50/70 border border-blue-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="p-4 rounded-xl glass-panel bg-gradient-to-r from-cyan-500/10 via-indigo-500/10 to-transparent border border-cyan-500/25 flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-[0_0_20px_rgba(34,211,238,0.06)]">
               <div className="flex items-start space-x-3">
-                <CheckCircle2 className="w-5 h-5 text-accent shrink-0 mt-0.5" />
+                <CheckCircle2 className="w-5 h-5 text-cyan-300 shrink-0 mt-0.5" />
                 <div>
                   <div className="flex items-center space-x-2">
-                    <span className="text-xs font-bold font-mono text-slate-900">
+                    <span className="text-xs font-bold font-mono text-cyan-300">
                       Optimal Estimator: {wfoResult.optimal_estimator} ({wfoResult.optimal_window_size} Quote Updates)
                     </span>
-                    <span className="px-2 py-0.2 rounded text-[10px] font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    <span className="chip chip-pos text-[10px] font-bold tabular-nums">
                       OOS Sharpe: {wfoResult.out_of_sample_score.toFixed(2)}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-600 mt-1">{wfoResult.recommendation_notes}</p>
+                  <p className="text-xs text-white/70 mt-1 leading-relaxed">{wfoResult.recommendation_notes}</p>
                 </div>
               </div>
 
-              <div className="flex items-center space-x-3 shrink-0 text-xs font-mono">
+              <div className="flex items-center space-x-4 shrink-0 text-xs font-mono">
                 <div className="text-right">
-                  <span className="text-[10px] text-slate-400 block uppercase">In-Sample Sharpe</span>
-                  <span className="font-bold text-slate-900">{wfoResult.in_sample_score.toFixed(2)}</span>
+                  <span className="text-[10px] text-white/40 block uppercase">In-Sample Sharpe</span>
+                  <span className="font-bold text-white tabular-nums">{wfoResult.in_sample_score.toFixed(2)}</span>
                 </div>
                 <div className="text-right">
-                  <span className="text-[10px] text-slate-400 block uppercase">Out-of-Sample</span>
-                  <span className="font-bold text-accent">{wfoResult.out_of_sample_score.toFixed(2)}</span>
+                  <span className="text-[10px] text-white/40 block uppercase">Out-of-Sample</span>
+                  <span className="font-bold text-cyan-300 tabular-nums">{wfoResult.out_of_sample_score.toFixed(2)}</span>
                 </div>
               </div>
             </div>
 
             {/* Candidate Estimators Table */}
-            <div className="border border-surface-border rounded-xl overflow-hidden">
-              <div className="bg-surface-raised px-4 py-2 border-b border-surface-border">
-                <span className="text-xs font-bold font-mono text-slate-800">
+            <div className="border border-white/[0.08] rounded-xl overflow-hidden glass-panel">
+              <div className="bg-white/[0.04] px-4 py-2.5 border-b border-white/[0.08]">
+                <span className="text-xs font-bold font-mono text-white/90">
                   Walk-Forward Evaluation Matrix (60% Calibration / 40% Validation)
                 </span>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs font-mono text-left">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-surface-border text-[10px] uppercase">
+                  <thead className="bg-white/[0.02] text-white/40 border-b border-white/[0.06] text-[10px] uppercase tracking-wider">
                     <tr>
-                      <th className="px-4 py-2 font-semibold">Estimator Variant</th>
-                      <th className="px-3 py-2 font-semibold">Window (Ticks)</th>
-                      <th className="px-3 py-2 font-semibold">In-Sample Sharpe</th>
-                      <th className="px-3 py-2 font-semibold">OOS Sharpe</th>
-                      <th className="px-3 py-2 font-semibold">Tracking Err (BPS)</th>
-                      <th className="px-3 py-2 font-semibold">Sim. Net Profit</th>
-                      <th className="px-3 py-2 font-semibold">Win Rate</th>
-                      <th className="px-3 py-2 font-semibold">Trades</th>
+                      <th className="px-4 py-2.5 font-semibold">Estimator Variant</th>
+                      <th className="px-3 py-2.5 font-semibold">Window (Ticks)</th>
+                      <th className="px-3 py-2.5 font-semibold">In-Sample Sharpe</th>
+                      <th className="px-3 py-2.5 font-semibold">OOS Sharpe</th>
+                      <th className="px-3 py-2.5 font-semibold">Tracking Err (BPS)</th>
+                      <th className="px-3 py-2.5 font-semibold">Sim. Net Profit</th>
+                      <th className="px-3 py-2.5 font-semibold">Win Rate</th>
+                      <th className="px-3 py-2.5 font-semibold">Trades</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-surface-border">
+                  <tbody className="divide-y divide-white/[0.06]">
                     {wfoResult.candidate_evaluations.map((c, idx) => {
                       const isTop =
                         c.estimator === wfoResult.optimal_estimator &&
@@ -344,12 +346,14 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
                         <tr
                           key={idx}
                           className={`${
-                            isTop ? "bg-blue-50/50 font-semibold" : "hover:bg-slate-50/60"
-                          } transition`}
+                            isTop
+                              ? "bg-cyan-500/10 border-l-2 border-cyan-400 font-semibold text-white"
+                              : "hover:bg-white/[0.03] text-white/80"
+                          } transition tabular-nums`}
                         >
-                          <td className="px-4 py-2 flex items-center space-x-2">
-                            {isTop && <Award className="w-3.5 h-3.5 text-accent" />}
-                            <span>
+                          <td className="px-4 py-2.5 flex items-center space-x-2">
+                            {isTop && <Award className="w-3.5 h-3.5 text-cyan-400" />}
+                            <span className={isTop ? "text-cyan-300 font-bold" : "text-white"}>
                               {c.estimator === "VWMA"
                                 ? "VWMA (Depth-Weighted)"
                                 : c.estimator === "SMMA"
@@ -357,17 +361,17 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
                                 : c.estimator}
                             </span>
                           </td>
-                          <td className="px-3 py-2">{c.window_size}</td>
-                          <td className="px-3 py-2">{c.in_sample_sharpe.toFixed(2)}</td>
-                          <td className="px-3 py-2">
-                            <span className={c.out_of_sample_sharpe > 2.0 ? "text-profit font-bold" : ""}>
+                          <td className="px-3 py-2.5">{c.window_size}</td>
+                          <td className="px-3 py-2.5">{c.in_sample_sharpe.toFixed(2)}</td>
+                          <td className="px-3 py-2.5">
+                            <span className={c.out_of_sample_sharpe > 2.0 ? "text-emerald-400 font-bold" : ""}>
                               {c.out_of_sample_sharpe.toFixed(2)}
                             </span>
                           </td>
-                          <td className="px-3 py-2">{c.tracking_error_bps.toFixed(2)}</td>
-                          <td className="px-3 py-2 text-profit font-bold">+{c.simulated_net_profit_bps.toFixed(1)} BPS</td>
-                          <td className="px-3 py-2">{c.win_rate_pct.toFixed(1)}%</td>
-                          <td className="px-3 py-2">{c.total_trades}</td>
+                          <td className="px-3 py-2.5">{c.tracking_error_bps.toFixed(2)}</td>
+                          <td className="px-3 py-2.5 text-emerald-400 font-bold">+{c.simulated_net_profit_bps.toFixed(1)} BPS</td>
+                          <td className="px-3 py-2.5">{c.win_rate_pct.toFixed(1)}%</td>
+                          <td className="px-3 py-2.5">{c.total_trades}</td>
                         </tr>
                       );
                     })}

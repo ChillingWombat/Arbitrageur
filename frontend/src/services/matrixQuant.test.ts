@@ -398,6 +398,6 @@ test("buildCrossVenueMatrix incorporates target profit, nominal hurdle, and Doub
   assert.equal(cellDouble.isExecutable, true);
 
   const unwindVisuals = getMatrixCellVisuals(cellDouble, 5.0);
-  assert.ok(unwindVisuals.bgClass.includes("blue"));
-  assert.ok(unwindVisuals.highlightRing.includes("blue"));
+  assert.ok(unwindVisuals.bgClass.includes("cyan") || unwindVisuals.bgClass.includes("blue"));
+  assert.ok(unwindVisuals.highlightRing.includes("cyan") || unwindVisuals.highlightRing.includes("blue"));
 });
