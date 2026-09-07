@@ -150,90 +150,72 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
         </div>
       </div>
 
-      {/* 4-Venue Orderbook Comparison Grid */}
+      {/* 4-Venue Market Quotes Grid (Top of Book) */}
       <div>
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-3 flex items-center justify-between">
-          <span>Cross-Venue L2 Orderbook Depth & VWAP</span>
-          <span className="text-slate-400 font-normal lowercase">calculated with benchmark size: {orderQty} {symbol.split("-")[0]}</span>
-        </h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 font-semibold">
+            Venue Market Quotes (Top of Book)
+          </h3>
+          <span className="text-[11px] font-mono text-slate-400">
+            Target: {symbol}
+          </span>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {orderbooks.map((book) => {
             const spreadColor = book.spread_bps < 10 ? "text-profit" : "text-warn";
+            const topBidSize = book.bids.length > 0 ? book.bids[0][1] : 0;
+            const topAskSize = book.asks.length > 0 ? book.asks[0][1] : 0;
+
             return (
               <div
                 key={book.venue_id}
                 className="bg-surface border border-surface-border rounded-xl p-4 flex flex-col justify-between hover:border-slate-300 transition shadow-xs"
               >
-                <div>
-                  {/* Card Header */}
-                  <div className="flex items-center justify-between border-b border-surface-border pb-2 mb-3">
-                    <div>
-                      <span className="font-mono text-xs font-bold text-slate-900">{book.venue_name}</span>
-                      <div className="text-[10px] font-mono text-slate-500">
-                        8h Funding: {(book.funding_rate_8h_pct).toFixed(4)}%
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <span className="text-[10px] font-mono text-slate-500">Spread:</span>{" "}
-                      <span className={`font-mono text-xs font-semibold ${spreadColor}`}>
-                        {book.spread_bps.toFixed(1)} BPS
-                      </span>
+                {/* Header: Venue Name, Funding & Spread */}
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5 mb-3">
+                  <div>
+                    <span className="font-mono text-xs font-bold text-slate-900">{book.venue_name}</span>
+                    <div className="text-[10px] font-mono text-slate-500 mt-0.5">
+                      8h Funding: {(book.funding_rate_8h_pct).toFixed(4)}%
                     </div>
                   </div>
-
-                  {/* Asks (Red) */}
-                  <div className="space-y-1 mb-2">
-                    <div className="text-[10px] font-mono text-slate-400 flex justify-between px-1">
-                      <span>ASK (SELL)</span>
-                      <span>SIZE</span>
-                    </div>
-                    {book.asks.slice(0, 3).reverse().map(([price, size], idx) => {
-                      const widthPct = Math.min(100, (size / (book.total_ask_depth || 1)) * 100);
-                      return (
-                        <div key={idx} className="relative flex justify-between text-xs font-mono px-2 py-0.5 rounded overflow-hidden">
-                          <div
-                            className="absolute inset-y-0 right-0 bg-loss-dim"
-                            style={{ width: `${widthPct}%` }}
-                          />
-                          <span className="text-loss font-medium relative z-10">{formatCurrencyPrice(price)}</span>
-                          <span className="text-slate-500 relative z-10">{size.toFixed(3)}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* Mid / VWAP Bar */}
-                  <div className="py-1.5 my-1 px-2 rounded bg-surface-raised border border-surface-border text-center font-mono text-[11px] flex justify-between items-center">
-                    <span className="text-slate-600">Mid: {formatCurrencyPrice(book.mid_price)}</span>
-                    <span className="text-accent font-medium text-[10px]">VWAP: {formatCurrencyPrice(book.vwap_ask)}</span>
-                  </div>
-
-                  {/* Bids (Green) */}
-                  <div className="space-y-1">
-                    <div className="text-[10px] font-mono text-slate-400 flex justify-between px-1">
-                      <span>BID (BUY)</span>
-                      <span>SIZE</span>
-                    </div>
-                    {book.bids.slice(0, 3).map(([price, size], idx) => {
-                      const widthPct = Math.min(100, (size / (book.total_bid_depth || 1)) * 100);
-                      return (
-                        <div key={idx} className="relative flex justify-between text-xs font-mono px-2 py-0.5 rounded overflow-hidden">
-                          <div
-                            className="absolute inset-y-0 right-0 bg-profit-dim"
-                            style={{ width: `${widthPct}%` }}
-                          />
-                          <span className="text-profit font-medium relative z-10">{formatCurrencyPrice(price)}</span>
-                          <span className="text-slate-500 relative z-10">{size.toFixed(3)}</span>
-                        </div>
-                      );
-                    })}
+                  <div className="text-right">
+                    <span className="text-[10px] font-mono text-slate-400">Spread:</span>{" "}
+                    <span className={`font-mono text-xs font-semibold ${spreadColor}`}>
+                      {book.spread_bps.toFixed(1)} BPS
+                    </span>
                   </div>
                 </div>
 
-                {/* Best B/A Summary Footer */}
-                <div className="mt-4 pt-2 border-t border-surface-border text-[10px] font-mono text-slate-500 flex justify-between">
-                  <span>Best: {formatCurrencyPrice(book.best_bid)}</span>
-                  <span>{formatCurrencyPrice(book.best_ask)}</span>
+                {/* Compact Best Bid / Best Ask Box */}
+                <div className="grid grid-cols-2 gap-2 bg-surface-raised p-2.5 rounded-lg border border-surface-border mb-3">
+                  {/* Bid (Buy) */}
+                  <div>
+                    <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wide flex justify-between">
+                      <span>Bid (Buy)</span>
+                      <span className="text-slate-500">{topBidSize > 0 ? topBidSize.toFixed(2) : ""}</span>
+                    </div>
+                    <div className="text-sm font-mono font-bold text-profit mt-1">
+                      {formatCurrencyPrice(book.best_bid)}
+                    </div>
+                  </div>
+
+                  {/* Ask (Sell) */}
+                  <div className="border-l border-surface-border pl-2.5">
+                    <div className="text-[10px] font-mono text-slate-400 uppercase tracking-wide flex justify-between">
+                      <span>Ask (Sell)</span>
+                      <span className="text-slate-500">{topAskSize > 0 ? topAskSize.toFixed(2) : ""}</span>
+                    </div>
+                    <div className="text-sm font-mono font-bold text-loss mt-1">
+                      {formatCurrencyPrice(book.best_ask)}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Footer: Mid Price */}
+                <div className="pt-2 border-t border-surface-border text-[11px] font-mono text-slate-500 flex justify-between items-center">
+                  <span>Mid Price</span>
+                  <span className="font-semibold text-slate-700">{formatCurrencyPrice(book.mid_price)}</span>
                 </div>
               </div>
             );
