@@ -2,6 +2,7 @@ import type {
   VenueOrderBookDto,
   MatrixCellDto,
   SlidingWindowOption,
+  TickerStrategyConfigDto,
 } from "../types";
 import type { PerpTicker } from "../types/tickers";
 
@@ -23,6 +24,8 @@ export interface WindowStats {
   meanNetBps: number;
   deltaBps: number;
   sampleCount: number;
+  percentileNetBps: number;
+  percentileGrossBps: number;
 }
 
 /**
@@ -99,15 +102,50 @@ export class RollingSpreadTracker {
   }
 
   /**
-   * Computes baseline mean and difference (delta BPS) for a given sliding window.
+   * Computes baseline mean, delta BPS, and percentile values for a given sliding window.
+   * Enforces percentile >= 50% (50% is median baseline) up to 99.9%.
    */
-  public getStats(pairKey: string, currentNetBps: number, windowSeconds: number, now = Date.now()): WindowStats {
+  public getStats(
+    pairKey: string,
+    currentNetBps: number,
+    windowSeconds: number,
+    nowOrPercentile: number = Date.now(),
+    percentileOrNow?: number
+  ): WindowStats {
+    let now = Date.now();
+    let percentile = 50;
+
+    // Support both (pairKey, currentNetBps, windowSeconds, now, percentile)
+    // and (pairKey, currentNetBps, windowSeconds, percentile, now)
+    if (typeof percentileOrNow === "number") {
+      if (nowOrPercentile > 1000) {
+        now = nowOrPercentile;
+        percentile = percentileOrNow;
+      } else {
+        percentile = nowOrPercentile;
+        now = percentileOrNow;
+      }
+    } else {
+      if (nowOrPercentile > 1000) {
+        now = nowOrPercentile;
+        percentile = 50;
+      } else {
+        percentile = nowOrPercentile;
+        now = Date.now();
+      }
+    }
+
+    // Strictly clamp percentile to [50%, 99.9%]
+    const clampedPercentile = Math.max(50, Math.min(99.9, percentile));
+
     const samples = this.history.get(pairKey);
     if (!samples || samples.length === 0) {
       return {
         meanNetBps: currentNetBps,
         deltaBps: 0.0,
         sampleCount: 1,
+        percentileNetBps: currentNetBps,
+        percentileGrossBps: currentNetBps,
       };
     }
 
@@ -120,6 +158,8 @@ export class RollingSpreadTracker {
         meanNetBps: last.netBps,
         deltaBps: Math.round((currentNetBps - last.netBps) * 100) / 100,
         sampleCount: 1,
+        percentileNetBps: last.netBps,
+        percentileGrossBps: last.grossBps,
       };
     }
 
@@ -130,10 +170,20 @@ export class RollingSpreadTracker {
     const mean = sum / baselineSamples.length;
     const delta = currentNetBps - mean;
 
+    // Compute empirical percentile rank across the sliding window
+    const sortedNet = [...baselineSamples].map((s) => s.netBps).sort((a, b) => a - b);
+    const sortedGross = [...baselineSamples].map((s) => s.grossBps).sort((a, b) => a - b);
+    const pIdx = Math.min(
+      sortedNet.length - 1,
+      Math.max(0, Math.round(((clampedPercentile / 100) * (sortedNet.length - 1))))
+    );
+
     return {
       meanNetBps: Math.round(mean * 100) / 100,
       deltaBps: Math.round(delta * 100) / 100,
       sampleCount: windowSamples.length,
+      percentileNetBps: Math.round(sortedNet[pIdx] * 100) / 100,
+      percentileGrossBps: Math.round(sortedGross[pIdx] * 100) / 100,
     };
   }
 
@@ -177,6 +227,7 @@ export function buildCrossVenueMatrix(
   windowSeconds: number,
   orderQty: number,
   minBps: number,
+  strategyConfig?: Partial<TickerStrategyConfigDto>,
   tracker: RollingSpreadTracker = globalSpreadTracker
 ): {
   venues: string[];
@@ -186,6 +237,12 @@ export function buildCrossVenueMatrix(
   const venues = orderbooks.map((b) => b.venue_id);
   const venueLabels = orderbooks.map((b) => getVenueShortLabel(b.venue_name));
   const now = Date.now();
+
+  const targetProfitBps = strategyConfig?.targetProfitBps ?? minBps;
+  const percentile = Math.max(50, strategyConfig?.windowPercentile ?? 50);
+  const executionMode = strategyConfig?.executionMode ?? "SINGLE_WAY";
+  const maxUnits = strategyConfig?.maxAccumulatedUnits ?? 3;
+  const currentUnits = strategyConfig?.currentAccumulatedUnits ?? 0;
 
   const grid: MatrixCellDto[][] = [];
 
@@ -218,6 +275,10 @@ export function buildCrossVenueMatrix(
           orderQty,
           estProfitUsd: 0,
           isExecutable: false,
+          nominalHurdleBps: 0,
+          targetProfitBps,
+          percentileHurdleBps: 0,
+          isConvergenceUnwind: false,
           longVenue: buyBook.venue_name,
           shortVenue: sellBook.venue_name,
           longSymbol: symbol,
@@ -247,17 +308,32 @@ export function buildCrossVenueMatrix(
       const sellSpreadBps = sellBook.spread_bps > 0 ? sellBook.spread_bps : ((sellBook.best_ask - sellBook.best_bid) / sellBook.mid_price) * 10000;
       const closingFrictionBps = Math.max(0.1, buySpreadBps + sellSpreadBps);
 
+      // Nominal hurdle = Round-trip Fees + Closing Spread Friction + Target Profit
+      const nominalHurdleBps = Math.round((feeBps + closingFrictionBps + targetProfitBps) * 100) / 100;
+
       // Net spread BPS after deducting commission and closing spread friction
       const netSpreadBps = grossSpreadBps - feeBps - closingFrictionBps;
 
-      // Record observation and compute sliding window baseline stats
+      // Record observation and compute sliding window baseline stats with percentile filter (min 50%)
       const pairKey = `venue:${symbol}:${rowId}:${colId}`;
       tracker.seedIfEmpty(pairKey, netSpreadBps, grossSpreadBps, now);
       tracker.record(pairKey, netSpreadBps, grossSpreadBps, now);
-      const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, now);
+      const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, percentile, now);
 
       // Estimated dollar profit for order quantity
       const estProfitUsd = ((netSpreadBps / 10000) * longPrice * orderQty);
+
+      // Execution decision:
+      // 1. Divergence Entry: gross spread exceeds nominal hurdle AND net spread meets historical percentile rank
+      //    Plus grid capacity: currentAccumulatedUnits < maxAccumulatedUnits
+      const hasCapacity = currentUnits < maxUnits;
+      const isDivergenceOpportunity = grossSpreadBps >= nominalHurdleBps && netSpreadBps >= stats.percentileNetBps;
+
+      // 2. Double-Way Convergence Unwind:
+      //    When in DOUBLE_WAY mode and units are held (>0), if price difference converges back toward 0 (|grossSpreadBps| <= 2.5 BPS)
+      const isConvergenceUnwind = executionMode === "DOUBLE_WAY" && currentUnits > 0 && Math.abs(grossSpreadBps) <= 2.5;
+
+      const isExecutable = (isDivergenceOpportunity && hasCapacity) || isConvergenceUnwind;
 
       row.push({
         rowId,
@@ -276,7 +352,11 @@ export function buildCrossVenueMatrix(
         sampleCount: stats.sampleCount,
         orderQty,
         estProfitUsd: Math.round(estProfitUsd * 100) / 100,
-        isExecutable: netSpreadBps >= minBps,
+        isExecutable,
+        nominalHurdleBps,
+        targetProfitBps,
+        percentileHurdleBps: stats.percentileGrossBps,
+        isConvergenceUnwind,
         longVenue: buyBook.venue_name,
         shortVenue: sellBook.venue_name,
         longSymbol: symbol,
@@ -312,6 +392,7 @@ export function buildCrossTickerMatrix(
   windowSeconds: number,
   tradeNotionalUsd: number,
   minBps: number,
+  strategyConfig?: Partial<TickerStrategyConfigDto>,
   tracker: RollingSpreadTracker = globalSpreadTracker
 ): {
   symbols: string[];
@@ -321,6 +402,12 @@ export function buildCrossTickerMatrix(
   const symbols = tickers.map((t) => t.symbol);
   const symbolLabels = tickers.map((t) => t.base);
   const now = Date.now();
+
+  const targetProfitBps = strategyConfig?.targetProfitBps ?? minBps;
+  const percentile = Math.max(50, strategyConfig?.windowPercentile ?? 50);
+  const executionMode = strategyConfig?.executionMode ?? "SINGLE_WAY";
+  const maxUnits = strategyConfig?.maxAccumulatedUnits ?? 3;
+  const currentUnits = strategyConfig?.currentAccumulatedUnits ?? 0;
 
   const grid: MatrixCellDto[][] = [];
 
@@ -378,6 +465,10 @@ export function buildCrossTickerMatrix(
           orderQty: 0,
           estProfitUsd: 0,
           isExecutable: false,
+          nominalHurdleBps: 0,
+          targetProfitBps,
+          percentileHurdleBps: 0,
+          isConvergenceUnwind: false,
           longVenue: qLong.bestBuyVenue,
           shortVenue: qShort.bestSellVenue,
           longSymbol: tLong.symbol,
@@ -405,20 +496,28 @@ export function buildCrossTickerMatrix(
       // Closing spread friction: Bid-ask spread required to unwind both positions later
       const closingFrictionBps = Math.max(0.1, qLong.spreadBps + qShort.spreadBps);
 
+      // Nominal hurdle = Round-trip Fees + Closing Spread Friction + Target Profit
+      const nominalHurdleBps = Math.round((feeBps + closingFrictionBps + targetProfitBps) * 100) / 100;
+
       // Net spread BPS
       const netSpreadBps = grossSpreadBps - feeBps - closingFrictionBps;
 
-      // Record observation and compute sliding window stats
+      // Record observation and compute sliding window stats with percentile filter (min 50%)
       const pairKey = `ticker:${rowId}:${colId}`;
       tracker.seedIfEmpty(pairKey, netSpreadBps, grossSpreadBps, now);
       tracker.record(pairKey, netSpreadBps, grossSpreadBps, now);
-      const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, now);
+      const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, percentile, now);
 
       // Estimated dollar profit for the trade notional size
       const estProfitUsd = (netSpreadBps / 10000) * tradeNotionalUsd;
 
       // Order qty for the long asset
       const orderQty = qLong.bestAsk > 0 ? tradeNotionalUsd / qLong.bestAsk : 1.0;
+
+      const hasCapacity = currentUnits < maxUnits;
+      const isDivergenceOpportunity = grossSpreadBps >= nominalHurdleBps && netSpreadBps >= stats.percentileNetBps;
+      const isConvergenceUnwind = executionMode === "DOUBLE_WAY" && currentUnits > 0 && Math.abs(grossSpreadBps) <= 2.5;
+      const isExecutable = (isDivergenceOpportunity && hasCapacity) || isConvergenceUnwind;
 
       row.push({
         rowId,
@@ -437,7 +536,11 @@ export function buildCrossTickerMatrix(
         sampleCount: stats.sampleCount,
         orderQty: Math.round(orderQty * 1000) / 1000,
         estProfitUsd: Math.round(estProfitUsd * 100) / 100,
-        isExecutable: netSpreadBps >= minBps,
+        isExecutable,
+        nominalHurdleBps,
+        targetProfitBps,
+        percentileHurdleBps: stats.percentileGrossBps,
+        isConvergenceUnwind,
         longVenue: qLong.bestBuyVenue,
         shortVenue: qShort.bestSellVenue,
         longSymbol: tLong.symbol,
@@ -451,7 +554,7 @@ export function buildCrossTickerMatrix(
 }
 
 /**
- * Generates heatmap visual styles for a matrix cell based on Net BPS and Δ BPS.
+ * Generates heatmap visual styles for a matrix cell based on Net BPS, Δ BPS, and Convergence Unwind.
  */
 export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
   bgClass: string;
@@ -483,6 +586,18 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
   } else if (delta < -0.05) {
     deltaClass = "text-rose-700 font-bold";
     deltaBadgeBg = "bg-rose-100 text-rose-800 border border-rose-200";
+  }
+
+  // If Double-Way convergence unwind is active
+  if (cell.isConvergenceUnwind) {
+    return {
+      bgClass: "bg-blue-50/90 hover:bg-blue-100 active:bg-blue-200/80",
+      borderClass: "border-blue-400 shadow-xs",
+      textClass: "text-blue-700 font-bold",
+      deltaClass: "text-blue-600 font-semibold",
+      deltaBadgeBg: "bg-blue-100 text-blue-800 border border-blue-200",
+      highlightRing: "ring-2 ring-blue-500/50",
+    };
   }
 
   if (net >= minBps) {

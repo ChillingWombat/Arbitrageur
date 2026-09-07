@@ -13,6 +13,7 @@ import type {
   EngineSettingsDto,
   CrossTickerExecutionParams,
   TickerMarketQuoteDto,
+  TickerStrategyConfigDto,
 } from "../types";
 
 import { PERP_TICKERS } from "../types/tickers";
@@ -906,6 +907,31 @@ class BrowserMockEngine {
     this.isLive = enabled;
     return this.isLive;
   }
+
+  private strategyConfigs = new Map<string, TickerStrategyConfigDto>();
+
+  getTickerStrategyConfig(symbol: string): TickerStrategyConfigDto {
+    const existing = this.strategyConfigs.get(symbol);
+    if (existing) return existing;
+    return {
+      symbol,
+      targetProfitBps: 5.0,
+      windowPercentile: 50,
+      maxAccumulatedUnits: 3,
+      currentAccumulatedUnits: 0,
+      executionMode: "SINGLE_WAY",
+      unitSize: 0.005,
+      userTargetLeverage: 10,
+    };
+  }
+
+  saveTickerStrategyConfig(config: TickerStrategyConfigDto): void {
+    this.strategyConfigs.set(config.symbol, config);
+  }
+
+  getAllTickerStrategyConfigs(): TickerStrategyConfigDto[] {
+    return Array.from(this.strategyConfigs.values());
+  }
 }
 
 const mockEngine = new BrowserMockEngine();
@@ -1099,6 +1125,24 @@ export const api = {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<boolean>("set_live_mode", { enabled });
     return mockEngine.setLiveMode(enabled);
+  },
+
+  async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<TickerStrategyConfigDto>("get_ticker_strategy_config", { symbol });
+    return mockEngine.getTickerStrategyConfig(symbol);
+  },
+
+  async saveTickerStrategyConfig(config: TickerStrategyConfigDto): Promise<void> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<void>("save_ticker_strategy_config", { config });
+    return mockEngine.saveTickerStrategyConfig(config);
+  },
+
+  async getAllTickerStrategyConfigs(): Promise<TickerStrategyConfigDto[]> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<TickerStrategyConfigDto[]>("get_all_ticker_strategy_configs");
+    return mockEngine.getAllTickerStrategyConfigs();
   },
 };
 

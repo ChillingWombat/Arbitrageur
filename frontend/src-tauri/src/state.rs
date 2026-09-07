@@ -32,6 +32,33 @@ pub struct ExecutionLogEntry {
     pub note: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct TickerStrategyConfigDto {
+    pub symbol: String,
+    pub target_profit_bps: f64,
+    pub window_percentile: u32,
+    pub max_accumulated_units: u32,
+    pub current_accumulated_units: u32,
+    pub execution_mode: String, // "SINGLE_WAY" or "DOUBLE_WAY"
+    pub unit_size: f64,
+    pub user_target_leverage: u32,
+}
+
+impl Default for TickerStrategyConfigDto {
+    fn default() -> Self {
+        Self {
+            symbol: "BTC-USDC".into(),
+            target_profit_bps: 5.0,
+            window_percentile: 50,
+            max_accumulated_units: 3,
+            current_accumulated_units: 0,
+            execution_mode: "SINGLE_WAY".into(),
+            unit_size: 0.005,
+            user_target_leverage: 10,
+        }
+    }
+}
+
 fn default_hsm_url() -> String { "http://127.0.0.1:8787/sign".into() }
 fn default_hmac_token() -> String { "••••••••••••••••••••••••".into() }
 fn default_max_slippage() -> f64 { 15.0 }
@@ -164,6 +191,7 @@ pub struct AppEngineState {
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
     pub sim_step_counter: RwLock<usize>,
     pub settings: RwLock<EngineSettingsDto>,
+    pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
 }
 
 impl AppEngineState {
@@ -388,6 +416,7 @@ impl AppEngineState {
             execution_logs: RwLock::new(initial_logs),
             sim_step_counter: RwLock::new(8),
             settings,
+            strategy_configs: RwLock::new(std::collections::HashMap::new()),
         }
     }
 

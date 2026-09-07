@@ -99,6 +99,7 @@ test("buildCrossVenueMatrix produces real 2D matrix with deductions and sliding 
     60,
     0.5,
     5.0,
+    undefined,
     tracker
   );
 
@@ -177,6 +178,7 @@ test("buildCrossTickerMatrix produces 2D matrix with relative value quant calcul
     60,
     25000,
     5.0,
+    undefined,
     tracker
   );
 
@@ -278,4 +280,124 @@ test("getMatrixCellVisuals assigns proper heatmap classes and highlights", () =>
   }, 5.0);
   assert.ok(negVisual.bgClass.includes("rose"));
   assert.ok(negVisual.deltaClass.includes("rose"));
+});
+
+test("RollingSpreadTracker enforces minimum 50% percentile and computes empirical ranks", () => {
+  const tracker = new RollingSpreadTracker();
+  const pairKey = "pair:percentile:test";
+  const now = 2_000_000;
+
+  // Add 10 samples with net spreads: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10
+  for (let i = 1; i <= 10; i++) {
+    tracker.record(pairKey, i, i + 5, now - 50_000 + i * 2000);
+  }
+
+  // Request 20% percentile -> Must clamp to 50% (median)
+  const statsClamped = tracker.getStats(pairKey, 10, 60, 20, now);
+  // Median (50th percentile) of 1..10 is approx index 5 -> value 6
+  assert.ok(statsClamped.percentileNetBps >= 5);
+
+  // Request 90% percentile
+  const stats90 = tracker.getStats(pairKey, 10, 60, 90, now);
+  assert.ok(stats90.percentileNetBps >= 9);
+  assert.ok(stats90.percentileGrossBps >= 14);
+});
+
+test("buildCrossVenueMatrix incorporates target profit, nominal hurdle, and Double-Way convergence unwind", () => {
+  const books: VenueOrderBookDto[] = [
+    {
+      venue_id: "hyperliquid",
+      venue_name: "Hyperliquid",
+      symbol: "ETH-USDC",
+      best_bid: 3400.0,
+      best_ask: 3401.0,
+      spread: 1.0,
+      spread_bps: 2.94,
+      mid_price: 3400.5,
+      total_bid_depth: 50.0,
+      total_ask_depth: 50.0,
+      vwap_bid: 3400.0,
+      vwap_ask: 3401.0,
+      funding_rate_8h_pct: 0.01,
+      bids: [[3400.0, 10.0]],
+      asks: [[3401.0, 10.0]],
+    },
+    {
+      venue_id: "lighter",
+      venue_name: "Lighter",
+      symbol: "ETH-USDC",
+      best_bid: 3410.0,
+      best_ask: 3411.0,
+      spread: 1.0,
+      spread_bps: 2.93,
+      mid_price: 3410.5,
+      total_bid_depth: 40.0,
+      total_ask_depth: 40.0,
+      vwap_bid: 3410.0,
+      vwap_ask: 3411.0,
+      funding_rate_8h_pct: 0.01,
+      bids: [[3410.0, 10.0]],
+      asks: [[3411.0, 10.0]],
+    },
+  ];
+
+  const tracker = new RollingSpreadTracker();
+
+  // Test 1: Single-Way with Target Profit 6.0 BPS
+  const resSingle = buildCrossVenueMatrix(
+    "ETH-USDC",
+    books,
+    60,
+    1.0,
+    5.0,
+    {
+      targetProfitBps: 6.0,
+      windowPercentile: 75,
+      maxAccumulatedUnits: 3,
+      currentAccumulatedUnits: 0,
+      executionMode: "SINGLE_WAY",
+      unitSize: 1.0,
+      userTargetLeverage: 10,
+    },
+    tracker
+  );
+
+  const cell01 = resSingle.grid[0][1];
+  assert.equal(cell01.targetProfitBps, 6.0);
+  // feeBps = 2 * (HL 2.0 + LGT 1.5) = 7.0
+  // closingFrictionBps ≈ 2.94 + 2.93 ≈ 5.87
+  // nominalHurdle = 7.0 + 5.87 + 6.0 = 18.87
+  assert.ok(cell01.nominalHurdleBps !== undefined && cell01.nominalHurdleBps > 18.0);
+
+  // Test 2: Double-Way Mode with open position (units = 1) and spread converged (tight books)
+  const tightBooks: VenueOrderBookDto[] = [
+    { ...books[0], best_bid: 3400.0, best_ask: 3400.1, spread_bps: 0.29 },
+    { ...books[1], best_bid: 3400.1, best_ask: 3400.2, spread_bps: 0.29 },
+  ];
+
+  const resDouble = buildCrossVenueMatrix(
+    "ETH-USDC",
+    tightBooks,
+    60,
+    1.0,
+    5.0,
+    {
+      targetProfitBps: 5.0,
+      windowPercentile: 50,
+      maxAccumulatedUnits: 3,
+      currentAccumulatedUnits: 1, // Currently held position
+      executionMode: "DOUBLE_WAY",
+      unitSize: 1.0,
+      userTargetLeverage: 10,
+    },
+    tracker
+  );
+
+  const cellDouble = resDouble.grid[0][1];
+  assert.equal(cellDouble.isConvergenceUnwind, true);
+  assert.equal(cellDouble.isExecutable, true);
+
+  const unwindVisuals = getMatrixCellVisuals(cellDouble, 5.0);
+  assert.ok(unwindVisuals.bgClass.includes("blue"));
+  assert.ok(unwindVisuals.highlightRing.includes("blue"));
 });

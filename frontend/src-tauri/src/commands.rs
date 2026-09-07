@@ -13,7 +13,7 @@ use arbitrager_execution::coordinator::ArbitrageExecutionResult;
 use arbitrager_strategy::spatial_price_arb::SpatialPriceArbStrategy;
 use arbitrager_strategy::funding_rate_arb::FundingRateArbStrategy;
 use arbitrager_strategy::prediction_market_arb::PredictionMarketArbStrategy;
-use crate::state::{AppEngineState, EngineSettingsDto, ExecutionLogEntry};
+use crate::state::{AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemStatusDto {
@@ -1623,6 +1623,60 @@ pub async fn save_engine_settings(
     save_engine_settings_impl(settings, &state)
 }
 
+pub fn get_ticker_strategy_config_impl(symbol: &str, state: &AppEngineState) -> Result<TickerStrategyConfigDto, String> {
+    let configs = state.strategy_configs.read();
+    if let Some(cfg) = configs.get(symbol) {
+        Ok(cfg.clone())
+    } else {
+        let mut def = TickerStrategyConfigDto::default();
+        def.symbol = symbol.to_string();
+        Ok(def)
+    }
+}
+
+pub fn save_ticker_strategy_config_impl(config: TickerStrategyConfigDto, state: &AppEngineState) -> Result<(), String> {
+    if config.target_profit_bps <= 0.0 {
+        return Err("target_profit_bps must be positive".into());
+    }
+    if config.window_percentile < 50 {
+        return Err("window_percentile must be at least 50%".into());
+    }
+    if config.max_accumulated_units < 1 {
+        return Err("max_accumulated_units must be at least 1".into());
+    }
+    let mut configs = state.strategy_configs.write();
+    configs.insert(config.symbol.clone(), config);
+    Ok(())
+}
+
+pub fn get_all_ticker_strategy_configs_impl(state: &AppEngineState) -> Result<Vec<TickerStrategyConfigDto>, String> {
+    let configs = state.strategy_configs.read();
+    Ok(configs.values().cloned().collect())
+}
+
+#[tauri::command]
+pub async fn get_ticker_strategy_config(
+    symbol: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<TickerStrategyConfigDto, String> {
+    get_ticker_strategy_config_impl(&symbol, &state)
+}
+
+#[tauri::command]
+pub async fn save_ticker_strategy_config(
+    config: TickerStrategyConfigDto,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    save_ticker_strategy_config_impl(config, &state)
+}
+
+#[tauri::command]
+pub async fn get_all_ticker_strategy_configs(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<TickerStrategyConfigDto>, String> {
+    get_all_ticker_strategy_configs_impl(&state)
+}
+
 // ---------------------------------------------------------------------------
 // Unit Tests (deep verification of all command business logic and edge cases)
 // ---------------------------------------------------------------------------
@@ -1961,5 +2015,50 @@ mod tests {
             assert!(!q.best_buy_venue.is_empty());
             assert!(!q.best_sell_venue.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn test_ticker_strategy_config_crud_and_validation() {
+        let state = AppEngineState::new();
+
+        // 1. Initial query for non-existing returns default with correct symbol
+        let def = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("default config");
+        assert_eq!(def.symbol, "BTC-USDC");
+        assert_eq!(def.target_profit_bps, 5.0);
+        assert_eq!(def.window_percentile, 50);
+        assert_eq!(def.execution_mode, "SINGLE_WAY");
+
+        // 2. Validation: window_percentile must be >= 50
+        let invalid_percentile = TickerStrategyConfigDto {
+            window_percentile: 40,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(invalid_percentile, &state).is_err());
+
+        // 3. Save valid updated config
+        let updated = TickerStrategyConfigDto {
+            symbol: "BTC-USDC".into(),
+            target_profit_bps: 8.5,
+            window_percentile: 80,
+            max_accumulated_units: 5,
+            current_accumulated_units: 1,
+            execution_mode: "DOUBLE_WAY".into(),
+            unit_size: 0.01,
+            user_target_leverage: 15,
+        };
+        assert!(save_ticker_strategy_config_impl(updated.clone(), &state).is_ok());
+
+        // 4. Retrieve saved config
+        let retrieved = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("retrieved config");
+        assert_eq!(retrieved.target_profit_bps, 8.5);
+        assert_eq!(retrieved.window_percentile, 80);
+        assert_eq!(retrieved.max_accumulated_units, 5);
+        assert_eq!(retrieved.execution_mode, "DOUBLE_WAY");
+        assert_eq!(retrieved.unit_size, 0.01);
+
+        // 5. Query all
+        let all = get_all_ticker_strategy_configs_impl(&state).expect("all configs");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].symbol, "BTC-USDC");
     }
 }

@@ -19,6 +19,7 @@ import type {
   RiskOverviewDto,
   ExecutionLogEntry,
   CrossTickerExecutionParams,
+  TickerStrategyConfigDto,
 } from "./types";
 
 import { PERP_TICKERS, getDefaultOrderQty } from "./types/tickers";
@@ -32,6 +33,7 @@ export const App: React.FC = () => {
   const [predictionOpps, setPredictionOpps] = useState<PredictionOpportunityDto[]>([]);
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
   const [executionLogs, setExecutionLogs] = useState<ExecutionLogEntry[]>([]);
+  const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(new Map());
 
   const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
@@ -45,7 +47,7 @@ export const App: React.FC = () => {
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
-      const [status, books, spatial, funding, prediction, risk, logs] = await Promise.all([
+      const [status, books, spatial, funding, prediction, risk, logs, configs] = await Promise.all([
         api.getSystemStatus(),
         api.fetchOrderbooks(selectedSymbol),
         api.scanSpatialOpportunities(selectedSymbol, minBps, qty),
@@ -53,6 +55,7 @@ export const App: React.FC = () => {
         api.scanPredictionOpportunities(""),
         api.getRiskOverview(),
         api.getExecutionLogs(),
+        api.getAllTickerStrategyConfigs(),
       ]);
 
       setSystemStatus(status);
@@ -62,6 +65,16 @@ export const App: React.FC = () => {
       setPredictionOpps(prediction);
       setRiskData(risk);
       setExecutionLogs(logs);
+
+      if (configs && configs.length > 0) {
+        setStrategyConfigs((prev) => {
+          const next = new Map(prev);
+          for (const c of configs) {
+            next.set(c.symbol, c);
+          }
+          return next;
+        });
+      }
     } catch (err) {
       console.error("Failed to refresh market data:", err);
     } finally {
@@ -142,6 +155,7 @@ export const App: React.FC = () => {
           selectedSymbol={selectedSymbol}
           onSelectTicker={setSelectedSymbol}
           executionLogs={executionLogs}
+          strategyConfigs={strategyConfigs}
         />
 
         {/* Workspace Content Pane */}

@@ -21,6 +21,7 @@ import type {
   SlidingWindowOption,
   MatrixCellDto,
   CrossTickerExecutionParams,
+  TickerStrategyConfigDto,
 } from "../types";
 import {
   PERP_TICKERS,
@@ -38,6 +39,8 @@ import {
   globalSpreadTracker,
   type TickerMarketQuote,
 } from "../services/matrixQuant";
+import { getMinCompatibleSize } from "../services/contractSpecs";
+import { TickerStrategyBar } from "./TickerStrategyBar";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
@@ -91,6 +94,63 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
   // Multi-ticker quotes state for Cross-Ticker matrix
   const [tickerQuotesMap, setTickerQuotesMap] = useState<Map<string, TickerMarketQuote>>(new Map());
+
+  // Per-ticker quantitative strategy configurations
+  const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(() => new Map());
+
+  const currentStrategyConfig: TickerStrategyConfigDto = useMemo(() => {
+    const existing = strategyConfigs.get(symbol);
+    if (existing) return existing;
+
+    const minLot = getMinCompatibleSize(symbol, activeTicker.venues, activeTicker.basePrice).minCompatibleSize;
+    return {
+      symbol,
+      targetProfitBps: minBps,
+      windowPercentile: 50,
+      maxAccumulatedUnits: 3,
+      currentAccumulatedUnits: 0,
+      executionMode: "SINGLE_WAY",
+      unitSize: minLot,
+      userTargetLeverage: 10,
+    };
+  }, [symbol, strategyConfigs, activeTicker.venues, activeTicker.basePrice, minBps]);
+
+  const handleUpdateStrategyConfig = (newCfg: TickerStrategyConfigDto) => {
+    setStrategyConfigs((prev) => {
+      const next = new Map(prev);
+      next.set(newCfg.symbol, newCfg);
+      return next;
+    });
+    setMinBps(newCfg.targetProfitBps);
+    setOrderQty(newCfg.unitSize);
+    api.saveTickerStrategyConfig(newCfg).catch((err) => {
+      console.warn("Failed to persist ticker strategy config:", err);
+    });
+  };
+
+  // Load persisted strategy config for active symbol on select
+  useEffect(() => {
+    let isMounted = true;
+    api
+      .getTickerStrategyConfig(symbol)
+      .then((cfg) => {
+        if (isMounted && cfg) {
+          setStrategyConfigs((prev) => {
+            const next = new Map(prev);
+            next.set(symbol, cfg);
+            return next;
+          });
+          setMinBps(cfg.targetProfitBps);
+          setOrderQty(cfg.unitSize);
+        }
+      })
+      .catch((err) => {
+        console.warn("Failed to fetch ticker strategy config:", err);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [symbol]);
 
   // Sync benchmark order quantity when active asset changes
   useEffect(() => {
@@ -214,9 +274,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       windowSeconds,
       orderQty,
       minBps,
+      currentStrategyConfig,
       globalSpreadTracker
     );
-  }, [symbol, orderbooks, windowSeconds, orderQty, minBps]);
+  }, [symbol, orderbooks, windowSeconds, orderQty, minBps, currentStrategyConfig]);
 
   // Build Cross-Ticker Matrix
   const crossTickerMatrix = useMemo(() => {
@@ -227,9 +288,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       windowSeconds,
       tradeNotional,
       minBps,
+      currentStrategyConfig,
       globalSpreadTracker
     );
-  }, [activeCrossTickers, tickerQuotesMap, windowSeconds, orderQty, activeTicker.basePrice, minBps]);
+  }, [activeCrossTickers, tickerQuotesMap, windowSeconds, orderQty, activeTicker.basePrice, minBps, currentStrategyConfig]);
 
   // Derive selected cell cleanly from selectedPair coordinates and current active matrix grid
   const selectedCell = useMemo<MatrixCellDto | null>(() => {
@@ -269,9 +331,26 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           is_executable: cell.isExecutable,
         };
         await onExecuteTrade(opp);
+
+        // Update accumulated units
+        if (cell.isConvergenceUnwind) {
+          handleUpdateStrategyConfig({
+            ...currentStrategyConfig,
+            currentAccumulatedUnits: Math.max(0, currentStrategyConfig.currentAccumulatedUnits - 1),
+          });
+        } else {
+          handleUpdateStrategyConfig({
+            ...currentStrategyConfig,
+            currentAccumulatedUnits: Math.min(
+              currentStrategyConfig.maxAccumulatedUnits,
+              currentStrategyConfig.currentAccumulatedUnits + 1
+            ),
+          });
+        }
+
         setExecutionResult({
           success: true,
-          message: `Filled atomically! Buy ${cell.longVenue} / Sell ${cell.shortVenue} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
+          message: `${cell.isConvergenceUnwind ? "Unwound convergence" : "Filled atomically"}! Buy ${cell.longVenue} / Sell ${cell.shortVenue} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
         });
       } else {
         const params: CrossTickerExecutionParams = {
@@ -289,9 +368,25 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           await api.executeCrossTickerArbitrage(params);
           onRefresh(orderQty, minBps);
         }
+
+        if (cell.isConvergenceUnwind) {
+          handleUpdateStrategyConfig({
+            ...currentStrategyConfig,
+            currentAccumulatedUnits: Math.max(0, currentStrategyConfig.currentAccumulatedUnits - 1),
+          });
+        } else {
+          handleUpdateStrategyConfig({
+            ...currentStrategyConfig,
+            currentAccumulatedUnits: Math.min(
+              currentStrategyConfig.maxAccumulatedUnits,
+              currentStrategyConfig.currentAccumulatedUnits + 1
+            ),
+          });
+        }
+
         setExecutionResult({
           success: true,
-          message: `Executed pair trade! Long ${cell.rowLabel} / Short ${cell.colLabel} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
+          message: `${cell.isConvergenceUnwind ? "Unwound convergence pair" : "Executed pair trade"}! Long ${cell.rowLabel} / Short ${cell.colLabel} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
         });
       }
     } catch (err: unknown) {
@@ -456,6 +551,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Quantitative Ticker Strategy & Sizing Control Bar */}
+      <TickerStrategyBar
+        ticker={activeTicker}
+        venues={activeTicker.venues}
+        config={currentStrategyConfig}
+        onChangeConfig={handleUpdateStrategyConfig}
+      />
 
       {/* 4-Venue Market Quotes Grid (Shown in Cross-Venue mode) */}
       {matrixMode === "cross-venue" && (

@@ -56,6 +56,18 @@ export interface SpatialOpportunityDto {
 
 export type MatrixMode = "cross-venue" | "cross-ticker";
 export type SlidingWindowOption = "10s" | "30s" | "1m" | "5m" | "15m";
+export type ArbitrageExecutionMode = "SINGLE_WAY" | "DOUBLE_WAY";
+
+export interface TickerStrategyConfigDto {
+  symbol: string;
+  targetProfitBps: number; // Target profit in BPS
+  windowPercentile: number; // Percentile of historical sliding window (50 - 99%)
+  maxAccumulatedUnits: number; // Maximum accumulated grid units
+  currentAccumulatedUnits: number; // Currently filled units
+  executionMode: ArbitrageExecutionMode; // Single-way (divergence) or Double-way (divergence + convergence)
+  unitSize: number; // Size per unit in base asset units
+  userTargetLeverage: number; // User target leverage ratio (e.g. 10)
+}
 
 export interface MatrixCellDto {
   rowId: string;
@@ -75,6 +87,10 @@ export interface MatrixCellDto {
   orderQty: number;
   estProfitUsd: number;
   isExecutable: boolean;
+  nominalHurdleBps?: number;
+  targetProfitBps?: number;
+  percentileHurdleBps?: number;
+  isConvergenceUnwind?: boolean;
   longVenue: string;
   shortVenue: string;
   longSymbol: string;

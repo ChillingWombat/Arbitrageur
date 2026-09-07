@@ -7,18 +7,20 @@ import {
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
-import type { ExecutionLogEntry } from "../types";
+import type { ExecutionLogEntry, TickerStrategyConfigDto } from "../types";
 
 interface TickerExplorerProps {
   selectedSymbol: string;
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
+  strategyConfigs?: Map<string, TickerStrategyConfigDto>;
 }
 
 export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   selectedSymbol,
   onSelectTicker,
   executionLogs,
+  strategyConfigs,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOption, setSortOption] = useState<TickerSortOption>("alpha");
@@ -312,6 +314,21 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     </span>
                   </div>
                 </div>
+
+                {/* Optional Strategy Configuration Badge Row */}
+                {strategyConfigs?.get(ticker.symbol) && (
+                  <div className="flex items-center space-x-1.5 pt-1 text-[9px] font-mono text-slate-500">
+                    <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
+                      TP {strategyConfigs.get(ticker.symbol)!.targetProfitBps.toFixed(1)} bps
+                    </span>
+                    <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
+                      {strategyConfigs.get(ticker.symbol)!.currentAccumulatedUnits}/{strategyConfigs.get(ticker.symbol)!.maxAccumulatedUnits}u
+                    </span>
+                    <span className="text-slate-400">
+                      {strategyConfigs.get(ticker.symbol)!.executionMode === "DOUBLE_WAY" ? "DW" : "SW"}
+                    </span>
+                  </div>
+                )}
               </button>
             );
           })

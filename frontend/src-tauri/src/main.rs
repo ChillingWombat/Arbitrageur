@@ -38,6 +38,9 @@ fn main() {
             commands::set_live_mode,
             commands::get_engine_settings,
             commands::save_engine_settings,
+            commands::get_ticker_strategy_config,
+            commands::save_ticker_strategy_config,
+            commands::get_all_ticker_strategy_configs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrager Tauri desktop application");
