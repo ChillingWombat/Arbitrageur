@@ -161,7 +161,7 @@ export const SimulationRunner: React.FC<SimulationRunnerProps> = ({
           >
             {PERP_TICKERS.map((t) => (
               <option key={t.symbol} value={t.symbol}>
-                {t.symbol} ({t.name})
+                {t.symbol}
               </option>
             ))}
           </select>

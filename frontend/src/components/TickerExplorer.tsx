@@ -260,9 +260,6 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     <span className="text-[9px] px-1 py-0.2 rounded bg-slate-200/60 text-slate-600 font-medium shrink-0">
                       PERP
                     </span>
-                    <span className="text-[10px] text-slate-500 truncate max-w-[90px]" title={ticker.name}>
-                      {ticker.name}
-                    </span>
                   </div>
 
                   {/* Venue Availability Badges (≥ 2 venues) */}
