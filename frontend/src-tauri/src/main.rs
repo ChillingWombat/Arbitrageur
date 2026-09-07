@@ -2,11 +2,21 @@
 
 mod commands;
 mod state;
+mod vault;
 
 use std::sync::Arc;
 use state::AppEngineState;
+use tauri::Manager;
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::set_var("GDK_BACKEND", "x11");
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+        std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+    }
+
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .init();
@@ -16,10 +26,18 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(engine_state)
+        .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::get_system_status,
             commands::fetch_orderbooks,
             commands::scan_spatial_opportunities,
+            commands::scan_spot_opportunities,
+            commands::execute_spot_arbitrage,
             commands::scan_funding_opportunities,
             commands::scan_prediction_opportunities,
             commands::run_stat_arb_step,
@@ -41,6 +59,15 @@ fn main() {
             commands::get_ticker_strategy_config,
             commands::save_ticker_strategy_config,
             commands::get_all_ticker_strategy_configs,
+            commands::get_vault_status,
+            commands::initialize_vault,
+            commands::unlock_vault,
+            commands::lock_vault,
+            commands::get_exchange_credentials,
+            commands::save_exchange_credentials,
+            commands::get_venue_balances,
+            commands::get_strategy_performance,
+            commands::run_wfo_calibration,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrager Tauri desktop application");

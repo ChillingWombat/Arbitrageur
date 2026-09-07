@@ -6,11 +6,12 @@ interface HeaderProps {
   status: SystemStatusDto | null;
   onResetCircuitBreaker: () => void;
   onEmergencyKillswitch: () => void;
-  onToggleLiveMode: (enabled: boolean) => void;
+  onToggleLiveMode?: (enabled: boolean) => void;
   refreshing: boolean;
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   spatialCount?: number;
+  spotCount?: number;
   fundingCount?: number;
   predictionCount?: number;
 }
@@ -19,11 +20,11 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   onResetCircuitBreaker,
   onEmergencyKillswitch,
-  onToggleLiveMode,
   refreshing,
   activeTab,
   onSelectTab,
   spatialCount = 0,
+  spotCount = 0,
   fundingCount = 0,
   predictionCount = 0,
 }) => {
@@ -55,6 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
             activeTab={activeTab}
             onSelectTab={onSelectTab}
             spatialCount={spatialCount}
+            spotCount={spotCount}
             fundingCount={fundingCount}
             predictionCount={predictionCount}
           />
@@ -99,24 +101,17 @@ export const Header: React.FC<HeaderProps> = ({
             </button>
           )}
 
-          {/* Mode Selector */}
-          <div className="flex items-center bg-surface-raised border border-surface-border rounded-lg p-0.5 text-xs font-mono">
-            <button
-              onClick={() => onToggleLiveMode(false)}
-              className={`px-2 py-0.5 rounded transition ${
-                !isLive ? "bg-surface text-accent font-semibold shadow-xs" : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              Sim
-            </button>
-            <button
-              onClick={() => onToggleLiveMode(true)}
-              className={`px-2 py-0.5 rounded transition ${
-                isLive ? "bg-surface text-profit font-semibold shadow-xs" : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              Live
-            </button>
+          {/* Trading Mode Status Badge (Setting moved to Settings page) */}
+          <div
+            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-xs font-mono font-medium ${
+              isLive
+                ? "bg-amber-50 border-amber-300 text-amber-800"
+                : "bg-blue-50 border-blue-200 text-blue-700"
+            }`}
+            title={isLive ? "Real Trading (Live Execution Active)" : "Paper Trading (Live Feeds & Simulated Orderbooks)"}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-amber-600 animate-pulse" : "bg-blue-600"}`} />
+            <span>{isLive ? "Real Trading" : "Paper Trading"}</span>
           </div>
 
           {/* Emergency Kill Switch */}

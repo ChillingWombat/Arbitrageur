@@ -1,10 +1,12 @@
 pub mod circuit_breaker;
 pub mod margin_monitor;
 pub mod delta_guard;
+pub mod safety_guards;
 
 pub use circuit_breaker::*;
 pub use margin_monitor::*;
 pub use delta_guard::*;
+pub use safety_guards::*;
 
 #[cfg(test)]
 mod tests {

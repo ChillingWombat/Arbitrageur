@@ -41,6 +41,7 @@ import {
 } from "../services/matrixQuant";
 import { getMinCompatibleSize } from "../services/contractSpecs";
 import { TickerStrategyBar } from "./TickerStrategyBar";
+import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
@@ -91,6 +92,9 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   const [executing, setExecuting] = useState(false);
   const [executionResult, setExecutionResult] = useState<{ success: boolean; message: string } | null>(null);
   const [showRankedList, setShowRankedList] = useState(false);
+  const [autoExecute, setAutoExecute] = useState(true);
+  const [lastAutoExecMsg, setLastAutoExecMsg] = useState<string | null>(null);
+  const lastAutoExecTimeRef = React.useRef<number>(0);
 
   // Multi-ticker quotes state for Cross-Ticker matrix
   const [tickerQuotesMap, setTickerQuotesMap] = useState<Map<string, TickerMarketQuote>>(new Map());
@@ -329,6 +333,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           order_qty: cell.orderQty,
           estimated_profit_usd: cell.estProfitUsd,
           is_executable: cell.isExecutable,
+          direction: cell.isConvergenceUnwind ? "Convergence Unwind" : "Divergence Entry",
+          trigger_spread_bps: cell.netSpreadBps,
+          baseline_mean_spread_bps: cell.baselineMeanBps,
+          position_step: cell.isConvergenceUnwind
+            ? currentStrategyConfig.currentAccumulatedUnits
+            : currentStrategyConfig.currentAccumulatedUnits + 1,
+          max_units: currentStrategyConfig.maxAccumulatedUnits,
+          nominal_hurdle_bps: cell.nominalHurdleBps,
         };
         await onExecuteTrade(opp);
 
@@ -401,8 +413,94 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     }
   };
 
+  // Automated Execution Engine Loop for Futures Spread Convergence
+  useEffect(() => {
+    if (!autoExecute || executing) return;
+
+    const now = Date.now();
+    if (now - lastAutoExecTimeRef.current < 4000) return; // 4s cooldown between auto-trades
+
+    let bestCell: MatrixCellDto | null = null;
+    let highestNet = -Infinity;
+
+    for (const row of venueMatrix.grid) {
+      for (const cell of row) {
+        if (cell.isDiagonal) continue;
+        if (cell.isExecutable && cell.netSpreadBps > highestNet) {
+          if (currentStrategyConfig.currentAccumulatedUnits < currentStrategyConfig.maxAccumulatedUnits) {
+            highestNet = cell.netSpreadBps;
+            bestCell = cell;
+          }
+        } else if (cell.isConvergenceUnwind && currentStrategyConfig.currentAccumulatedUnits > 0) {
+          bestCell = cell;
+          break;
+        }
+      }
+      if (bestCell?.isConvergenceUnwind) break;
+    }
+
+    if (bestCell) {
+      lastAutoExecTimeRef.current = now;
+      setLastAutoExecMsg(
+        `⚡ Auto-Executed ${bestCell.longSymbol}: Long ${bestCell.longVenue} / Short ${bestCell.shortVenue} (+${bestCell.netSpreadBps.toFixed(1)} BPS Net)`
+      );
+      handleExecuteCellTrade(bestCell);
+    }
+  }, [autoExecute, executing, venueMatrix.grid, currentStrategyConfig]);
+
   return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full text-slate-900">
+    <div className="p-6 space-y-4 overflow-y-auto h-full text-slate-900">
+      {/* Title & Automated Execution Header Banner */}
+      <div className="bg-surface rounded-2xl border border-surface-border p-4 shadow-2xs flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <div className="flex items-center space-x-2">
+            <span className="p-1.5 bg-blue-50 text-accent rounded-lg border border-blue-200">
+              <Layers className="w-5 h-5 text-accent" />
+            </span>
+            <h1 className="text-base font-bold text-slate-900 tracking-tight font-sans">
+              Futures Spread Convergence Matrix
+            </h1>
+            <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-blue-50 text-accent border border-blue-200">
+              Auto-Execution Basis Arb
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 font-sans mt-1">
+            Automated cross-venue perpetual basis spread convergence engine. Continuously scans live orderbooks and auto-executes atomic legs whenever Net Spread ≥ Hurdle.
+          </p>
+        </div>
+
+        {/* Auto-Execution Engine Control */}
+        <div className="flex items-center space-x-3 shrink-0">
+          <div className="flex items-center space-x-2 bg-surface-raised px-3 py-1.5 rounded-xl border border-surface-border">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                autoExecute ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
+              }`}
+            />
+            <span className="text-xs font-mono font-bold text-slate-700">
+              {autoExecute ? "AUTO-EXECUTION BOT: ACTIVE" : "AUTO-EXECUTION BOT: PAUSED"}
+            </span>
+            <button
+              onClick={() => setAutoExecute((prev) => !prev)}
+              className={`ml-2 px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition ${
+                autoExecute
+                  ? "bg-emerald-600 text-white shadow-2xs hover:bg-emerald-700"
+                  : "bg-surface border border-surface-border text-slate-600 hover:text-slate-900"
+              }`}
+            >
+              {autoExecute ? "Pause Auto-Bot" : "Enable Auto-Bot"}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {lastAutoExecMsg && (
+        <div className="px-4 py-2 bg-emerald-50 border border-emerald-200 rounded-xl text-xs font-mono text-emerald-800 flex items-center justify-between">
+          <span>{lastAutoExecMsg}</span>
+          <button onClick={() => setLastAutoExecMsg(null)} className="text-emerald-600 hover:text-emerald-900 text-xs font-bold">×</button>
+        </div>
+      )}
+
       {/* Top Bar: Mode Selector & Quant Controls */}
       <div className="flex flex-wrap items-center justify-between gap-4 bg-surface p-4 rounded-xl border border-surface-border shadow-xs">
         {/* Left Side: Mode Toggle & Active Ticker */}
@@ -1137,7 +1235,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                         </td>
                         <td className="py-3 px-3 text-right">
                           <button
-                            onClick={() => onExecuteTrade(opp)}
+                            onClick={() => {
+                              const enrichedOpp: SpatialOpportunityDto = {
+                                ...opp,
+                                direction: "Divergence Entry",
+                                trigger_spread_bps: opp.net_spread_bps,
+                                baseline_mean_spread_bps: currentStrategyConfig.targetProfitBps,
+                                position_step: currentStrategyConfig.currentAccumulatedUnits + 1,
+                                max_units: currentStrategyConfig.maxAccumulatedUnits,
+                                nominal_hurdle_bps: currentStrategyConfig.targetProfitBps + 3.5,
+                              };
+                              onExecuteTrade(enrichedOpp);
+                            }}
                             disabled={!isExec || loading}
                             className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition flex items-center ml-auto shadow-xs ${
                               isExec
@@ -1157,6 +1266,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           )
         )}
       </div>
+
+      {/* Transaction History & Execution Telemetry for Active Ticker */}
+      <TickerTransactionHistory
+        symbol={symbol}
+        logs={executionLogs || []}
+        config={currentStrategyConfig}
+        onRefresh={() => onRefresh(orderQty, minBps)}
+      />
     </div>
   );
 };

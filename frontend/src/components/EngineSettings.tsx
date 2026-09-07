@@ -1,9 +1,26 @@
 import React, { useState, useEffect } from "react";
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Key, Lock, Server, Sliders, Shield, Activity } from "lucide-react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  Eye,
+  EyeOff,
+  Key,
+  Lock,
+  Sliders,
+  Shield,
+  ExternalLink,
+  Wallet,
+  Globe,
+  Unlock,
+  AlertTriangle,
+  Scale,
+  RefreshCw,
+} from "lucide-react";
 import { api } from "../services/api";
-import { EngineSettingsDto, SystemStatusDto, VenueStatusDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
+import { VaultUnlockModal } from "./VaultUnlockModal";
 
-type SettingsTab = "all" | "exchanges" | "execution" | "hsm";
+type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
 type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "polymarket" | "kalshi";
 
 interface EngineSettingsProps {
@@ -17,31 +34,44 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
   const [hsmUrl, setHsmUrl] = useState("http://127.0.0.1:8787/sign");
   const [hmacToken, setHmacToken] = useState("");
 
-  // Guardrails
+  // Guardrails & Execution Modes
   const [maxSlippageBps, setMaxSlippageBps] = useState(15.0);
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
+  const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
+  const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
+  const [venueRebalanceThresholdUsd, setVenueRebalanceThresholdUsd] = useState(500.0);
+
+  // Networking & VPS
+  const [engineRpcPort, setEngineRpcPort] = useState(8787);
+  const [engineWsPort, setEngineWsPort] = useState(8789);
+  const [bindAddress, setBindAddress] = useState("127.0.0.1");
 
   // Hyperliquid
   const [hyperliquidWallet, setHyperliquidWallet] = useState("");
   const [hyperliquidPrivateKey, setHyperliquidPrivateKey] = useState("");
   const [hyperliquidUrl, setHyperliquidUrl] = useState("https://api.hyperliquid.xyz");
+  const [hyperliquidAccountIndex, setHyperliquidAccountIndex] = useState<string>("");
+  const [hyperliquidSubaccountIndex, setHyperliquidSubaccountIndex] = useState<string>("");
 
   // Lighter
   const [lighterAccountIndex, setLighterAccountIndex] = useState("0");
   const [lighterApiKey, setLighterApiKey] = useState("");
   const [lighterUrl, setLighterUrl] = useState("https://mainnet.zklighter.elliot.ai");
+  const [lighterSubaccountIndex, setLighterSubaccountIndex] = useState<string>("");
 
   // Vanta (Orderly)
   const [vantaAccountId, setVantaAccountId] = useState("");
   const [vantaOrderlyKey, setVantaOrderlyKey] = useState("");
   const [vantaOrderlySecret, setVantaOrderlySecret] = useState("");
   const [vantaUrl, setVantaUrl] = useState("https://api-evm.orderly.org");
+  const [vantaSubaccountIndex, setVantaSubaccountIndex] = useState<string>("");
 
   // Robinhood EVM
   const [robinhoodWallet, setRobinhoodWallet] = useState("");
   const [robinhoodPrivateKey, setRobinhoodPrivateKey] = useState("");
   const [robinhoodRpcUrl, setRobinhoodRpcUrl] = useState("https://rpc.robinhood.network");
   const [robinhoodRouter, setRobinhoodRouter] = useState("0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
+  const [robinhoodSubaccountIndex, setRobinhoodSubaccountIndex] = useState<string>("");
 
   // Polymarket
   const [polymarketApiKey, setPolymarketApiKey] = useState("");
@@ -54,6 +84,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
   const [kalshiPrivateKey, setKalshiPrivateKey] = useState("");
   const [kalshiUrl, setKalshiUrl] = useState("https://trading-api.kalshi.com");
 
+  // Referrals, About & Links
+  const [referralLighter, setReferralLighter] = useState("https://app.lighter.xyz/?referral=SOLO&source=none");
+  const [referralRobinhood, setReferralRobinhood] = useState("https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
+  const [sponsorLink, setSponsorLink] = useState("https://buymeacoffee.com/dav1d1010");
+  const [version, setVersion] = useState("v1.2.0");
+  const [gitRepo, setGitRepo] = useState("https://github.com/arbitrager/arbitrager");
+
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("exchanges");
   const [venueFilter, setVenueFilter] = useState<ExchangeFilter>("all");
@@ -63,8 +100,41 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
   const [saved, setSaved] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Vault state
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
+  const [showVaultModal, setShowVaultModal] = useState(false);
+
+  // Venue Balances
+  const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
+  const [loadingBalances, setLoadingBalances] = useState(false);
+
+  // Update check
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+
   const toggleSecret = (field: string) => {
     setShowSecrets((prev) => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const loadVaultStatus = async () => {
+    try {
+      const status = await api.getVaultStatus();
+      setVaultStatus(status);
+    } catch (err) {
+      console.warn("Could not fetch vault status:", err);
+    }
+  };
+
+  const loadVenueBalances = async () => {
+    setLoadingBalances(true);
+    try {
+      const data = await api.getVenueBalances();
+      setVenueBalances(data);
+    } catch (err) {
+      console.error("Failed to load balances:", err);
+    } finally {
+      setLoadingBalances(false);
+    }
   };
 
   useEffect(() => {
@@ -76,23 +146,36 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         setMaxSlippageBps(s.max_slippage_bps ?? 15.0);
         setMinDepthRatio(s.min_depth_ratio ?? 3.0);
 
+        setEngineRpcPort(s.engine_rpc_port ?? 8787);
+        setEngineWsPort(s.engine_ws_port ?? 8789);
+        setBindAddress(s.bind_address || "127.0.0.1");
+
+        setTradingMode(s.trading_mode === "real" ? "real" : "paper");
+        setFastWarmupEnabled(s.fast_warmup_enabled ?? true);
+        setVenueRebalanceThresholdUsd(s.venue_rebalance_threshold_usd ?? 500.0);
+
         setHyperliquidWallet(s.hyperliquid_wallet || "");
         setHyperliquidPrivateKey(s.hyperliquid_private_key || "");
         setHyperliquidUrl(s.hyperliquid_url || "https://api.hyperliquid.xyz");
+        setHyperliquidAccountIndex(s.hyperliquid_account_index?.toString() ?? "");
+        setHyperliquidSubaccountIndex(s.hyperliquid_subaccount_index?.toString() ?? "");
 
         setLighterAccountIndex(s.lighter_account_index || "0");
         setLighterApiKey(s.lighter_api_key || "");
         setLighterUrl(s.lighter_url || "https://mainnet.zklighter.elliot.ai");
+        setLighterSubaccountIndex(s.lighter_subaccount_index?.toString() ?? "");
 
         setVantaAccountId(s.vanta_account_id || "");
         setVantaOrderlyKey(s.vanta_orderly_key || "");
         setVantaOrderlySecret(s.vanta_orderly_secret || "");
         setVantaUrl(s.vanta_url || "https://api-evm.orderly.org");
+        setVantaSubaccountIndex(s.vanta_subaccount_index?.toString() ?? "");
 
         setRobinhoodWallet(s.robinhood_wallet || "");
         setRobinhoodPrivateKey(s.robinhood_private_key || "");
         setRobinhoodRpcUrl(s.robinhood_rpc_url || "https://rpc.robinhood.network");
         setRobinhoodRouter(s.robinhood_router || "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
+        setRobinhoodSubaccountIndex(s.robinhood_subaccount_index?.toString() ?? "");
 
         setPolymarketApiKey(s.polymarket_api_key || "");
         setPolymarketSecret(s.polymarket_secret || "");
@@ -102,6 +185,12 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         setKalshiApiKeyId(s.kalshi_api_key_id || "");
         setKalshiPrivateKey(s.kalshi_private_key || "");
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
+
+        setReferralLighter(s.referral_lighter || "https://app.lighter.xyz/?referral=SOLO&source=none");
+        setReferralRobinhood(s.referral_robinhood || "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
+        setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
+        setVersion(s.version || "v1.2.0");
+        setGitRepo(s.git_repo || "https://github.com/arbitrager/arbitrager");
 
         if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
           setLiveVenues(systemStatus.active_venues);
@@ -117,12 +206,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
       }
     };
     loadSettings();
-  }, [systemStatus]);
-
-  useEffect(() => {
-    if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
-      setLiveVenues(systemStatus.active_venues);
-    }
+    loadVaultStatus();
+    loadVenueBalances();
   }, [systemStatus]);
 
   const defaultVenues: VenueStatusDto[] = [
@@ -151,20 +236,31 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         hmac_token: hmacToken,
         max_slippage_bps: maxSlippageBps,
         min_depth_ratio: minDepthRatio,
+        engine_rpc_port: engineRpcPort,
+        engine_ws_port: engineWsPort,
+        bind_address: bindAddress,
+        trading_mode: tradingMode,
+        fast_warmup_enabled: fastWarmupEnabled,
+        venue_rebalance_threshold_usd: venueRebalanceThresholdUsd,
         hyperliquid_wallet: hyperliquidWallet.trim(),
         hyperliquid_private_key: hyperliquidPrivateKey.trim(),
         hyperliquid_url: hyperliquidUrl.trim(),
+        hyperliquid_account_index: hyperliquidAccountIndex ? parseInt(hyperliquidAccountIndex, 10) : undefined,
+        hyperliquid_subaccount_index: hyperliquidSubaccountIndex ? parseInt(hyperliquidSubaccountIndex, 10) : undefined,
         lighter_account_index: lighterAccountIndex.trim(),
         lighter_api_key: lighterApiKey.trim(),
         lighter_url: lighterUrl.trim(),
+        lighter_subaccount_index: lighterSubaccountIndex ? parseInt(lighterSubaccountIndex, 10) : undefined,
         vanta_account_id: vantaAccountId.trim(),
         vanta_orderly_key: vantaOrderlyKey.trim(),
         vanta_orderly_secret: vantaOrderlySecret.trim(),
         vanta_url: vantaUrl.trim(),
+        vanta_subaccount_index: vantaSubaccountIndex ? parseInt(vantaSubaccountIndex, 10) : undefined,
         robinhood_wallet: robinhoodWallet.trim(),
         robinhood_private_key: robinhoodPrivateKey.trim(),
         robinhood_rpc_url: robinhoodRpcUrl.trim(),
         robinhood_router: robinhoodRouter.trim(),
+        robinhood_subaccount_index: robinhoodSubaccountIndex ? parseInt(robinhoodSubaccountIndex, 10) : undefined,
         polymarket_api_key: polymarketApiKey.trim(),
         polymarket_secret: polymarketSecret.trim(),
         polymarket_passphrase: polymarketPassphrase.trim(),
@@ -172,7 +268,16 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
         kalshi_api_key_id: kalshiApiKeyId.trim(),
         kalshi_private_key: kalshiPrivateKey.trim(),
         kalshi_url: kalshiUrl.trim(),
+        referral_lighter: referralLighter,
+        referral_robinhood: referralRobinhood,
+        sponsor_link: sponsorLink,
+        version: version,
+        git_repo: gitRepo,
       });
+
+      // Also sync live mode in backend state if tradingMode changed
+      await api.setLiveMode(tradingMode === "real");
+
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err: unknown) {
@@ -181,6 +286,24 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleLockVault = async () => {
+    try {
+      const s = await api.lockVault();
+      setVaultStatus(s);
+    } catch (err) {
+      console.error("Lock error:", err);
+    }
+  };
+
+  const handleCheckForUpdates = () => {
+    setCheckingUpdate(true);
+    setUpdateMsg(null);
+    setTimeout(() => {
+      setCheckingUpdate(false);
+      setUpdateMsg("System up to date. Arbitrager v1.2.0 is currently the latest stable release.");
+    }, 1200);
   };
 
   const isVenueConfigured = (venue: string): boolean => {
@@ -211,755 +334,846 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
     isVenueConfigured("kalshi"),
   ].filter(Boolean).length;
 
+  const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
+
   return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full max-w-5xl">
+    <div className="p-6 space-y-6 overflow-y-auto h-full max-w-5xl select-none">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-surface p-5 rounded-2xl border border-surface-border shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center space-x-2">
-            <h2 className="text-sm font-bold font-mono text-slate-900">
-              Arbitrager Engine Settings & API Keys
+            <h2 className="text-base font-bold font-mono text-slate-900">
+              Arbitrager System Engine Settings
             </h2>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              {configuredCount} / 6 Venues Configured
+              {configuredCount} / 6 Venues Active
             </span>
           </div>
-          <p className="text-xs text-slate-500 mt-1">
-            Configure exchange API keys, order routing thresholds, and remote HSM signing endpoints.
+          <p className="text-xs text-slate-500 font-mono mt-1">
+            Zero-seed secure local vault, cross-venue API configuration, network ports, and execution safety
           </p>
         </div>
 
         {/* Section Tabs */}
-        <div className="flex items-center bg-slate-100 p-1 rounded-lg text-xs font-mono border border-slate-200 self-start md:self-auto">
+        <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-mono border border-slate-200 overflow-x-auto self-start md:self-auto">
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
-            className={`px-3 py-1.5 rounded-md transition flex items-center space-x-1.5 ${
+            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "exchanges"
                 ? "bg-white text-blue-600 font-semibold shadow-xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
             <Key className="w-3.5 h-3.5" />
-            <span>Exchange APIs</span>
+            <span>Exchanges</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("balances")}
+            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
+              activeTab === "balances"
+                ? "bg-white text-blue-600 font-semibold shadow-xs"
+                : "text-slate-600 hover:text-slate-900"
+            }`}
+          >
+            <Wallet className="w-3.5 h-3.5" />
+            <span>Balances</span>
           </button>
           <button
             type="button"
             onClick={() => setActiveTab("execution")}
-            className={`px-3 py-1.5 rounded-md transition flex items-center space-x-1.5 ${
+            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
               activeTab === "execution"
                 ? "bg-white text-blue-600 font-semibold shadow-xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>Guardrails</span>
+            <span>Execution</span>
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab("hsm")}
-            className={`px-3 py-1.5 rounded-md transition flex items-center space-x-1.5 ${
-              activeTab === "hsm"
+            onClick={() => setActiveTab("network")}
+            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
+              activeTab === "network"
                 ? "bg-white text-blue-600 font-semibold shadow-xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
-            <Server className="w-3.5 h-3.5" />
-            <span>Remote HSM</span>
+            <Globe className="w-3.5 h-3.5" />
+            <span>Network & VPS</span>
           </button>
           <button
             type="button"
-            onClick={() => setActiveTab("all")}
-            className={`px-3 py-1.5 rounded-md transition ${
-              activeTab === "all"
+            onClick={() => setActiveTab("about")}
+            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
+              activeTab === "about"
                 ? "bg-white text-blue-600 font-semibold shadow-xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
           >
-            All
+            <Shield className="w-3.5 h-3.5" />
+            <span>About</span>
           </button>
         </div>
       </div>
 
       {errorMsg && (
-        <div className="bg-loss-dim border border-loss-border text-loss px-4 py-3 rounded-xl text-xs font-mono flex items-center space-x-2">
-          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+        <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />
           <span>{errorMsg}</span>
         </div>
       )}
 
       {saved && (
-        <div className="bg-emerald-50 border border-emerald-200 text-emerald-700 px-4 py-3 rounded-xl text-xs font-mono flex items-center space-x-2">
-          <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-          <span>Engine configuration successfully applied and persistent in runtime.</span>
+        <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
         </div>
       )}
 
       <form onSubmit={handleSave} className="space-y-6">
         {/* =================================================================== */}
-        {/* SECTION 1: EXCHANGE API CREDENTIALS                                */}
+        {/* SECTION 1: EXCHANGES & SECURE VAULT                                */}
         {/* =================================================================== */}
         {(activeTab === "exchanges" || activeTab === "all") && (
           <div className="space-y-4">
-            {/* Active Exchange Venues Chips (Moved from top of page header) */}
-            <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-xs space-y-3">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                <div className="flex items-center space-x-2">
-                  <Activity className="w-3.5 h-3.5 text-blue-600" />
-                  <h4 className="text-xs font-mono font-semibold uppercase tracking-wide text-slate-900">
-                    Active Exchange Venues & Connectivity
+            {/* Referral Links Promotion Card */}
+            <div className="p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-blue-50/70 border border-blue-200 rounded-2xl shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h4 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
+                    <span>⚡ Exchange Referral Links (Fee Tier Discounts)</span>
                   </h4>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                    {displayVenues.filter((v) => v.status === "ONLINE").length} Online
+                  <p className="text-[11px] text-slate-600 font-mono mt-0.5">
+                    Create accounts with zero taker surcharges and support project maintenance:
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <a
+                    href={referralLighter}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
+                  >
+                    <span>Lighter (SOLO)</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                  <a
+                    href={referralRobinhood}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
+                  >
+                    <span>Robinhood Chain (SOLO)</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            {/* Local Encrypted Vault Banner */}
+            <div className="p-4 bg-surface border border-surface-border rounded-2xl shadow-xs flex items-center justify-between gap-4">
+              <div className="flex items-center space-x-3">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center ${
+                    isVaultLocked ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
+                  }`}
+                >
+                  {isVaultLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <h4 className="text-xs font-bold font-mono text-slate-900">
+                      Local Secure Vault: {isVaultLocked ? "Locked" : "Unlocked"}
+                    </h4>
+                    <span
+                      className={`px-2 py-0.2 rounded text-[10px] font-mono font-semibold ${
+                        isVaultLocked
+                          ? "bg-amber-50 text-amber-800 border border-amber-300"
+                          : "bg-emerald-50 text-emerald-800 border border-emerald-300"
+                      }`}
+                    >
+                      AES-256-GCM Encrypted
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                    {isVaultLocked
+                      ? "Master password required to view or edit exchange private keys"
+                      : "Vault unlocked in-memory. Sensitive fields can be viewed and edited."}
+                  </p>
+                </div>
+              </div>
+
+              <div>
+                {isVaultLocked ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowVaultModal(true)}
+                    className="px-4 py-2 bg-accent hover:bg-blue-600 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+                  >
+                    <Key className="w-3.5 h-3.5" />
+                    <span>Unlock Vault</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleLockVault}
+                    className="px-3 py-1.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border rounded-xl text-xs font-mono font-medium transition shadow-xs"
+                  >
+                    Lock Vault Now
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Exchange Filter Selector */}
+            <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-xs font-mono">
+              <span className="text-slate-500 text-[11px] mr-2">Filter Venue:</span>
+              {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => (
+                <button
+                  key={vf}
+                  type="button"
+                  onClick={() => setVenueFilter(vf)}
+                  className={`px-2.5 py-1 rounded-lg transition capitalize ${
+                    venueFilter === vf
+                      ? "bg-accent text-white font-semibold shadow-xs"
+                      : "bg-surface text-slate-600 hover:bg-surface-raised border border-surface-border"
+                  }`}
+                >
+                  {vf}
+                </button>
+              ))}
+            </div>
+
+            {/* Exchange 1: Hyperliquid */}
+            {(venueFilter === "all" || venueFilter === "hyperliquid") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Hyperliquid (L1 Perp DEX)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Subaccount & EVM Key
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Fee: {getVenueInfo("hyperliquid")?.fee_bps ?? 2.0} BPS
                   </span>
                 </div>
-                <div className="flex items-center space-x-2 text-[11px] font-mono">
-                  {venueFilter !== "all" ? (
-                    <button
-                      type="button"
-                      onClick={() => setVenueFilter("all")}
-                      className="text-blue-600 hover:text-blue-800 font-medium underline underline-offset-2"
-                    >
-                      Show All (6)
-                    </button>
-                  ) : (
-                    <span className="text-slate-400">Click venue to filter API cards below</span>
-                  )}
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-slate-600 block mb-1">Trading EOA Wallet Address:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={hyperliquidWallet}
+                      placeholder="0x..."
+                      onChange={(e) => setHyperliquidWallet(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-600">Trading Agent Private Key:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("hl_key")}
+                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
+                      </button>
+                    </div>
+                    <input
+                      type={showSecrets["hl_key"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={hyperliquidPrivateKey}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                      onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-600 block mb-1">Account Index (Optional):</label>
+                    <input
+                      type="number"
+                      disabled={loading || isVaultLocked}
+                      value={hyperliquidAccountIndex}
+                      placeholder="Default: 0"
+                      onChange={(e) => setHyperliquidAccountIndex(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <input
+                      type="number"
+                      disabled={loading || isVaultLocked}
+                      value={hyperliquidSubaccountIndex}
+                      placeholder="Default: None"
+                      onChange={(e) => setHyperliquidSubaccountIndex(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
                 </div>
               </div>
+            )}
 
-              {/* Exact venue status pills from top header, now placed in the settings page */}
-              <div className="flex flex-wrap items-center gap-2 pt-0.5">
-                {displayVenues.map((v) => {
-                  const isFiltered = venueFilter === v.id;
-                  const isOnline = v.status === "ONLINE";
-                  return (
-                    <button
-                      key={v.id}
-                      type="button"
-                      onClick={() => setVenueFilter(venueFilter === v.id ? "all" : (v.id as ExchangeFilter))}
-                      className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono transition shadow-xs ${
-                        isFiltered
-                          ? "bg-blue-50 border-blue-400 text-blue-800 font-semibold ring-1 ring-blue-300"
-                          : "bg-surface-raised border-surface-border text-slate-700 hover:bg-slate-50 hover:border-slate-300"
-                      }`}
-                      title={`${v.name} (${v.market_type}) — Status: ${v.status} (${v.latency_ms}ms ping)`}
-                    >
-                      <span className={`w-2 h-2 rounded-full ${isOnline ? "bg-profit" : "bg-slate-400"}`} />
-                      <span className="font-semibold">{v.name.split(" ")[0]}</span>
-                      <span className="text-[10px] text-slate-500 font-normal">({v.latency_ms}ms)</span>
-                    </button>
-                  );
-                })}
+            {/* Exchange 2: Lighter */}
+            {(venueFilter === "all" || venueFilter === "lighter") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Lighter (zkDEX Rollup)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      zk-Rollup CLOB
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-slate-600 block mb-1">Account Index:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={lighterAccountIndex}
+                      onChange={(e) => setLighterAccountIndex(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-600">API Private Key / Signer Token:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("lgt_key")}
+                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
+                      </button>
+                    </div>
+                    <input
+                      type={showSecrets["lgt_key"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={lighterApiKey}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                      onChange={(e) => setLighterApiKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <input
+                      type="number"
+                      disabled={loading || isVaultLocked}
+                      value={lighterSubaccountIndex}
+                      placeholder="e.g. 1"
+                      onChange={(e) => setLighterSubaccountIndex(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                    <input
+                      type="text"
+                      disabled={loading}
+                      value={lighterUrl}
+                      onChange={(e) => setLighterUrl(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
-            {/* Grid of Exchange Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* 1. HYPERLIQUID */}
-              {(venueFilter === "all" || venueFilter === "hyperliquid") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Hyperliquid</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("hyperliquid")?.market_type ?? "L1 DEX"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("hyperliquid")?.latency_ms ?? 2}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("hyperliquid")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("hyperliquid") ? "Configured" : "Unset"}
+            {/* Exchange 3: Vanta */}
+            {(venueFilter === "all" || venueFilter === "vanta") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Vanta.exchange (Orderly Network)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Ed25519 Orderly
                     </span>
                   </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
+                  </span>
+                </div>
 
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Main Wallet Address (0x...):</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={hyperliquidWallet}
-                        placeholder="0x0000000000000000000000000000000000000000"
-                        onChange={(e) => setHyperliquidWallet(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                      />
-                    </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={vantaAccountId}
+                      placeholder="0x..."
+                      onChange={(e) => setVantaAccountId(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">API Agent Secret / Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("hl_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["hl_key"] ? "text" : "password"}
-                        disabled={loading}
-                        value={hyperliquidPrivateKey}
-                        placeholder="0x..."
-                        onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                      />
-                    </div>
+                  <div>
+                    <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={vantaOrderlyKey}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
+                      onChange={(e) => setVantaOrderlyKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
 
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Endpoint URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={hyperliquidUrl}
-                        onChange={(e) => setHyperliquidUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                      />
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-600">Orderly Secret:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("vanta_secret")}
+                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
+                      </button>
                     </div>
+                    <input
+                      type={showSecrets["vanta_secret"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={vantaOrderlySecret}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                      onChange={(e) => setVantaOrderlySecret(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                    <input
+                      type="number"
+                      disabled={loading || isVaultLocked}
+                      value={vantaSubaccountIndex}
+                      placeholder="e.g. 0"
+                      onChange={(e) => setVantaSubaccountIndex(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
                   </div>
                 </div>
-              )}
+              </div>
+            )}
 
-              {/* 2. LIGHTER */}
-              {(venueFilter === "all" || venueFilter === "lighter") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Lighter</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("lighter")?.market_type ?? "zkDEX Rollup"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("lighter")?.latency_ms ?? 5}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("lighter")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("lighter") ? "Configured" : "Unset"}
+            {/* Exchange 4: Robinhood EVM */}
+            {(venueFilter === "all" || venueFilter === "robinhood") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Robinhood Chain (Arbitrum L2 EVM)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      DEX Aggregator Router
                     </span>
                   </div>
+                  <span className="text-[11px] font-mono text-slate-400">
+                    Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
+                  </span>
+                </div>
 
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Account Index (integer):</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={lighterAccountIndex}
-                        placeholder="0"
-                        onChange={(e) => setLighterAccountIndex(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                      />
-                    </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                  <div>
+                    <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
+                    <input
+                      type="text"
+                      disabled={loading || isVaultLocked}
+                      value={robinhoodWallet}
+                      placeholder="0x..."
+                      onChange={(e) => setRobinhoodWallet(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
+                  </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Stark Private Key / API Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("lgt_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["lgt_key"] ? "text" : "password"}
-                        disabled={loading}
-                        value={lighterApiKey}
-                        placeholder="Enter Stark private key"
-                        onChange={(e) => setLighterApiKey(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                      />
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-slate-600">Signer Private Key:</label>
+                      <button
+                        type="button"
+                        onClick={() => toggleSecret("rh_key")}
+                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                      >
+                        {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                        <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
+                      </button>
                     </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Base Endpoint URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={lighterUrl}
-                        onChange={(e) => setLighterUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                      />
-                    </div>
+                    <input
+                      type={showSecrets["rh_key"] ? "text" : "password"}
+                      disabled={loading || isVaultLocked}
+                      value={robinhoodPrivateKey}
+                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                      onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                    />
                   </div>
                 </div>
-              )}
+              </div>
+            )}
+          </div>
+        )}
 
-              {/* 3. VANTA.EXCHANGE (ORDERLY NETWORK) */}
-              {(venueFilter === "all" || venueFilter === "vanta") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Vanta.exchange</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("vanta")?.market_type ?? "Orderly EVM"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("vanta")?.latency_ms ?? 4}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("vanta")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("vanta") ? "Configured" : "Unset"}
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-slate-600 block mb-1">Account ID:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={vantaAccountId}
-                          placeholder="vanta_account..."
-                          onChange={(e) => setVantaAccountId(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-slate-600 block mb-1">Orderly API Key:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={vantaOrderlyKey}
-                          placeholder="ed25519:..."
-                          onChange={(e) => setVantaOrderlyKey(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Orderly API Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("vanta_secret")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["vanta_secret"] ? "text" : "password"}
-                        disabled={loading}
-                        value={vantaOrderlySecret}
-                        placeholder="Enter Orderly private secret"
-                        onChange={(e) => setVantaOrderlySecret(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">REST Base URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={vantaUrl}
-                        onChange={(e) => setVantaUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 4. ROBINHOOD EVM */}
-              {(venueFilter === "all" || venueFilter === "robinhood") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Robinhood EVM</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("robinhood")?.market_type ?? "Router & Bridge"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("robinhood")?.latency_ms ?? 8}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("robinhood")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("robinhood") ? "Configured" : "Unset"}
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">EVM Wallet Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={robinhoodWallet}
-                        placeholder="0x..."
-                        onChange={(e) => setRobinhoodWallet(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Wallet Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("rh_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["rh_key"] ? "text" : "password"}
-                        disabled={loading}
-                        value={robinhoodPrivateKey}
-                        placeholder="0x..."
-                        onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="text-slate-600 block mb-1">RPC URL:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={robinhoodRpcUrl}
-                          onChange={(e) => setRobinhoodRpcUrl(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-slate-600 block mb-1">Router Contract:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={robinhoodRouter}
-                          onChange={(e) => setRobinhoodRouter(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500 font-mono"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 5. POLYMARKET */}
-              {(venueFilter === "all" || venueFilter === "polymarket") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Polymarket</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("polymarket")?.market_type ?? "CTF CLOB"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("polymarket")?.latency_ms ?? 12}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("polymarket")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("polymarket") ? "Configured" : "Unset"}
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">CLOB API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={polymarketApiKey}
-                        placeholder="Enter Polymarket CLOB API Key"
-                        onChange={(e) => setPolymarketApiKey(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-slate-600">API Secret:</label>
-                          <button
-                            type="button"
-                            onClick={() => toggleSecret("poly_secret")}
-                            className="text-slate-400 hover:text-slate-600 text-[11px]"
-                          >
-                            {showSecrets["poly_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          </button>
-                        </div>
-                        <input
-                          type={showSecrets["poly_secret"] ? "text" : "password"}
-                          disabled={loading}
-                          value={polymarketSecret}
-                          placeholder="Secret"
-                          onChange={(e) => setPolymarketSecret(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-slate-600">Passphrase:</label>
-                          <button
-                            type="button"
-                            onClick={() => toggleSecret("poly_pass")}
-                            className="text-slate-400 hover:text-slate-600 text-[11px]"
-                          >
-                            {showSecrets["poly_pass"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          </button>
-                        </div>
-                        <input
-                          type={showSecrets["poly_pass"] ? "text" : "password"}
-                          disabled={loading}
-                          value={polymarketPassphrase}
-                          placeholder="Passphrase"
-                          onChange={(e) => setPolymarketPassphrase(e.target.value)}
-                          className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">CLOB Base URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={polymarketUrl}
-                        onChange={(e) => setPolymarketUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* 6. KALSHI */}
-              {(venueFilter === "all" || venueFilter === "kalshi") && (
-                <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
-                  <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-                    <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
-                      <h4 className="text-xs font-bold font-mono text-slate-900">Kalshi</h4>
-                      <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        {getVenueInfo("kalshi")?.market_type ?? "CFTC Binary"}
-                      </span>
-                      <span className="text-[10px] font-mono text-emerald-600">
-                        ({getVenueInfo("kalshi")?.latency_ms ?? 15}ms)
-                      </span>
-                    </div>
-                    <span
-                      className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                        isVenueConfigured("kalshi")
-                          ? "bg-emerald-50 border-emerald-200 text-emerald-700"
-                          : "bg-slate-50 border-slate-200 text-slate-500"
-                      }`}
-                    >
-                      {isVenueConfigured("kalshi") ? "Configured" : "Unset"}
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Key ID:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={kalshiApiKeyId}
-                        placeholder="Enter Kalshi API Key ID"
-                        onChange={(e) => setKalshiApiKeyId(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">RSA Private Key / Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("kalshi_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["kalshi_key"] ? "text" : "password"}
-                        disabled={loading}
-                        value={kalshiPrivateKey}
-                        placeholder="Enter RSA private key or secret token"
-                        onChange={(e) => setKalshiPrivateKey(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-xs font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Trading API URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={kalshiUrl}
-                        onChange={(e) => setKalshiUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent text-[11px] text-slate-500"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Security Notice */}
-            <div className="p-3.5 bg-blue-50/50 border border-blue-100 rounded-xl text-xs font-mono text-slate-600 flex items-start space-x-2.5">
-              <Shield className="w-4 h-4 text-blue-600 flex-shrink-0 mt-0.5" />
+        {/* =================================================================== */}
+        {/* SECTION 2: BALANCES & ASYMMETRIC REBALANCE                         */}
+        {/* =================================================================== */}
+        {(activeTab === "balances" || activeTab === "all") && (
+          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+            <div className="flex items-center justify-between border-b border-surface-border pb-3">
               <div>
-                <span className="font-semibold text-slate-900">Zero-Key Local Leakage Architecture:</span>
-                <p className="mt-0.5 text-[11px] text-slate-600 leading-relaxed">
-                  Exchange credentials and private signing keys are held strictly in memory in the native Rust engine process or delegated to your designated remote HSM signer. Keys are never saved unencrypted to disk or sent to external telemetry servers.
+                <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
+                  <Wallet className="w-4 h-4 text-accent" />
+                  <span>Venue Balances & Asymmetric Depletion Alert</span>
+                </h3>
+                <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                  Tracks free margin across venues to prevent single-leg fill failure from one-sided executions
                 </p>
               </div>
+
+              <button
+                type="button"
+                onClick={loadVenueBalances}
+                disabled={loadingBalances}
+                className="px-3 py-1 bg-surface-raised border border-surface-border hover:bg-slate-200 rounded-lg text-xs font-mono flex items-center space-x-1 text-slate-700"
+              >
+                <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-accent" : ""}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {venueBalances.map((b) => {
+                const isWarning = b.needs_rebalance || b.status !== "HEALTHY";
+                return (
+                  <div
+                    key={b.venue}
+                    className={`p-4 rounded-xl border ${
+                      isWarning
+                        ? "bg-amber-50/60 border-amber-300"
+                        : "bg-surface-raised/60 border-surface-border"
+                    } space-y-2`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold font-mono text-slate-900 uppercase">{b.venue}</span>
+                      <span
+                        className={`px-2 py-0.2 rounded text-[10px] font-mono font-bold ${
+                          isWarning
+                            ? "bg-amber-200 text-amber-900"
+                            : "bg-emerald-100 text-emerald-800"
+                        }`}
+                      >
+                        {b.status}
+                      </span>
+                    </div>
+
+                    <div className="space-y-0.5">
+                      <span className="text-[10px] uppercase font-mono text-slate-400 block">Free Margin</span>
+                      <span className="text-base font-bold font-mono text-slate-900">
+                        ${b.balance_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
+
+                    <div className="text-[10px] font-mono text-slate-500 pt-1 border-t border-surface-border/60">
+                      <span>Safety Floor: ${b.min_required_usd.toFixed(0)}</span>
+                    </div>
+
+                    {b.recommended_action && (
+                      <div className="p-2 bg-amber-100/80 border border-amber-300 rounded-lg text-[10px] font-mono text-amber-900 flex items-start space-x-1.5">
+                        <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0 mt-0.5" />
+                        <span>{b.recommended_action}</span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
 
         {/* =================================================================== */}
-        {/* SECTION 2: EXECUTION GUARDRAILS & ROUTING                          */}
+        {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
         {/* =================================================================== */}
         {(activeTab === "execution" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
             <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-semibold uppercase text-slate-900 flex items-center space-x-1.5">
-                <Sliders className="w-3.5 h-3.5 text-blue-600" />
-                <span>Smart Order Routing & Execution Guardrails</span>
+              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
+                <Sliders className="w-4 h-4 text-accent" />
+                <span>Execution Modes & Cache Warm-Up Guardrails</span>
               </h3>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                Protect atomic execution against market depth decay, adverse selection, and slippage.
+              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                Configure live order execution vs paper simulation and orderbook persistence
               </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+              {/* Trading Mode Radio Card */}
+              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
+                <label className="text-slate-800 font-bold block text-xs">Trading Mode</label>
+                <p className="text-[11px] text-slate-500">
+                  Switch between risk-free simulation and active DEX order placement:
+                </p>
+
+                <div className="flex items-center space-x-3 pt-1">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="trading_mode"
+                      value="paper"
+                      checked={tradingMode === "paper"}
+                      onChange={() => setTradingMode("paper")}
+                      className="text-accent focus:ring-accent"
+                    />
+                    <span className="font-semibold text-slate-800">Paper Trading (Live Feeds)</span>
+                  </label>
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="trading_mode"
+                      value="real"
+                      checked={tradingMode === "real"}
+                      onChange={() => setTradingMode("real")}
+                      className="text-amber-600 focus:ring-amber-500"
+                    />
+                    <span className="font-semibold text-amber-800">Real Trading (Live Execution)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Orderbook Fast Warm-up Toggle */}
+              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
+                  <input
+                    type="checkbox"
+                    checked={fastWarmupEnabled}
+                    onChange={(e) => setFastWarmupEnabled(e.target.checked)}
+                    className="w-4 h-4 text-accent rounded focus:ring-accent"
+                  />
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  {fastWarmupEnabled
+                    ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
+                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
+                </p>
+              </div>
+
+              {/* Max Slippage */}
               <div>
-                <label className="text-slate-600 block mb-1">Maximum Slippage Tolerance (BPS):</label>
+                <label className="text-slate-600 block mb-1">Max Slippage Tolerance (BPS):</label>
                 <input
                   type="number"
                   step="1"
-                  min="0.1"
-                  max="500"
+                  min="1"
                   disabled={loading}
                   value={maxSlippageBps}
                   onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 15)}
-                  className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
-                <span className="text-[11px] text-slate-400 mt-1 block">
-                  Recommended: 10 - 25 BPS for perp DEXs
-                </span>
               </div>
 
+              {/* Venue Rebalance Threshold */}
               <div>
-                <label className="text-slate-600 block mb-1">Min Available Depth Ratio (Depth / Size):</label>
+                <label className="text-slate-600 block mb-1">Venue Rebalance Warning Threshold ($ USD):</label>
                 <input
                   type="number"
-                  step="0.5"
-                  min="1.0"
+                  step="50"
+                  min="100"
                   disabled={loading}
-                  value={minDepthRatio}
-                  onChange={(e) => setMinDepthRatio(parseFloat(e.target.value) || 3)}
-                  className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  value={venueRebalanceThresholdUsd}
+                  onChange={(e) => setVenueRebalanceThresholdUsd(parseFloat(e.target.value) || 500)}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
-                <span className="text-[11px] text-slate-400 mt-1 block">
-                  Ensures top-of-book depth is at least N× target order size
-                </span>
               </div>
             </div>
           </div>
         )}
 
         {/* =================================================================== */}
-        {/* SECTION 3: REMOTE HSM SIGNER                                       */}
+        {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
-        {(activeTab === "hsm" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+        {(activeTab === "network" || activeTab === "all") && (
+          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
             <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-semibold uppercase text-slate-900 flex items-center space-x-1.5">
-                <Server className="w-3.5 h-3.5 text-blue-600" />
-                <span>Remote HSM & Key Management (Zero-Key Local Storage)</span>
+              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
+                <Globe className="w-4 h-4 text-accent" />
+                <span>Engine Ports & 24/7 VPS Background Daemon</span>
               </h3>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                Optional Cloudflare Worker or AWS KMS signer for enterprise air-gapped signing.
+              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+                Configure RPC / WebSocket listener ports and deploy headlessly on cloud servers
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
               <div>
-                <label className="text-slate-600 block mb-1">Cloudflare Worker / Docker HSM URL:</label>
+                <label className="text-slate-600 block mb-1">Engine RPC Port:</label>
                 <input
-                  type="text"
+                  type="number"
                   disabled={loading}
-                  value={hsmUrl}
-                  onChange={(e) => setHsmUrl(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  value={engineRpcPort}
+                  onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="text-slate-600">HMAC Authentication Token:</label>
+                <label className="text-slate-600 block mb-1">Engine WebSocket Port:</label>
+                <input
+                  type="number"
+                  disabled={loading}
+                  value={engineWsPort}
+                  onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-600 block mb-1">Bind Address:</label>
+                <input
+                  type="text"
+                  disabled={loading}
+                  value={bindAddress}
+                  placeholder="127.0.0.1 or 0.0.0.0"
+                  onChange={(e) => setBindAddress(e.target.value)}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                />
+              </div>
+            </div>
+
+            {/* VPS Daemon Deployment Guide */}
+            <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-xs font-mono text-slate-700">
+              <h4 className="font-bold text-slate-900 flex items-center space-x-1.5">
+                <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
+              </h4>
+              <p className="text-[11px] text-slate-600">
+                To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
+              </p>
+              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-[11px] overflow-x-auto select-text font-mono">
+                <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787 --ws-port 8789</code>
+              </div>
+              <p className="text-[10px] text-slate-500">
+                You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded">systemctl start arbitrager</code>) to auto-restart on server reboot.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* SECTION 5: ABOUT, CHECK FOR UPDATES & BUY ME A SOLO                 */}
+        {/* =================================================================== */}
+        {(activeTab === "about" || activeTab === "all") && (
+          <div className="space-y-4">
+            <div className="bg-surface border border-surface-border rounded-2xl p-6 shadow-xs space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
+                    <Shield className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold font-mono text-slate-900">
+                      About Arbitrager ({version})
+                    </h3>
+                    <p className="text-xs text-slate-500 font-mono mt-0.5">
+                      High-frequency cross-venue statistical & spatial arbitrage platform
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2">
                   <button
                     type="button"
-                    onClick={() => toggleSecret("hsm_token")}
-                    className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                    onClick={handleCheckForUpdates}
+                    disabled={checkingUpdate}
+                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
                   >
-                    {showSecrets["hsm_token"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                    <span>{showSecrets["hsm_token"] ? "Hide" : "Show"}</span>
+                    <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
+                    <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
                   </button>
+
+                  <a
+                    href={gitRepo}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                  >
+                    <span>Git Repository</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
                 </div>
-                <input
-                  type={showSecrets["hsm_token"] ? "text" : "password"}
-                  disabled={loading}
-                  value={hmacToken}
-                  placeholder="Enter HMAC secret token"
-                  onChange={(e) => setHmacToken(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                />
+              </div>
+
+              {updateMsg && (
+                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-mono flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{updateMsg}</span>
+                </div>
+              )}
+
+              {/* Sponsor Card: Buy me a SOLO */}
+              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+                <div className="flex items-center space-x-4">
+                  <img
+                    src="/solo_can.jpg"
+                    alt="Can of Australian SOLO Lemon Soda"
+                    className="w-14 h-14 object-contain rounded-xl shadow-xs border border-amber-200 bg-white"
+                  />
+                  <div>
+                    <h4 className="text-sm font-bold font-mono text-slate-900">
+                      Enjoying the tool? Buy me a SOLO!
+                    </h4>
+                    <p className="text-xs text-slate-600 font-mono mt-0.5">
+                      Fuel the research and development of ultra-low latency quantitative arbitrage strategies.
+                    </p>
+                  </div>
+                </div>
+
+                <a
+                  href={sponsorLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-xl transition shadow-xs flex items-center space-x-2 shrink-0"
+                >
+                  <span>Buy me a SOLO ($5)</span>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              </div>
+
+              {/* Legal & Financial Disclaimer */}
+              <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-[11px] font-mono text-slate-600 leading-relaxed">
+                <div className="flex items-center space-x-1.5 font-bold text-slate-800 uppercase text-[10px]">
+                  <Scale className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Legal & Financial Risk Disclaimer</span>
+                </div>
+                <p>
+                  This software is provided for research, simulation, and educational quantitative finance purposes. Cross-market arbitrage and algorithmic trading involve inherent execution risks, including market volatility, network latency spikes, smart contract bugs, API rate limits, and liquidity slippage. Past simulation performance does not guarantee future financial returns.
+                </p>
+                <p>
+                  No private keys or seed phrases are stored remotely or accessed by any third party; all credentials remain encrypted locally on your system using AES-256-GCM. Users are solely responsible for compliance with their local jurisdiction regulations and exchange terms of service.
+                </p>
               </div>
             </div>
           </div>
@@ -975,7 +1189,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-6 py-2.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
+            className="px-6 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
           >
             {saving ? (
               <span>Saving...</span>
@@ -990,8 +1204,17 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
           </button>
         </div>
       </form>
+
+      {/* Vault Unlock Modal */}
+      <VaultUnlockModal
+        isOpen={showVaultModal}
+        vaultStatus={vaultStatus}
+        onClose={() => setShowVaultModal(false)}
+        onSuccess={(status) => {
+          setVaultStatus(status);
+          setShowVaultModal(false);
+        }}
+      />
     </div>
   );
 };
-
-

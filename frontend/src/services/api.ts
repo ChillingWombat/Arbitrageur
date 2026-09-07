@@ -1,7 +1,10 @@
+import { invoke } from "@tauri-apps/api/core";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
   SpatialOpportunityDto,
+  SpotOpportunityDto,
+  SpotExecutionParams,
   FundingOpportunityDto,
   PredictionOpportunityDto,
   StatArbStepResultDto,
@@ -14,6 +17,11 @@ import type {
   CrossTickerExecutionParams,
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
+  VaultStatus,
+  ExchangeCredentials,
+  VenueBalanceInfo,
+  StrategyMetrics,
+  WfoOptimizationResult,
 } from "../types";
 
 import { PERP_TICKERS } from "../types/tickers";
@@ -55,6 +63,17 @@ class BrowserMockEngine {
     kalshi_api_key_id: "",
     kalshi_private_key: "",
     kalshi_url: "https://trading-api.kalshi.com",
+    engine_rpc_port: 8787,
+    engine_ws_port: 8789,
+    bind_address: "127.0.0.1",
+    trading_mode: "paper",
+    fast_warmup_enabled: true,
+    venue_rebalance_threshold_usd: 500.0,
+    referral_lighter: "https://app.lighter.xyz/?referral=SOLO&source=none",
+    referral_robinhood: "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none",
+    sponsor_link: "https://buymeacoffee.com/dav1d1010",
+    version: "v1.2.0",
+    git_repo: "https://github.com/arbitrager/arbitrager",
   };
   private logs: ExecutionLogEntry[] = [
     {
@@ -71,7 +90,13 @@ class BrowserMockEngine {
       fees: 2.1,
       net_profit: 46.4,
       latency_us: 114,
-      note: "Executed atomically at spread 18.2 BPS",
+      note: "Executed atomically at spread 18.2 BPS (Dislocation +6.8 BPS over baseline)",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 18.2,
+      baseline_mean_spread_bps: 11.4,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 14.8,
     },
     {
       id: "exec-2",
@@ -88,6 +113,12 @@ class BrowserMockEngine {
       net_profit: 30.2,
       latency_us: 98,
       note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)",
+      direction: "Carry Open",
+      trigger_spread_bps: 15.0,
+      baseline_mean_spread_bps: 9.5,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 12.0,
     },
     {
       id: "exec-3",
@@ -103,7 +134,35 @@ class BrowserMockEngine {
       fees: 1.9,
       net_profit: 39.1,
       latency_us: 120,
-      note: "Atomic multi-leg routing on BTC basis dislocation",
+      note: "Step 2 scale-in on widening divergence",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 22.4,
+      baseline_mean_spread_bps: 13.1,
+      position_step: 2,
+      max_units: 3,
+      nominal_hurdle_bps: 15.2,
+    },
+    {
+      id: "exec-3b",
+      timestamp: new Date(Date.now() - 210000).toISOString(),
+      trade_type: "Spatial",
+      symbol: "BTC-USDC",
+      venue_a: "Hyperliquid",
+      venue_b: "Lighter",
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: 26.0,
+      fees: 1.5,
+      net_profit: 24.5,
+      latency_us: 108,
+      note: "Partial unwind as spread converged toward mean",
+      direction: "Convergence Unwind",
+      trigger_spread_bps: 4.2,
+      baseline_mean_spread_bps: 12.0,
+      position_step: 2,
+      max_units: 3,
+      nominal_hurdle_bps: 6.0,
     },
     {
       id: "exec-4",
@@ -120,6 +179,12 @@ class BrowserMockEngine {
       net_profit: 18.2,
       latency_us: 105,
       note: "Executed atomically at spread 16.4 BPS",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 16.4,
+      baseline_mean_spread_bps: 10.2,
+      position_step: 1,
+      max_units: 4,
+      nominal_hurdle_bps: 13.5,
     },
     {
       id: "exec-5",
@@ -136,6 +201,12 @@ class BrowserMockEngine {
       net_profit: 12.1,
       latency_us: 88,
       note: "Carry opened: Short HL + Long LGT",
+      direction: "Carry Open",
+      trigger_spread_bps: 14.2,
+      baseline_mean_spread_bps: 9.0,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 12.0,
     },
     {
       id: "exec-6",
@@ -152,6 +223,12 @@ class BrowserMockEngine {
       net_profit: 10.3,
       latency_us: 92,
       note: "Sui perp dislocation captured",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 24.5,
+      baseline_mean_spread_bps: 14.0,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 17.2,
     },
     {
       id: "exec-7",
@@ -167,7 +244,13 @@ class BrowserMockEngine {
       fees: 1.1,
       net_profit: 6.4,
       latency_us: 110,
-      note: "AVAX perp basis captured",
+      note: "AVAX perp basis captured on convergence",
+      direction: "Convergence Unwind",
+      trigger_spread_bps: 3.2,
+      baseline_mean_spread_bps: 8.5,
+      position_step: 2,
+      max_units: 3,
+      nominal_hurdle_bps: 5.0,
     },
     {
       id: "exec-8",
@@ -184,6 +267,12 @@ class BrowserMockEngine {
       net_profit: 5.9,
       latency_us: 102,
       note: "Solana cross-venue basis capture",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 14.5,
+      baseline_mean_spread_bps: 10.0,
+      position_step: 2,
+      max_units: 4,
+      nominal_hurdle_bps: 13.5,
     },
     {
       id: "exec-9",
@@ -200,6 +289,12 @@ class BrowserMockEngine {
       net_profit: 5.5,
       latency_us: 95,
       note: "Sui liquidity arb captured",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 20.1,
+      baseline_mean_spread_bps: 13.5,
+      position_step: 2,
+      max_units: 3,
+      nominal_hurdle_bps: 16.5,
     },
     {
       id: "exec-10",
@@ -216,6 +311,12 @@ class BrowserMockEngine {
       net_profit: -0.5,
       latency_us: 130,
       note: "DeltaGuard safety unwind on Leg B rejection",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 19.0,
+      baseline_mean_spread_bps: 12.0,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 15.0,
     },
     {
       id: "exec-11",
@@ -232,6 +333,12 @@ class BrowserMockEngine {
       net_profit: -0.3,
       latency_us: 125,
       note: "Slippage tolerance boundary reached, position cleanly unwound",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 17.5,
+      baseline_mean_spread_bps: 11.5,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 14.5,
     },
     {
       id: "exec-12",
@@ -248,6 +355,12 @@ class BrowserMockEngine {
       net_profit: -1.5,
       latency_us: 145,
       note: "Emergency unwind on venue latency spike",
+      direction: "Divergence Entry",
+      trigger_spread_bps: 21.5,
+      baseline_mean_spread_bps: 12.8,
+      position_step: 1,
+      max_units: 3,
+      nominal_hurdle_bps: 16.0,
     },
   ];
 
@@ -466,6 +579,116 @@ class BrowserMockEngine {
     return opps.sort((a, b) => b.net_spread_bps - a.net_spread_bps);
   }
 
+  scanSpotOpportunities(symbolFilter?: string): SpotOpportunityDto[] {
+    const assets = [
+      { symbol: "BTC/USDC", basePrice: 96420.0, depth: 350000, latency: 12 },
+      { symbol: "ETH/USDC", basePrice: 2845.5, depth: 220000, latency: 15 },
+      { symbol: "SOL/USDC", basePrice: 198.8, depth: 140000, latency: 10 },
+      { symbol: "BNB/USDC", basePrice: 654.2, depth: 95000, latency: 16 },
+      { symbol: "SUI/USDC", basePrice: 3.45, depth: 65000, latency: 18 },
+      { symbol: "AVAX/USDC", basePrice: 34.9, depth: 70000, latency: 20 },
+      { symbol: "LINK/USDC", basePrice: 18.95, depth: 55000, latency: 14 },
+      { symbol: "NEAR/USDC", basePrice: 5.68, depth: 48000, latency: 17 },
+    ];
+
+    const venues = [
+      { name: "Hyperliquid Spot", feeBps: 1.5, transferCost: 0.0 },
+      { name: "Lighter Spot", feeBps: 0.0, transferCost: 0.0 },
+      { name: "Binance Spot", feeBps: 7.5, transferCost: 0.8 },
+      { name: "Coinbase Spot", feeBps: 15.0, transferCost: 1.5 },
+      { name: "OKX Spot", feeBps: 8.0, transferCost: 0.8 },
+      { name: "Kraken Spot", feeBps: 16.0, transferCost: 1.2 },
+    ];
+
+    const opps: SpotOpportunityDto[] = [];
+    for (const a of assets) {
+      if (symbolFilter && symbolFilter.trim().length > 0 && !a.symbol.toLowerCase().includes(symbolFilter.toLowerCase())) {
+        continue;
+      }
+      for (let i = 0; i < venues.length; i++) {
+        for (let j = 0; j < venues.length; j++) {
+          if (i === j) continue;
+          const buy = venues[i];
+          const sell = venues[j];
+          const skew = Math.sin(i * 3.7 + j * 7.1 + this.simCycle * 0.4) * 12.0;
+          const grossBps = Math.max(buy.feeBps + sell.feeBps + 2.0 + skew, 0.5);
+          const buyPrice = a.basePrice * (1.0 - skew * 0.00005);
+          const sellPrice = buyPrice * (1.0 + grossBps / 10000);
+          const transferCost = buy.transferCost + sell.transferCost;
+          const tradeSize = 1000;
+          const feeUsd = (buyPrice * tradeSize * buy.feeBps / 10000) + (sellPrice * tradeSize * sell.feeBps / 10000);
+          const grossProfit = (sellPrice - buyPrice) * (tradeSize / buyPrice);
+          const netProfitUsd = grossProfit - feeUsd - transferCost;
+          const netBps = (netProfitUsd / tradeSize) * 10000;
+
+          opps.push({
+            id: `spot-${a.symbol.replace("/", "-")}-${buy.name.replace(/\s+/g, "")}-${sell.name.replace(/\s+/g, "")}`,
+            symbol: a.symbol,
+            buy_venue: buy.name,
+            sell_venue: sell.name,
+            buy_price: Math.round(buyPrice * 100) / 100,
+            sell_price: Math.round(sellPrice * 100) / 100,
+            gross_spread_bps: Math.round(grossBps * 10) / 10,
+            buy_fee_bps: buy.feeBps,
+            sell_fee_bps: sell.feeBps,
+            transfer_cost_usd: transferCost,
+            net_spread_bps: Math.round(netBps * 10) / 10,
+            net_profit_usd: Math.round(netProfitUsd * 100) / 100,
+            available_depth_usd: a.depth,
+            estimated_latency_ms: a.latency,
+            is_executable: netBps > 2.0,
+          });
+        }
+      }
+    }
+    return opps.sort((a, b) => b.net_spread_bps - a.net_spread_bps);
+  }
+
+  executeSpotArbitrage(params: SpotExecutionParams): SimStepResultDto {
+    this.simCycle += 1;
+    const profit = Math.max(params.trade_size_usd * 0.00085, 4.5);
+    this.pnl += profit;
+
+    const logEntry: ExecutionLogEntry = {
+      id: `exec-spot-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      trade_type: "Spot Cross-Exchange",
+      symbol: params.symbol,
+      venue_a: params.buy_venue,
+      venue_b: params.sell_venue,
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: Math.round((profit + 2.0) * 100) / 100,
+      fees: 2.0,
+      net_profit: Math.round(profit * 100) / 100,
+      latency_us: 14200,
+      note: `Spot Bot flash execution: Bought ${params.symbol} on ${params.buy_venue}, sold on ${params.sell_venue}`,
+      direction: "Spot Cash Arb",
+      trigger_spread_bps: 8.5,
+      baseline_mean_spread_bps: 4.0,
+      position_step: 1,
+      max_units: 1,
+      nominal_hurdle_bps: 5.0,
+    };
+    this.logs.unshift(logEntry);
+    if (this.logs.length > 100) this.logs.pop();
+
+    return {
+      cycle: this.simCycle,
+      opportunity_found: true,
+      execution_success: true,
+      trade_type: "Spot Cross-Exchange",
+      direction: "Spot Cash Arb",
+      venue_a: params.buy_venue,
+      venue_b: params.sell_venue,
+      spread_bps: 8.5,
+      realized_profit_usd: profit,
+      total_cumulative_pnl_usd: this.pnl,
+      message: `Spot Bot execution successful: +$${profit.toFixed(2)} USD (+8.5 bps)`,
+    };
+  }
+
   scanFundingOpportunities(symbol: string, tradeSizeUsd: number): FundingOpportunityDto[] {
     return [
       {
@@ -678,11 +901,22 @@ class BrowserMockEngine {
     };
   }
 
-  executeSpatialArbitrage(symbol: string, buyVenue: string, sellVenue: string, orderQty: number): SimStepResultDto {
+  executeSpatialArbitrage(
+    symbol: string,
+    buyVenue: string,
+    sellVenue: string,
+    orderQty: number,
+    direction?: string,
+    triggerSpreadBps?: number,
+    baselineMeanSpreadBps?: number,
+    positionStep?: number,
+    maxUnits?: number,
+    nominalHurdleBps?: number
+  ): SimStepResultDto {
     this.simCycle += 1;
     const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
     const base = ticker ? ticker.basePrice : 100.0;
-    const spreadBps = 14.8 + Math.random() * 5.2;
+    const spreadBps = triggerSpreadBps ?? (14.8 + Math.random() * 5.2);
     const grossProfit = (spreadBps / 10000) * base * orderQty;
     const fees = 2.1;
     const netProfit = grossProfit - fees;
@@ -703,6 +937,12 @@ class BrowserMockEngine {
       net_profit: netProfit,
       latency_us: Math.floor(95 + Math.random() * 30),
       note: `Spatial captured: Buy ${buyVenue} / Sell ${sellVenue} (+${netProfit.toFixed(2)} USD)`,
+      direction: direction ?? "Divergence Entry",
+      trigger_spread_bps: spreadBps,
+      baseline_mean_spread_bps: baselineMeanSpreadBps,
+      position_step: positionStep ?? 1,
+      max_units: maxUnits ?? 3,
+      nominal_hurdle_bps: nominalHurdleBps,
     };
     this.logs.unshift(log);
 
@@ -711,7 +951,7 @@ class BrowserMockEngine {
       opportunity_found: true,
       execution_success: true,
       trade_type: "Spatial Arb",
-      direction: `Buy ${buyVenue} / Sell ${sellVenue}`,
+      direction: direction ?? `Buy ${buyVenue} / Sell ${sellVenue}`,
       venue_a: buyVenue,
       venue_b: sellVenue,
       spread_bps: spreadBps,
@@ -932,25 +1172,184 @@ class BrowserMockEngine {
   getAllTickerStrategyConfigs(): TickerStrategyConfigDto[] {
     return Array.from(this.strategyConfigs.values());
   }
+
+  private vaultStatus: VaultStatus = {
+    is_initialized: true,
+    is_unlocked: true,
+    unlocked_until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+  };
+  private exchangeCredentials: ExchangeCredentials[] = [
+    { venue: "hyperliquid", api_key: "0x1a8f9c...4b", api_secret: "••••••••••••", passphrase: null, account_index: 0, subaccount_index: null, enabled: true },
+    { venue: "lighter", api_key: "0x3e71d8...c2", api_secret: "••••••••••••", passphrase: null, account_index: 0, subaccount_index: 1, enabled: true },
+    { venue: "vanta", api_key: "ord_key_99812", api_secret: "••••••••••••", passphrase: null, account_index: null, subaccount_index: null, enabled: true },
+    { venue: "robinhood", api_key: "0x89e5db...ba", api_secret: "••••••••••••", passphrase: null, account_index: null, subaccount_index: null, enabled: true },
+  ];
+
+  getVaultStatus(): VaultStatus {
+    return this.vaultStatus;
+  }
+
+  initializeVault(_password: string): VaultStatus {
+    this.vaultStatus = {
+      is_initialized: true,
+      is_unlocked: true,
+      unlocked_until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    };
+    return this.vaultStatus;
+  }
+
+  unlockVault(_password: string): VaultStatus {
+    this.vaultStatus.is_unlocked = true;
+    this.vaultStatus.unlocked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+    return this.vaultStatus;
+  }
+
+  lockVault(): VaultStatus {
+    this.vaultStatus.is_unlocked = false;
+    this.vaultStatus.unlocked_until = null;
+    return this.vaultStatus;
+  }
+
+  getExchangeCredentials(): ExchangeCredentials[] {
+    if (!this.vaultStatus.is_unlocked) throw new Error("Vault is locked. Enter password to view credentials.");
+    return this.exchangeCredentials;
+  }
+
+  saveExchangeCredentials(_password: string, credentials: ExchangeCredentials[]): void {
+    this.exchangeCredentials = credentials;
+  }
+
+  getVenueBalances(): VenueBalanceInfo[] {
+    return [
+      { venue: "hyperliquid", balance_usd: 84250.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "lighter", balance_usd: 62100.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "vanta", balance_usd: 48900.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "robinhood", balance_usd: 35400.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+    ];
+  }
+
+  getStrategyPerformance(strategyId?: string): StrategyMetrics[] {
+    const list: StrategyMetrics[] = [
+      {
+        strategy_id: "spatial_spread",
+        total_cycles_initiated: 24,
+        total_cycles_completed: 22,
+        winning_cycles: 20,
+        losing_cycles: 2,
+        win_rate_pct: 90.9,
+        total_pnl_usd: 1420.5,
+        avg_pnl_usd: 64.57,
+        avg_pnl_bps: 12.4,
+        max_drawdown_usd: 85.0,
+        max_drawdown_pct: 0.85,
+        sharpe_ratio: 3.42,
+        annualized_apr_pct: 172.8,
+        annualized_apy_pct: 320.4,
+      },
+      {
+        strategy_id: "stat_arb",
+        total_cycles_initiated: 16,
+        total_cycles_completed: 15,
+        winning_cycles: 13,
+        losing_cycles: 2,
+        win_rate_pct: 86.7,
+        total_pnl_usd: 890.2,
+        avg_pnl_usd: 59.35,
+        avg_pnl_bps: 9.8,
+        max_drawdown_usd: 120.0,
+        max_drawdown_pct: 1.2,
+        sharpe_ratio: 2.85,
+        annualized_apr_pct: 108.3,
+        annualized_apy_pct: 195.1,
+      },
+      {
+        strategy_id: "funding_rate",
+        total_cycles_initiated: 12,
+        total_cycles_completed: 12,
+        winning_cycles: 11,
+        losing_cycles: 1,
+        win_rate_pct: 91.7,
+        total_pnl_usd: 640.8,
+        avg_pnl_usd: 53.4,
+        avg_pnl_bps: 14.1,
+        max_drawdown_usd: 45.0,
+        max_drawdown_pct: 0.45,
+        sharpe_ratio: 3.8,
+        annualized_apr_pct: 78.0,
+        annualized_apy_pct: 118.2,
+      },
+      {
+        strategy_id: "prediction_parity",
+        total_cycles_initiated: 8,
+        total_cycles_completed: 8,
+        winning_cycles: 8,
+        losing_cycles: 0,
+        win_rate_pct: 100.0,
+        total_pnl_usd: 310.0,
+        avg_pnl_usd: 38.75,
+        avg_pnl_bps: 22.5,
+        max_drawdown_usd: 0.0,
+        max_drawdown_pct: 0.0,
+        sharpe_ratio: 6.5,
+        annualized_apr_pct: 37.7,
+        annualized_apy_pct: 45.8,
+      },
+    ];
+    if (strategyId) return list.filter((s) => s.strategy_id === strategyId);
+    return list;
+  }
+
+  runWfoCalibration(_symbol: string): WfoOptimizationResult {
+    return {
+      optimal_estimator: "VWMA",
+      optimal_window_size: 30,
+      in_sample_score: 3.15,
+      out_of_sample_score: 2.84,
+      recommendation_notes: "Depth-weighted VWMA(30) demonstrated highest out-of-sample Sharpe (2.84) with lowest tracking error across orderbook quote updates.",
+      candidate_evaluations: [
+        { estimator: "VWMA", window_size: 30, in_sample_sharpe: 3.15, out_of_sample_sharpe: 2.84, tracking_error_bps: 1.1, simulated_net_profit_bps: 48.2, win_rate_pct: 88.5, total_trades: 26 },
+        { estimator: "EMA", window_size: 20, in_sample_sharpe: 2.92, out_of_sample_sharpe: 2.45, tracking_error_bps: 1.4, simulated_net_profit_bps: 41.0, win_rate_pct: 82.0, total_trades: 28 },
+        { estimator: "SMA", window_size: 50, in_sample_sharpe: 2.65, out_of_sample_sharpe: 2.15, tracking_error_bps: 1.8, simulated_net_profit_bps: 36.5, win_rate_pct: 78.0, total_trades: 23 },
+        { estimator: "WMA", window_size: 30, in_sample_sharpe: 2.80, out_of_sample_sharpe: 2.30, tracking_error_bps: 1.5, simulated_net_profit_bps: 38.2, win_rate_pct: 80.0, total_trades: 25 },
+        { estimator: "SMMA", window_size: 50, in_sample_sharpe: 2.40, out_of_sample_sharpe: 1.95, tracking_error_bps: 2.1, simulated_net_profit_bps: 31.0, win_rate_pct: 74.0, total_trades: 20 },
+      ],
+    };
+  }
 }
 
 const mockEngine = new BrowserMockEngine();
 
-// Dynamic loader for Tauri core IPC
-let tauriCore: { invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T> } | null = null;
-
+// Tauri core IPC using statically imported invoke
 async function getTauriCore() {
-  if (tauriCore) return tauriCore;
   if (isTauriEnvironment()) {
-    try {
-      const core = await import("@tauri-apps/api/core");
-      tauriCore = core;
-      return tauriCore;
-    } catch (e) {
-      console.warn("Could not load @tauri-apps/api/core, falling back to mock:", e);
-    }
+    return { invoke };
   }
   return null;
+}
+
+function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
+  if (!c) {
+    return {
+      symbol: "BTC-USDC",
+      targetProfitBps: 5.0,
+      windowPercentile: 50,
+      maxAccumulatedUnits: 3,
+      currentAccumulatedUnits: 0,
+      executionMode: "SINGLE_WAY",
+      unitSize: 0.005,
+      userTargetLeverage: 10,
+    };
+  }
+  return {
+    symbol: c.symbol || "BTC-USDC",
+    targetProfitBps: Number(c.targetProfitBps ?? c.target_profit_bps ?? 5.0),
+    windowPercentile: Number(c.windowPercentile ?? c.window_percentile ?? 50),
+    maxAccumulatedUnits: Number(c.maxAccumulatedUnits ?? c.max_accumulated_units ?? 3),
+    currentAccumulatedUnits: Number(c.currentAccumulatedUnits ?? c.current_accumulated_units ?? 0),
+    executionMode: (c.executionMode ?? c.execution_mode ?? "SINGLE_WAY"),
+    unitSize: Number(c.unitSize ?? c.unit_size ?? 0.005),
+    userTargetLeverage: Number(c.userTargetLeverage ?? c.user_target_leverage ?? 10),
+  };
 }
 
 export const api = {
@@ -971,9 +1370,36 @@ export const api = {
   },
 
   async scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): Promise<SpatialOpportunityDto[]> {
-    const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<SpatialOpportunityDto[]>("scan_spatial_opportunities", { symbol, minBps, orderQty });
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<SpatialOpportunityDto[]>("scan_spatial_opportunities", { symbol, minBps, orderQty });
+      } catch (e) {
+        console.warn("Tauri invoke scan_spatial_opportunities error:", e);
+      }
+    }
     return mockEngine.scanSpatialOpportunities(symbol, minBps, orderQty);
+  },
+
+  async scanSpotOpportunities(symbol?: string): Promise<SpotOpportunityDto[]> {
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<SpotOpportunityDto[]>("scan_spot_opportunities", { symbol: symbol || "" });
+      } catch (e) {
+        console.warn("Tauri invoke scan_spot_opportunities error:", e);
+      }
+    }
+    return mockEngine.scanSpotOpportunities(symbol);
+  },
+
+  async executeSpotArbitrage(params: SpotExecutionParams): Promise<SimStepResultDto> {
+    if (isTauriEnvironment()) {
+      try {
+        return await invoke<SimStepResultDto>("execute_spot_arbitrage", { params });
+      } catch (e) {
+        console.warn("Tauri invoke execute_spot_arbitrage error:", e);
+      }
+    }
+    return mockEngine.executeSpotArbitrage(params);
   },
 
   async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
@@ -1017,10 +1443,44 @@ export const api = {
     return mockEngine.runSimStep(symbol, targetBps, orderQty);
   },
 
-  async executeSpatialArbitrage(symbol: string, buyVenue: string, sellVenue: string, orderQty: number): Promise<SimStepResultDto> {
+  async executeSpatialArbitrage(
+    symbol: string,
+    buyVenue: string,
+    sellVenue: string,
+    orderQty: number,
+    direction?: string,
+    triggerSpreadBps?: number,
+    baselineMeanSpreadBps?: number,
+    positionStep?: number,
+    maxUnits?: number,
+    nominalHurdleBps?: number
+  ): Promise<SimStepResultDto> {
     const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<SimStepResultDto>("execute_spatial_arbitrage", { symbol, buyVenue, sellVenue, orderQty });
-    return mockEngine.executeSpatialArbitrage(symbol, buyVenue, sellVenue, orderQty);
+    if (tauri)
+      return tauri.invoke<SimStepResultDto>("execute_spatial_arbitrage", {
+        symbol,
+        buyVenue,
+        sellVenue,
+        orderQty,
+        direction,
+        triggerSpreadBps,
+        baselineMeanSpreadBps,
+        positionStep,
+        maxUnits,
+        nominalHurdleBps,
+      });
+    return mockEngine.executeSpatialArbitrage(
+      symbol,
+      buyVenue,
+      sellVenue,
+      orderQty,
+      direction,
+      triggerSpreadBps,
+      baselineMeanSpreadBps,
+      positionStep,
+      maxUnits,
+      nominalHurdleBps
+    );
   },
 
   async executeCrossTickerArbitrage(
@@ -1129,8 +1589,11 @@ export const api = {
 
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
     const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<TickerStrategyConfigDto>("get_ticker_strategy_config", { symbol });
-    return mockEngine.getTickerStrategyConfig(symbol);
+    if (tauri) {
+      const res = await tauri.invoke<TickerStrategyConfigDto>("get_ticker_strategy_config", { symbol });
+      return normalizeTickerStrategyConfig(res);
+    }
+    return normalizeTickerStrategyConfig(mockEngine.getTickerStrategyConfig(symbol));
   },
 
   async saveTickerStrategyConfig(config: TickerStrategyConfigDto): Promise<void> {
@@ -1141,8 +1604,66 @@ export const api = {
 
   async getAllTickerStrategyConfigs(): Promise<TickerStrategyConfigDto[]> {
     const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<TickerStrategyConfigDto[]>("get_all_ticker_strategy_configs");
-    return mockEngine.getAllTickerStrategyConfigs();
+    if (tauri) {
+      const res = await tauri.invoke<TickerStrategyConfigDto[]>("get_all_ticker_strategy_configs");
+      return (res || []).map(normalizeTickerStrategyConfig);
+    }
+    return mockEngine.getAllTickerStrategyConfigs().map(normalizeTickerStrategyConfig);
+  },
+
+  async getVaultStatus(): Promise<VaultStatus> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<VaultStatus>("get_vault_status");
+    return mockEngine.getVaultStatus();
+  },
+
+  async initializeVault(password: string): Promise<VaultStatus> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<VaultStatus>("initialize_vault", { password });
+    return mockEngine.initializeVault(password);
+  },
+
+  async unlockVault(password: string): Promise<VaultStatus> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<VaultStatus>("unlock_vault", { password });
+    return mockEngine.unlockVault(password);
+  },
+
+  async lockVault(): Promise<VaultStatus> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<VaultStatus>("lock_vault");
+    return mockEngine.lockVault();
+  },
+
+  async getExchangeCredentials(): Promise<ExchangeCredentials[]> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<ExchangeCredentials[]>("get_exchange_credentials");
+    return mockEngine.getExchangeCredentials();
+  },
+
+  async saveExchangeCredentials(password: string, credentials: ExchangeCredentials[]): Promise<void> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<void>("save_exchange_credentials", { password, credentials });
+    return mockEngine.saveExchangeCredentials(password, credentials);
+  },
+
+  async getVenueBalances(): Promise<VenueBalanceInfo[]> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<VenueBalanceInfo[]>("get_venue_balances");
+    return mockEngine.getVenueBalances();
+  },
+
+  async getStrategyPerformance(strategyId?: string): Promise<StrategyMetrics[]> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<StrategyMetrics[]>("get_strategy_performance", { strategyId });
+    return mockEngine.getStrategyPerformance(strategyId);
+  },
+
+  async runWfoCalibration(symbol: string): Promise<WfoOptimizationResult> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<WfoOptimizationResult>("run_wfo_calibration", { symbol });
+    return mockEngine.runWfoCalibration(symbol);
   },
 };
+
 

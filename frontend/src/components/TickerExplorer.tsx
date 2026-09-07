@@ -316,19 +316,27 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                 </div>
 
                 {/* Optional Strategy Configuration Badge Row */}
-                {strategyConfigs?.get(ticker.symbol) && (
-                  <div className="flex items-center space-x-1.5 pt-1 text-[9px] font-mono text-slate-500">
-                    <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
-                      TP {strategyConfigs.get(ticker.symbol)!.targetProfitBps.toFixed(1)} bps
-                    </span>
-                    <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
-                      {strategyConfigs.get(ticker.symbol)!.currentAccumulatedUnits}/{strategyConfigs.get(ticker.symbol)!.maxAccumulatedUnits}u
-                    </span>
-                    <span className="text-slate-400">
-                      {strategyConfigs.get(ticker.symbol)!.executionMode === "DOUBLE_WAY" ? "DW" : "SW"}
-                    </span>
-                  </div>
-                )}
+                {(() => {
+                  const cfg = strategyConfigs?.get(ticker.symbol);
+                  if (!cfg) return null;
+                  const tp = Number(cfg.targetProfitBps ?? cfg.target_profit_bps ?? 5.0);
+                  const curUnits = Number(cfg.currentAccumulatedUnits ?? cfg.current_accumulated_units ?? 0);
+                  const maxUnits = Number(cfg.maxAccumulatedUnits ?? cfg.max_accumulated_units ?? 3);
+                  const mode = cfg.executionMode ?? cfg.execution_mode ?? "SINGLE_WAY";
+                  return (
+                    <div className="flex items-center space-x-1.5 pt-1 text-[9px] font-mono text-slate-500">
+                      <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
+                        TP {isNaN(tp) ? "5.0" : tp.toFixed(1)} bps
+                      </span>
+                      <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
+                        {curUnits}/{maxUnits}u
+                      </span>
+                      <span className="text-slate-400">
+                        {mode === "DOUBLE_WAY" ? "DW" : "SW"}
+                      </span>
+                    </div>
+                  );
+                })()}
               </button>
             );
           })

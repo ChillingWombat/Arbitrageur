@@ -52,6 +52,12 @@ export interface SpatialOpportunityDto {
   order_qty: number;
   estimated_profit_usd: number;
   is_executable: boolean;
+  direction?: string;
+  trigger_spread_bps?: number;
+  baseline_mean_spread_bps?: number;
+  position_step?: number;
+  max_units?: number;
+  nominal_hurdle_bps?: number;
 }
 
 export type MatrixMode = "cross-venue" | "cross-ticker";
@@ -61,12 +67,19 @@ export type ArbitrageExecutionMode = "SINGLE_WAY" | "DOUBLE_WAY";
 export interface TickerStrategyConfigDto {
   symbol: string;
   targetProfitBps: number; // Target profit in BPS
+  target_profit_bps?: number;
   windowPercentile: number; // Percentile of historical sliding window (50 - 99%)
+  window_percentile?: number;
   maxAccumulatedUnits: number; // Maximum accumulated grid units
+  max_accumulated_units?: number;
   currentAccumulatedUnits: number; // Currently filled units
+  current_accumulated_units?: number;
   executionMode: ArbitrageExecutionMode; // Single-way (divergence) or Double-way (divergence + convergence)
+  execution_mode?: string;
   unitSize: number; // Size per unit in base asset units
+  unit_size?: number;
   userTargetLeverage: number; // User target leverage ratio (e.g. 10)
+  user_target_leverage?: number;
 }
 
 export interface MatrixCellDto {
@@ -237,6 +250,12 @@ export interface ExecutionLogEntry {
   symbol: string;
   venue_a: string;
   venue_b: string;
+  direction?: string; // e.g. "Long Hyperliquid / Short Lighter"
+  trigger_spread_bps?: number; // Instantaneous spread when entering/triggering
+  baseline_mean_spread_bps?: number; // Average spread at that time (entry signal)
+  position_step?: number; // Position step number (e.g. 1, 2, 3)
+  max_units?: number; // Maximum accumulated grid units
+  nominal_hurdle_bps?: number; // Nominal hurdle threshold at trigger time
   leg_a_status: string;
   leg_b_status: string;
   success: boolean;
@@ -288,5 +307,117 @@ export interface EngineSettingsDto {
   kalshi_api_key_id: string;
   kalshi_private_key: string;
   kalshi_url: string;
+
+  // Networking & Port Settings
+  engine_rpc_port: number;
+  engine_ws_port: number;
+  bind_address: string;
+
+  // Execution & Warm-up Modes
+  trading_mode: "paper" | "real";
+  fast_warmup_enabled: boolean;
+  venue_rebalance_threshold_usd: number;
+
+  // Subaccount mappings
+  hyperliquid_account_index?: number;
+  hyperliquid_subaccount_index?: number;
+  lighter_subaccount_index?: number;
+  vanta_subaccount_index?: number;
+  robinhood_subaccount_index?: number;
+
+  // Referrals, About & Sponsor Links
+  referral_lighter: string;
+  referral_robinhood: string;
+  sponsor_link: string;
+  version: string;
+  git_repo: string;
 }
+
+export interface VaultStatus {
+  is_initialized: boolean;
+  is_unlocked: boolean;
+  unlocked_until?: string | null;
+}
+
+export interface ExchangeCredentials {
+  venue: string;
+  api_key: string;
+  api_secret: string;
+  passphrase?: string | null;
+  account_index?: number | null;
+  subaccount_index?: number | null;
+  enabled: boolean;
+}
+
+export interface VenueBalanceInfo {
+  venue: string;
+  balance_usd: number;
+  min_required_usd: number;
+  needs_rebalance: boolean;
+  status: "HEALTHY" | "LOW_MARGIN" | "DEPLETED" | string;
+  recommended_action?: string | null;
+}
+
+export interface StrategyMetrics {
+  strategy_id: string;
+  total_cycles_initiated: number;
+  total_cycles_completed: number;
+  winning_cycles: number;
+  losing_cycles: number;
+  win_rate_pct: number;
+  total_pnl_usd: number;
+  avg_pnl_usd: number;
+  avg_pnl_bps: number;
+  max_drawdown_usd: number;
+  max_drawdown_pct: number;
+  sharpe_ratio: number;
+  annualized_apr_pct: number;
+  annualized_apy_pct: number;
+}
+
+export interface WfoEvaluation {
+  estimator: string;
+  window_size: number;
+  in_sample_sharpe: number;
+  out_of_sample_sharpe: number;
+  tracking_error_bps: number;
+  simulated_net_profit_bps: number;
+  win_rate_pct: number;
+  total_trades: number;
+}
+
+export interface WfoOptimizationResult {
+  optimal_estimator: string;
+  optimal_window_size: number;
+  in_sample_score: number;
+  out_of_sample_score: number;
+  candidate_evaluations: WfoEvaluation[];
+  recommendation_notes: string;
+}
+export interface SpotOpportunityDto {
+  id: string;
+  symbol: string;
+  buy_venue: string;
+  sell_venue: string;
+  buy_price: number;
+  sell_price: number;
+  gross_spread_bps: number;
+  buy_fee_bps: number;
+  sell_fee_bps: number;
+  transfer_cost_usd: number;
+  net_spread_bps: number;
+  net_profit_usd: number;
+  available_depth_usd: number;
+  estimated_latency_ms: number;
+  is_executable: boolean;
+}
+
+export interface SpotExecutionParams {
+  symbol: string;
+  buy_venue: string;
+  sell_venue: string;
+  trade_size_usd: number;
+  max_slippage_bps: number;
+}
+
 export * from "./tickers";

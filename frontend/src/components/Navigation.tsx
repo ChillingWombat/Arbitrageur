@@ -6,22 +6,27 @@ import {
   FlaskConical,
   ShieldCheck,
   PlaySquare,
+  TrendingUp,
   Settings,
+  Coins,
 } from "lucide-react";
 
 export type ActiveTab =
   | "spatial"
+  | "spot_arb"
   | "funding"
   | "prediction"
   | "statarb"
   | "risk"
   | "sim"
+  | "performance"
   | "settings";
 
 export interface NavigationProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   spatialCount?: number;
+  spotCount?: number;
   fundingCount?: number;
   predictionCount?: number;
 }
@@ -30,16 +35,24 @@ export const Navigation: React.FC<NavigationProps> = ({
   activeTab,
   onSelectTab,
   spatialCount = 0,
+  spotCount = 0,
   fundingCount = 0,
   predictionCount = 0,
 }) => {
   const tabs = [
     {
       id: "spatial" as ActiveTab,
-      shortLabel: "Spatial",
-      fullLabel: "Matrix",
+      shortLabel: "Futures",
+      fullLabel: "Convergence",
       icon: Layers,
       badge: spatialCount > 0 ? spatialCount : undefined,
+    },
+    {
+      id: "spot_arb" as ActiveTab,
+      shortLabel: "Spot Arb",
+      fullLabel: "Bot",
+      icon: Coins,
+      badge: spotCount > 0 ? spotCount : undefined,
     },
     {
       id: "funding" as ActiveTab,
@@ -72,6 +85,12 @@ export const Navigation: React.FC<NavigationProps> = ({
       shortLabel: "Simulation",
       fullLabel: "Studio",
       icon: PlaySquare,
+    },
+    {
+      id: "performance" as ActiveTab,
+      shortLabel: "Performance",
+      fullLabel: "",
+      icon: TrendingUp,
     },
     {
       id: "settings" as ActiveTab,

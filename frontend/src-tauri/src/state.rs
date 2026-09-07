@@ -30,9 +30,22 @@ pub struct ExecutionLogEntry {
     pub net_profit: f64,
     pub latency_us: u64,
     pub note: String,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub trigger_spread_bps: Option<f64>,
+    #[serde(default)]
+    pub baseline_mean_spread_bps: Option<f64>,
+    #[serde(default)]
+    pub position_step: Option<u32>,
+    #[serde(default)]
+    pub max_units: Option<u32>,
+    #[serde(default)]
+    pub nominal_hurdle_bps: Option<f64>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub struct TickerStrategyConfigDto {
     pub symbol: String,
     pub target_profit_bps: f64,
@@ -71,6 +84,27 @@ fn default_robinhood_rpc_url() -> String { "https://rpc.robinhood.network".into(
 fn default_robinhood_router() -> String { "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba".into() }
 fn default_polymarket_url() -> String { "https://clob.polymarket.com".into() }
 fn default_kalshi_url() -> String { "https://trading-api.kalshi.com".into() }
+fn default_engine_rpc_port() -> u16 { 8787 }
+fn default_engine_ws_port() -> u16 { 8789 }
+fn default_bind_address() -> String { "127.0.0.1".into() }
+fn default_trading_mode() -> String { "paper".into() }
+fn default_fast_warmup_enabled() -> bool { true }
+fn default_venue_rebalance_threshold_usd() -> f64 { 500.0 }
+fn default_referral_lighter() -> String { "https://app.lighter.xyz/?referral=SOLO&source=none".into() }
+fn default_referral_robinhood() -> String { "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none".into() }
+fn default_sponsor_link() -> String { "https://buymeacoffee.com/dav1d1010".into() }
+fn default_app_version() -> String { "v1.2.0".into() }
+fn default_git_repo() -> String { "https://github.com/arbitrager/arbitrager".into() }
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct VenueBalanceInfo {
+    pub venue: String,
+    pub balance_usd: f64,
+    pub min_required_usd: f64,
+    pub needs_rebalance: bool,
+    pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED"
+    pub recommended_action: Option<String>,
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct EngineSettingsDto {
@@ -83,6 +117,22 @@ pub struct EngineSettingsDto {
     #[serde(default = "default_min_depth_ratio")]
     pub min_depth_ratio: f64,
 
+    // Networking & Ports
+    #[serde(default = "default_engine_rpc_port")]
+    pub engine_rpc_port: u16,
+    #[serde(default = "default_engine_ws_port")]
+    pub engine_ws_port: u16,
+    #[serde(default = "default_bind_address")]
+    pub bind_address: String,
+
+    // Execution & Risk Modes
+    #[serde(default = "default_trading_mode")]
+    pub trading_mode: String, // "paper" or "real"
+    #[serde(default = "default_fast_warmup_enabled")]
+    pub fast_warmup_enabled: bool,
+    #[serde(default = "default_venue_rebalance_threshold_usd")]
+    pub venue_rebalance_threshold_usd: f64,
+
     // Hyperliquid
     #[serde(default)]
     pub hyperliquid_wallet: String,
@@ -90,6 +140,10 @@ pub struct EngineSettingsDto {
     pub hyperliquid_private_key: String,
     #[serde(default = "default_hyperliquid_url")]
     pub hyperliquid_url: String,
+    #[serde(default)]
+    pub hyperliquid_account_index: Option<u32>,
+    #[serde(default)]
+    pub hyperliquid_subaccount_index: Option<u32>,
 
     // Lighter zkDEX
     #[serde(default = "default_lighter_account_index")]
@@ -98,6 +152,8 @@ pub struct EngineSettingsDto {
     pub lighter_api_key: String,
     #[serde(default = "default_lighter_url")]
     pub lighter_url: String,
+    #[serde(default)]
+    pub lighter_subaccount_index: Option<u32>,
 
     // Vanta.exchange (Orderly Network)
     #[serde(default)]
@@ -108,6 +164,8 @@ pub struct EngineSettingsDto {
     pub vanta_orderly_secret: String,
     #[serde(default = "default_vanta_url")]
     pub vanta_url: String,
+    #[serde(default)]
+    pub vanta_subaccount_index: Option<u32>,
 
     // Robinhood EVM
     #[serde(default)]
@@ -118,6 +176,8 @@ pub struct EngineSettingsDto {
     pub robinhood_rpc_url: String,
     #[serde(default = "default_robinhood_router")]
     pub robinhood_router: String,
+    #[serde(default)]
+    pub robinhood_subaccount_index: Option<u32>,
 
     // Polymarket CLOB
     #[serde(default)]
@@ -136,6 +196,18 @@ pub struct EngineSettingsDto {
     pub kalshi_private_key: String,
     #[serde(default = "default_kalshi_url")]
     pub kalshi_url: String,
+
+    // Referrals, About & Sponsor Links
+    #[serde(default = "default_referral_lighter")]
+    pub referral_lighter: String,
+    #[serde(default = "default_referral_robinhood")]
+    pub referral_robinhood: String,
+    #[serde(default = "default_sponsor_link")]
+    pub sponsor_link: String,
+    #[serde(default = "default_app_version")]
+    pub version: String,
+    #[serde(default = "default_git_repo")]
+    pub git_repo: String,
 }
 
 impl Default for EngineSettingsDto {
@@ -145,20 +217,31 @@ impl Default for EngineSettingsDto {
             hmac_token: default_hmac_token(),
             max_slippage_bps: default_max_slippage(),
             min_depth_ratio: default_min_depth_ratio(),
+            engine_rpc_port: default_engine_rpc_port(),
+            engine_ws_port: default_engine_ws_port(),
+            bind_address: default_bind_address(),
+            trading_mode: default_trading_mode(),
+            fast_warmup_enabled: default_fast_warmup_enabled(),
+            venue_rebalance_threshold_usd: default_venue_rebalance_threshold_usd(),
             hyperliquid_wallet: "".into(),
             hyperliquid_private_key: "".into(),
             hyperliquid_url: default_hyperliquid_url(),
+            hyperliquid_account_index: None,
+            hyperliquid_subaccount_index: None,
             lighter_account_index: default_lighter_account_index(),
             lighter_api_key: "".into(),
             lighter_url: default_lighter_url(),
+            lighter_subaccount_index: None,
             vanta_account_id: "".into(),
             vanta_orderly_key: "".into(),
             vanta_orderly_secret: "".into(),
             vanta_url: default_vanta_url(),
+            vanta_subaccount_index: None,
             robinhood_wallet: "".into(),
             robinhood_private_key: "".into(),
             robinhood_rpc_url: default_robinhood_rpc_url(),
             robinhood_router: default_robinhood_router(),
+            robinhood_subaccount_index: None,
             polymarket_api_key: "".into(),
             polymarket_secret: "".into(),
             polymarket_passphrase: "".into(),
@@ -166,6 +249,11 @@ impl Default for EngineSettingsDto {
             kalshi_api_key_id: "".into(),
             kalshi_private_key: "".into(),
             kalshi_url: default_kalshi_url(),
+            referral_lighter: default_referral_lighter(),
+            referral_robinhood: default_referral_robinhood(),
+            sponsor_link: default_sponsor_link(),
+            version: default_app_version(),
+            git_repo: default_git_repo(),
         }
     }
 }
@@ -192,6 +280,8 @@ pub struct AppEngineState {
     pub sim_step_counter: RwLock<usize>,
     pub settings: RwLock<EngineSettingsDto>,
     pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
+    pub vault: RwLock<crate::vault::SecureVault>,
+    pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
 }
 
 impl AppEngineState {
@@ -280,7 +370,13 @@ impl AppEngineState {
                 fees: 2.1,
                 net_profit: 46.4,
                 latency_us: 114,
-                note: "Executed atomically at spread 18.2 BPS".into(),
+                note: "Executed atomically at spread 18.2 BPS (Dislocation +6.8 BPS over baseline)".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(18.2),
+                baseline_mean_spread_bps: Some(11.4),
+                position_step: Some(1),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(14.8),
             },
             ExecutionLogEntry {
                 id: "exec-init-2".into(),
@@ -297,6 +393,12 @@ impl AppEngineState {
                 net_profit: 30.2,
                 latency_us: 98,
                 note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)".into(),
+                direction: Some("Carry Open".into()),
+                trigger_spread_bps: Some(15.0),
+                baseline_mean_spread_bps: Some(9.5),
+                position_step: Some(1),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(12.0),
             },
             ExecutionLogEntry {
                 id: "exec-init-3".into(),
@@ -312,7 +414,35 @@ impl AppEngineState {
                 fees: 1.9,
                 net_profit: 39.1,
                 latency_us: 120,
-                note: "Cross-venue spatial spread captured".into(),
+                note: "Step 2 scale-in on widening divergence".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(22.4),
+                baseline_mean_spread_bps: Some(13.1),
+                position_step: Some(2),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(15.2),
+            },
+            ExecutionLogEntry {
+                id: "exec-init-3b".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: "BTC-USDC".into(),
+                venue_a: "Hyperliquid".into(),
+                venue_b: "Lighter".into(),
+                leg_a_status: "FILLED".into(),
+                leg_b_status: "FILLED".into(),
+                success: true,
+                gross_profit: 26.0,
+                fees: 1.5,
+                net_profit: 24.5,
+                latency_us: 108,
+                note: "Partial unwind as spread converged toward mean".into(),
+                direction: Some("Convergence Unwind".into()),
+                trigger_spread_bps: Some(4.2),
+                baseline_mean_spread_bps: Some(12.0),
+                position_step: Some(2),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(6.0),
             },
             ExecutionLogEntry {
                 id: "exec-init-4".into(),
@@ -329,6 +459,12 @@ impl AppEngineState {
                 net_profit: 18.2,
                 latency_us: 105,
                 note: "Executed atomically at spread 16.4 BPS".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(16.4),
+                baseline_mean_spread_bps: Some(10.2),
+                position_step: Some(1),
+                max_units: Some(4),
+                nominal_hurdle_bps: Some(13.5),
             },
             ExecutionLogEntry {
                 id: "exec-init-5".into(),
@@ -345,6 +481,12 @@ impl AppEngineState {
                 net_profit: 10.3,
                 latency_us: 92,
                 note: "Sui perp dislocation captured".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(24.5),
+                baseline_mean_spread_bps: Some(14.0),
+                position_step: Some(1),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(17.2),
             },
             ExecutionLogEntry {
                 id: "exec-init-6".into(),
@@ -360,7 +502,13 @@ impl AppEngineState {
                 fees: 1.1,
                 net_profit: 6.4,
                 latency_us: 110,
-                note: "AVAX perp basis captured".into(),
+                note: "AVAX perp basis captured on convergence".into(),
+                direction: Some("Convergence Unwind".into()),
+                trigger_spread_bps: Some(3.2),
+                baseline_mean_spread_bps: Some(8.5),
+                position_step: Some(2),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(5.0),
             },
             ExecutionLogEntry {
                 id: "exec-init-7".into(),
@@ -377,6 +525,12 @@ impl AppEngineState {
                 net_profit: -0.8,
                 latency_us: 130,
                 note: "DeltaGuard safety unwind on Leg B rejection".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(19.0),
+                baseline_mean_spread_bps: Some(12.0),
+                position_step: Some(1),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(15.0),
             },
             ExecutionLogEntry {
                 id: "exec-init-8".into(),
@@ -393,8 +547,46 @@ impl AppEngineState {
                 net_profit: -1.5,
                 latency_us: 145,
                 note: "Emergency unwind on venue latency spike".into(),
+                direction: Some("Divergence Entry".into()),
+                trigger_spread_bps: Some(21.5),
+                baseline_mean_spread_bps: Some(12.8),
+                position_step: Some(1),
+                max_units: Some(3),
+                nominal_hurdle_bps: Some(16.0),
             },
         ];
+
+        let vault = RwLock::new(crate::vault::SecureVault::new_with_path(crate::vault::SecureVault::default_path()));
+        let mut virtual_ledger_raw = arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new();
+        for log in &initial_logs {
+            let strategy_id = match log.trade_type.as_str() {
+                "Spatial" => "spatial_spread",
+                "Funding" => "funding_rate",
+                "Prediction" => "prediction_parity",
+                _ => "spatial_spread",
+            };
+            virtual_ledger_raw.open_cycle(
+                log.id.clone(),
+                strategy_id.to_string(),
+                log.symbol.clone(),
+                log.venue_a.clone(),
+                log.venue_b.clone(),
+                log.trigger_spread_bps.unwrap_or(15.0),
+                0.1,
+                64000.0,
+                0.1,
+                64100.0,
+                log.fees,
+            );
+            let status = if log.success {
+                arbitrager_execution::virtual_ledger::CycleStatus::Closed
+            } else {
+                arbitrager_execution::virtual_ledger::CycleStatus::StoppedOut
+            };
+            let pnl_bps = log.trigger_spread_bps.unwrap_or(12.0) * if log.success { 0.8 } else { -0.5 };
+            virtual_ledger_raw.close_cycle_with_pnl(&log.id, log.net_profit, pnl_bps, status);
+        }
+        let virtual_ledger = RwLock::new(virtual_ledger_raw);
 
         Self {
             ex_hl,
@@ -417,6 +609,8 @@ impl AppEngineState {
             sim_step_counter: RwLock::new(8),
             settings,
             strategy_configs: RwLock::new(std::collections::HashMap::new()),
+            vault,
+            virtual_ledger,
         }
     }
 

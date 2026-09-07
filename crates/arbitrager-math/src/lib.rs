@@ -7,6 +7,7 @@ pub mod kalman_filter;
 pub mod cointegration;
 pub mod prediction_synthetic;
 pub mod risk_math;
+pub mod calibration;
 
 pub use rolling_stats::*;
 pub use spatial_spread::*;
@@ -17,6 +18,7 @@ pub use kalman_filter::*;
 pub use cointegration::*;
 pub use prediction_synthetic::*;
 pub use risk_math::*;
+pub use calibration::*;
 
 #[cfg(test)]
 mod tests {

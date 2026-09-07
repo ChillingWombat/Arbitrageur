@@ -1,10 +1,12 @@
 pub mod smart_routing;
 pub mod emergency_unwind;
 pub mod coordinator;
+pub mod virtual_ledger;
 
 pub use smart_routing::*;
 pub use emergency_unwind::*;
 pub use coordinator::*;
+pub use virtual_ledger::*;
 
 #[cfg(test)]
 mod tests {

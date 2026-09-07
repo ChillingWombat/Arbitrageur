@@ -8,12 +8,15 @@ import { PredictionHub } from "./components/PredictionHub";
 import { StatArbLab } from "./components/StatArbLab";
 import { RiskOperations } from "./components/RiskOperations";
 import { SimulationRunner } from "./components/SimulationRunner";
+import { StrategyPerformance } from "./components/StrategyPerformance";
 import { EngineSettings } from "./components/EngineSettings";
+import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { api } from "./services/api";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
   SpatialOpportunityDto,
+  SpotOpportunityDto,
   FundingOpportunityDto,
   PredictionOpportunityDto,
   RiskOverviewDto,
@@ -29,6 +32,7 @@ export const App: React.FC = () => {
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
+  const [spotOpps, setSpotOpps] = useState<SpotOpportunityDto[]>([]);
   const [fundingOpps, setFundingOpps] = useState<FundingOpportunityDto[]>([]);
   const [predictionOpps, setPredictionOpps] = useState<PredictionOpportunityDto[]>([]);
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
@@ -47,7 +51,7 @@ export const App: React.FC = () => {
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
-      const [status, books, spatial, funding, prediction, risk, logs, configs] = await Promise.all([
+      const [status, books, spatial, funding, prediction, risk, logs, configs, spot] = await Promise.all([
         api.getSystemStatus(),
         api.fetchOrderbooks(selectedSymbol),
         api.scanSpatialOpportunities(selectedSymbol, minBps, qty),
@@ -56,6 +60,7 @@ export const App: React.FC = () => {
         api.getRiskOverview(),
         api.getExecutionLogs(),
         api.getAllTickerStrategyConfigs(),
+        api.scanSpotOpportunities(),
       ]);
 
       setSystemStatus(status);
@@ -65,6 +70,7 @@ export const App: React.FC = () => {
       setPredictionOpps(prediction);
       setRiskData(risk);
       setExecutionLogs(logs);
+      setSpotOpps(spot);
 
       if (configs && configs.length > 0) {
         setStrategyConfigs((prev) => {
@@ -107,7 +113,18 @@ export const App: React.FC = () => {
   };
 
   const handleExecuteTrade = async (opp: SpatialOpportunityDto) => {
-    await api.executeSpatialArbitrage(opp.symbol, opp.buy_venue, opp.sell_venue, opp.order_qty);
+    await api.executeSpatialArbitrage(
+      opp.symbol,
+      opp.buy_venue,
+      opp.sell_venue,
+      opp.order_qty,
+      opp.direction,
+      opp.trigger_spread_bps ?? opp.net_spread_bps,
+      opp.baseline_mean_spread_bps,
+      opp.position_step,
+      opp.max_units,
+      opp.nominal_hurdle_bps
+    );
     await refreshAllData();
   };
 
@@ -144,6 +161,7 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         spatialCount={spatialOpps.filter((o) => o.is_executable).length}
+        spotCount={spotOpps.filter((o) => o.is_executable).length}
         fundingCount={fundingOpps.length}
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
@@ -170,6 +188,13 @@ export const App: React.FC = () => {
               onExecuteCrossTicker={handleExecuteCrossTicker}
               loading={refreshing}
               executionLogs={executionLogs}
+            />
+          )}
+
+          {activeTab === "spot_arb" && (
+            <SpotArbitrageBot
+              executionLogs={executionLogs}
+              onRefreshAll={refreshAllData}
             />
           )}
 
@@ -224,6 +249,8 @@ export const App: React.FC = () => {
               onSymbolChange={setSelectedSymbol}
             />
           )}
+
+          {activeTab === "performance" && <StrategyPerformance activeSymbol={selectedSymbol} />}
 
           {activeTab === "settings" && <EngineSettings systemStatus={systemStatus} />}
         </main>

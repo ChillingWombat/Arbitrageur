@@ -6,6 +6,30 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#ffffff" />
     <title>Arbitrager - Cross-Market Quantitative Terminal</title>
+    <script>
+      (function() {
+        function showFatal(title, msg, stack) {
+          console.error("[FATAL]", title, msg, stack);
+          var el = document.getElementById("fatal-error-overlay");
+          if (!el) {
+            el = document.createElement("div");
+            el.id = "fatal-error-overlay";
+            el.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:#fff1f2;color:#991b1b;padding:32px;font-family:monospace;font-size:15px;z-index:9999999;overflow:auto;border:4px solid #f43f5e;";
+            document.body ? document.body.appendChild(el) : document.documentElement.appendChild(el);
+          }
+          el.innerHTML = "<h2 style='color:#e11d48;font-size:20px;font-weight:bold;margin-bottom:12px;'>" + title + "</h2>" +
+            "<p style='font-size:15px;font-weight:600;margin-bottom:8px;'>" + msg + "</p>" +
+            "<pre style='background:#ffffff;padding:16px;border:1px solid #fda4af;border-radius:6px;overflow:auto;white-space:pre-wrap;'>" + (stack || "No stack trace available") + "</pre>";
+        }
+        window.addEventListener("error", function(e) {
+          showFatal("Global JavaScript Error", (e.message || "Script load failure") + " (" + (e.filename || "unknown") + ":" + (e.lineno || 0) + ":" + (e.colno || 0) + ")", e.error ? (e.error.stack || e.error) : "");
+        });
+        window.addEventListener("unhandledrejection", function(e) {
+          var r = e.reason;
+          showFatal("Unhandled Promise Rejection", (r && (r.message || r)) || "Unknown error", r && (r.stack || r));
+        });
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
