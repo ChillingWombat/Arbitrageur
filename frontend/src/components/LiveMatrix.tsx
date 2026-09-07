@@ -11,7 +11,6 @@ import {
 
 interface LiveMatrixProps {
   symbol: string;
-  onSymbolChange: (symbol: string) => void;
   orderbooks: VenueOrderBookDto[];
   opportunities: SpatialOpportunityDto[];
   onRefresh: (qty?: number, minBps?: number) => void;
@@ -22,7 +21,6 @@ interface LiveMatrixProps {
 
 export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   symbol,
-  onSymbolChange,
   orderbooks,
   opportunities,
   onRefresh,
@@ -67,11 +65,6 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     }
     return { count, pnl: Math.round(pnl * 100) / 100 };
   }, [executionLogs, symbol]);
-
-  const quickSymbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "SUI-USDC", "ARB-USDC"];
-  const displayedSymbols = quickSymbols.includes(symbol)
-    ? quickSymbols
-    : [symbol, ...quickSymbols.slice(0, 5)];
 
   const handleExecute = async (opp: SpatialOpportunityDto) => {
     setExecutingId(opp.id);
@@ -119,23 +112,6 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                 {formatCurrencyPnl(tickerStats.pnl)}
               </span>
             </div>
-          </div>
-
-          <div className="flex items-center space-x-1 bg-surface-raised p-1 rounded-lg border border-surface-border">
-            {displayedSymbols.map((s) => (
-              <button
-                key={s}
-                onClick={() => onSymbolChange(s)}
-                className={`px-2.5 py-0.5 text-xs font-mono rounded-md transition ${
-                  symbol === s
-                    ? "bg-accent text-white font-semibold shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                }`}
-                title={`Switch to ${s}`}
-              >
-                {s.split("-")[0]}
-              </button>
-            ))}
           </div>
         </div>
 

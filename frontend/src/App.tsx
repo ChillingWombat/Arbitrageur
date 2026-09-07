@@ -143,7 +143,6 @@ export const App: React.FC = () => {
           {activeTab === "spatial" && (
             <LiveMatrix
               symbol={selectedSymbol}
-              onSymbolChange={setSelectedSymbol}
               orderbooks={orderbooks}
               opportunities={spatialOpps}
               onRefresh={refreshAllData}
@@ -157,7 +156,6 @@ export const App: React.FC = () => {
             <FundingRadar
               opportunities={fundingOpps}
               symbol={selectedSymbol}
-              onSymbolChange={setSelectedSymbol}
               tradeSize={fundingTradeSize}
               onTradeSizeChange={setFundingTradeSize}
               onExecuteCarry={handleExecuteCarry}

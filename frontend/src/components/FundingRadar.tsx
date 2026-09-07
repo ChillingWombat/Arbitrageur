@@ -5,7 +5,6 @@ import { PERP_TICKERS, formatCurrencyPnl } from "../types/tickers";
 interface FundingRadarProps {
   opportunities: FundingOpportunityDto[];
   symbol: string;
-  onSymbolChange: (s: string) => void;
   tradeSize: number;
   onTradeSizeChange: (size: number) => void;
   onExecuteCarry?: (opp: FundingOpportunityDto) => Promise<void>;
@@ -16,7 +15,6 @@ interface FundingRadarProps {
 export const FundingRadar: React.FC<FundingRadarProps> = ({
   opportunities,
   symbol,
-  onSymbolChange,
   tradeSize,
   onTradeSizeChange,
   onExecuteCarry,
@@ -54,10 +52,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     return { count, pnl: Math.round(pnl * 100) / 100 };
   }, [executionLogs, symbol]);
 
-  const quickSymbols = ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "SUI-USDC", "ARB-USDC"];
-  const displayedSymbols = quickSymbols.includes(symbol)
-    ? quickSymbols
-    : [symbol, ...quickSymbols.slice(0, 5)];
   const quickSizes = [10000, 25000, 50000, 100000];
 
   const handleExecute = async (opp: FundingOpportunityDto) => {
@@ -117,23 +111,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                 {formatCurrencyPnl(tickerStats.pnl)}
               </span>
             </div>
-          </div>
-
-          <div className="flex items-center space-x-1 bg-surface-raised p-1 rounded-lg border border-surface-border">
-            {displayedSymbols.map((s) => (
-              <button
-                key={s}
-                onClick={() => onSymbolChange(s)}
-                className={`px-2.5 py-0.5 text-xs font-mono rounded-md transition ${
-                  symbol === s
-                    ? "bg-accent text-white font-semibold shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                }`}
-                title={`Switch to ${s}`}
-              >
-                {s.split("-")[0]}
-              </button>
-            ))}
           </div>
 
           <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs font-mono">
