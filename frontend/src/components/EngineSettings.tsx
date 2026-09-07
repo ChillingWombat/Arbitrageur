@@ -1,12 +1,18 @@
 import React, { useState, useEffect } from "react";
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Key, Lock, Server, Sliders, Shield } from "lucide-react";
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Key, Lock, Server, Sliders, Shield, Activity } from "lucide-react";
 import { api } from "../services/api";
-import { EngineSettingsDto } from "../types";
+import { EngineSettingsDto, SystemStatusDto, VenueStatusDto } from "../types";
 
 type SettingsTab = "all" | "exchanges" | "execution" | "hsm";
 type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "polymarket" | "kalshi";
 
-export const EngineSettings: React.FC = () => {
+interface EngineSettingsProps {
+  systemStatus?: SystemStatusDto | null;
+}
+
+export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) => {
+  const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
+
   // Remote HSM
   const [hsmUrl, setHsmUrl] = useState("http://127.0.0.1:8787/sign");
   const [hmacToken, setHmacToken] = useState("");
@@ -96,6 +102,14 @@ export const EngineSettings: React.FC = () => {
         setKalshiApiKeyId(s.kalshi_api_key_id || "");
         setKalshiPrivateKey(s.kalshi_private_key || "");
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
+
+        if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
+          setLiveVenues(systemStatus.active_venues);
+        } else {
+          api.getSystemStatus().then((sys) => {
+            if (sys?.active_venues) setLiveVenues(sys.active_venues);
+          }).catch(() => {});
+        }
       } catch (err) {
         console.error("Failed to load engine settings:", err);
       } finally {
@@ -103,7 +117,29 @@ export const EngineSettings: React.FC = () => {
       }
     };
     loadSettings();
-  }, []);
+  }, [systemStatus]);
+
+  useEffect(() => {
+    if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
+      setLiveVenues(systemStatus.active_venues);
+    }
+  }, [systemStatus]);
+
+  const defaultVenues: VenueStatusDto[] = [
+    { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "ONLINE", latency_ms: 2, fee_bps: 2.0 },
+    { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "ONLINE", latency_ms: 5, fee_bps: 1.5 },
+    { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "ONLINE", latency_ms: 4, fee_bps: 3.0 },
+    { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "ONLINE", latency_ms: 8, fee_bps: 2.5 },
+    { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 12, fee_bps: 0.0 },
+    { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 15, fee_bps: 10.0 },
+  ];
+  const displayVenues = liveVenues.length > 0 ? liveVenues : defaultVenues;
+
+  const getVenueInfo = (id: string) => {
+    return displayVenues.find(
+      (v) => v.id.toLowerCase() === id.toLowerCase() || v.name.toLowerCase().includes(id.toLowerCase())
+    );
+  };
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -265,36 +301,56 @@ export const EngineSettings: React.FC = () => {
         {/* =================================================================== */}
         {(activeTab === "exchanges" || activeTab === "all") && (
           <div className="space-y-4">
-            {/* Header with Sub-filters */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-1 border-b border-surface-border">
-              <div>
-                <h3 className="text-xs font-mono font-semibold uppercase tracking-wide text-slate-900 flex items-center space-x-1.5">
-                  <Key className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Exchange API Credentials & Private Keys</span>
-                </h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Connect real trading accounts for atomic spatial arbitrage and funding rate capture.
-                </p>
+            {/* Active Exchange Venues Chips (Moved from top of page header) */}
+            <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-xs space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center space-x-2">
+                  <Activity className="w-3.5 h-3.5 text-blue-600" />
+                  <h4 className="text-xs font-mono font-semibold uppercase tracking-wide text-slate-900">
+                    Active Exchange Venues & Connectivity
+                  </h4>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                    {displayVenues.filter((v) => v.status === "ONLINE").length} Online
+                  </span>
+                </div>
+                <div className="flex items-center space-x-2 text-[11px] font-mono">
+                  {venueFilter !== "all" ? (
+                    <button
+                      type="button"
+                      onClick={() => setVenueFilter("all")}
+                      className="text-blue-600 hover:text-blue-800 font-medium underline underline-offset-2"
+                    >
+                      Show All (6)
+                    </button>
+                  ) : (
+                    <span className="text-slate-400">Click venue to filter API cards below</span>
+                  )}
+                </div>
               </div>
 
-              {/* Venue filter pills */}
-              <div className="flex flex-wrap items-center gap-1 text-[11px] font-mono">
-                {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "polymarket", "kalshi"] as const).map(
-                  (v) => (
+              {/* Exact venue status pills from top header, now placed in the settings page */}
+              <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                {displayVenues.map((v) => {
+                  const isFiltered = venueFilter === v.id;
+                  const isOnline = v.status === "ONLINE";
+                  return (
                     <button
-                      key={v}
+                      key={v.id}
                       type="button"
-                      onClick={() => setVenueFilter(v)}
-                      className={`px-2 py-0.5 rounded border transition ${
-                        venueFilter === v
-                          ? "bg-blue-50 border-blue-300 text-blue-700 font-medium"
-                          : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
+                      onClick={() => setVenueFilter(venueFilter === v.id ? "all" : (v.id as ExchangeFilter))}
+                      className={`flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border text-xs font-mono transition shadow-xs ${
+                        isFiltered
+                          ? "bg-blue-50 border-blue-400 text-blue-800 font-semibold ring-1 ring-blue-300"
+                          : "bg-surface-raised border-surface-border text-slate-700 hover:bg-slate-50 hover:border-slate-300"
                       }`}
+                      title={`${v.name} (${v.market_type}) — Status: ${v.status} (${v.latency_ms}ms ping)`}
                     >
-                      {v === "all" ? "All Venues" : v.charAt(0).toUpperCase() + v.slice(1)}
+                      <span className={`w-2 h-2 rounded-full ${isOnline ? "bg-profit" : "bg-slate-400"}`} />
+                      <span className="font-semibold">{v.name.split(" ")[0]}</span>
+                      <span className="text-[10px] text-slate-500 font-normal">({v.latency_ms}ms)</span>
                     </button>
-                  )
-                )}
+                  );
+                })}
               </div>
             </div>
 
@@ -305,10 +361,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-blue-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Hyperliquid</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        L1 DEX
+                        {getVenueInfo("hyperliquid")?.market_type ?? "L1 DEX"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("hyperliquid")?.latency_ms ?? 2}ms)
                       </span>
                     </div>
                     <span
@@ -376,10 +435,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-indigo-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Lighter</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        zkDEX Rollup
+                        {getVenueInfo("lighter")?.market_type ?? "zkDEX Rollup"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("lighter")?.latency_ms ?? 5}ms)
                       </span>
                     </div>
                     <span
@@ -447,10 +509,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-cyan-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Vanta.exchange</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        Orderly EVM
+                        {getVenueInfo("vanta")?.market_type ?? "Orderly EVM"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("vanta")?.latency_ms ?? 4}ms)
                       </span>
                     </div>
                     <span
@@ -531,10 +596,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-emerald-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Robinhood EVM</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        Router & Bridge
+                        {getVenueInfo("robinhood")?.market_type ?? "Router & Bridge"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("robinhood")?.latency_ms ?? 8}ms)
                       </span>
                     </div>
                     <span
@@ -614,10 +682,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-purple-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Polymarket</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        CTF CLOB
+                        {getVenueInfo("polymarket")?.market_type ?? "CTF CLOB"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("polymarket")?.latency_ms ?? 12}ms)
                       </span>
                     </div>
                     <span
@@ -707,10 +778,13 @@ export const EngineSettings: React.FC = () => {
                 <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
                   <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                     <div className="flex items-center space-x-2">
-                      <span className="w-2 h-2 rounded-full bg-amber-600"></span>
+                      <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
                       <h4 className="text-xs font-bold font-mono text-slate-900">Kalshi</h4>
                       <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 border border-slate-200">
-                        CFTC Binary
+                        {getVenueInfo("kalshi")?.market_type ?? "CFTC Binary"}
+                      </span>
+                      <span className="text-[10px] font-mono text-emerald-600">
+                        ({getVenueInfo("kalshi")?.latency_ms ?? 15}ms)
                       </span>
                     </div>
                     <span

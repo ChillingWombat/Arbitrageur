@@ -62,19 +62,7 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right: Metrics & Risk Actions */}
         <div className="flex items-center space-x-2.5 shrink-0">
-          {/* Active Venues Micro-Chips */}
-          <div className="hidden 2xl:flex items-center space-x-1.5">
-            {status?.active_venues.slice(0, 4).map((v) => (
-              <div
-                key={v.id}
-                className="flex items-center space-x-1 px-2 py-1 rounded bg-surface-raised border border-surface-border text-[10px] font-mono text-slate-600"
-                title={`${v.name} (${v.latency_ms}ms)`}
-              >
-                <span className="w-1.5 h-1.5 rounded-full bg-profit" />
-                <span className="font-semibold">{v.name.split(" ")[0]}</span>
-              </div>
-            ))}
-          </div>
+
 
           {/* PnL Card */}
           <div className="px-3 py-1 rounded-lg bg-surface-raised border border-surface-border flex flex-col items-end">

@@ -211,7 +211,7 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "settings" && <EngineSettings />}
+          {activeTab === "settings" && <EngineSettings systemStatus={systemStatus} />}
         </main>
       </div>
     </div>
