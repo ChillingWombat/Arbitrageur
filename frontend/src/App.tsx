@@ -18,6 +18,7 @@ import type {
   PredictionOpportunityDto,
   RiskOverviewDto,
   ExecutionLogEntry,
+  CrossTickerExecutionParams,
 } from "./types";
 
 import { PERP_TICKERS, getDefaultOrderQty } from "./types/tickers";
@@ -97,6 +98,11 @@ export const App: React.FC = () => {
     await refreshAllData();
   };
 
+  const handleExecuteCrossTicker = async (params: CrossTickerExecutionParams) => {
+    await api.executeCrossTickerArbitrage(params);
+    await refreshAllData();
+  };
+
   const handleExecuteCarry = async (opp: FundingOpportunityDto) => {
     await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, opp.trade_size_usd);
     await refreshAllData();
@@ -147,6 +153,7 @@ export const App: React.FC = () => {
               opportunities={spatialOpps}
               onRefresh={refreshAllData}
               onExecuteTrade={handleExecuteTrade}
+              onExecuteCrossTicker={handleExecuteCrossTicker}
               loading={refreshing}
               executionLogs={executionLogs}
             />

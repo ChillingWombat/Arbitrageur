@@ -54,6 +54,56 @@ export interface SpatialOpportunityDto {
   is_executable: boolean;
 }
 
+export type MatrixMode = "cross-venue" | "cross-ticker";
+export type SlidingWindowOption = "10s" | "30s" | "1m" | "5m" | "15m";
+
+export interface MatrixCellDto {
+  rowId: string;
+  colId: string;
+  rowLabel: string;
+  colLabel: string;
+  isDiagonal: boolean;
+  longPrice: number;
+  shortPrice: number;
+  grossSpreadBps: number;
+  feeBps: number;
+  closingFrictionBps: number;
+  netSpreadBps: number;
+  baselineMeanBps: number;
+  deltaBps: number;
+  sampleCount: number;
+  orderQty: number;
+  estProfitUsd: number;
+  isExecutable: boolean;
+  longVenue: string;
+  shortVenue: string;
+  longSymbol: string;
+  shortSymbol: string;
+}
+
+export interface CrossTickerExecutionParams {
+  longSymbol: string;
+  shortSymbol: string;
+  longVenue: string;
+  shortVenue: string;
+  orderQty: number;
+  estProfitUsd: number;
+  netSpreadBps: number;
+}
+
+export interface TickerMarketQuoteDto {
+  symbol: string;
+  base: string;
+  best_bid: number;
+  best_ask: number;
+  mid_price: number;
+  spread_bps: number;
+  best_buy_venue: string;
+  best_sell_venue: string;
+  fee_bps: number;
+  base_price: number;
+}
+
 export interface FundingOpportunityDto {
   id: string;
   symbol: string;

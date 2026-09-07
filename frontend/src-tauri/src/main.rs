@@ -27,6 +27,8 @@ fn main() {
             commands::fit_ou_process,
             commands::run_simulation_step,
             commands::execute_spatial_arbitrage,
+            commands::execute_cross_ticker_arbitrage,
+            commands::fetch_multi_market_quotes,
             commands::execute_funding_carry,
             commands::execute_prediction_arbitrage,
             commands::get_risk_overview,

@@ -11,6 +11,8 @@ import type {
   SimStepResultDto,
   ExecutionLogEntry,
   EngineSettingsDto,
+  CrossTickerExecutionParams,
+  TickerMarketQuoteDto,
 } from "../types";
 
 import { PERP_TICKERS } from "../types/tickers";
@@ -361,6 +363,49 @@ class BrowserMockEngine {
     ];
   }
 
+  fetchMultiMarketQuotes(symbols: string[]): TickerMarketQuoteDto[] {
+    const results: TickerMarketQuoteDto[] = [];
+    for (const sym of symbols) {
+      const books = this.fetchOrderbooks(sym);
+      const ticker = PERP_TICKERS.find((t) => t.symbol === sym);
+      const basePrice = ticker ? ticker.basePrice : 100.0;
+      const baseStr = sym.split("-")[0];
+
+      let bestBid = -Infinity;
+      let bestBidVenue = "Hyperliquid";
+      let bestAsk = Infinity;
+      let bestAskVenue = "Hyperliquid";
+      let bestBuySpreadBps = 2.0;
+
+      for (const b of books) {
+        if (b.best_bid > bestBid) {
+          bestBid = b.best_bid;
+          bestBidVenue = b.venue_name;
+        }
+        if (b.best_ask < bestAsk && b.best_ask > 0) {
+          bestAsk = b.best_ask;
+          bestAskVenue = b.venue_name;
+          bestBuySpreadBps = b.spread_bps > 0 ? b.spread_bps : ((b.best_ask - b.best_bid) / b.mid_price) * 10000;
+        }
+      }
+
+      const mid = (bestBid + bestAsk) / 2;
+      results.push({
+        symbol: sym,
+        base: baseStr,
+        best_bid: bestBid,
+        best_ask: bestAsk,
+        mid_price: mid,
+        spread_bps: Math.max(0.5, bestBuySpreadBps),
+        best_buy_venue: bestAskVenue,
+        best_sell_venue: bestBidVenue,
+        fee_bps: 2.0,
+        base_price: basePrice,
+      });
+    }
+    return results;
+  }
+
   scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): SpatialOpportunityDto[] {
     const books = this.fetchOrderbooks(symbol);
     const opps: SpatialOpportunityDto[] = [];
@@ -655,6 +700,56 @@ class BrowserMockEngine {
     };
   }
 
+  executeCrossTickerArbitrage(
+    longSymbol: string,
+    shortSymbol: string,
+    longVenue: string,
+    shortVenue: string,
+    orderQty: number,
+    netSpreadBps?: number
+  ): SimStepResultDto {
+    this.simCycle += 1;
+    const tickerLong = PERP_TICKERS.find((t) => t.symbol === longSymbol);
+    const baseLong = tickerLong ? tickerLong.basePrice : 100.0;
+    const spreadBps = netSpreadBps ?? (15.5 + Math.random() * 6.0);
+    const grossProfit = Math.max(0.5, (spreadBps / 10000) * baseLong * orderQty);
+    const fees = 2.1;
+    const netProfit = grossProfit - fees;
+    this.pnl += netProfit;
+
+    const log: ExecutionLogEntry = {
+      id: `exec-${this.simCycle}`,
+      timestamp: new Date().toISOString(),
+      trade_type: "PairStatArb",
+      symbol: `${longSymbol}/${shortSymbol}`,
+      venue_a: `${longSymbol} (${longVenue})`,
+      venue_b: `${shortSymbol} (${shortVenue})`,
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: grossProfit,
+      fees,
+      net_profit: netProfit,
+      latency_us: Math.floor(105 + Math.random() * 30),
+      note: `Cross-ticker relative arb: Buy ${longSymbol} (${longVenue}) / Sell ${shortSymbol} (${shortVenue}) (+${netProfit.toFixed(2)} USD)`,
+    };
+    this.logs.unshift(log);
+
+    return {
+      cycle: this.simCycle,
+      opportunity_found: true,
+      execution_success: true,
+      trade_type: "Cross-Ticker Arb",
+      direction: `Long ${longSymbol} (${longVenue}) + Short ${shortSymbol} (${shortVenue})`,
+      venue_a: `${longSymbol} (${longVenue})`,
+      venue_b: `${shortSymbol} (${shortVenue})`,
+      spread_bps: spreadBps,
+      realized_profit_usd: netProfit,
+      total_cumulative_pnl_usd: this.pnl,
+      message: `Executed cross-ticker pair arb! Long ${longSymbol} on ${longVenue} / Short ${shortSymbol} on ${shortVenue}. Net profit: $${netProfit.toFixed(2)}`,
+    };
+  }
+
   executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number): SimStepResultDto {
     this.simCycle += 1;
     const netProfit = tradeSizeUsd * 0.00018 * 3;
@@ -880,6 +975,56 @@ export const api = {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<SimStepResultDto>("execute_spatial_arbitrage", { symbol, buyVenue, sellVenue, orderQty });
     return mockEngine.executeSpatialArbitrage(symbol, buyVenue, sellVenue, orderQty);
+  },
+
+  async executeCrossTickerArbitrage(
+    paramsOrLongSymbol: CrossTickerExecutionParams | string,
+    shortSymbol?: string,
+    longVenue?: string,
+    shortVenue?: string,
+    orderQty?: number,
+    netSpreadBps?: number
+  ): Promise<SimStepResultDto> {
+    const p: CrossTickerExecutionParams =
+      typeof paramsOrLongSymbol === "string"
+        ? {
+            longSymbol: paramsOrLongSymbol,
+            shortSymbol: shortSymbol!,
+            longVenue: longVenue!,
+            shortVenue: shortVenue!,
+            orderQty: orderQty!,
+            estProfitUsd: 0,
+            netSpreadBps: netSpreadBps ?? 0,
+          }
+        : paramsOrLongSymbol;
+
+    const tauri = await getTauriCore();
+    if (tauri) {
+      return tauri.invoke<SimStepResultDto>("execute_cross_ticker_arbitrage", {
+        longSymbol: p.longSymbol,
+        shortSymbol: p.shortSymbol,
+        longVenue: p.longVenue,
+        shortVenue: p.shortVenue,
+        orderQty: p.orderQty,
+        netSpreadBps: p.netSpreadBps,
+      });
+    }
+    return mockEngine.executeCrossTickerArbitrage(
+      p.longSymbol,
+      p.shortSymbol,
+      p.longVenue,
+      p.shortVenue,
+      p.orderQty,
+      p.netSpreadBps
+    );
+  },
+
+  async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {
+    const tauri = await getTauriCore();
+    if (tauri) {
+      return tauri.invoke<TickerMarketQuoteDto[]>("fetch_multi_market_quotes", { symbols });
+    }
+    return mockEngine.fetchMultiMarketQuotes(symbols);
   },
 
   async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number): Promise<SimStepResultDto> {
