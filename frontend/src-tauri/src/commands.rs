@@ -1802,7 +1802,27 @@ mod tests {
             hmac_token: "test_token".into(),
             max_slippage_bps: 20.0,
             min_depth_ratio: 4.0,
+            hyperliquid_wallet: "0x1234567890abcdef1234567890abcdef12345678".into(),
+            hyperliquid_private_key: "0xhlsecret".into(),
+            hyperliquid_url: "https://api.hyperliquid.xyz".into(),
+            lighter_account_index: "42".into(),
+            lighter_api_key: "0xlgtkey".into(),
+            lighter_url: "https://mainnet.zklighter.elliot.ai".into(),
+            vanta_account_id: "acc_vanta_99".into(),
+            vanta_orderly_key: "ed25519_key".into(),
+            vanta_orderly_secret: "vanta_secret".into(),
+            vanta_url: "https://api-evm.orderly.org".into(),
+            robinhood_wallet: "0xrhwallet".into(),
+            robinhood_private_key: "0xrhkey".into(),
+            robinhood_rpc_url: "https://rpc.robinhood.network".into(),
             robinhood_router: "0x1111".into(),
+            polymarket_api_key: "poly_key".into(),
+            polymarket_secret: "poly_secret".into(),
+            polymarket_passphrase: "poly_phrase".into(),
+            polymarket_url: "https://clob.polymarket.com".into(),
+            kalshi_api_key_id: "kalshi_id".into(),
+            kalshi_private_key: "kalshi_key".into(),
+            kalshi_url: "https://trading-api.kalshi.com".into(),
         };
 
         save_engine_settings_impl(new_settings, &state).expect("save settings");
@@ -1810,6 +1830,12 @@ mod tests {
         assert_eq!(updated.max_slippage_bps, 20.0);
         assert_eq!(updated.min_depth_ratio, 4.0);
         assert_eq!(updated.hsm_url, "http://hsm.internal:9000");
+        assert_eq!(updated.hyperliquid_wallet, "0x1234567890abcdef1234567890abcdef12345678");
+        assert_eq!(updated.lighter_account_index, "42");
+        assert_eq!(updated.vanta_account_id, "acc_vanta_99");
+        assert_eq!(updated.robinhood_router, "0x1111");
+        assert_eq!(updated.polymarket_api_key, "poly_key");
+        assert_eq!(updated.kalshi_api_key_id, "kalshi_id");
     }
 
     #[tokio::test]

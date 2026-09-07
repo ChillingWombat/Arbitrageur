@@ -29,11 +29,31 @@ class BrowserMockEngine {
   private isLive = false;
   private cbTripped = false;
   private settings: EngineSettingsDto = {
-    hsm_url: "https://hsm-vault.internal.net:8443",
-    hmac_token: "enc-vault-a9f82d-k92",
-    max_slippage_bps: 10.0,
-    min_depth_ratio: 2.5,
-    robinhood_router: "0x1b44f3514812d835eb1bdb0acb33d3ff33f13353",
+    hsm_url: "http://127.0.0.1:8787/sign",
+    hmac_token: "••••••••••••••••••••••••",
+    max_slippage_bps: 15.0,
+    min_depth_ratio: 3.0,
+    hyperliquid_wallet: "",
+    hyperliquid_private_key: "",
+    hyperliquid_url: "https://api.hyperliquid.xyz",
+    lighter_account_index: "0",
+    lighter_api_key: "",
+    lighter_url: "https://mainnet.zklighter.elliot.ai",
+    vanta_account_id: "",
+    vanta_orderly_key: "",
+    vanta_orderly_secret: "",
+    vanta_url: "https://api-evm.orderly.org",
+    robinhood_wallet: "",
+    robinhood_private_key: "",
+    robinhood_rpc_url: "https://rpc.robinhood.network",
+    robinhood_router: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
+    polymarket_api_key: "",
+    polymarket_secret: "",
+    polymarket_passphrase: "",
+    polymarket_url: "https://clob.polymarket.com",
+    kalshi_api_key_id: "",
+    kalshi_private_key: "",
+    kalshi_url: "https://trading-api.kalshi.com",
   };
   private logs: ExecutionLogEntry[] = [
     {

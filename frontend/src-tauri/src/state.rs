@@ -32,13 +32,115 @@ pub struct ExecutionLogEntry {
     pub note: String,
 }
 
+fn default_hsm_url() -> String { "http://127.0.0.1:8787/sign".into() }
+fn default_hmac_token() -> String { "••••••••••••••••••••••••".into() }
+fn default_max_slippage() -> f64 { 15.0 }
+fn default_min_depth_ratio() -> f64 { 3.0 }
+fn default_hyperliquid_url() -> String { "https://api.hyperliquid.xyz".into() }
+fn default_lighter_account_index() -> String { "0".into() }
+fn default_lighter_url() -> String { "https://mainnet.zklighter.elliot.ai".into() }
+fn default_vanta_url() -> String { "https://api-evm.orderly.org".into() }
+fn default_robinhood_rpc_url() -> String { "https://rpc.robinhood.network".into() }
+fn default_robinhood_router() -> String { "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba".into() }
+fn default_polymarket_url() -> String { "https://clob.polymarket.com".into() }
+fn default_kalshi_url() -> String { "https://trading-api.kalshi.com".into() }
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct EngineSettingsDto {
+    #[serde(default = "default_hsm_url")]
     pub hsm_url: String,
+    #[serde(default = "default_hmac_token")]
     pub hmac_token: String,
+    #[serde(default = "default_max_slippage")]
     pub max_slippage_bps: f64,
+    #[serde(default = "default_min_depth_ratio")]
     pub min_depth_ratio: f64,
+
+    // Hyperliquid
+    #[serde(default)]
+    pub hyperliquid_wallet: String,
+    #[serde(default)]
+    pub hyperliquid_private_key: String,
+    #[serde(default = "default_hyperliquid_url")]
+    pub hyperliquid_url: String,
+
+    // Lighter zkDEX
+    #[serde(default = "default_lighter_account_index")]
+    pub lighter_account_index: String,
+    #[serde(default)]
+    pub lighter_api_key: String,
+    #[serde(default = "default_lighter_url")]
+    pub lighter_url: String,
+
+    // Vanta.exchange (Orderly Network)
+    #[serde(default)]
+    pub vanta_account_id: String,
+    #[serde(default)]
+    pub vanta_orderly_key: String,
+    #[serde(default)]
+    pub vanta_orderly_secret: String,
+    #[serde(default = "default_vanta_url")]
+    pub vanta_url: String,
+
+    // Robinhood EVM
+    #[serde(default)]
+    pub robinhood_wallet: String,
+    #[serde(default)]
+    pub robinhood_private_key: String,
+    #[serde(default = "default_robinhood_rpc_url")]
+    pub robinhood_rpc_url: String,
+    #[serde(default = "default_robinhood_router")]
     pub robinhood_router: String,
+
+    // Polymarket CLOB
+    #[serde(default)]
+    pub polymarket_api_key: String,
+    #[serde(default)]
+    pub polymarket_secret: String,
+    #[serde(default)]
+    pub polymarket_passphrase: String,
+    #[serde(default = "default_polymarket_url")]
+    pub polymarket_url: String,
+
+    // Kalshi Binary
+    #[serde(default)]
+    pub kalshi_api_key_id: String,
+    #[serde(default)]
+    pub kalshi_private_key: String,
+    #[serde(default = "default_kalshi_url")]
+    pub kalshi_url: String,
+}
+
+impl Default for EngineSettingsDto {
+    fn default() -> Self {
+        Self {
+            hsm_url: default_hsm_url(),
+            hmac_token: default_hmac_token(),
+            max_slippage_bps: default_max_slippage(),
+            min_depth_ratio: default_min_depth_ratio(),
+            hyperliquid_wallet: "".into(),
+            hyperliquid_private_key: "".into(),
+            hyperliquid_url: default_hyperliquid_url(),
+            lighter_account_index: default_lighter_account_index(),
+            lighter_api_key: "".into(),
+            lighter_url: default_lighter_url(),
+            vanta_account_id: "".into(),
+            vanta_orderly_key: "".into(),
+            vanta_orderly_secret: "".into(),
+            vanta_url: default_vanta_url(),
+            robinhood_wallet: "".into(),
+            robinhood_private_key: "".into(),
+            robinhood_rpc_url: default_robinhood_rpc_url(),
+            robinhood_router: default_robinhood_router(),
+            polymarket_api_key: "".into(),
+            polymarket_secret: "".into(),
+            polymarket_passphrase: "".into(),
+            polymarket_url: default_polymarket_url(),
+            kalshi_api_key_id: "".into(),
+            kalshi_private_key: "".into(),
+            kalshi_url: default_kalshi_url(),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -133,13 +235,7 @@ impl AppEngineState {
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
 
-        let settings = RwLock::new(EngineSettingsDto {
-            hsm_url: "http://127.0.0.1:8787/sign".into(),
-            hmac_token: "••••••••••••••••••••••••".into(),
-            max_slippage_bps: 15.0,
-            min_depth_ratio: 3.0,
-            robinhood_router: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba".into(),
-        });
+        let settings = RwLock::new(EngineSettingsDto::default());
 
         let initial_logs = vec![
             ExecutionLogEntry {
@@ -430,6 +526,11 @@ mod tests {
         assert_eq!(s.min_depth_ratio, 3.0);
         assert!(!s.hsm_url.is_empty());
         assert!(!s.robinhood_router.is_empty());
+        assert_eq!(s.hyperliquid_url, "https://api.hyperliquid.xyz");
+        assert_eq!(s.lighter_url, "https://mainnet.zklighter.elliot.ai");
+        assert_eq!(s.vanta_url, "https://api-evm.orderly.org");
+        assert_eq!(s.polymarket_url, "https://clob.polymarket.com");
+        assert_eq!(s.kalshi_url, "https://trading-api.kalshi.com");
     }
 }
 

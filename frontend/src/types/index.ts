@@ -232,10 +232,45 @@ export interface ExecutionLogEntry {
 }
 
 export interface EngineSettingsDto {
+  // Remote HSM & Key Management
   hsm_url: string;
   hmac_token: string;
+
+  // Smart Order Routing & Execution Guardrails
   max_slippage_bps: number;
   min_depth_ratio: number;
+
+  // Hyperliquid L1 Perp DEX
+  hyperliquid_wallet: string;
+  hyperliquid_private_key: string;
+  hyperliquid_url: string;
+
+  // Lighter zkDEX Rollup
+  lighter_account_index: string;
+  lighter_api_key: string;
+  lighter_url: string;
+
+  // Vanta.exchange (Orderly Network)
+  vanta_account_id: string;
+  vanta_orderly_key: string;
+  vanta_orderly_secret: string;
+  vanta_url: string;
+
+  // Robinhood EVM
+  robinhood_wallet: string;
+  robinhood_private_key: string;
+  robinhood_rpc_url: string;
   robinhood_router: string;
+
+  // Polymarket CTF CLOB
+  polymarket_api_key: string;
+  polymarket_secret: string;
+  polymarket_passphrase: string;
+  polymarket_url: string;
+
+  // Kalshi CFTC Binary
+  kalshi_api_key_id: string;
+  kalshi_private_key: string;
+  kalshi_url: string;
 }
 export * from "./tickers";
