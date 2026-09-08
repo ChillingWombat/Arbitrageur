@@ -91,9 +91,9 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             onClick={() => setShowKillModal(true)}
             className="px-2.5 py-1 bg-loss hover:bg-red-700 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs cursor-pointer"
-            title="Emergency Killswitch: Halt All Trading"
+            title="Emergency Killswitch: Stop All Trading"
           >
-            Halt
+            STOP
           </button>
         </div>
       </header>
@@ -103,10 +103,10 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-surface border border-surface-border rounded-xl p-6 max-w-md w-full shadow-xl space-y-4">
             <div>
-              <h3 className="text-base font-bold font-mono text-slate-900">Emergency Halt</h3>
+              <h3 className="text-base font-bold font-mono text-slate-900">Emergency Stop</h3>
             </div>
             <p className="text-sm text-slate-600">
-              This will immediately halt all trading coordination, trip the risk circuit breaker, and cancel pending orders across all venues.
+              This will immediately stop all trading coordination, trip the risk circuit breaker, and cancel pending orders across all venues.
             </p>
             <div className="flex justify-end space-x-3 pt-2">
               <button
@@ -122,7 +122,7 @@ export const Header: React.FC<HeaderProps> = ({
                 }}
                 className="px-4 py-2 bg-loss hover:bg-red-700 text-white font-medium rounded-lg text-sm font-mono transition shadow-xs"
               >
-                Confirm Halt
+                Confirm Stop
               </button>
             </div>
           </div>
