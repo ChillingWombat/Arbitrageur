@@ -95,6 +95,9 @@ fn default_referral_robinhood() -> String { "https://robinhoodchain.lighter.xyz/
 fn default_sponsor_link() -> String { "https://buymeacoffee.com/dav1d1010".into() }
 fn default_app_version() -> String { "v1.2.0".into() }
 fn default_git_repo() -> String { "https://github.com/arbitrager/arbitrager".into() }
+fn default_true() -> bool { true }
+fn default_kraken_spot_url() -> String { "https://api.kraken.com".into() }
+fn default_kraken_futures_url() -> String { "https://futures.kraken.com".into() }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct VenueBalanceInfo {
@@ -132,6 +135,44 @@ pub struct EngineSettingsDto {
     pub fast_warmup_enabled: bool,
     #[serde(default = "default_venue_rebalance_threshold_usd")]
     pub venue_rebalance_threshold_usd: f64,
+
+    // Exchange Enablement Toggles
+    #[serde(default = "default_true")]
+    pub hyperliquid_enabled: bool,
+    #[serde(default = "default_true")]
+    pub hyperliquid_spot_enabled: bool,
+    #[serde(default = "default_true")]
+    pub lighter_enabled: bool,
+    #[serde(default = "default_true")]
+    pub lighter_spot_enabled: bool,
+    #[serde(default = "default_true")]
+    pub vanta_enabled: bool,
+    #[serde(default = "default_true")]
+    pub robinhood_enabled: bool,
+    #[serde(default)]
+    pub kraken_enabled: bool,
+    #[serde(default)]
+    pub kraken_spot_enabled: bool,
+    #[serde(default)]
+    pub kraken_futures_enabled: bool,
+    #[serde(default)]
+    pub polymarket_enabled: bool,
+    #[serde(default)]
+    pub kalshi_enabled: bool,
+
+    // Kraken Spot & Futures
+    #[serde(default)]
+    pub kraken_spot_api_key: String,
+    #[serde(default)]
+    pub kraken_spot_secret: String,
+    #[serde(default = "default_kraken_spot_url")]
+    pub kraken_spot_url: String,
+    #[serde(default)]
+    pub kraken_futures_api_key: String,
+    #[serde(default)]
+    pub kraken_futures_secret: String,
+    #[serde(default = "default_kraken_futures_url")]
+    pub kraken_futures_url: String,
 
     // Hyperliquid
     #[serde(default)]
@@ -223,6 +264,23 @@ impl Default for EngineSettingsDto {
             trading_mode: default_trading_mode(),
             fast_warmup_enabled: default_fast_warmup_enabled(),
             venue_rebalance_threshold_usd: default_venue_rebalance_threshold_usd(),
+            hyperliquid_enabled: true,
+            hyperliquid_spot_enabled: true,
+            lighter_enabled: true,
+            lighter_spot_enabled: true,
+            vanta_enabled: true,
+            robinhood_enabled: true,
+            kraken_enabled: false,
+            kraken_spot_enabled: false,
+            kraken_futures_enabled: false,
+            polymarket_enabled: false,
+            kalshi_enabled: false,
+            kraken_spot_api_key: "".into(),
+            kraken_spot_secret: "".into(),
+            kraken_spot_url: default_kraken_spot_url(),
+            kraken_futures_api_key: "".into(),
+            kraken_futures_secret: "".into(),
+            kraken_futures_url: default_kraken_futures_url(),
             hyperliquid_wallet: "".into(),
             hyperliquid_private_key: "".into(),
             hyperliquid_url: default_hyperliquid_url(),

@@ -21,7 +21,58 @@ import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, V
 import { VaultUnlockModal } from "./VaultUnlockModal";
 
 type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
-type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "polymarket" | "kalshi";
+type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "kraken" | "polymarket" | "kalshi";
+
+interface ToggleSwitchProps {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  label?: string;
+  size?: "sm" | "md";
+}
+
+const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
+  checked,
+  onChange,
+  disabled = false,
+  label,
+  size = "md",
+}) => {
+  const isSm = size === "sm";
+  return (
+    <div className="inline-flex items-center space-x-2">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        disabled={disabled}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onChange(!checked);
+        }}
+        className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+          isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
+        } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
+          checked ? "bg-accent" : "bg-slate-300"
+        }`}
+      >
+        <span
+          className={`inline-block rounded-full bg-white shadow-xs transform transition-transform ${
+            isSm
+              ? checked
+                ? "w-3.5 h-3.5 translate-x-4"
+                : "w-3.5 h-3.5 translate-x-0.5"
+              : checked
+              ? "w-4 h-4 translate-x-5"
+              : "w-4 h-4 translate-x-1"
+          }`}
+        />
+      </button>
+      {label && <span className="text-[11px] font-mono text-slate-700">{label}</span>}
+    </div>
+  );
+};
 
 interface EngineSettingsProps {
   systemStatus?: SystemStatusDto | null;
@@ -46,6 +97,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
   const [engineWsPort, setEngineWsPort] = useState(8789);
   const [bindAddress, setBindAddress] = useState("127.0.0.1");
+
+  // Exchange Enablement Toggles
+  const [hlEnabled, setHlEnabled] = useState(true);
+  const [hlSpotEnabled, setHlSpotEnabled] = useState(true);
+  const [lighterEnabled, setLighterEnabled] = useState(true);
+  const [lighterSpotEnabled, setLighterSpotEnabled] = useState(true);
+  const [vantaEnabled, setVantaEnabled] = useState(true);
+  const [robinhoodEnabled, setRobinhoodEnabled] = useState(true);
+  const [krakenEnabled, setKrakenEnabled] = useState(false);
+  const [krakenSpotEnabled, setKrakenSpotEnabled] = useState(false);
+  const [krakenFuturesEnabled, setKrakenFuturesEnabled] = useState(false);
+  const [polymarketEnabled, setPolymarketEnabled] = useState(false);
+  const [kalshiEnabled, setKalshiEnabled] = useState(false);
 
   // Hyperliquid
   const [hyperliquidWallet, setHyperliquidWallet] = useState("");
@@ -73,6 +137,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [robinhoodRpcUrl, setRobinhoodRpcUrl] = useState("https://rpc.robinhood.network");
   const [robinhoodRouter, setRobinhoodRouter] = useState("0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
   const [robinhoodSubaccountIndex, setRobinhoodSubaccountIndex] = useState<string>("");
+
+  // Kraken (Spot & Futures)
+  const [krakenSpotApiKey, setKrakenSpotApiKey] = useState("");
+  const [krakenSpotSecret, setKrakenSpotSecret] = useState("");
+  const [krakenSpotUrl, setKrakenSpotUrl] = useState("https://api.kraken.com");
+  const [krakenFuturesApiKey, setKrakenFuturesApiKey] = useState("");
+  const [krakenFuturesSecret, setKrakenFuturesSecret] = useState("");
+  const [krakenFuturesUrl, setKrakenFuturesUrl] = useState("https://futures.kraken.com");
 
   // Polymarket
   const [polymarketApiKey, setPolymarketApiKey] = useState("");
@@ -187,6 +259,25 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         setKalshiPrivateKey(s.kalshi_private_key || "");
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
 
+        setHlEnabled(s.hyperliquid_enabled ?? true);
+        setHlSpotEnabled(s.hyperliquid_spot_enabled ?? true);
+        setLighterEnabled(s.lighter_enabled ?? true);
+        setLighterSpotEnabled(s.lighter_spot_enabled ?? true);
+        setVantaEnabled(s.vanta_enabled ?? true);
+        setRobinhoodEnabled(s.robinhood_enabled ?? true);
+        setKrakenEnabled(s.kraken_enabled ?? false);
+        setKrakenSpotEnabled(s.kraken_spot_enabled ?? false);
+        setKrakenFuturesEnabled(s.kraken_futures_enabled ?? false);
+        setPolymarketEnabled(s.polymarket_enabled ?? false);
+        setKalshiEnabled(s.kalshi_enabled ?? false);
+
+        setKrakenSpotApiKey(s.kraken_spot_api_key || "");
+        setKrakenSpotSecret(s.kraken_spot_secret || "");
+        setKrakenSpotUrl(s.kraken_spot_url || "https://api.kraken.com");
+        setKrakenFuturesApiKey(s.kraken_futures_api_key || "");
+        setKrakenFuturesSecret(s.kraken_futures_secret || "");
+        setKrakenFuturesUrl(s.kraken_futures_url || "https://futures.kraken.com");
+
         setReferralLighter(s.referral_lighter || "https://app.lighter.xyz/?referral=SOLO&source=none");
         setReferralRobinhood(s.referral_robinhood || "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
         setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
@@ -209,6 +300,12 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     loadSettings();
     loadVaultStatus();
     loadVenueBalances();
+  }, []);
+
+  useEffect(() => {
+    if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
+      setLiveVenues(systemStatus.active_venues);
+    }
   }, [systemStatus]);
 
   const defaultVenues: VenueStatusDto[] = [
@@ -216,6 +313,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "ONLINE", latency_ms: 5, fee_bps: 1.5 },
     { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "ONLINE", latency_ms: 4, fee_bps: 3.0 },
     { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "ONLINE", latency_ms: 8, fee_bps: 2.5 },
+    { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "ONLINE", latency_ms: 22, fee_bps: 16.0 },
     { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 12, fee_bps: 0.0 },
     { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 15, fee_bps: 10.0 },
   ];
@@ -243,6 +341,23 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         trading_mode: tradingMode,
         fast_warmup_enabled: fastWarmupEnabled,
         venue_rebalance_threshold_usd: venueRebalanceThresholdUsd,
+        hyperliquid_enabled: hlEnabled,
+        hyperliquid_spot_enabled: hlSpotEnabled,
+        lighter_enabled: lighterEnabled,
+        lighter_spot_enabled: lighterSpotEnabled,
+        vanta_enabled: vantaEnabled,
+        robinhood_enabled: robinhoodEnabled,
+        kraken_enabled: krakenEnabled,
+        kraken_spot_enabled: krakenSpotEnabled,
+        kraken_futures_enabled: krakenFuturesEnabled,
+        polymarket_enabled: polymarketEnabled,
+        kalshi_enabled: kalshiEnabled,
+        kraken_spot_api_key: krakenSpotApiKey.trim(),
+        kraken_spot_secret: krakenSpotSecret.trim(),
+        kraken_spot_url: krakenSpotUrl.trim(),
+        kraken_futures_api_key: krakenFuturesApiKey.trim(),
+        kraken_futures_secret: krakenFuturesSecret.trim(),
+        kraken_futures_url: krakenFuturesUrl.trim(),
         hyperliquid_wallet: hyperliquidWallet.trim(),
         hyperliquid_private_key: hyperliquidPrivateKey.trim(),
         hyperliquid_url: hyperliquidUrl.trim(),
@@ -310,17 +425,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const isVenueConfigured = (venue: string): boolean => {
     switch (venue) {
       case "hyperliquid":
-        return Boolean(hyperliquidWallet || hyperliquidPrivateKey);
+        return hlEnabled && Boolean(hyperliquidWallet || hyperliquidPrivateKey);
       case "lighter":
-        return Boolean(lighterApiKey);
+        return lighterEnabled && Boolean(lighterApiKey);
       case "vanta":
-        return Boolean(vantaOrderlyKey || vantaAccountId);
+        return vantaEnabled && Boolean(vantaOrderlyKey || vantaAccountId);
       case "robinhood":
-        return Boolean(robinhoodWallet || robinhoodPrivateKey);
+        return robinhoodEnabled && Boolean(robinhoodWallet || robinhoodPrivateKey);
+      case "kraken":
+        return krakenEnabled && ((krakenSpotEnabled && Boolean(krakenSpotApiKey)) || (krakenFuturesEnabled && Boolean(krakenFuturesApiKey)));
       case "polymarket":
-        return Boolean(polymarketApiKey || polymarketSecret);
+        return polymarketEnabled && Boolean(polymarketApiKey || polymarketSecret);
       case "kalshi":
-        return Boolean(kalshiApiKeyId || kalshiPrivateKey);
+        return kalshiEnabled && Boolean(kalshiApiKeyId || kalshiPrivateKey);
       default:
         return false;
     }
@@ -331,8 +448,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     isVenueConfigured("lighter"),
     isVenueConfigured("vanta"),
     isVenueConfigured("robinhood"),
+    isVenueConfigured("kraken"),
     isVenueConfigured("polymarket"),
     isVenueConfigured("kalshi"),
+  ].filter(Boolean).length;
+
+  const activeVenuesCount = [
+    hlEnabled,
+    lighterEnabled,
+    vantaEnabled,
+    robinhoodEnabled,
+    krakenEnabled,
+    polymarketEnabled,
+    kalshiEnabled,
   ].filter(Boolean).length;
 
   const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
@@ -347,7 +475,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               Arbitrager System Engine Settings
             </h2>
             <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              {configuredCount} / 6 Venues Active
+              {activeVenuesCount} / 7 Venues Enabled ({configuredCount} Configured)
             </span>
           </div>
           <p className="text-xs text-slate-500 font-mono mt-1">
@@ -532,7 +660,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             {/* Exchange Filter Selector */}
             <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-xs font-mono">
               <span className="text-slate-500 text-[11px] mr-2">Filter Venue:</span>
-              {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => (
+              {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => (
                 <button
                   key={vf}
                   type="button"
@@ -557,73 +685,102 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                       Hyperliquid (L1 Perp DEX)
                     </h3>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Subaccount & EVM Key
+                      Perp & Spot
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    Fee: {getVenueInfo("hyperliquid")?.fee_bps ?? 2.0} BPS
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                  <div>
-                    <label className="text-slate-600 block mb-1">Trading EOA Wallet Address:</label>
-                    <input
-                      type="text"
-                      disabled={loading || isVaultLocked}
-                      value={hyperliquidWallet}
-                      placeholder="0x..."
-                      onChange={(e) => setHyperliquidWallet(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("hyperliquid")?.fee_bps ?? 2.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={hlEnabled}
+                      onChange={setHlEnabled}
+                      label={hlEnabled ? "Active" : "Disabled"}
                     />
                   </div>
+                </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Trading Agent Private Key:</label>
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret("hl_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                      >
-                        {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                        <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
-                      </button>
+                {!hlEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Hyperliquid exchange is disabled. Toggle switch to enable and configure credentials.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {/* Hyperliquid Multi-Market Option: Spot */}
+                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold font-mono text-slate-900 block">Hyperliquid Spot Market (HyperEVM / L1 Spot)</span>
+                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot leg routing alongside perp basis trades</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={hlSpotEnabled}
+                        onChange={setHlSpotEnabled}
+                        size="sm"
+                        label={hlSpotEnabled ? "Spot Enabled" : "Spot Off"}
+                      />
                     </div>
-                    <input
-                      type={showSecrets["hl_key"] ? "text" : "password"}
-                      disabled={loading || isVaultLocked}
-                      value={hyperliquidPrivateKey}
-                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                      onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
 
-                  <div>
-                    <label className="text-slate-600 block mb-1">Account Index (Optional):</label>
-                    <input
-                      type="number"
-                      disabled={loading || isVaultLocked}
-                      value={hyperliquidAccountIndex}
-                      placeholder="Default: 0"
-                      onChange={(e) => setHyperliquidAccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                      <div>
+                        <label className="text-slate-600 block mb-1">Trading EOA Wallet Address:</label>
+                        <input
+                          type="text"
+                          disabled={loading || isVaultLocked}
+                          value={hyperliquidWallet}
+                          placeholder="0x..."
+                          onChange={(e) => setHyperliquidWallet(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
 
-                  <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                    <input
-                      type="number"
-                      disabled={loading || isVaultLocked}
-                      value={hyperliquidSubaccountIndex}
-                      placeholder="Default: None"
-                      onChange={(e) => setHyperliquidSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-slate-600">Trading Agent Private Key:</label>
+                          <button
+                            type="button"
+                            onClick={() => toggleSecret("hl_key")}
+                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                          >
+                            {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                            <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
+                          </button>
+                        </div>
+                        <input
+                          type={showSecrets["hl_key"] ? "text" : "password"}
+                          disabled={loading || isVaultLocked}
+                          value={hyperliquidPrivateKey}
+                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                          onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Account Index (Optional):</label>
+                        <input
+                          type="number"
+                          disabled={loading || isVaultLocked}
+                          value={hyperliquidAccountIndex}
+                          placeholder="Default: 0"
+                          onChange={(e) => setHyperliquidAccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                        <input
+                          type="number"
+                          disabled={loading || isVaultLocked}
+                          value={hyperliquidSubaccountIndex}
+                          placeholder="Default: None"
+                          onChange={(e) => setHyperliquidSubaccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
 
@@ -636,71 +793,100 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                       Lighter (zkDEX Rollup)
                     </h3>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      zk-Rollup CLOB
+                      Perp & Spot CLOB
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                  <div>
-                    <label className="text-slate-600 block mb-1">Account Index:</label>
-                    <input
-                      type="text"
-                      disabled={loading || isVaultLocked}
-                      value={lighterAccountIndex}
-                      onChange={(e) => setLighterAccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={lighterEnabled}
+                      onChange={setLighterEnabled}
+                      label={lighterEnabled ? "Active" : "Disabled"}
                     />
                   </div>
+                </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">API Private Key / Signer Token:</label>
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret("lgt_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                      >
-                        {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                        <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
-                      </button>
+                {!lighterEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Lighter exchange is disabled. Toggle switch to enable and configure credentials.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {/* Lighter Multi-Market Option: Spot */}
+                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
+                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={lighterSpotEnabled}
+                        onChange={setLighterSpotEnabled}
+                        size="sm"
+                        label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
+                      />
                     </div>
-                    <input
-                      type={showSecrets["lgt_key"] ? "text" : "password"}
-                      disabled={loading || isVaultLocked}
-                      value={lighterApiKey}
-                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                      onChange={(e) => setLighterApiKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
 
-                  <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                    <input
-                      type="number"
-                      disabled={loading || isVaultLocked}
-                      value={lighterSubaccountIndex}
-                      placeholder="e.g. 1"
-                      onChange={(e) => setLighterSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                      <div>
+                        <label className="text-slate-600 block mb-1">Account Index:</label>
+                        <input
+                          type="text"
+                          disabled={loading || isVaultLocked}
+                          value={lighterAccountIndex}
+                          onChange={(e) => setLighterAccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
 
-                  <div>
-                    <label className="text-slate-600 block mb-1">Endpoint URL:</label>
-                    <input
-                      type="text"
-                      disabled={loading}
-                      value={lighterUrl}
-                      onChange={(e) => setLighterUrl(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-slate-600">API Private Key / Signer Token:</label>
+                          <button
+                            type="button"
+                            onClick={() => toggleSecret("lgt_key")}
+                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                          >
+                            {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                            <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
+                          </button>
+                        </div>
+                        <input
+                          type={showSecrets["lgt_key"] ? "text" : "password"}
+                          disabled={loading || isVaultLocked}
+                          value={lighterApiKey}
+                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                          onChange={(e) => setLighterApiKey(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                        <input
+                          type="number"
+                          disabled={loading || isVaultLocked}
+                          value={lighterSubaccountIndex}
+                          placeholder="e.g. 1"
+                          onChange={(e) => setLighterSubaccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                        <input
+                          type="text"
+                          disabled={loading}
+                          value={lighterUrl}
+                          onChange={(e) => setLighterUrl(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
 
@@ -716,70 +902,83 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                       Ed25519 Orderly
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
-                  </span>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={vantaEnabled}
+                      onChange={setVantaEnabled}
+                      label={vantaEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                  <div>
-                    <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
-                    <input
-                      type="text"
-                      disabled={loading || isVaultLocked}
-                      value={vantaAccountId}
-                      placeholder="0x..."
-                      onChange={(e) => setVantaAccountId(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
+                {!vantaEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Vanta exchange is disabled. Toggle switch to enable and configure Orderly credentials.
                   </div>
-
-                  <div>
-                    <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
-                    <input
-                      type="text"
-                      disabled={loading || isVaultLocked}
-                      value={vantaOrderlyKey}
-                      placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
-                      onChange={(e) => setVantaOrderlyKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
-
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Orderly Secret:</label>
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret("vanta_secret")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                      >
-                        {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                        <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
-                      </button>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={vantaAccountId}
+                        placeholder="0x..."
+                        onChange={(e) => setVantaAccountId(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
                     </div>
-                    <input
-                      type={showSecrets["vanta_secret"] ? "text" : "password"}
-                      disabled={loading || isVaultLocked}
-                      value={vantaOrderlySecret}
-                      placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                      onChange={(e) => setVantaOrderlySecret(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
-                  </div>
 
-                  <div>
-                    <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                    <input
-                      type="number"
-                      disabled={loading || isVaultLocked}
-                      value={vantaSubaccountIndex}
-                      placeholder="e.g. 0"
-                      onChange={(e) => setVantaSubaccountIndex(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                    />
+                    <div>
+                      <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={vantaOrderlyKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
+                        onChange={(e) => setVantaOrderlyKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Orderly Secret:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("vanta_secret")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["vanta_secret"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={vantaOrderlySecret}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                        onChange={(e) => setVantaOrderlySecret(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                      <input
+                        type="number"
+                        disabled={loading || isVaultLocked}
+                        value={vantaSubaccountIndex}
+                        placeholder="e.g. 0"
+                        onChange={(e) => setVantaSubaccountIndex(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
 
@@ -795,46 +994,439 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                       DEX Aggregator Router
                     </span>
                   </div>
-                  <span className="text-[11px] font-mono text-slate-400">
-                    Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                  <div>
-                    <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
-                    <input
-                      type="text"
-                      disabled={loading || isVaultLocked}
-                      value={robinhoodWallet}
-                      placeholder="0x..."
-                      onChange={(e) => setRobinhoodWallet(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={robinhoodEnabled}
+                      onChange={setRobinhoodEnabled}
+                      label={robinhoodEnabled ? "Active" : "Disabled"}
                     />
                   </div>
+                </div>
 
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-slate-600">Signer Private Key:</label>
-                      <button
-                        type="button"
-                        onClick={() => toggleSecret("rh_key")}
-                        className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                      >
-                        {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                        <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
-                      </button>
+                {!robinhoodEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Robinhood EVM is disabled. Toggle switch to enable and configure signer credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={robinhoodWallet}
+                        placeholder="0x..."
+                        onChange={(e) => setRobinhoodWallet(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
                     </div>
-                    <input
-                      type={showSecrets["rh_key"] ? "text" : "password"}
-                      disabled={loading || isVaultLocked}
-                      value={robinhoodPrivateKey}
-                      placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                      onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Signer Private Key:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("rh_key")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["rh_key"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={robinhoodPrivateKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                        onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">RPC URL:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={robinhoodRpcUrl}
+                        onChange={(e) => setRobinhoodRpcUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Router Address:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={robinhoodRouter}
+                        onChange={(e) => setRobinhoodRouter(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exchange 5: Kraken (Spot & Futures Multi-Market) */}
+            {(venueFilter === "all" || venueFilter === "kraken") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Kraken (Spot & Futures CLOB)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-50 text-purple-700 border border-purple-200">
+                      Multi-Market (Spot & Futures)
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("kraken")?.fee_bps ?? 16.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={krakenEnabled}
+                      onChange={setKrakenEnabled}
+                      label={krakenEnabled ? "Active" : "Disabled"}
                     />
                   </div>
                 </div>
+
+                {!krakenEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Kraken exchange is disabled. Toggle switch to enable Spot & Futures API configuration.
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-xl text-[11px] font-mono text-slate-600">
+                      💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Toggle each option independently to enter its respective credentials.
+                    </div>
+
+                    {/* Option A: Kraken Spot Market */}
+                    <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-3">
+                      <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
+                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-200 text-slate-700">api.kraken.com</span>
+                        </div>
+                        <ToggleSwitch
+                          checked={krakenSpotEnabled}
+                          onChange={setKrakenSpotEnabled}
+                          size="sm"
+                          label={krakenSpotEnabled ? "Spot Enabled" : "Spot Disabled"}
+                        />
+                      </div>
+
+                      {!krakenSpotEnabled ? (
+                        <div className="text-[11px] text-slate-500 font-mono py-1">
+                          Spot trading disabled for Kraken. Toggle on to configure Spot API Key & Secret.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono pt-1">
+                          <div>
+                            <label className="text-slate-600 block mb-1">Kraken Spot API Key:</label>
+                            <input
+                              type="text"
+                              disabled={loading || isVaultLocked}
+                              value={krakenSpotApiKey}
+                              placeholder="api_key_..."
+                              onChange={(e) => setKrakenSpotApiKey(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-slate-600">Kraken Spot Private/Secret Key:</label>
+                              <button
+                                type="button"
+                                onClick={() => toggleSecret("kraken_spot_sec")}
+                                className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                              >
+                                {showSecrets["kraken_spot_sec"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                                <span>{showSecrets["kraken_spot_sec"] ? "Hide" : "Show"}</span>
+                              </button>
+                            </div>
+                            <input
+                              type={showSecrets["kraken_spot_sec"] ? "text" : "password"}
+                              disabled={loading || isVaultLocked}
+                              value={krakenSpotSecret}
+                              placeholder={isVaultLocked ? "••••••••••••••••" : "base64_secret..."}
+                              onChange={(e) => setKrakenSpotSecret(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+
+                          <div className="md:col-span-2">
+                            <label className="text-slate-600 block mb-1">Spot API Endpoint URL:</label>
+                            <input
+                              type="text"
+                              disabled={loading}
+                              value={krakenSpotUrl}
+                              placeholder="https://api.kraken.com"
+                              onChange={(e) => setKrakenSpotUrl(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Option B: Kraken Futures Market */}
+                    <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-3">
+                      <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
+                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
+                        </div>
+                        <ToggleSwitch
+                          checked={krakenFuturesEnabled}
+                          onChange={setKrakenFuturesEnabled}
+                          size="sm"
+                          label={krakenFuturesEnabled ? "Futures Enabled" : "Futures Disabled"}
+                        />
+                      </div>
+
+                      {!krakenFuturesEnabled ? (
+                        <div className="text-[11px] text-slate-500 font-mono py-1">
+                          Futures trading disabled for Kraken. Toggle on to configure Futures API Key & Secret.
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono pt-1">
+                          <div>
+                            <label className="text-slate-600 block mb-1">Kraken Futures API Key:</label>
+                            <input
+                              type="text"
+                              disabled={loading || isVaultLocked}
+                              value={krakenFuturesApiKey}
+                              placeholder="futures_key_..."
+                              onChange={(e) => setKrakenFuturesApiKey(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="text-slate-600">Kraken Futures Secret Key:</label>
+                              <button
+                                type="button"
+                                onClick={() => toggleSecret("kraken_fut_sec")}
+                                className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                              >
+                                {showSecrets["kraken_fut_sec"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                                <span>{showSecrets["kraken_fut_sec"] ? "Hide" : "Show"}</span>
+                              </button>
+                            </div>
+                            <input
+                              type={showSecrets["kraken_fut_sec"] ? "text" : "password"}
+                              disabled={loading || isVaultLocked}
+                              value={krakenFuturesSecret}
+                              placeholder={isVaultLocked ? "••••••••••••••••" : "futures_secret..."}
+                              onChange={(e) => setKrakenFuturesSecret(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+
+                          <div className="md:col-span-2">
+                            <label className="text-slate-600 block mb-1">Futures API Endpoint URL:</label>
+                            <input
+                              type="text"
+                              disabled={loading}
+                              value={krakenFuturesUrl}
+                              placeholder="https://futures.kraken.com"
+                              onChange={(e) => setKrakenFuturesUrl(e.target.value)}
+                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exchange 6: Polymarket */}
+            {(venueFilter === "all" || venueFilter === "polymarket") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Polymarket (CTF CLOB)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Prediction Market
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("polymarket")?.fee_bps ?? 0.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={polymarketEnabled}
+                      onChange={setPolymarketEnabled}
+                      label={polymarketEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!polymarketEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Polymarket is disabled. Toggle switch to enable and configure CTF credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">Polymarket API Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={polymarketApiKey}
+                        placeholder="0x..."
+                        onChange={(e) => setPolymarketApiKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Polymarket Secret:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("pm_secret")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["pm_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["pm_secret"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["pm_secret"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={polymarketSecret}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                        onChange={(e) => setPolymarketSecret(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Polymarket Passphrase:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("pm_pass")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["pm_pass"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["pm_pass"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["pm_pass"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={polymarketPassphrase}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "passphrase"}
+                        onChange={(e) => setPolymarketPassphrase(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={polymarketUrl}
+                        onChange={(e) => setPolymarketUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exchange 7: Kalshi */}
+            {(venueFilter === "all" || venueFilter === "kalshi") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Kalshi (CFTC Binary)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Regulated Prediction
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("kalshi")?.fee_bps ?? 10.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={kalshiEnabled}
+                      onChange={setKalshiEnabled}
+                      label={kalshiEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!kalshiEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Kalshi is disabled. Toggle switch to enable and configure CFTC API credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">Kalshi API Key ID:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={kalshiApiKeyId}
+                        placeholder="e.g. 550e8400-e29b-..."
+                        onChange={(e) => setKalshiApiKeyId(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">RSA Private Key:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("kalshi_key")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["kalshi_key"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={kalshiPrivateKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
+                        onChange={(e) => setKalshiPrivateKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={kalshiUrl}
+                        onChange={(e) => setKalshiUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

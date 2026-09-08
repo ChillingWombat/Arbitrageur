@@ -305,10 +305,18 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
             const isLoss = ticker.netProfit < 0;
 
             return (
-              <button
+              <div
                 key={ticker.symbol}
+                role="button"
+                tabIndex={0}
                 onClick={() => onSelectTicker(ticker.symbol)}
-                className={`w-full p-2.5 rounded-lg border text-left transition relative group font-mono ${
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSelectTicker(ticker.symbol);
+                  }
+                }}
+                className={`w-full p-2.5 rounded-lg border text-left transition relative group font-mono cursor-pointer ${
                   isSelected
                     ? "bg-accent-dim/60 border-accent shadow-xs text-slate-900"
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700"
@@ -415,7 +423,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     </div>
                   );
                 })()}
-              </button>
+              </div>
             );
           })
         )}

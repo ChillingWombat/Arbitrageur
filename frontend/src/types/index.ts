@@ -275,6 +275,27 @@ export interface EngineSettingsDto {
   max_slippage_bps: number;
   min_depth_ratio: number;
 
+  // Exchange Enablement Toggles
+  hyperliquid_enabled?: boolean;
+  hyperliquid_spot_enabled?: boolean;
+  lighter_enabled?: boolean;
+  lighter_spot_enabled?: boolean;
+  vanta_enabled?: boolean;
+  robinhood_enabled?: boolean;
+  kraken_enabled?: boolean;
+  kraken_spot_enabled?: boolean;
+  kraken_futures_enabled?: boolean;
+  polymarket_enabled?: boolean;
+  kalshi_enabled?: boolean;
+
+  // Kraken Spot & Futures
+  kraken_spot_api_key?: string;
+  kraken_spot_secret?: string;
+  kraken_spot_url?: string;
+  kraken_futures_api_key?: string;
+  kraken_futures_secret?: string;
+  kraken_futures_url?: string;
+
   // Hyperliquid L1 Perp DEX
   hyperliquid_wallet: string;
   hyperliquid_private_key: string;
