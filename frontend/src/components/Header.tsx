@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Settings } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
 
@@ -7,6 +8,7 @@ interface HeaderProps {
   onResetCircuitBreaker: () => void;
   onEmergencyKillswitch: () => void;
   onToggleLiveMode?: (enabled: boolean) => void;
+  onOpenSettings?: () => void;
   refreshing: boolean;
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
@@ -20,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   onResetCircuitBreaker,
   onEmergencyKillswitch,
+  onOpenSettings,
   refreshing,
   activeTab,
   onSelectTab,
@@ -114,10 +117,20 @@ export const Header: React.FC<HeaderProps> = ({
             <span>{isLive ? "Real Trading" : "Paper Trading"}</span>
           </div>
 
+          {/* Settings Pop-out Modal Trigger */}
+          <button
+            onClick={onOpenSettings}
+            className="px-2.5 py-1 bg-surface-raised hover:bg-slate-200 text-slate-700 hover:text-slate-900 border border-surface-border rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5 cursor-pointer"
+            title="Engine Settings & API Keys (Pop-out Modal)"
+          >
+            <Settings className="w-3.5 h-3.5 text-slate-500" />
+            <span className="hidden sm:inline">Settings</span>
+          </button>
+
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="px-2.5 py-1 bg-loss hover:bg-red-700 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs"
+            className="px-2.5 py-1 bg-loss hover:bg-red-700 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs cursor-pointer"
             title="Emergency Killswitch: Halt All Trading"
           >
             Halt

@@ -9,7 +9,7 @@ import { StatArbLab } from "./components/StatArbLab";
 import { RiskOperations } from "./components/RiskOperations";
 import { SimulationRunner } from "./components/SimulationRunner";
 import { StrategyPerformance } from "./components/StrategyPerformance";
-import { EngineSettings } from "./components/EngineSettings";
+import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { api } from "./services/api";
 import type {
@@ -42,6 +42,7 @@ export const App: React.FC = () => {
   const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
   const [refreshing, setRefreshing] = useState(false);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   // Load baseline status and telemetry
   const refreshAllData = useCallback(async (customQty?: number, customMinBps?: number) => {
@@ -157,6 +158,7 @@ export const App: React.FC = () => {
         onResetCircuitBreaker={handleResetCircuitBreaker}
         onEmergencyKillswitch={handleEmergencyKillswitch}
         onToggleLiveMode={handleToggleLiveMode}
+        onOpenSettings={() => setIsSettingsOpen(true)}
         refreshing={refreshing}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
@@ -251,10 +253,15 @@ export const App: React.FC = () => {
           )}
 
           {activeTab === "performance" && <StrategyPerformance activeSymbol={selectedSymbol} />}
-
-          {activeTab === "settings" && <EngineSettings systemStatus={systemStatus} />}
         </main>
       </div>
+
+      {/* Pop-Out Engine Settings Modal */}
+      <SettingsModal
+        isOpen={isSettingsOpen}
+        onClose={() => setIsSettingsOpen(false)}
+        systemStatus={systemStatus}
+      />
     </div>
   );
 };

@@ -25,9 +25,10 @@ type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" 
 
 interface EngineSettingsProps {
   systemStatus?: SystemStatusDto | null;
+  onClose?: () => void;
 }
 
-export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) => {
+export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, onClose }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
 
   // Remote HSM
@@ -337,7 +338,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
   const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
 
   return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full max-w-5xl select-none">
+    <div className="p-6 space-y-6 max-w-5xl select-none">
       {/* Top Banner */}
       <div className="bg-surface p-5 rounded-2xl border border-surface-border shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
@@ -1186,22 +1187,33 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus }) 
             <span>Config changes immediately affect live atomic coordinator execution.</span>
           </div>
 
-          <button
-            type="submit"
-            disabled={loading || saving}
-            className="px-6 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
-          >
-            {saving ? (
-              <span>Saving...</span>
-            ) : saved ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Saved to Engine</span>
-              </>
-            ) : (
-              <span>Save Configuration</span>
+          <div className="flex items-center space-x-2.5">
+            {onClose && (
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs"
+              >
+                Done
+              </button>
             )}
-          </button>
+            <button
+              type="submit"
+              disabled={loading || saving}
+              className="px-6 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
+            >
+              {saving ? (
+                <span>Saving...</span>
+              ) : saved ? (
+                <>
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Saved to Engine</span>
+                </>
+              ) : (
+                <span>Save Configuration</span>
+              )}
+            </button>
+          </div>
         </div>
       </form>
 

@@ -7,7 +7,6 @@ import {
   ShieldCheck,
   PlaySquare,
   TrendingUp,
-  Settings,
   Coins,
 } from "lucide-react";
 
@@ -19,8 +18,7 @@ export type ActiveTab =
   | "statarb"
   | "risk"
   | "sim"
-  | "performance"
-  | "settings";
+  | "performance";
 
 export interface NavigationProps {
   activeTab: ActiveTab;
@@ -91,12 +89,6 @@ export const Navigation: React.FC<NavigationProps> = ({
       shortLabel: "Performance",
       fullLabel: "",
       icon: TrendingUp,
-    },
-    {
-      id: "settings" as ActiveTab,
-      shortLabel: "Settings",
-      fullLabel: "",
-      icon: Settings,
     },
   ];
 
