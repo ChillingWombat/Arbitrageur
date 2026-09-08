@@ -412,14 +412,13 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
           </div>
 
           <div
-            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-xs font-mono font-medium ${
+            className={`px-2.5 py-1 rounded-lg border text-xs font-mono font-medium ${
               isLive
                 ? "bg-amber-50 border-amber-300 text-amber-800"
                 : "bg-blue-50 border-blue-200 text-blue-700"
             }`}
             title={isLive ? "Real Trading (Live Execution Active)" : "Paper Trading (Live Feeds & Simulated Orderbooks)"}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-amber-600 animate-pulse" : "bg-blue-600"}`} />
             <span>{isLive ? "Live" : "Paper"}</span>
           </div>
         </div>
