@@ -4,6 +4,8 @@ import {
   PERP_TICKERS,
   formatCurrencyPrice,
   formatCurrencyPnl,
+  getTickerActiveVenues,
+  type PerpTicker,
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
@@ -17,6 +19,8 @@ interface TickerExplorerProps {
   status?: SystemStatusDto | null;
   onOpenSettings?: () => void;
   onOpenTickerConfig?: (symbol: string) => void;
+  availableTickers?: PerpTicker[];
+  activeVenueCodes?: Set<string>;
 }
 
 export const TickerExplorer: React.FC<TickerExplorerProps> = ({
@@ -27,6 +31,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   status,
   onOpenSettings,
   onOpenTickerConfig,
+  availableTickers,
+  activeVenueCodes,
 }) => {
   const pnl = status?.total_realized_pnl ?? 0;
   const isLive = status?.is_live_mode ?? false;
@@ -71,7 +77,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       statsMap.set(baseKey, cur);
     }
 
-    return PERP_TICKERS.map((t) => {
+    const baseList = availableTickers ?? PERP_TICKERS;
+    return baseList.map((t) => {
       const stat = statsMap.get(t.base.toUpperCase()) || { count: 0, pnl: 0 };
       return {
         ...t,
@@ -80,7 +87,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         lastTradeTime: stat.lastTime,
       };
     });
-  }, [executionLogs]);
+  }, [availableTickers, executionLogs]);
 
   // Filter and sort the tickers
   const processedTickers = useMemo(() => {
@@ -88,15 +95,17 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
     let list = tickersWithStats;
     const query = searchQuery.trim().toLowerCase();
     if (query) {
-      list = list.filter(
-        (t) =>
+      list = list.filter((t) => {
+        const activeVenues = activeVenueCodes ? getTickerActiveVenues(t, activeVenueCodes) : t.venues;
+        return (
           t.symbol.toLowerCase().includes(query) ||
           t.base.toLowerCase().includes(query) ||
           t.name.toLowerCase().includes(query) ||
           t.quote.toLowerCase().includes(query) ||
           query === "perp" ||
-          t.venues.some((v) => v.toLowerCase().includes(query))
-      );
+          activeVenues.some((v) => v.toLowerCase().includes(query))
+        );
+      });
     }
 
     // 2. Sort
@@ -149,7 +158,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
       return 0;
     });
-  }, [tickersWithStats, searchQuery, sortOption]);
+  }, [tickersWithStats, searchQuery, sortOption, activeVenueCodes]);
 
   const venueBadgeColor = (v: string) => {
     switch (v) {
@@ -161,11 +170,15 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         return "bg-emerald-500/10 text-emerald-600 border-emerald-500/20";
       case "RH":
         return "bg-amber-500/10 text-amber-600 border-amber-500/20";
+      case "KRK":
+        return "bg-purple-500/10 text-purple-600 border-purple-500/20";
       default:
         return "bg-slate-500/10 text-slate-600 border-slate-500/20";
     }
   };
 
+
+  const totalAvailableCount = (availableTickers ?? PERP_TICKERS).length;
 
   return (
     <aside className="w-80 border-r border-surface-border bg-surface flex flex-col justify-between select-none h-full overflow-hidden">
@@ -174,7 +187,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         <div className="flex items-center justify-between">
           <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-900 flex items-center space-x-1.5">
             <span>Tickers</span>
-            <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{PERP_TICKERS.length})</span>
+            <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{totalAvailableCount})</span>
           </div>
         </div>
 
@@ -186,7 +199,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search 52 tickers..."
+              placeholder={`Search ${totalAvailableCount} tickers...`}
               className="w-full pl-8 pr-7 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition"
             />
             {searchQuery && (
@@ -303,8 +316,27 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Scrollable Ticker List */}
       <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-1">
         {processedTickers.length === 0 ? (
-          <div className="py-8 text-center text-xs font-mono text-slate-600">
-            No tickers matching &quot;{searchQuery}&quot;
+          <div className="py-10 text-center text-xs font-mono text-slate-600 px-4 space-y-2.5">
+            {searchQuery ? (
+              <div>No tickers matching &quot;{searchQuery}&quot;</div>
+            ) : (
+              <>
+                <div className="text-slate-800 font-bold text-sm">No Available Tickers</div>
+                <div className="text-[11px] text-slate-500 leading-relaxed">
+                  Cross-market arbitrage requires at least 2 enabled &amp; connected exchanges in Settings.
+                </div>
+                {onOpenSettings && (
+                  <button
+                    type="button"
+                    onClick={onOpenSettings}
+                    className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-lg font-medium hover:bg-accent-hover transition cursor-pointer shadow-xs"
+                  >
+                    <Settings className="w-3.5 h-3.5" />
+                    <span>Open Exchange Settings</span>
+                  </button>
+                )}
+              </>
+            )}
           </div>
         ) : (
           processedTickers.map((ticker) => {
@@ -312,6 +344,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
             const hasTrades = ticker.tradeCount > 0;
             const isProfit = ticker.netProfit > 0;
             const isLoss = ticker.netProfit < 0;
+            const activeVenues = activeVenueCodes ? getTickerActiveVenues(ticker, activeVenueCodes) : ticker.venues;
 
             return (
               <div
@@ -342,7 +375,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center space-x-0.5 mt-0.5">
-                    {ticker.venues.map((v) => (
+                    {activeVenues.map((v) => (
                       <span
                         key={v}
                         className={`px-1 py-0.2 rounded text-[8px] font-medium border leading-tight ${venueBadgeColor(

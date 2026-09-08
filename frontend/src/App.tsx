@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Header } from "./components/Header";
 import { TickerExplorer } from "./components/TickerExplorer";
 import type { ActiveTab } from "./components/Navigation";
@@ -23,13 +23,21 @@ import type {
   ExecutionLogEntry,
   CrossTickerExecutionParams,
   TickerStrategyConfigDto,
+  EngineSettingsDto,
 } from "./types";
 
-import { PERP_TICKERS, getDefaultOrderQty } from "./types/tickers";
+import {
+  PERP_TICKERS,
+  getDefaultOrderQty,
+  getEnabledConnectedVenueCodes,
+  filterAvailableTickers,
+  type PerpTicker,
+} from "./types/tickers";
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<ActiveTab>("spatial");
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
+  const [engineSettings, setEngineSettings] = useState<EngineSettingsDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
   const [spotOpps, setSpotOpps] = useState<SpotOpportunityDto[]>([]);
@@ -53,16 +61,36 @@ export const App: React.FC = () => {
     strategy: "futures",
   });
 
+  // Calculate enabled & connected venues and dynamically available tickers
+  const activeVenueCodes = useMemo(() => {
+    return getEnabledConnectedVenueCodes(engineSettings, systemStatus?.is_live_mode);
+  }, [engineSettings, systemStatus?.is_live_mode]);
+
+  const availableTickers: PerpTicker[] = useMemo(() => {
+    return filterAvailableTickers(PERP_TICKERS, activeVenueCodes, 2);
+  }, [activeVenueCodes]);
+
+  // Fallback selectedSymbol to first available ticker if current selection loses availability
+  useEffect(() => {
+    if (availableTickers.length > 0) {
+      const isAvailable = availableTickers.some((t: PerpTicker) => t.symbol === selectedSymbol);
+      if (!isAvailable) {
+        setSelectedSymbol(availableTickers[0].symbol);
+      }
+    }
+  }, [availableTickers, selectedSymbol]);
+
   // Load baseline status and telemetry
   const refreshAllData = useCallback(async (customQty?: number, customMinBps?: number) => {
     setRefreshing(true);
     try {
-      const ticker = PERP_TICKERS.find((t) => t.symbol === selectedSymbol);
+      const ticker = (availableTickers.length > 0 ? availableTickers : PERP_TICKERS).find((t: PerpTicker) => t.symbol === selectedSymbol);
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
-      const [status, books, spatial, funding, prediction, risk, logs, configs, spot] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot] = await Promise.all([
         api.getSystemStatus(),
+        api.getEngineSettings(),
         api.fetchOrderbooks(selectedSymbol),
         api.scanSpatialOpportunities(selectedSymbol, minBps, qty),
         api.scanFundingOpportunities(selectedSymbol, fundingTradeSize),
@@ -74,6 +102,7 @@ export const App: React.FC = () => {
       ]);
 
       setSystemStatus(status);
+      setEngineSettings(settings);
       setOrderbooks(books);
       setSpatialOpps(spatial);
       setFundingOpps(funding);
@@ -96,7 +125,7 @@ export const App: React.FC = () => {
     } finally {
       setRefreshing(false);
     }
-  }, [selectedSymbol, fundingTradeSize]);
+  }, [selectedSymbol, fundingTradeSize, availableTickers]);
 
   useEffect(() => {
     refreshAllData();
@@ -200,6 +229,8 @@ export const App: React.FC = () => {
           status={systemStatus}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenTickerConfig={handleOpenTickerConfig}
+          availableTickers={availableTickers}
+          activeVenueCodes={activeVenueCodes}
         />
 
         {/* Workspace Content Pane */}
@@ -215,6 +246,8 @@ export const App: React.FC = () => {
               loading={refreshing}
               executionLogs={executionLogs}
               onOpenTickerConfig={handleOpenTickerConfig}
+              activeVenueCodes={activeVenueCodes}
+              availableTickers={availableTickers}
             />
           )}
 
@@ -278,6 +311,10 @@ export const App: React.FC = () => {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         systemStatus={systemStatus}
+        onSettingsSaved={(newSettings) => {
+          setEngineSettings(newSettings);
+          refreshAllData();
+        }}
       />
 
       {/* Pop-Out Ticker Strategy Configurator Modal */}

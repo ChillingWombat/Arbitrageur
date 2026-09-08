@@ -462,15 +462,26 @@ impl AppEngineState {
         self.ex_robinhood.seed_market(symbol, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
     }
 
-    /// Returns active venue list using live market adapters
+    /// Returns active venue list using live market adapters, filtered by enabled & connected settings
     pub fn get_venues(&self) -> Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> {
         let is_live = *self.is_live_mode.read();
-        vec![
-            ("hyperliquid", if is_live { "Hyperliquid (L1 DEX)" } else { "Hyperliquid (L1)" }, self.live_hl.clone()),
-            ("lighter", if is_live { "Lighter (zkDEX)" } else { "Lighter (zkDEX)" }, self.live_lighter.clone()),
-            ("vanta", if is_live { "Vanta.exchange" } else { "Vanta.exchange" }, self.live_vanta.clone()),
-            ("robinhood", if is_live { "Robinhood EVM" } else { "Robinhood EVM" }, self.live_robinhood.clone()),
-        ]
+        let s = self.settings.read();
+        let mut list: Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> = Vec::new();
+
+        if s.hyperliquid_enabled && (!is_live || !s.hyperliquid_wallet.trim().is_empty() || !s.hyperliquid_private_key.trim().is_empty()) {
+            list.push(("hyperliquid", if is_live { "Hyperliquid (L1 DEX)" } else { "Hyperliquid (L1)" }, self.live_hl.clone()));
+        }
+        if s.lighter_enabled && (!is_live || !s.lighter_api_key.trim().is_empty()) {
+            list.push(("lighter", if is_live { "Lighter (zkDEX)" } else { "Lighter (zkDEX)" }, self.live_lighter.clone()));
+        }
+        if s.vanta_enabled && (!is_live || !s.vanta_orderly_key.trim().is_empty() || !s.vanta_account_id.trim().is_empty()) {
+            list.push(("vanta", if is_live { "Vanta.exchange" } else { "Vanta.exchange" }, self.live_vanta.clone()));
+        }
+        if s.robinhood_enabled && (!is_live || !s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
+            list.push(("robinhood", if is_live { "Robinhood EVM" } else { "Robinhood EVM" }, self.live_robinhood.clone()));
+        }
+
+        list
     }
 
     /// Resolves an exchange adapter by venue identifier or name using live market adapters
@@ -552,7 +563,14 @@ mod tests {
         assert!(state.get_adapter("kalshi").is_some());
         assert!(state.get_adapter("nonexistent").is_none());
 
-        // Toggle to live mode
+        // Toggle to live mode with configured credentials
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_wallet = "0x1111".into();
+            s.lighter_api_key = "lgt_key".into();
+            s.vanta_orderly_key = "vnt_key".into();
+            s.robinhood_wallet = "0x2222".into();
+        }
         *state.is_live_mode.write() = true;
         let venues_live = state.get_venues();
         assert_eq!(venues_live.len(), 4);

@@ -58,21 +58,147 @@ export function getDefaultOrderQty(basePrice: number): number {
   return Math.round(raw * 100) / 100;
 }
 
-// Complete list of the union of available tickers across perp DEXes (Hyperliquid, Lighter, Vanta, Robinhood)
+// Venue Identifiers & Short Code Mappings
+export const VENUE_ID_TO_CODE: Record<string, string> = {
+  hyperliquid: "HL",
+  lighter: "LGT",
+  vanta: "VNT",
+  robinhood: "RH",
+  kraken: "KRK",
+};
+
+export const VENUE_CODE_TO_ID: Record<string, string> = {
+  HL: "hyperliquid",
+  LGT: "lighter",
+  VNT: "vanta",
+  RH: "robinhood",
+  KRK: "kraken",
+};
+
+/**
+ * Minimal settings contract needed to determine venue enablement and connectivity.
+ */
+export interface VenueSettingsFilter {
+  trading_mode?: string;
+  hyperliquid_enabled?: boolean;
+  hyperliquid_wallet?: string;
+  hyperliquid_private_key?: string;
+  lighter_enabled?: boolean;
+  lighter_api_key?: string;
+  lighter_account_index?: string;
+  vanta_enabled?: boolean;
+  vanta_orderly_key?: string;
+  vanta_account_id?: string;
+  robinhood_enabled?: boolean;
+  robinhood_wallet?: string;
+  robinhood_private_key?: string;
+  kraken_enabled?: boolean;
+  kraken_spot_enabled?: boolean;
+  kraken_futures_enabled?: boolean;
+  kraken_spot_api_key?: string;
+  kraken_futures_api_key?: string;
+}
+
+/**
+ * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "KRK") based on engine settings
+ * and whether live trading mode is engaged.
+ */
+export function getEnabledConnectedVenueCodes(
+  settings?: VenueSettingsFilter | null,
+  isLiveMode?: boolean
+): Set<string> {
+  const active = new Set<string>();
+  if (!settings) {
+    // Default baseline: standard 4 DEXes enabled
+    active.add("HL");
+    active.add("LGT");
+    active.add("VNT");
+    active.add("RH");
+    return active;
+  }
+
+  const live = isLiveMode !== undefined ? isLiveMode : (settings.trading_mode === "real");
+
+  // 1. Hyperliquid (L1 DEX)
+  if (settings.hyperliquid_enabled !== false) {
+    if (!live || Boolean(settings.hyperliquid_wallet?.trim() || settings.hyperliquid_private_key?.trim())) {
+      active.add("HL");
+    }
+  }
+
+  // 2. Lighter (zkDEX)
+  if (settings.lighter_enabled !== false) {
+    if (!live || Boolean(settings.lighter_api_key?.trim() || (settings.lighter_account_index && settings.lighter_account_index !== "0"))) {
+      active.add("LGT");
+    }
+  }
+
+  // 3. Vanta.exchange (Omnichain perps)
+  if (settings.vanta_enabled !== false) {
+    if (!live || Boolean(settings.vanta_orderly_key?.trim() || settings.vanta_account_id?.trim())) {
+      active.add("VNT");
+    }
+  }
+
+  // 4. Robinhood EVM
+  if (settings.robinhood_enabled !== false) {
+    if (!live || Boolean(settings.robinhood_wallet?.trim() || settings.robinhood_private_key?.trim())) {
+      active.add("RH");
+    }
+  }
+
+  // 5. Kraken Spot & Futures
+  if (settings.kraken_enabled === true) {
+    const spotOk = Boolean(settings.kraken_spot_enabled && settings.kraken_spot_api_key?.trim());
+    const futuresOk = Boolean(settings.kraken_futures_enabled && settings.kraken_futures_api_key?.trim());
+    if (!live || spotOk || futuresOk) {
+      active.add("KRK");
+    }
+  }
+
+  return active;
+}
+
+/**
+ * Returns the subset of venue codes in ticker.venues that are currently enabled & connected.
+ */
+export function getTickerActiveVenues(
+  ticker: PerpTicker,
+  activeVenueCodes: Set<string>
+): string[] {
+  return ticker.venues.filter((v) => activeVenueCodes.has(v));
+}
+
+/**
+ * Filters the list of tickers to only those that have at least minVenues (default 2)
+ * enabled and connected exchanges.
+ */
+export function filterAvailableTickers(
+  tickers: PerpTicker[],
+  activeVenueCodes: Set<string>,
+  minVenues = 2
+): PerpTicker[] {
+  return tickers.filter((t) => {
+    const activeVenues = getTickerActiveVenues(t, activeVenueCodes);
+    return activeVenues.length >= minVenues;
+  });
+}
+
+// Complete list of the union of available tickers across perp DEXes (Hyperliquid, Lighter, Vanta, Robinhood, Kraken)
 // Every ticker is available on at least 2 exchanges (52 tickers total, exceeding the >40 requirement).
 export const PERP_TICKERS: PerpTicker[] = [
-  { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 78550.0 },
-  { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 2470.0 },
-  { symbol: "SOL-USDC", base: "SOL", quote: "USDC", name: "Solana", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 103.0 },
-  { symbol: "AVAX-USDC", base: "AVAX", quote: "USDC", name: "Avalanche", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 8.07 },
+  { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 78550.0 },
+  { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 2470.0 },
+  { symbol: "SOL-USDC", base: "SOL", quote: "USDC", name: "Solana", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 103.0 },
+  { symbol: "AVAX-USDC", base: "AVAX", quote: "USDC", name: "Avalanche", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 8.07 },
   { symbol: "BNB-USDC", base: "BNB", quote: "USDC", name: "BNB", venues: ["HL", "LGT", "VNT"], basePrice: 751.0 },
   { symbol: "ARB-USDC", base: "ARB", quote: "USDC", name: "Arbitrum", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.58 },
   { symbol: "OP-USDC", base: "OP", quote: "USDC", name: "Optimism", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 1.45 },
   { symbol: "SUI-USDC", base: "SUI", quote: "USDC", name: "Sui", venues: ["HL", "LGT", "VNT"], basePrice: 0.82 },
   { symbol: "NEAR-USDC", base: "NEAR", quote: "USDC", name: "NEAR Protocol", venues: ["HL", "LGT", "VNT"], basePrice: 2.29 },
   { symbol: "APT-USDC", base: "APT", quote: "USDC", name: "Aptos", venues: ["HL", "LGT", "VNT"], basePrice: 5.40 },
-  { symbol: "LINK-USDC", base: "LINK", quote: "USDC", name: "Chainlink", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 12.67 },
-  { symbol: "DOGE-USDC", base: "DOGE", quote: "USDC", name: "Dogecoin", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.125 },
+  { symbol: "LINK-USDC", base: "LINK", quote: "USDC", name: "Chainlink", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 12.67 },
+  { symbol: "DOGE-USDC", base: "DOGE", quote: "USDC", name: "Dogecoin", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 0.125 },
   { symbol: "PEPE-USDC", base: "PEPE", quote: "USDC", name: "Pepe", venues: ["HL", "LGT", "VNT"], basePrice: 0.0000095 },
   { symbol: "WIF-USDC", base: "WIF", quote: "USDC", name: "dogwifhat", venues: ["HL", "LGT", "VNT"], basePrice: 1.75 },
   { symbol: "POL-USDC", base: "POL", quote: "USDC", name: "Polygon / POL", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.38 },
@@ -82,13 +208,13 @@ export const PERP_TICKERS: PerpTicker[] = [
   { symbol: "RENDER-USDC", base: "RENDER", quote: "USDC", name: "Render", venues: ["HL", "LGT", "VNT"], basePrice: 5.80 },
   { symbol: "FTM-USDC", base: "FTM", quote: "USDC", name: "Fantom / Sonic", venues: ["HL", "LGT", "VNT"], basePrice: 0.68 },
   { symbol: "ATOM-USDC", base: "ATOM", quote: "USDC", name: "Cosmos", venues: ["HL", "LGT", "VNT"], basePrice: 4.85 },
-  { symbol: "ADA-USDC", base: "ADA", quote: "USDC", name: "Cardano", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.36 },
-  { symbol: "XRP-USDC", base: "XRP", quote: "USDC", name: "XRP", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.58 },
+  { symbol: "ADA-USDC", base: "ADA", quote: "USDC", name: "Cardano", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 0.36 },
+  { symbol: "XRP-USDC", base: "XRP", quote: "USDC", name: "XRP", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 0.58 },
   { symbol: "DOT-USDC", base: "DOT", quote: "USDC", name: "Polkadot", venues: ["HL", "LGT", "VNT"], basePrice: 4.40 },
-  { symbol: "LTC-USDC", base: "LTC", quote: "USDC", name: "Litecoin", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 65.50 },
-  { symbol: "BCH-USDC", base: "BCH", quote: "USDC", name: "Bitcoin Cash", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 340.0 },
-  { symbol: "UNI-USDC", base: "UNI", quote: "USDC", name: "Uniswap", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 7.20 },
-  { symbol: "AAVE-USDC", base: "AAVE", quote: "USDC", name: "Aave", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 145.0 },
+  { symbol: "LTC-USDC", base: "LTC", quote: "USDC", name: "Litecoin", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 65.50 },
+  { symbol: "BCH-USDC", base: "BCH", quote: "USDC", name: "Bitcoin Cash", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 340.0 },
+  { symbol: "UNI-USDC", base: "UNI", quote: "USDC", name: "Uniswap", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 7.20 },
+  { symbol: "AAVE-USDC", base: "AAVE", quote: "USDC", name: "Aave", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 145.0 },
   { symbol: "CRV-USDC", base: "CRV", quote: "USDC", name: "Curve DAO", venues: ["HL", "LGT", "VNT"], basePrice: 0.28 },
   { symbol: "MKR-USDC", base: "MKR", quote: "USDC", name: "Maker", venues: ["HL", "LGT", "VNT"], basePrice: 1650.0 },
   { symbol: "LDO-USDC", base: "LDO", quote: "USDC", name: "Lido DAO", venues: ["HL", "LGT", "VNT"], basePrice: 1.15 },

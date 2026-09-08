@@ -24,7 +24,7 @@ import type {
   WfoOptimizationResult,
 } from "../types";
 
-import { PERP_TICKERS } from "../types/tickers";
+import { PERP_TICKERS, VENUE_ID_TO_CODE, getEnabledConnectedVenueCodes } from "../types/tickers";
 
 // Check if running inside Tauri IPC environment
 function isTauriEnvironment(): boolean {
@@ -217,6 +217,7 @@ class BrowserMockEngine {
   private kfVariance = 1.0;
 
   getSystemStatus(): SystemStatusDto {
+    const activeCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
     return {
       is_live_mode: this.isLive,
       total_realized_pnl: this.pnl,
@@ -228,13 +229,13 @@ class BrowserMockEngine {
       max_drawdown_usd: 250000.0,
       consecutive_failures: 0,
       active_venues: [
-        { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "ONLINE", latency_ms: 2, fee_bps: 2.0 },
-        { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "ONLINE", latency_ms: 5, fee_bps: 1.5 },
-        { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "ONLINE", latency_ms: 4, fee_bps: 3.0 },
-        { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "ONLINE", latency_ms: 8, fee_bps: 2.5 },
-        { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "STANDBY", latency_ms: 25, fee_bps: 16.0 },
-        { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 12, fee_bps: 0.0 },
-        { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 15, fee_bps: 1.0 },
+        { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: activeCodes.has("HL") ? "ONLINE" : "OFFLINE", latency_ms: 2, fee_bps: 2.0 },
+        { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: activeCodes.has("LGT") ? "ONLINE" : "OFFLINE", latency_ms: 5, fee_bps: 1.5 },
+        { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: activeCodes.has("VNT") ? "ONLINE" : "OFFLINE", latency_ms: 4, fee_bps: 3.0 },
+        { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: activeCodes.has("RH") ? "ONLINE" : "OFFLINE", latency_ms: 8, fee_bps: 2.5 },
+        { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: activeCodes.has("KRK") ? "ONLINE" : "STANDBY", latency_ms: 25, fee_bps: 16.0 },
+        { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: this.settings.polymarket_enabled ? "ONLINE" : "STANDBY", latency_ms: 12, fee_bps: 0.0 },
+        { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: this.settings.kalshi_enabled ? "ONLINE" : "STANDBY", latency_ms: 15, fee_bps: 1.0 },
       ],
     };
   }
@@ -383,12 +384,19 @@ class BrowserMockEngine {
       };
     };
 
-    return [
+    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
+    const candidateBooks: VenueOrderBookDto[] = [
       makeDto("hyperliquid", "Hyperliquid (L1)", hlBid, hlAsk, hlBids, hlAsks, 2.0, hlFunding),
       makeDto("lighter", "Lighter (zkDEX)", lgtBid, lgtAsk, lgtBids, lgtAsks, 1.5, hlFunding * 0.75),
       makeDto("vanta", "Vanta.exchange", vntBid, vntAsk, [[vntBid, 12.0], [vntBid * 0.9995, 20.0]], [[vntAsk, 14.0], [vntAsk * 1.0005, 22.0]], 3.0, hlFunding * 0.9),
       makeDto("robinhood", "Robinhood EVM", rhBid, rhAsk, [[rhBid, 8.0], [rhBid * 0.9996, 15.0]], [[rhAsk, 9.0], [rhAsk * 1.0004, 16.0]], 2.5, hlFunding * 0.8),
+      makeDto("kraken", "Kraken Spot & Futures", binanceBid > 0 ? binanceBid : hlBid, binanceAsk > 0 ? binanceAsk : hlAsk, [[hlBid, 10.0], [hlBid * 0.9994, 18.0]], [[hlAsk, 10.0], [hlAsk * 1.0006, 18.0]], 16.0, hlFunding * 0.85),
     ];
+
+    return candidateBooks.filter((book) => {
+      const code = VENUE_ID_TO_CODE[book.venue_id];
+      return code ? activeVenueCodes.has(code) : true;
+    });
   }
 
   async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {

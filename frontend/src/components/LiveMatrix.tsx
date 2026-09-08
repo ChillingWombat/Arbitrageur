@@ -26,6 +26,7 @@ import {
   formatCurrencyPrice,
   formatCurrencyPnl,
   getDefaultOrderQty,
+  getTickerActiveVenues,
   type PerpTicker,
 } from "../types/tickers";
 import {
@@ -51,6 +52,8 @@ interface LiveMatrixProps {
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
   onOpenTickerConfig?: (symbol: string, strategy?: string) => void;
+  activeVenueCodes?: Set<string>;
+  availableTickers?: PerpTicker[];
 }
 
 const TICKER_PRESETS: Record<string, string[]> = {
@@ -71,8 +74,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   loading,
   executionLogs = [],
   onOpenTickerConfig,
+  activeVenueCodes,
+  availableTickers,
 }) => {
-  const activeTicker = PERP_TICKERS.find((t) => t.symbol === symbol) || {
+  const rawTicker = (availableTickers ?? PERP_TICKERS).find((t) => t.symbol === symbol) || {
     symbol,
     base: symbol.split("-")[0],
     quote: symbol.split("-")[1] || "USDC",
@@ -80,6 +85,17 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     venues: ["HL", "LGT", "VNT"],
     basePrice: 100,
   };
+
+  const activeVenues = useMemo(() => {
+    return activeVenueCodes ? getTickerActiveVenues(rawTicker, activeVenueCodes) : rawTicker.venues;
+  }, [rawTicker, activeVenueCodes]);
+
+  const activeTicker = useMemo(() => {
+    return {
+      ...rawTicker,
+      venues: activeVenues,
+    };
+  }, [rawTicker, activeVenues]);
 
   // State
   const [matrixMode, setMatrixMode] = useState<MatrixMode>("cross-venue");
@@ -162,12 +178,15 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   // Derive active tickers for cross-ticker matrix
   const activeCrossTickers: PerpTicker[] = useMemo(() => {
     const symbolList = TICKER_PRESETS[selectedPreset] || TICKER_PRESETS["Majors (8)"];
-    // Ensure currently selected symbol is always included
-    const set = new Set(symbolList);
-    set.add(symbol);
+    const pool = availableTickers ?? PERP_TICKERS;
+    const poolSymbols = new Set(pool.map((t) => t.symbol));
+    const set = new Set(symbolList.filter((s) => poolSymbols.has(s)));
+    if (poolSymbols.has(symbol)) {
+      set.add(symbol);
+    }
 
-    return PERP_TICKERS.filter((t) => set.has(t.symbol));
-  }, [selectedPreset, symbol]);
+    return pool.filter((t) => set.has(t.symbol));
+  }, [selectedPreset, symbol, availableTickers]);
 
   // Populate and update quotes for active cross-tickers via real multi-market backend/mock quotes
   useEffect(() => {
@@ -784,9 +803,12 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           {/* Matrix Table */}
           <div className="overflow-auto max-h-[500px] rounded-lg border border-surface-border">
             {matrixMode === "cross-venue" ? (
-              venueMatrix.grid.length === 0 ? (
-                <div className="py-12 text-center text-slate-400 font-mono text-xs">
-                  Scanning orderbooks for {symbol}...
+              venueMatrix.grid.length < 2 ? (
+                <div className="py-12 text-center text-slate-500 font-mono text-xs px-4 space-y-1.5">
+                  <div className="font-bold text-slate-800 text-sm">Cross-Venue Arbitrage Unavailable</div>
+                  <div className="text-[11px] text-slate-500">
+                    At least 2 enabled &amp; connected exchanges are required for this ticker.
+                  </div>
                 </div>
               ) : (
                 <table className="w-full border-collapse font-mono text-xs">

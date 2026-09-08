@@ -1,18 +1,20 @@
 import React, { useEffect } from "react";
 import { X, Settings as SettingsIcon } from "lucide-react";
 import { EngineSettings } from "./EngineSettings";
-import type { SystemStatusDto } from "../types";
+import type { SystemStatusDto, EngineSettingsDto } from "../types";
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   systemStatus?: SystemStatusDto | null;
+  onSettingsSaved?: (newSettings: EngineSettingsDto) => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   systemStatus,
+  onSettingsSaved,
 }) => {
   // Close on Escape key press
   useEffect(() => {
@@ -74,7 +76,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
         {/* Modal Scrollable Body */}
         <div className="flex-1 overflow-y-auto">
-          <EngineSettings systemStatus={systemStatus} onClose={onClose} />
+          <EngineSettings
+            systemStatus={systemStatus}
+            onClose={onClose}
+            onSettingsSaved={onSettingsSaved}
+          />
         </div>
       </div>
     </div>

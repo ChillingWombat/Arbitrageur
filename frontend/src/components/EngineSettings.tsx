@@ -77,9 +77,10 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
 interface EngineSettingsProps {
   systemStatus?: SystemStatusDto | null;
   onClose?: () => void;
+  onSettingsSaved?: (newSettings: EngineSettingsDto) => void;
 }
 
-export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, onClose }) => {
+export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, onClose, onSettingsSaved }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
 
   // Remote HSM
@@ -330,7 +331,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     setErrorMsg(null);
     setSaving(true);
     try {
-      await api.saveEngineSettings({
+      const payload: EngineSettingsDto = {
         hsm_url: hsmUrl,
         hmac_token: hmacToken,
         max_slippage_bps: maxSlippageBps,
@@ -389,10 +390,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         sponsor_link: sponsorLink,
         version: version,
         git_repo: gitRepo,
-      });
+      };
+
+      await api.saveEngineSettings(payload);
 
       // Also sync live mode in backend state if tradingMode changed
       await api.setLiveMode(tradingMode === "real");
+
+      onSettingsSaved?.(payload);
 
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
