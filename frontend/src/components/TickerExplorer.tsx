@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Search, X, ArrowDownAZ, Activity, DollarSign } from "lucide-react";
+import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings } from "lucide-react";
 import {
   PERP_TICKERS,
   formatCurrencyPrice,
@@ -7,13 +7,15 @@ import {
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
-import type { ExecutionLogEntry, TickerStrategyConfigDto } from "../types";
+import type { ExecutionLogEntry, TickerStrategyConfigDto, SystemStatusDto } from "../types";
 
 interface TickerExplorerProps {
   selectedSymbol: string;
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
+  status?: SystemStatusDto | null;
+  onOpenSettings?: () => void;
 }
 
 export const TickerExplorer: React.FC<TickerExplorerProps> = ({
@@ -21,7 +23,11 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   onSelectTicker,
   executionLogs,
   strategyConfigs,
+  status,
+  onOpenSettings,
 }) => {
+  const pnl = status?.total_realized_pnl ?? 0;
+  const isLive = status?.is_live_mode ?? false;
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOption, setSortOption] = useState<TickerSortOption>("alpha");
 
@@ -343,23 +349,44 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         )}
       </div>
 
-      {/* Bottom Panel Status & Venues */}
-      <div className="p-3 border-t border-surface-border bg-surface-raised text-[10px] font-mono text-slate-600 space-y-1">
-        <div className="flex justify-between items-center">
-          <span className="text-slate-600">Tauri Core:</span>
-          <span className="text-accent font-semibold flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            <span>IPC Connected</span>
-          </span>
+      {/* Bottom Control Panel: Net Profit, Paper/Live Indicator & Settings */}
+      <div className="p-3 border-t border-surface-border bg-surface-raised space-y-2.5">
+        <div className="flex items-center justify-between">
+          <div className="flex flex-col">
+            <span className="text-[9px] uppercase font-mono tracking-wider text-slate-500 font-semibold">
+              Net Profit
+            </span>
+            <span
+              className={`font-mono text-xs font-bold ${
+                pnl >= 0 ? "text-profit" : "text-loss"
+              }`}
+            >
+              {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
+            </span>
+          </div>
+
+          <div
+            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-xs font-mono font-medium ${
+              isLive
+                ? "bg-amber-50 border-amber-300 text-amber-800"
+                : "bg-blue-50 border-blue-200 text-blue-700"
+            }`}
+            title={isLive ? "Real Trading (Live Execution Active)" : "Paper Trading (Live Feeds & Simulated Orderbooks)"}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${isLive ? "bg-amber-600 animate-pulse" : "bg-blue-600"}`} />
+            <span>{isLive ? "Live" : "Paper"}</span>
+          </div>
         </div>
-        <div className="flex justify-between items-center">
-          <span className="text-slate-600">Perp DEXes:</span>
-          <span className="text-slate-700 font-medium">HL · LGT · VNT · RH</span>
-        </div>
-        <div className="flex justify-between items-center">
-          <span className="text-slate-600">Union Coverage:</span>
-          <span className="text-profit font-medium">52 Pairs (≥2 Venues)</span>
-        </div>
+
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          className="w-full py-1.5 px-3 bg-surface hover:bg-slate-100 text-slate-700 hover:text-slate-900 border border-surface-border rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center justify-center space-x-2 cursor-pointer"
+          title="Engine Settings & API Keys"
+        >
+          <Settings className="w-3.5 h-3.5 text-slate-500" />
+          <span>Settings</span>
+        </button>
       </div>
     </aside>
   );

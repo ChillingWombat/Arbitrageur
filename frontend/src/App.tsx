@@ -169,6 +169,8 @@ export const App: React.FC = () => {
           onSelectTicker={setSelectedSymbol}
           executionLogs={executionLogs}
           strategyConfigs={strategyConfigs}
+          status={systemStatus}
+          onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
         {/* Workspace Content Pane */}
