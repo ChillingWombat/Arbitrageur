@@ -4,34 +4,35 @@
 
 @layer base {
   :root {
-    --background: #f8fafc;
-    --foreground: #0f172a;
+    --background: #f4f5f8;
+    --foreground: #141923;
     --card: #ffffff;
-    --card-foreground: #0f172a;
-    --border: #e2e8f0;
-    --input: #e2e8f0;
-    --primary: #2563eb;
-    --primary-hover: #1d4ed8;
+    --card-foreground: #141923;
+    --border: #e5e8ed;
+    --input: #e5e8ed;
+    --primary: #1677ff;
+    --primary-hover: #0958d9;
     --primary-foreground: #ffffff;
-    --accent-soft: #eff6ff;
-    --accent-line: #bfdbfe;
-    --muted: #f1f5f9;
-    --muted-foreground: #64748b;
-    --ring: #3b82f6;
-    --color-bg: #f8fafc;
+    --accent-soft: #edf4ff;
+    --accent-line: #bae0ff;
+    --muted: #f8f9fb;
+    --muted-foreground: #6c7b8a;
+    --ring: #1677ff;
+    --color-bg: #f4f5f8;
     --color-surface: #ffffff;
-    --color-surface-raised: #f1f5f9;
-    --color-border: #e2e8f0;
-    --color-blue: #2563eb;
-    --color-green: #059669;
-    --color-rose: #dc2626;
-    --color-amber: #d97706;
+    --color-surface-raised: #f8f9fb;
+    --color-border: #e5e8ed;
+    --color-blue: #1677ff;
+    --color-green: #00a86b;
+    --color-rose: #ef4444;
+    --color-amber: #f59e0b;
   }
 
   body {
-    background-color: #f8fafc;
-    color: #0f172a;
+    background-color: #f4f5f8;
+    color: #141923;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-variant-numeric: tabular-nums;
     user-select: none;
     -webkit-user-select: none;
   }

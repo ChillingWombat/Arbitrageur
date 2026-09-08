@@ -23,7 +23,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   selectedSymbol,
   onSelectTicker,
   executionLogs,
-  strategyConfigs,
+  strategyConfigs: _strategyConfigs,
   status,
   onOpenSettings,
   onOpenTickerConfig,
@@ -291,8 +291,17 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         </div>
       </div>
 
+      {/* WeBull Column Subheader */}
+      <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[10px] font-mono text-slate-600 font-semibold uppercase tracking-wider">
+        <span>Symbol / Venues</span>
+        <div className="flex items-center space-x-4">
+          <span>Last Price</span>
+          <span className="w-12 text-right">Net PnL</span>
+        </div>
+      </div>
+
       {/* Scrollable Ticker List */}
-      <div className="flex-1 overflow-y-auto px-2 py-2 space-y-1.5">
+      <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-1">
         {processedTickers.length === 0 ? (
           <div className="py-8 text-center text-xs font-mono text-slate-600">
             No tickers matching &quot;{searchQuery}&quot;
@@ -316,34 +325,27 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     onSelectTicker(ticker.symbol);
                   }
                 }}
-                className={`w-full p-2.5 rounded-lg border text-left transition relative group font-mono cursor-pointer ${
+                className={`w-full px-2.5 py-1.5 rounded-lg border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
                   isSelected
-                    ? "bg-accent-dim/60 border-accent shadow-xs text-slate-900"
-                    : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700"
+                    ? "bg-accent-dim/70 border-accent/60 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
+                    : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300"
                 }`}
               >
-                {/* Active Indicator Strip */}
-                {isSelected && (
-                  <div className="absolute left-0 top-1.5 bottom-1.5 w-1 bg-accent rounded-r" />
-                )}
-
-                {/* Top Row: Symbol, Name & Venue Tags */}
-                <div className="flex items-center justify-between mb-1.5 gap-1.5">
-                  <div className="flex items-center space-x-1.5 min-w-0 whitespace-nowrap">
-                    <span className="font-bold text-xs text-slate-900 tracking-tight shrink-0">
+                {/* Left: Symbol & Venue pills */}
+                <div className="flex flex-col min-w-0 pr-1">
+                  <div className="flex items-center space-x-1.5">
+                    <span className="font-bold text-xs text-slate-900 tracking-tight">
                       {ticker.base}
                     </span>
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-slate-200/60 text-slate-600 font-medium shrink-0">
+                    <span className="text-[8px] px-1 py-0.2 rounded bg-slate-200/70 text-slate-600 font-semibold">
                       PERP
                     </span>
                   </div>
-
-                  {/* Venue Availability Badges (≥ 2 venues) */}
-                  <div className="flex items-center space-x-1 shrink-0">
+                  <div className="flex items-center space-x-0.5 mt-0.5">
                     {ticker.venues.map((v) => (
                       <span
                         key={v}
-                        className={`px-1 py-0.2 rounded text-[9px] font-semibold border ${venueBadgeColor(
+                        className={`px-1 py-0.2 rounded text-[8px] font-medium border leading-tight ${venueBadgeColor(
                           v
                         )}`}
                         title={`Available on ${v}`}
@@ -354,75 +356,39 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                   </div>
                 </div>
 
-                {/* Bottom Row: Price, Strategy Trade Count, Net PnL */}
-                <div className="flex items-center justify-between text-[11px] pt-1 border-t border-surface-border/50">
-                  <span className="text-slate-600 text-[10px]">
-                    {formatCurrencyPrice(ticker.basePrice)}
-                  </span>
-
-                  <div className="flex items-center space-x-2">
-                    {/* Trade Count */}
-                    <span
-                      className={`text-[10px] px-1.5 py-0.2 rounded ${
-                        hasTrades
-                          ? "bg-surface-raised font-medium text-slate-700 border border-surface-border"
-                          : "text-slate-500"
-                      }`}
-                      title={`${ticker.tradeCount} transactions executed by strategy`}
-                    >
-                      {ticker.tradeCount} tx{ticker.tradeCount === 1 ? "" : "s"}
+                {/* Right: Last Price + WeBull-style PnL pill + Configure button */}
+                <div className="flex items-center space-x-2 shrink-0">
+                  <div className="flex flex-col items-end">
+                    <span className="text-[11px] font-bold text-slate-900 tabular-nums">
+                      {formatCurrencyPrice(ticker.basePrice)}
                     </span>
-
-                    {/* Net Profit */}
                     <span
-                      className={`text-[10px] font-semibold px-1.5 py-0.2 rounded ${
+                      className={`text-[9px] font-mono font-semibold px-1.5 py-0.2 rounded mt-0.5 tabular-nums ${
                         isProfit
                           ? "text-profit bg-profit-dim border border-profit-border"
                           : isLoss
                           ? "text-loss bg-loss-dim border border-loss-border"
-                          : "text-slate-500 bg-surface-raised border border-surface-border"
+                          : "text-slate-600 bg-surface-raised border border-surface-border"
                       }`}
-                      title={`Net profit generated: ${formatCurrencyPnl(ticker.netProfit)}`}
+                      title={hasTrades ? `${ticker.tradeCount} txs · ${formatCurrencyPnl(ticker.netProfit)}` : "No trades executed"}
                     >
                       {formatCurrencyPnl(ticker.netProfit)}
                     </span>
                   </div>
-                </div>
 
-                {/* Strategy Configuration Badge Row & Configure Button */}
-                {(() => {
-                  const cfg = strategyConfigs?.get(ticker.symbol);
-                  const tp = Number(cfg?.targetProfitBps ?? cfg?.target_profit_bps ?? 5.0);
-                  const curUnits = Number(cfg?.currentAccumulatedUnits ?? cfg?.current_accumulated_units ?? 0);
-                  const maxUnits = Number(cfg?.maxAccumulatedUnits ?? cfg?.max_accumulated_units ?? 3);
-                  const mode = cfg?.executionMode ?? cfg?.execution_mode ?? "SINGLE_WAY";
-                  return (
-                    <div className="flex items-center justify-between pt-1 text-[9px] font-mono text-slate-500">
-                      <div className="flex items-center space-x-1.5">
-                        <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
-                          TP {isNaN(tp) ? "5.0" : tp.toFixed(1)} bps
-                        </span>
-                        <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
-                          {curUnits}/{maxUnits}u
-                        </span>
-                        <span className="text-slate-400">
-                          {mode === "DOUBLE_WAY" ? "DW" : "SW"}
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenTickerConfig?.(ticker.symbol);
-                        }}
-                        className="p-1 rounded text-slate-400 hover:text-accent hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
-                        title={`Configure ${ticker.symbol} quantitative parameters`}
-                      >
-                        <SlidersHorizontal className="w-3 h-3" />
-                      </button>
-                    </div>
-                  );
-                })()}
+                  {/* Configure strategy button */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenTickerConfig?.(ticker.symbol);
+                    }}
+                    className="p-1 rounded text-slate-600 hover:text-accent hover:bg-surface border border-transparent hover:border-surface-border transition cursor-pointer opacity-70 group-hover:opacity-100"
+                    title={`Configure ${ticker.symbol} parameters`}
+                  >
+                    <SlidersHorizontal className="w-3 h-3" />
+                  </button>
+                </div>
               </div>
             );
           })

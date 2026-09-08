@@ -36,7 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   return (
     <>
-      <header className="h-16 border-b border-surface-border bg-surface px-4 lg:px-6 flex items-center justify-between select-none gap-3">
+      <header className="h-12 border-b border-surface-border bg-surface px-4 lg:px-6 flex items-center justify-between select-none gap-3">
         {/* Left: Minimalist Branding */}
         <div className="flex items-center space-x-3 shrink-0">
           <div
