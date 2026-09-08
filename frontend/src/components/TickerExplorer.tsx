@@ -172,16 +172,9 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Top Header & Search */}
       <div className="p-3 border-b border-surface-border space-y-2.5">
         <div className="flex items-center justify-between">
-          <div>
-            <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-900 flex items-center space-x-1.5">
-              <span>Perp Tickers</span>
-              <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{PERP_TICKERS.length})</span>
-            </div>
-            <div className="text-[10px] text-slate-600">Cross-DEX Union (≥2 Venues)</div>
-          </div>
-          <div className="flex items-center space-x-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
-            <span className="text-[10px] font-mono font-semibold text-profit">Live</span>
+          <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-900 flex items-center space-x-1.5">
+            <span>Tickers</span>
+            <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{PERP_TICKERS.length})</span>
           </div>
         </div>
 
