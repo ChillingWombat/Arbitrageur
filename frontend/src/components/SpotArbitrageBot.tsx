@@ -6,6 +6,7 @@ import {
   AlertCircle,
   Clock,
   Coins,
+  SlidersHorizontal,
 } from "lucide-react";
 import { api } from "../services/api";
 import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from "../types";
@@ -13,11 +14,13 @@ import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from 
 interface SpotArbitrageBotProps {
   executionLogs: ExecutionLogEntry[];
   onRefreshAll: () => Promise<void>;
+  onOpenConfig?: (symbol: string, strategy?: string) => void;
 }
 
 export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   executionLogs,
   onRefreshAll,
+  onOpenConfig,
 }) => {
   const [opportunities, setOpportunities] = useState<SpotOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
@@ -121,9 +124,19 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
         <div className="flex items-center space-x-3 shrink-0">
           <button
+            type="button"
+            onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-accent-line/60 bg-surface hover:bg-slate-100 text-xs font-mono text-accent font-semibold transition shadow-xs cursor-pointer"
+            title="Configure Spot Arbitrage Parameters"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configure Strategy</span>
+          </button>
+
+          <button
             onClick={loadSpotOpps}
             disabled={loading}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-surface-border text-xs font-mono text-slate-600 hover:text-slate-900 hover:bg-surface-raised transition"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-surface-border text-xs font-mono text-slate-600 hover:text-slate-900 hover:bg-surface-raised transition cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
             <span>Scan Spot</span>

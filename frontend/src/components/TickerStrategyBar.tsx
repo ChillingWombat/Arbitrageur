@@ -1,7 +1,9 @@
-import React from "react";
-import type { TickerStrategyConfigDto, ArbitrageExecutionMode } from "../types";
+import React, { useState } from "react";
+import { SlidersHorizontal, ShieldCheck } from "lucide-react";
+import type { TickerStrategyConfigDto } from "../types";
 import type { PerpTicker } from "../types/tickers";
-import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
+import { computeSafeLeverage } from "../services/contractSpecs";
+import { TickerConfigModal } from "./TickerConfigModal";
 
 interface TickerStrategyBarProps {
   ticker: PerpTicker;
@@ -10,19 +12,8 @@ interface TickerStrategyBarProps {
   onChangeConfig: (newConfig: TickerStrategyConfigDto) => void;
   avgFeeBps?: number;
   avgSpreadBps?: number;
+  onOpenConfigModal?: () => void;
 }
-
-const PERCENTILE_OPTIONS = [
-  { value: 50, label: "50% (Median - Min)" },
-  { value: 60, label: "60%" },
-  { value: 70, label: "70%" },
-  { value: 75, label: "75%" },
-  { value: 80, label: "80%" },
-  { value: 85, label: "85%" },
-  { value: 90, label: "90%" },
-  { value: 95, label: "95%" },
-  { value: 99, label: "99%" },
-];
 
 export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
   ticker,
@@ -31,9 +22,9 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
   onChangeConfig,
   avgFeeBps = 7.0,
   avgSpreadBps = 0.6,
+  onOpenConfigModal,
 }) => {
-  // Extract minimum compatible size across participating venues
-  const minCompatible = getMinCompatibleSize(ticker.symbol, venues, ticker.basePrice);
+  const [internalModalOpen, setInternalModalOpen] = useState(false);
 
   // Compute safe effective leverage across differing exchange futures contracts
   const safeLeverage = computeSafeLeverage(
@@ -47,205 +38,93 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
   // Nominal hurdle = Round-trip Fees + Closing Friction + Target Profit
   const nominalHurdleBps = Math.round((avgFeeBps + avgSpreadBps + config.targetProfitBps) * 100) / 100;
 
-  const handleTargetProfitChange = (val: number) => {
-    const clamped = Math.max(0.1, Math.min(100.0, Math.round(val * 10) / 10));
-    onChangeConfig({ ...config, targetProfitBps: clamped });
-  };
-
-  const handlePercentileChange = (p: number) => {
-    // Strictly enforce 50% minimum
-    const clamped = Math.max(50, Math.min(99, p));
-    onChangeConfig({ ...config, windowPercentile: clamped });
-  };
-
-  const handleMaxUnitsChange = (units: number) => {
-    const clamped = Math.max(1, Math.min(20, units));
-    onChangeConfig({ ...config, maxAccumulatedUnits: clamped });
-  };
-
-  const handleModeChange = (mode: ArbitrageExecutionMode) => {
-    onChangeConfig({ ...config, executionMode: mode });
-  };
-
-  const handleUnitSizeChange = (size: number) => {
-    const validSize = Math.max(minCompatible.minCompatibleSize, size);
-    onChangeConfig({ ...config, unitSize: validSize });
-  };
-
-  const handleLeverageTargetChange = (lev: number) => {
-    const clamped = Math.max(1, Math.min(50, lev));
-    onChangeConfig({ ...config, userTargetLeverage: clamped });
+  const handleOpenModal = () => {
+    if (onOpenConfigModal) {
+      onOpenConfigModal();
+    } else {
+      setInternalModalOpen(true);
+    }
   };
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg p-3 text-xs font-mono shadow-xs mb-3 space-y-2.5">
-      {/* Top Row: Quantitative Parameters and Controls */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        {/* Target Profit and Nominal Hurdle */}
+    <>
+      <div className="bg-surface border border-surface-border rounded-xl p-3 text-xs font-mono shadow-xs mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
+        {/* Left: Quantitative Strategy Parameters Summary Chips */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
-            <span className="text-slate-500 font-medium">Target Profit:</span>
-            <input
-              type="number"
-              step="0.5"
-              min="0.1"
-              max="100"
-              value={config.targetProfitBps}
-              onChange={(e) => handleTargetProfitChange(parseFloat(e.target.value) || 0.1)}
-              className="w-14 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <span className="text-slate-500">bps</span>
-          </div>
-
-          {/* Nominal Hurdle Breakdown Badge */}
-          <div
-            className="flex items-center space-x-1.5 bg-blue-50/70 border border-blue-200 px-2.5 py-1 rounded text-blue-900"
-            title="Nominal Hurdle = 2×Comm (roundtrip) + Closing Spread Friction + Target Profit"
-          >
-            <span className="text-slate-500">Nominal Hurdle:</span>
-            <span className="font-bold text-blue-700">{nominalHurdleBps.toFixed(1)} bps</span>
-            <span className="text-[10px] text-slate-500">
-              ({avgFeeBps.toFixed(1)} fee + {avgSpreadBps.toFixed(1)} friction + {config.targetProfitBps.toFixed(1)} tp)
-            </span>
-          </div>
-        </div>
-
-        {/* Window Percentile Filter (min 50%) */}
-        <div className="flex items-center space-x-2 bg-slate-50 px-2.5 py-1 rounded border border-slate-200">
-          <span className="text-slate-500 font-medium">Window Percentile:</span>
-          <select
-            value={config.windowPercentile}
-            onChange={(e) => handlePercentileChange(parseInt(e.target.value, 10))}
-            className="bg-white border border-slate-300 rounded px-2 py-0.5 text-xs text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
-          >
-            {PERCENTILE_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Execution Mode: Single-Way vs Double-Way */}
-        <div className="flex items-center space-x-1 bg-slate-100 p-0.5 rounded border border-slate-200 text-xs">
-          <button
-            type="button"
-            onClick={() => handleModeChange("SINGLE_WAY")}
-            className={`px-2 py-1 rounded transition ${
-              config.executionMode === "SINGLE_WAY"
-                ? "bg-white text-blue-700 font-semibold shadow-xs border border-slate-200"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-            title="Single-Way: Enter orders only when price divergence increases"
-          >
-            Single-Way (Divergence)
-          </button>
-          <button
-            type="button"
-            onClick={() => handleModeChange("DOUBLE_WAY")}
-            className={`px-2 py-1 rounded transition ${
-              config.executionMode === "DOUBLE_WAY"
-                ? "bg-white text-blue-700 font-semibold shadow-xs border border-slate-200"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-            title="Double-Way: Enter on divergence and automatically unwind when price difference converges to 0"
-          >
-            Double-Way (Expand & Converge)
-          </button>
-        </div>
-      </div>
-
-      {/* Bottom Row: Position Sizing, Max Grid Units, and Futures Leverage */}
-      <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-100 text-[11px]">
-        {/* Unit Sizing with Minimum Compatible Badge */}
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Unit Size:</span>
-            <input
-              type="number"
-              step={minCompatible.stepSize}
-              min={minCompatible.minCompatibleSize}
-              value={config.unitSize}
-              onChange={(e) => handleUnitSizeChange(parseFloat(e.target.value) || minCompatible.minCompatibleSize)}
-              className="w-20 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <span className="text-slate-600 font-medium">{ticker.base}</span>
+          <div className="flex items-center space-x-1.5 text-slate-500 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+            <span className="font-semibold text-slate-800">Strategy Parameters:</span>
           </div>
 
           <span
-            className="px-2 py-0.5 rounded bg-slate-100 text-slate-600 border border-slate-200"
-            title={`Minimum cross-exchange compatible lot size across ${venues.join(", ")}`}
+            className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-200/60 font-semibold"
+            title="Target profit locked in per round-trip after fees and friction"
           >
-            Min Compatible: {minCompatible.minCompatibleSize} {ticker.base}
+            TP {config.targetProfitBps.toFixed(1)} bps
+          </span>
+
+          <span
+            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+            title={`Nominal Hurdle: ${nominalHurdleBps.toFixed(1)} bps (${avgFeeBps.toFixed(1)} fee + ${avgSpreadBps.toFixed(1)} friction + ${config.targetProfitBps.toFixed(1)} tp)`}
+          >
+            Hurdle <strong className="text-slate-900 font-semibold">{nominalHurdleBps.toFixed(1)} bps</strong>
+          </span>
+
+          <span
+            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+            title="Historical sliding window percentile trigger"
+          >
+            Window P{config.windowPercentile}%
+          </span>
+
+          <span
+            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+            title="Execution Mode"
+          >
+            {config.executionMode === "DOUBLE_WAY" ? "Double-Way (Expand & Converge)" : "Single-Way (Divergence)"}
+          </span>
+
+          <span
+            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+            title="Grid unit sizing and current accumulated units"
+          >
+            Grid <strong className="text-slate-900">{config.currentAccumulatedUnits}/{config.maxAccumulatedUnits}u</strong> ({config.unitSize} {ticker.base})
+          </span>
+
+          <span
+            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border flex items-center space-x-1"
+            title={`Effective Safe Leverage: ${safeLeverage.effectiveLeverage}x | Margin: $${safeLeverage.totalMarginRequiredUsd.toFixed(2)} USD/unit | Buffer: ${safeLeverage.liquidationBufferPct.toFixed(1)}%`}
+          >
+            <ShieldCheck className="w-3 h-3 text-emerald-600" />
+            <span>Lev {safeLeverage.effectiveLeverage}x</span>
+            <span className="text-slate-300">|</span>
+            <span className="text-slate-600">${safeLeverage.totalMarginRequiredUsd.toFixed(0)}/u</span>
           </span>
         </div>
 
-        {/* Max Accumulated Units / Grid Scaling */}
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Max Grid Units:</span>
-            <input
-              type="number"
-              step="1"
-              min="1"
-              max="20"
-              value={config.maxAccumulatedUnits}
-              onChange={(e) => handleMaxUnitsChange(parseInt(e.target.value, 10) || 1)}
-              className="w-12 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-          </div>
-
-          {/* Units Status Indicator */}
-          <div className="flex items-center space-x-1 px-2 py-1 rounded bg-slate-50 border border-slate-200">
-            <span className="text-slate-500">Accumulated:</span>
-            <span
-              className={`font-semibold ${
-                config.currentAccumulatedUnits >= config.maxAccumulatedUnits
-                  ? "text-amber-700"
-                  : config.currentAccumulatedUnits > 0
-                  ? "text-blue-700"
-                  : "text-slate-700"
-              }`}
-            >
-              {config.currentAccumulatedUnits} / {config.maxAccumulatedUnits} Units
-            </span>
-          </div>
-        </div>
-
-        {/* Automatic Safe Futures Leverage & Margin Computation */}
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-slate-50 px-2 py-1 rounded border border-slate-200">
-            <span className="text-slate-500">Target Lev:</span>
-            <input
-              type="number"
-              step="1"
-              min="1"
-              max="50"
-              value={config.userTargetLeverage}
-              onChange={(e) => handleLeverageTargetChange(parseInt(e.target.value, 10) || 10)}
-              className="w-12 px-1.5 py-0.5 bg-white border border-slate-300 rounded text-slate-900 font-medium focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <span className="text-slate-500">x</span>
-          </div>
-
-          <div
-            className="flex items-center space-x-2 bg-blue-50/60 border border-blue-200 px-2.5 py-1 rounded text-blue-900"
-            title={`Effective leverage clamped to the most restrictive exchange among active venues (${venues.join(", ")})`}
-          >
-            <span>
-              Safe Lev: <strong className="text-blue-700">{safeLeverage.effectiveLeverage}x</strong>
-            </span>
-            <span className="text-slate-300">|</span>
-            <span>
-              Margin: <strong className="text-slate-800">${safeLeverage.totalMarginRequiredUsd.toFixed(2)}</strong> USD/unit
-            </span>
-            <span className="text-slate-300">|</span>
-            <span>
-              Buffer: <strong className="text-emerald-700">{safeLeverage.liquidationBufferPct.toFixed(1)}%</strong>
-            </span>
-          </div>
-        </div>
+        {/* Right: Configure Strategy Button */}
+        <button
+          type="button"
+          onClick={handleOpenModal}
+          className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-lg border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer"
+          title={`Configure ${ticker.symbol} quantitative parameters in pop-out window`}
+        >
+          <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+          <span>Configure Strategy</span>
+        </button>
       </div>
-    </div>
+
+      {/* Internal Modal Fallback */}
+      {!onOpenConfigModal && (
+        <TickerConfigModal
+          isOpen={internalModalOpen}
+          onClose={() => setInternalModalOpen(false)}
+          tickerSymbol={ticker.symbol}
+          strategyConfig={config}
+          onSaveConfig={onChangeConfig}
+          initialStrategy="futures"
+        />
+      )}
+    </>
   );
 };

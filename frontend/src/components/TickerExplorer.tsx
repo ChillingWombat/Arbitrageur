@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings } from "lucide-react";
+import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings, SlidersHorizontal } from "lucide-react";
 import {
   PERP_TICKERS,
   formatCurrencyPrice,
@@ -16,6 +16,7 @@ interface TickerExplorerProps {
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
   status?: SystemStatusDto | null;
   onOpenSettings?: () => void;
+  onOpenTickerConfig?: (symbol: string) => void;
 }
 
 export const TickerExplorer: React.FC<TickerExplorerProps> = ({
@@ -25,6 +26,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   strategyConfigs,
   status,
   onOpenSettings,
+  onOpenTickerConfig,
 }) => {
   const pnl = status?.total_realized_pnl ?? 0;
   const isLive = status?.is_live_mode ?? false;
@@ -321,25 +323,37 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                   </div>
                 </div>
 
-                {/* Optional Strategy Configuration Badge Row */}
+                {/* Strategy Configuration Badge Row & Configure Button */}
                 {(() => {
                   const cfg = strategyConfigs?.get(ticker.symbol);
-                  if (!cfg) return null;
-                  const tp = Number(cfg.targetProfitBps ?? cfg.target_profit_bps ?? 5.0);
-                  const curUnits = Number(cfg.currentAccumulatedUnits ?? cfg.current_accumulated_units ?? 0);
-                  const maxUnits = Number(cfg.maxAccumulatedUnits ?? cfg.max_accumulated_units ?? 3);
-                  const mode = cfg.executionMode ?? cfg.execution_mode ?? "SINGLE_WAY";
+                  const tp = Number(cfg?.targetProfitBps ?? cfg?.target_profit_bps ?? 5.0);
+                  const curUnits = Number(cfg?.currentAccumulatedUnits ?? cfg?.current_accumulated_units ?? 0);
+                  const maxUnits = Number(cfg?.maxAccumulatedUnits ?? cfg?.max_accumulated_units ?? 3);
+                  const mode = cfg?.executionMode ?? cfg?.execution_mode ?? "SINGLE_WAY";
                   return (
-                    <div className="flex items-center space-x-1.5 pt-1 text-[9px] font-mono text-slate-500">
-                      <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
-                        TP {isNaN(tp) ? "5.0" : tp.toFixed(1)} bps
-                      </span>
-                      <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
-                        {curUnits}/{maxUnits}u
-                      </span>
-                      <span className="text-slate-400">
-                        {mode === "DOUBLE_WAY" ? "DW" : "SW"}
-                      </span>
+                    <div className="flex items-center justify-between pt-1 text-[9px] font-mono text-slate-500">
+                      <div className="flex items-center space-x-1.5">
+                        <span className="bg-blue-50 text-blue-700 px-1 py-0.2 rounded border border-blue-200/60 font-medium">
+                          TP {isNaN(tp) ? "5.0" : tp.toFixed(1)} bps
+                        </span>
+                        <span className="bg-slate-100 text-slate-700 px-1 py-0.2 rounded border border-slate-200">
+                          {curUnits}/{maxUnits}u
+                        </span>
+                        <span className="text-slate-400">
+                          {mode === "DOUBLE_WAY" ? "DW" : "SW"}
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenTickerConfig?.(ticker.symbol);
+                        }}
+                        className="p-1 rounded text-slate-400 hover:text-accent hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
+                        title={`Configure ${ticker.symbol} quantitative parameters`}
+                      >
+                        <SlidersHorizontal className="w-3 h-3" />
+                      </button>
                     </div>
                   );
                 })()}

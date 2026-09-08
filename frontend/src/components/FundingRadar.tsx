@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from "react";
+import { SlidersHorizontal } from "lucide-react";
 import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
 import { PERP_TICKERS, formatCurrencyPnl } from "../types/tickers";
 
@@ -10,6 +11,7 @@ interface FundingRadarProps {
   onExecuteCarry?: (opp: FundingOpportunityDto) => Promise<void>;
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
+  onOpenConfig?: (symbol: string, strategy?: string) => void;
 }
 
 export const FundingRadar: React.FC<FundingRadarProps> = ({
@@ -19,6 +21,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   onTradeSizeChange,
   onExecuteCarry,
   executionLogs = [],
+  onOpenConfig,
 }) => {
   const [holdingDays, setHoldingDays] = useState(14);
   const [executingId, setExecutingId] = useState<string | null>(null);
@@ -129,6 +132,17 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               </button>
             ))}
           </div>
+
+          {/* Configure Strategy Button */}
+          <button
+            type="button"
+            onClick={() => onOpenConfig?.(symbol, "funding")}
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-lg border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer"
+            title={`Configure ${symbol} Funding Carry Parameters`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configure Strategy</span>
+          </button>
         </div>
       </div>
 

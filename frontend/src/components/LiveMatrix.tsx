@@ -53,6 +53,7 @@ interface LiveMatrixProps {
   onExecuteCrossTicker?: (params: CrossTickerExecutionParams) => Promise<void>;
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
+  onOpenTickerConfig?: (symbol: string, strategy?: string) => void;
 }
 
 const TICKER_PRESETS: Record<string, string[]> = {
@@ -72,6 +73,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   onExecuteCrossTicker,
   loading,
   executionLogs = [],
+  onOpenTickerConfig,
 }) => {
   const activeTicker = PERP_TICKERS.find((t) => t.symbol === symbol) || {
     symbol,
@@ -656,6 +658,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
         venues={activeTicker.venues}
         config={currentStrategyConfig}
         onChangeConfig={handleUpdateStrategyConfig}
+        onOpenConfigModal={onOpenTickerConfig ? () => onOpenTickerConfig(symbol, "futures") : undefined}
       />
 
       {/* 4-Venue Market Quotes Grid (Shown in Cross-Venue mode) */}

@@ -10,6 +10,7 @@ import { RiskOperations } from "./components/RiskOperations";
 import { StrategyPerformance } from "./components/StrategyPerformance";
 import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
+import { TickerConfigModal } from "./components/TickerConfigModal";
 import { api } from "./services/api";
 import type {
   SystemStatusDto,
@@ -42,6 +43,15 @@ export const App: React.FC = () => {
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
   const [refreshing, setRefreshing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [tickerConfigModal, setTickerConfigModal] = useState<{
+    isOpen: boolean;
+    symbol: string;
+    strategy?: string;
+  }>({
+    isOpen: false,
+    symbol: "BTC-USDC",
+    strategy: "futures",
+  });
 
   // Load baseline status and telemetry
   const refreshAllData = useCallback(async (customQty?: number, customMinBps?: number) => {
@@ -143,6 +153,24 @@ export const App: React.FC = () => {
     await refreshAllData();
   };
 
+  const handleOpenTickerConfig = (symbol: string, strategy?: string) => {
+    setTickerConfigModal({
+      isOpen: true,
+      symbol,
+      strategy: strategy || (activeTab === "funding" ? "funding" : activeTab === "spot_arb" ? "spot" : "futures"),
+    });
+  };
+
+  const handleSaveTickerConfig = async (newConfig: TickerStrategyConfigDto) => {
+    await api.saveTickerStrategyConfig(newConfig);
+    setStrategyConfigs((prev) => {
+      const next = new Map(prev);
+      next.set(newConfig.symbol, newConfig);
+      return next;
+    });
+    await refreshAllData();
+  };
+
   return (
     <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
       {/* Top Header Bar with Section Switcher Navigation */}
@@ -171,6 +199,7 @@ export const App: React.FC = () => {
           strategyConfigs={strategyConfigs}
           status={systemStatus}
           onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenTickerConfig={handleOpenTickerConfig}
         />
 
         {/* Workspace Content Pane */}
@@ -185,6 +214,7 @@ export const App: React.FC = () => {
               onExecuteCrossTicker={handleExecuteCrossTicker}
               loading={refreshing}
               executionLogs={executionLogs}
+              onOpenTickerConfig={handleOpenTickerConfig}
             />
           )}
 
@@ -192,6 +222,7 @@ export const App: React.FC = () => {
             <SpotArbitrageBot
               executionLogs={executionLogs}
               onRefreshAll={refreshAllData}
+              onOpenConfig={handleOpenTickerConfig}
             />
           )}
 
@@ -204,6 +235,7 @@ export const App: React.FC = () => {
               onExecuteCarry={handleExecuteCarry}
               loading={refreshing}
               executionLogs={executionLogs}
+              onOpenConfig={handleOpenTickerConfig}
             />
           )}
 
@@ -246,6 +278,16 @@ export const App: React.FC = () => {
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         systemStatus={systemStatus}
+      />
+
+      {/* Pop-Out Ticker Strategy Configurator Modal */}
+      <TickerConfigModal
+        isOpen={tickerConfigModal.isOpen}
+        onClose={() => setTickerConfigModal((prev) => ({ ...prev, isOpen: false }))}
+        tickerSymbol={tickerConfigModal.symbol}
+        initialStrategy={tickerConfigModal.strategy}
+        strategyConfig={strategyConfigs.get(tickerConfigModal.symbol)}
+        onSaveConfig={handleSaveTickerConfig}
       />
     </div>
   );
