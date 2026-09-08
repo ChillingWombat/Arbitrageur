@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from "react";
-import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings, SlidersHorizontal } from "lucide-react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings, SlidersHorizontal, ArrowUpDown, Check } from "lucide-react";
 import {
   PERP_TICKERS,
   formatCurrencyPrice,
@@ -32,6 +32,22 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   const isLive = status?.is_live_mode ?? false;
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOption, setSortOption] = useState<TickerSortOption>("alpha");
+  const [showSortMenu, setShowSortMenu] = useState(false);
+  const sortMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (sortMenuRef.current && !sortMenuRef.current.contains(event.target as Node)) {
+        setShowSortMenu(false);
+      }
+    };
+    if (showSortMenu) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [showSortMenu]);
 
   // Compute stats (transaction count and net profit) per ticker from execution logs
   const tickersWithStats: TickerWithStats[] = useMemo(() => {
@@ -169,66 +185,116 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
           </div>
         </div>
 
-        {/* Search Bar */}
-        <div className="relative">
-          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search 52 tickers (e.g. BTC, SOL)..."
-            className="w-full pl-8 pr-7 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition"
-          />
-          {searchQuery && (
+        {/* Search Bar & Sort Configuration Button */}
+        <div className="flex items-center space-x-1.5 relative">
+          <div className="relative flex-1">
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search 52 tickers..."
+              className="w-full pl-8 pr-7 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+
+          {/* Tiny Sort Configuration Button & Popover */}
+          <div className="relative" ref={sortMenuRef}>
             <button
-              onClick={() => setSearchQuery("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+              onClick={() => setShowSortMenu((prev) => !prev)}
+              aria-label="Sort configuration"
+              title={`Sort by: ${
+                sortOption === "alpha"
+                  ? "Alphabetical (A-Z)"
+                  : sortOption === "trades"
+                  ? "Strategy Trades"
+                  : "Net Profit / Loss"
+              }`}
+              className={`p-1.5 rounded-lg border transition flex items-center justify-center relative ${
+                showSortMenu
+                  ? "bg-accent/10 border-accent text-accent"
+                  : sortOption !== "alpha"
+                  ? "bg-accent/5 border-accent-line text-accent"
+                  : "bg-surface-raised border-surface-border text-slate-600 hover:text-slate-900 hover:border-slate-300"
+              }`}
             >
-              <X className="w-3 h-3" />
+              <ArrowUpDown className="w-3.5 h-3.5" />
+              {sortOption !== "alpha" && (
+                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-accent" />
+              )}
             </button>
-          )}
-        </div>
 
-        {/* Sorting Controls */}
-        <div className="grid grid-cols-3 gap-1 bg-surface-raised p-1 rounded-lg border border-surface-border text-[11px] font-mono">
-          <button
-            onClick={() => setSortOption("alpha")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
-              sortOption === "alpha"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-            title="Sort alphabetically (A-Z)"
-          >
-            <ArrowDownAZ className="w-3 h-3" />
-            <span>A-Z</span>
-          </button>
+            {/* Floating Popover Menu */}
+            {showSortMenu && (
+              <div className="absolute right-0 top-full mt-1.5 w-48 bg-surface border border-surface-border rounded-lg shadow-lg py-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
+                <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-slate-600 border-b border-surface-border/60">
+                  Sort Tickers
+                </div>
 
-          <button
-            onClick={() => setSortOption("trades")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
-              sortOption === "trades"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-            title="Sort by strategy transaction count (highest first)"
-          >
-            <Activity className="w-3 h-3" />
-            <span>Trades</span>
-          </button>
+                <button
+                  onClick={() => {
+                    setSortOption("alpha");
+                    setShowSortMenu(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                    sortOption === "alpha"
+                      ? "bg-accent/10 text-accent font-semibold"
+                      : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <ArrowDownAZ className="w-3.5 h-3.5 text-slate-600" />
+                    <span>A-Z (Name)</span>
+                  </div>
+                  {sortOption === "alpha" && <Check className="w-3.5 h-3.5 text-accent" />}
+                </button>
 
-          <button
-            onClick={() => setSortOption("pnl")}
-            className={`flex items-center justify-center space-x-1 py-1 px-1.5 rounded transition ${
-              sortOption === "pnl"
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-            title="Sort by strategy net profit: positive first, then negative, then zero"
-          >
-            <DollarSign className="w-3 h-3" />
-            <span>Net PnL</span>
-          </button>
+                <button
+                  onClick={() => {
+                    setSortOption("trades");
+                    setShowSortMenu(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                    sortOption === "trades"
+                      ? "bg-accent/10 text-accent font-semibold"
+                      : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <Activity className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Strategy Trades</span>
+                  </div>
+                  {sortOption === "trades" && <Check className="w-3.5 h-3.5 text-accent" />}
+                </button>
+
+                <button
+                  onClick={() => {
+                    setSortOption("pnl");
+                    setShowSortMenu(false);
+                  }}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                    sortOption === "pnl"
+                      ? "bg-accent/10 text-accent font-semibold"
+                      : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <DollarSign className="w-3.5 h-3.5 text-slate-600" />
+                    <span>Net Profit / Loss</span>
+                  </div>
+                  {sortOption === "pnl" && <Check className="w-3.5 h-3.5 text-accent" />}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
