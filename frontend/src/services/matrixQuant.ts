@@ -62,12 +62,10 @@ export class RollingSpreadTracker {
     for (let i = 0; i < offsetsMs.length; i++) {
       const offset = offsetsMs[i];
       const t = now - offset;
-      // Controlled mean-reverting sinusoidal drift (-1.2 to +1.2 BPS)
-      const drift = Math.sin((i * Math.PI) / 3) * 1.1;
       samples.push({
         timestamp: t,
-        netBps: Math.round((initialNetBps + drift) * 100) / 100,
-        grossBps: Math.round((initialGrossBps + drift) * 100) / 100,
+        netBps: initialNetBps,
+        grossBps: initialGrossBps,
       });
     }
 

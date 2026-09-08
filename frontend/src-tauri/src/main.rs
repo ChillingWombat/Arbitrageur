@@ -43,7 +43,6 @@ fn main() {
             commands::run_stat_arb_step,
             commands::compute_optimal_thresholds,
             commands::fit_ou_process,
-            commands::run_simulation_step,
             commands::execute_spatial_arbitrage,
             commands::execute_cross_ticker_arbitrage,
             commands::fetch_multi_market_quotes,

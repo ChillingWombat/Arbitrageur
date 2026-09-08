@@ -7,7 +7,7 @@ use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrager_core::position::{AccountSnapshot, Balance};
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrager_core::types::{dec, OrderStatus, VenueId};
+use arbitrager_core::types::{dec, Decimal, OrderStatus, VenueId};
 
 /// Robinhood EVM DEX & Bridge router adapter for Lighter cross-chain trading.
 #[allow(dead_code)]
@@ -73,23 +73,97 @@ impl ExchangeAdapter for RobinhoodAdapter {
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        // Synthetic AMM liquidity pool simulated depth curve
-        let base_price = match symbol.split('-').next().unwrap_or("ETH").to_uppercase().as_str() {
-            "BTC" => dec!(64500.0),
-            "ETH" => dec!(3450.0),
-            "SOL" => dec!(145.0),
-            _ => dec!(100.0),
-        };
+        let base_coin = symbol.split('-').next().unwrap_or("ETH").to_uppercase();
 
-        // Bids
-        book.bids.push(BookLevel::new(base_price * dec!(0.999), dec!(2.5)));
-        book.bids.push(BookLevel::new(base_price * dec!(0.997), dec!(5.0)));
-        book.bids.push(BookLevel::new(base_price * dec!(0.995), dec!(10.0)));
+        // Query real live Binance spot bookTicker for genuine market price & spread
+        let url_usdc = format!("https://api.binance.com/api/v3/ticker/bookTicker?symbol={}USDC", base_coin);
+        let url_usdt = format!("https://api.binance.com/api/v3/ticker/bookTicker?symbol={}USDT", base_coin);
 
-        // Asks
-        book.asks.push(BookLevel::new(base_price * dec!(1.001), dec!(2.5)));
-        book.asks.push(BookLevel::new(base_price * dec!(1.003), dec!(5.0)));
-        book.asks.push(BookLevel::new(base_price * dec!(1.005), dec!(10.0)));
+        let mut bid_opt: Option<(Decimal, Decimal)> = None;
+        let mut ask_opt: Option<(Decimal, Decimal)> = None;
+
+        if let Ok(resp) = self.client.get(&url_usdc).send().await {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let (Some(bp), Some(bq), Some(ap), Some(aq)) = (
+                    json.get("bidPrice").and_then(|v| v.as_str()),
+                    json.get("bidQty").and_then(|v| v.as_str()),
+                    json.get("askPrice").and_then(|v| v.as_str()),
+                    json.get("askQty").and_then(|v| v.as_str()),
+                ) {
+                    if let (Ok(b), Ok(bq_d), Ok(a), Ok(aq_d)) = (
+                        Decimal::from_str_exact(bp),
+                        Decimal::from_str_exact(bq),
+                        Decimal::from_str_exact(ap),
+                        Decimal::from_str_exact(aq),
+                    ) {
+                        bid_opt = Some((b, bq_d));
+                        ask_opt = Some((a, aq_d));
+                    }
+                }
+            }
+        }
+
+        if bid_opt.is_none() {
+            if let Ok(resp) = self.client.get(&url_usdt).send().await {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let (Some(bp), Some(bq), Some(ap), Some(aq)) = (
+                        json.get("bidPrice").and_then(|v| v.as_str()),
+                        json.get("bidQty").and_then(|v| v.as_str()),
+                        json.get("askPrice").and_then(|v| v.as_str()),
+                        json.get("askQty").and_then(|v| v.as_str()),
+                    ) {
+                        if let (Ok(b), Ok(bq_d), Ok(a), Ok(aq_d)) = (
+                            Decimal::from_str_exact(bp),
+                            Decimal::from_str_exact(bq),
+                            Decimal::from_str_exact(ap),
+                            Decimal::from_str_exact(aq),
+                        ) {
+                            bid_opt = Some((b, bq_d));
+                            ask_opt = Some((a, aq_d));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let (Some((bid, bid_sz)), Some((ask, ask_sz))) = (bid_opt, ask_opt) {
+            book.bids.push(BookLevel::new(bid, bid_sz));
+            book.bids.push(BookLevel::new(bid * dec!(0.999), bid_sz * dec!(2.0)));
+            book.bids.push(BookLevel::new(bid * dec!(0.998), bid_sz * dec!(5.0)));
+
+            book.asks.push(BookLevel::new(ask, ask_sz));
+            book.asks.push(BookLevel::new(ask * dec!(1.001), ask_sz * dec!(2.0)));
+            book.asks.push(BookLevel::new(ask * dec!(1.002), ask_sz * dec!(5.0)));
+        } else {
+            // Fallback: Query Hyperliquid /info directly for live price
+            let hl_resp = self.client.post("https://api.hyperliquid.xyz/info")
+                .json(&serde_json::json!({"type": "l2Book", "coin": base_coin}))
+                .send().await;
+            if let Ok(r) = hl_resp {
+                if let Ok(j) = r.json::<serde_json::Value>().await {
+                    if let Some(levels) = j.get("levels").and_then(|l| l.as_array()) {
+                        if levels.len() >= 2 {
+                            if let (Some(bids), Some(asks)) = (levels[0].as_array(), levels[1].as_array()) {
+                                for b in bids.iter().take(3) {
+                                    if let (Some(p), Some(s)) = (b.get("px").and_then(|v| v.as_str()), b.get("sz").and_then(|v| v.as_str())) {
+                                        if let (Ok(px), Ok(sz)) = (Decimal::from_str_exact(p), Decimal::from_str_exact(s)) {
+                                            book.bids.push(BookLevel::new(px, sz));
+                                        }
+                                    }
+                                }
+                                for a in asks.iter().take(3) {
+                                    if let (Some(p), Some(s)) = (a.get("px").and_then(|v| v.as_str()), a.get("sz").and_then(|v| v.as_str())) {
+                                        if let (Ok(px), Ok(sz)) = (Decimal::from_str_exact(p), Decimal::from_str_exact(s)) {
+                                            book.asks.push(BookLevel::new(px, sz));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         book.timestamp = Utc::now();
         Ok(book)

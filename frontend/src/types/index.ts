@@ -418,6 +418,7 @@ export interface SpotExecutionParams {
   sell_venue: string;
   trade_size_usd: number;
   max_slippage_bps: number;
+  net_spread_bps?: number;
 }
 
 export * from "./tickers";

@@ -355,238 +355,9 @@ impl AppEngineState {
 
         let settings = RwLock::new(EngineSettingsDto::default());
 
-        let initial_logs = vec![
-            ExecutionLogEntry {
-                id: "exec-init-1".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "BTC-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 48.5,
-                fees: 2.1,
-                net_profit: 46.4,
-                latency_us: 114,
-                note: "Executed atomically at spread 18.2 BPS (Dislocation +6.8 BPS over baseline)".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(18.2),
-                baseline_mean_spread_bps: Some(11.4),
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(14.8),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-2".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Funding".into(),
-                symbol: "ETH-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Vanta.exchange".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 32.0,
-                fees: 1.8,
-                net_profit: 30.2,
-                latency_us: 98,
-                note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)".into(),
-                direction: Some("Carry Open".into()),
-                trigger_spread_bps: Some(15.0),
-                baseline_mean_spread_bps: Some(9.5),
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(12.0),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-3".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "BTC-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Robinhood EVM".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 41.0,
-                fees: 1.9,
-                net_profit: 39.1,
-                latency_us: 120,
-                note: "Step 2 scale-in on widening divergence".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(22.4),
-                baseline_mean_spread_bps: Some(13.1),
-                position_step: Some(2),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(15.2),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-3b".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "BTC-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 26.0,
-                fees: 1.5,
-                net_profit: 24.5,
-                latency_us: 108,
-                note: "Partial unwind as spread converged toward mean".into(),
-                direction: Some("Convergence Unwind".into()),
-                trigger_spread_bps: Some(4.2),
-                baseline_mean_spread_bps: Some(12.0),
-                position_step: Some(2),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(6.0),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-4".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "SOL-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 20.0,
-                fees: 1.8,
-                net_profit: 18.2,
-                latency_us: 105,
-                note: "Executed atomically at spread 16.4 BPS".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(16.4),
-                baseline_mean_spread_bps: Some(10.2),
-                position_step: Some(1),
-                max_units: Some(4),
-                nominal_hurdle_bps: Some(13.5),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-5".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "SUI-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 12.0,
-                fees: 1.7,
-                net_profit: 10.3,
-                latency_us: 92,
-                note: "Sui perp dislocation captured".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(24.5),
-                baseline_mean_spread_bps: Some(14.0),
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(17.2),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-6".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "AVAX-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Vanta.exchange".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: 7.5,
-                fees: 1.1,
-                net_profit: 6.4,
-                latency_us: 110,
-                note: "AVAX perp basis captured on convergence".into(),
-                direction: Some("Convergence Unwind".into()),
-                trigger_spread_bps: Some(3.2),
-                baseline_mean_spread_bps: Some(8.5),
-                position_step: Some(2),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(5.0),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-7".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "ARB-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "REJECTED".into(),
-                success: false,
-                gross_profit: 0.0,
-                fees: 0.8,
-                net_profit: -0.8,
-                latency_us: 130,
-                note: "DeltaGuard safety unwind on Leg B rejection".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(19.0),
-                baseline_mean_spread_bps: Some(12.0),
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(15.0),
-            },
-            ExecutionLogEntry {
-                id: "exec-init-8".into(),
-                timestamp: chrono::Utc::now().to_rfc3339(),
-                trade_type: "Spatial".into(),
-                symbol: "DOGE-USDC".into(),
-                venue_a: "Hyperliquid".into(),
-                venue_b: "Lighter".into(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "REJECTED".into(),
-                success: false,
-                gross_profit: 0.0,
-                fees: 1.5,
-                net_profit: -1.5,
-                latency_us: 145,
-                note: "Emergency unwind on venue latency spike".into(),
-                direction: Some("Divergence Entry".into()),
-                trigger_spread_bps: Some(21.5),
-                baseline_mean_spread_bps: Some(12.8),
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: Some(16.0),
-            },
-        ];
-
+        let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(crate::vault::SecureVault::default_path()));
-        let mut virtual_ledger_raw = arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new();
-        for log in &initial_logs {
-            let strategy_id = match log.trade_type.as_str() {
-                "Spatial" => "spatial_spread",
-                "Funding" => "funding_rate",
-                "Prediction" => "prediction_parity",
-                _ => "spatial_spread",
-            };
-            virtual_ledger_raw.open_cycle(
-                log.id.clone(),
-                strategy_id.to_string(),
-                log.symbol.clone(),
-                log.venue_a.clone(),
-                log.venue_b.clone(),
-                log.trigger_spread_bps.unwrap_or(15.0),
-                0.1,
-                64000.0,
-                0.1,
-                64100.0,
-                log.fees,
-            );
-            let status = if log.success {
-                arbitrager_execution::virtual_ledger::CycleStatus::Closed
-            } else {
-                arbitrager_execution::virtual_ledger::CycleStatus::StoppedOut
-            };
-            let pnl_bps = log.trigger_spread_bps.unwrap_or(12.0) * if log.success { 0.8 } else { -0.5 };
-            virtual_ledger_raw.close_cycle_with_pnl(&log.id, log.net_profit, pnl_bps, status);
-        }
-        let virtual_ledger = RwLock::new(virtual_ledger_raw);
+        let virtual_ledger = RwLock::new(arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new());
 
         Self {
             ex_hl,
@@ -633,38 +404,28 @@ impl AppEngineState {
         self.ex_robinhood.seed_market(symbol, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
     }
 
-    /// Returns active venue list dynamically based on simulated vs live mode
+    /// Returns active venue list using live market adapters
     pub fn get_venues(&self) -> Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> {
         let is_live = *self.is_live_mode.read();
-        if is_live {
-            vec![
-                ("hyperliquid", "Hyperliquid (L1 DEX)", self.live_hl.clone()),
-                ("lighter", "Lighter (zkDEX)", self.live_lighter.clone()),
-                ("vanta", "Vanta.exchange", self.live_vanta.clone()),
-                ("robinhood", "Robinhood EVM", self.live_robinhood.clone()),
-            ]
-        } else {
-            vec![
-                ("hyperliquid", "Hyperliquid (L1)", self.ex_hl.clone()),
-                ("lighter", "Lighter (zkDEX)", self.ex_lighter.clone()),
-                ("vanta", "Vanta.exchange", self.ex_vanta.clone()),
-                ("robinhood", "Robinhood EVM", self.ex_robinhood.clone()),
-            ]
-        }
+        vec![
+            ("hyperliquid", if is_live { "Hyperliquid (L1 DEX)" } else { "Hyperliquid (L1)" }, self.live_hl.clone()),
+            ("lighter", if is_live { "Lighter (zkDEX)" } else { "Lighter (zkDEX)" }, self.live_lighter.clone()),
+            ("vanta", if is_live { "Vanta.exchange" } else { "Vanta.exchange" }, self.live_vanta.clone()),
+            ("robinhood", if is_live { "Robinhood EVM" } else { "Robinhood EVM" }, self.live_robinhood.clone()),
+        ]
     }
 
-    /// Resolves an exchange adapter by venue identifier or name
+    /// Resolves an exchange adapter by venue identifier or name using live market adapters
     pub fn get_adapter(&self, venue_id: &str) -> Option<Arc<dyn arbitrager_core::exchange::ExchangeAdapter>> {
-        let is_live = *self.is_live_mode.read();
         let id_clean = venue_id.to_lowercase();
         if id_clean.contains("hyperliquid") || id_clean == "hl" {
-            if is_live { Some(self.live_hl.clone()) } else { Some(self.ex_hl.clone()) }
+            Some(self.live_hl.clone())
         } else if id_clean.contains("lighter") {
-            if is_live { Some(self.live_lighter.clone()) } else { Some(self.ex_lighter.clone()) }
+            Some(self.live_lighter.clone())
         } else if id_clean.contains("vanta") {
-            if is_live { Some(self.live_vanta.clone()) } else { Some(self.ex_vanta.clone()) }
+            Some(self.live_vanta.clone())
         } else if id_clean.contains("robinhood") {
-            if is_live { Some(self.live_robinhood.clone()) } else { Some(self.ex_robinhood.clone()) }
+            Some(self.live_robinhood.clone())
         } else if id_clean.contains("polymarket") {
             Some(self.live_polymarket.clone())
         } else if id_clean.contains("kalshi") {

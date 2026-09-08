@@ -7,7 +7,6 @@ import { FundingRadar } from "./components/FundingRadar";
 import { PredictionHub } from "./components/PredictionHub";
 import { StatArbLab } from "./components/StatArbLab";
 import { RiskOperations } from "./components/RiskOperations";
-import { SimulationRunner } from "./components/SimulationRunner";
 import { StrategyPerformance } from "./components/StrategyPerformance";
 import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
@@ -144,12 +143,6 @@ export const App: React.FC = () => {
     await refreshAllData();
   };
 
-  const handleRunSimStep = async (symbol: string, targetBps: number, qty: number) => {
-    const res = await api.runSimulationStep(symbol, targetBps, qty);
-    await refreshAllData();
-    return res;
-  };
-
   return (
     <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
       {/* Top Header Bar with Section Switcher Navigation */}
@@ -239,16 +232,6 @@ export const App: React.FC = () => {
               riskData={riskData}
               onResetCircuitBreaker={handleResetCircuitBreaker}
               onTriggerKillswitch={handleEmergencyKillswitch}
-            />
-          )}
-
-          {activeTab === "sim" && (
-            <SimulationRunner
-              logs={executionLogs}
-              totalPnl={systemStatus?.total_realized_pnl ?? 0}
-              onRunStep={handleRunSimStep}
-              symbol={selectedSymbol}
-              onSymbolChange={setSelectedSymbol}
             />
           )}
 

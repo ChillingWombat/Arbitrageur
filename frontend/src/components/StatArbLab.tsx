@@ -39,12 +39,22 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
       let py = priceY;
 
       if (!isManual) {
-        // Generate slight cointegrated price drift
-        px = 3450.0 + nextStep * 2.5 + (Math.sin(nextStep * 0.5) * 10.0);
-        const trueBeta = 18.6;
-        py = trueBeta * px + 150.0 + (Math.cos(nextStep * 0.8) * 85.0);
-        setPriceX(px);
-        setPriceY(py);
+        try {
+          const resp = await fetch('https://api.binance.com/api/v3/ticker/bookTicker?symbols=%5B%22BTCUSDT%22,%22ETHUSDT%22%5D');
+          if (resp.ok) {
+            const data = await resp.json();
+            const btc = data.find((d: any) => d.symbol === "BTCUSDT");
+            const eth = data.find((d: any) => d.symbol === "ETHUSDT");
+            if (btc && eth) {
+              py = (parseFloat(btc.bidPrice) + parseFloat(btc.askPrice)) / 2;
+              px = (parseFloat(eth.bidPrice) + parseFloat(eth.askPrice)) / 2;
+              setPriceX(px);
+              setPriceY(py);
+            }
+          }
+        } catch {
+          // Keep current px and py on network error
+        }
       }
 
       setStep(nextStep);
@@ -88,13 +98,25 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
   const handleFitOu = async () => {
     setErrorMsg(null);
     try {
-      // Generate synthetic mean-reverting series
-      const series: number[] = [];
-      let cur = mu;
-      for (let i = 0; i < 500; i++) {
-        cur += theta * (mu - cur) * 0.1 + sigma * Math.sqrt(0.1) * (Math.random() - 0.5) * 2;
-        series.push(cur);
+      let series: number[] = [];
+      try {
+        const resp = await fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100");
+        if (resp.ok) {
+          const klines = await resp.json();
+          if (Array.isArray(klines) && klines.length > 10) {
+            const closes = klines.map((k: any) => parseFloat(k[4]));
+            const mean = closes.reduce((a: number, b: number) => a + b, 0) / closes.length;
+            series = closes.map((c: number) => mu + (c - mean) / mean);
+          }
+        }
+      } catch {
+        // network fallback
       }
+
+      if (series.length === 0) {
+        series = [mu - sigma, mu - sigma * 0.5, mu, mu + sigma * 0.5, mu + sigma, mu + sigma * 0.3, mu - sigma * 0.2, mu];
+      }
+
       const res = await onFitOu(series, 0.1);
       setOuFitResult(res);
     } catch (err: unknown) {

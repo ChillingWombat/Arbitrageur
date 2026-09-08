@@ -5,7 +5,6 @@ import {
   Target,
   FlaskConical,
   ShieldCheck,
-  PlaySquare,
   TrendingUp,
   Coins,
 } from "lucide-react";
@@ -17,7 +16,6 @@ export type ActiveTab =
   | "prediction"
   | "statarb"
   | "risk"
-  | "sim"
   | "performance";
 
 export interface NavigationProps {
@@ -77,12 +75,6 @@ export const Navigation: React.FC<NavigationProps> = ({
       shortLabel: "DeltaGuard",
       fullLabel: "& Risk",
       icon: ShieldCheck,
-    },
-    {
-      id: "sim" as ActiveTab,
-      shortLabel: "Simulation",
-      fullLabel: "Studio",
-      icon: PlaySquare,
     },
     {
       id: "performance" as ActiveTab,

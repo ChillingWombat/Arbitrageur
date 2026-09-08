@@ -31,10 +31,128 @@ function isTauriEnvironment(): boolean {
   return typeof window !== "undefined" && ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
 }
 
-// Fallback simulated engine state for browser mode
+// Lighter perp dex market IDs
+const LIGHTER_MARKET_MAP: Record<string, number> = {
+  BTC: 1,
+  ETH: 0,
+  SOL: 2,
+  DOGE: 3,
+  AVAX: 9,
+  SUI: 16,
+  BNB: 25,
+  ARB: 50,
+  OP: 55,
+  LINK: 8,
+  NEAR: 10,
+  APT: 11,
+  PEPE: 12,
+  WIF: 13,
+  AAVE: 14,
+  RENDER: 15,
+  INJ: 17,
+  TIA: 18,
+  SEI: 19,
+};
+
+// Cache for live quotes to prevent rate limits
+let cachedAllMids: { timestamp: number; mids: Record<string, number> } | null = null;
+let cachedFundingRates: { timestamp: number; rates: Record<string, number> } | null = null;
+let cachedBinanceTickers: { timestamp: number; tickers: Map<string, { bid: number; ask: number; bidQty: number; askQty: number }> } | null = null;
+
+async function getLiveHyperliquidMids(): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (cachedAllMids && now - cachedAllMids.timestamp < 1000) {
+    return cachedAllMids.mids;
+  }
+  try {
+    const resp = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "allMids" }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      const mids: Record<string, number> = {};
+      for (const [k, v] of Object.entries(data)) {
+        const num = parseFloat(v as string);
+        if (!isNaN(num)) mids[k.toUpperCase()] = num;
+      }
+      cachedAllMids = { timestamp: now, mids };
+      return mids;
+    }
+  } catch {
+    // network fallback
+  }
+  return cachedAllMids?.mids || {};
+}
+
+async function getLiveHyperliquidFunding(): Promise<Record<string, number>> {
+  const now = Date.now();
+  if (cachedFundingRates && now - cachedFundingRates.timestamp < 5000) {
+    return cachedFundingRates.rates;
+  }
+  try {
+    const resp = await fetch("https://api.hyperliquid.xyz/info", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ type: "metaAndAssetCtxs" }),
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Array.isArray(data) && data.length >= 2) {
+        const universe = data[0].universe || [];
+        const ctxs = data[1] || [];
+        const rates: Record<string, number> = {};
+        for (let i = 0; i < universe.length; i++) {
+          const coin = universe[i]?.name?.toUpperCase();
+          const ctx = ctxs[i];
+          if (coin && ctx && ctx.funding) {
+            rates[coin] = parseFloat(ctx.funding) * 800;
+          }
+        }
+        cachedFundingRates = { timestamp: now, rates };
+        return rates;
+      }
+    }
+  } catch {
+    // network fallback
+  }
+  return cachedFundingRates?.rates || {};
+}
+
+async function getLiveBinanceBookTickers(): Promise<Map<string, { bid: number; ask: number; bidQty: number; askQty: number }>> {
+  const now = Date.now();
+  if (cachedBinanceTickers && now - cachedBinanceTickers.timestamp < 1000) {
+    return cachedBinanceTickers.tickers;
+  }
+  try {
+    const resp = await fetch("https://api.binance.com/api/v3/ticker/bookTicker");
+    if (resp.ok) {
+      const data = await resp.json();
+      const map = new Map<string, { bid: number; ask: number; bidQty: number; askQty: number }>();
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          map.set(item.symbol, {
+            bid: parseFloat(item.bidPrice) || 0,
+            ask: parseFloat(item.askPrice) || 0,
+            bidQty: parseFloat(item.bidQty) || 0,
+            askQty: parseFloat(item.askQty) || 0,
+          });
+        }
+      }
+      cachedBinanceTickers = { timestamp: now, tickers: map };
+      return map;
+    }
+  } catch {
+    // network fallback
+  }
+  return cachedBinanceTickers?.tickers || new Map();
+}
+
+// Fallback live market paper engine for browser mode
 class BrowserMockEngine {
-  private pnl = 1420.5;
-  private simCycle = 10;
+  private pnl = 0.0;
+  private simCycle = 0;
   private isLive = false;
   private cbTripped = false;
   private settings: EngineSettingsDto = {
@@ -75,294 +193,7 @@ class BrowserMockEngine {
     version: "v1.2.0",
     git_repo: "https://github.com/arbitrager/arbitrager",
   };
-  private logs: ExecutionLogEntry[] = [
-    {
-      id: "exec-1",
-      timestamp: new Date(Date.now() - 360000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "BTC-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 48.5,
-      fees: 2.1,
-      net_profit: 46.4,
-      latency_us: 114,
-      note: "Executed atomically at spread 18.2 BPS (Dislocation +6.8 BPS over baseline)",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 18.2,
-      baseline_mean_spread_bps: 11.4,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 14.8,
-    },
-    {
-      id: "exec-2",
-      timestamp: new Date(Date.now() - 300000).toISOString(),
-      trade_type: "Funding",
-      symbol: "ETH-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Vanta.exchange",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 32.0,
-      fees: 1.8,
-      net_profit: 30.2,
-      latency_us: 98,
-      note: "Carry opened: Short HL (0.03%/1h) + Long Vanta (0.015%/8h)",
-      direction: "Carry Open",
-      trigger_spread_bps: 15.0,
-      baseline_mean_spread_bps: 9.5,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 12.0,
-    },
-    {
-      id: "exec-3",
-      timestamp: new Date(Date.now() - 240000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "BTC-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Robinhood EVM",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 41.0,
-      fees: 1.9,
-      net_profit: 39.1,
-      latency_us: 120,
-      note: "Step 2 scale-in on widening divergence",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 22.4,
-      baseline_mean_spread_bps: 13.1,
-      position_step: 2,
-      max_units: 3,
-      nominal_hurdle_bps: 15.2,
-    },
-    {
-      id: "exec-3b",
-      timestamp: new Date(Date.now() - 210000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "BTC-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 26.0,
-      fees: 1.5,
-      net_profit: 24.5,
-      latency_us: 108,
-      note: "Partial unwind as spread converged toward mean",
-      direction: "Convergence Unwind",
-      trigger_spread_bps: 4.2,
-      baseline_mean_spread_bps: 12.0,
-      position_step: 2,
-      max_units: 3,
-      nominal_hurdle_bps: 6.0,
-    },
-    {
-      id: "exec-4",
-      timestamp: new Date(Date.now() - 180000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "SOL-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 20.0,
-      fees: 1.8,
-      net_profit: 18.2,
-      latency_us: 105,
-      note: "Executed atomically at spread 16.4 BPS",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 16.4,
-      baseline_mean_spread_bps: 10.2,
-      position_step: 1,
-      max_units: 4,
-      nominal_hurdle_bps: 13.5,
-    },
-    {
-      id: "exec-5",
-      timestamp: new Date(Date.now() - 150000).toISOString(),
-      trade_type: "Funding",
-      symbol: "ETH-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 13.9,
-      fees: 1.8,
-      net_profit: 12.1,
-      latency_us: 88,
-      note: "Carry opened: Short HL + Long LGT",
-      direction: "Carry Open",
-      trigger_spread_bps: 14.2,
-      baseline_mean_spread_bps: 9.0,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 12.0,
-    },
-    {
-      id: "exec-6",
-      timestamp: new Date(Date.now() - 120000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "SUI-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 12.0,
-      fees: 1.7,
-      net_profit: 10.3,
-      latency_us: 92,
-      note: "Sui perp dislocation captured",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 24.5,
-      baseline_mean_spread_bps: 14.0,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 17.2,
-    },
-    {
-      id: "exec-7",
-      timestamp: new Date(Date.now() - 90000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "AVAX-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Vanta.exchange",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 7.5,
-      fees: 1.1,
-      net_profit: 6.4,
-      latency_us: 110,
-      note: "AVAX perp basis captured on convergence",
-      direction: "Convergence Unwind",
-      trigger_spread_bps: 3.2,
-      baseline_mean_spread_bps: 8.5,
-      position_step: 2,
-      max_units: 3,
-      nominal_hurdle_bps: 5.0,
-    },
-    {
-      id: "exec-8",
-      timestamp: new Date(Date.now() - 70000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "SOL-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Vanta.exchange",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 7.7,
-      fees: 1.8,
-      net_profit: 5.9,
-      latency_us: 102,
-      note: "Solana cross-venue basis capture",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 14.5,
-      baseline_mean_spread_bps: 10.0,
-      position_step: 2,
-      max_units: 4,
-      nominal_hurdle_bps: 13.5,
-    },
-    {
-      id: "exec-9",
-      timestamp: new Date(Date.now() - 50000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "SUI-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Vanta.exchange",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: 6.8,
-      fees: 1.3,
-      net_profit: 5.5,
-      latency_us: 95,
-      note: "Sui liquidity arb captured",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 20.1,
-      baseline_mean_spread_bps: 13.5,
-      position_step: 2,
-      max_units: 3,
-      nominal_hurdle_bps: 16.5,
-    },
-    {
-      id: "exec-10",
-      timestamp: new Date(Date.now() - 30000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "ARB-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "REJECTED",
-      success: false,
-      gross_profit: 0.0,
-      fees: 0.5,
-      net_profit: -0.5,
-      latency_us: 130,
-      note: "DeltaGuard safety unwind on Leg B rejection",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 19.0,
-      baseline_mean_spread_bps: 12.0,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 15.0,
-    },
-    {
-      id: "exec-11",
-      timestamp: new Date(Date.now() - 20000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "ARB-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Vanta.exchange",
-      leg_a_status: "FILLED",
-      leg_b_status: "REJECTED",
-      success: false,
-      gross_profit: 0.0,
-      fees: 0.3,
-      net_profit: -0.3,
-      latency_us: 125,
-      note: "Slippage tolerance boundary reached, position cleanly unwound",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 17.5,
-      baseline_mean_spread_bps: 11.5,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 14.5,
-    },
-    {
-      id: "exec-12",
-      timestamp: new Date(Date.now() - 10000).toISOString(),
-      trade_type: "Spatial",
-      symbol: "DOGE-USDC",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "REJECTED",
-      success: false,
-      gross_profit: 0.0,
-      fees: 1.5,
-      net_profit: -1.5,
-      latency_us: 145,
-      note: "Emergency unwind on venue latency spike",
-      direction: "Divergence Entry",
-      trigger_spread_bps: 21.5,
-      baseline_mean_spread_bps: 12.8,
-      position_step: 1,
-      max_units: 3,
-      nominal_hurdle_bps: 16.0,
-    },
-  ];
+  private logs: ExecutionLogEntry[] = [];
 
   // Kalman filter internal state
   private kfState = [0.0, 20.0]; // [alpha, beta]
@@ -390,158 +221,217 @@ class BrowserMockEngine {
     };
   }
 
-  fetchOrderbooks(symbol: string): VenueOrderBookDto[] {
+  async fetchOrderbooks(symbol: string): Promise<VenueOrderBookDto[]> {
+    const baseCoin = symbol.split("-")[0].toUpperCase();
     const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
-    const base = ticker ? ticker.basePrice : 100.0;
-    const jitter = (Math.random() - 0.5) * (base * 0.0003);
+    const benchmark = ticker ? ticker.basePrice : 100.0;
 
-    const hlSpreadHalf = Math.max(0.000001, base * 0.00012);
-    const hlBid = base + jitter - hlSpreadHalf;
-    const hlAsk = base + jitter + hlSpreadHalf;
+    let hlBid = benchmark * 0.9998;
+    let hlAsk = benchmark * 1.0002;
+    let hlBids: [number, number][] = [];
+    let hlAsks: [number, number][] = [];
 
-    const lgtDisloc = base * 0.00026;
-    const lgtBid = base + jitter + lgtDisloc - hlSpreadHalf;
-    const lgtAsk = base + jitter + lgtDisloc + hlSpreadHalf;
+    try {
+      const resp = await fetch("https://api.hyperliquid.xyz/info", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "l2Book", coin: baseCoin }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data && data.levels && data.levels.length >= 2) {
+          const rawBids = data.levels[0] || [];
+          const rawAsks = data.levels[1] || [];
+          if (rawBids.length > 0) {
+            hlBid = parseFloat(rawBids[0].px);
+            hlBids = rawBids.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
+          }
+          if (rawAsks.length > 0) {
+            hlAsk = parseFloat(rawAsks[0].px);
+            hlAsks = rawAsks.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
+          }
+        }
+      }
+    } catch {
+      // network fallback
+    }
 
-    const vntDisloc = base * 0.00008;
-    const vntBid = base + jitter + vntDisloc - hlSpreadHalf * 1.1;
-    const vntAsk = base + jitter + vntDisloc + hlSpreadHalf * 1.1;
+    if (hlBids.length === 0) {
+      hlBids = [
+        [hlBid, 5.0],
+        [hlBid * 0.9998, 8.5],
+        [hlBid * 0.9995, 12.0],
+        [hlBid * 0.9992, 15.0],
+      ];
+    }
+    if (hlAsks.length === 0) {
+      hlAsks = [
+        [hlAsk, 5.2],
+        [hlAsk * 1.0002, 9.0],
+        [hlAsk * 1.0005, 13.5],
+        [hlAsk * 1.0008, 16.0],
+      ];
+    }
 
-    const rhDisloc = base * 0.00005;
-    const rhBid = base + jitter + rhDisloc - hlSpreadHalf * 1.2;
-    const rhAsk = base + jitter + rhDisloc + hlSpreadHalf * 1.2;
+    let lgtBid = hlBid;
+    let lgtAsk = hlAsk;
+    let lgtBids: [number, number][] = [];
+    let lgtAsks: [number, number][] = [];
+    const marketId = LIGHTER_MARKET_MAP[baseCoin];
+    if (marketId !== undefined) {
+      try {
+        const resp = await fetch(`https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=${marketId}&limit=10`);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data && data.code === 200) {
+            if (data.bids && data.bids.length > 0) {
+              lgtBid = parseFloat(data.bids[0].price);
+              lgtBids = data.bids.slice(0, 5).map((b: any) => [parseFloat(b.price), parseFloat(b.remaining_base_amount || b.initial_base_amount || "1.0")]);
+            }
+            if (data.asks && data.asks.length > 0) {
+              lgtAsk = parseFloat(data.asks[0].price);
+              lgtAsks = data.asks.slice(0, 5).map((a: any) => [parseFloat(a.price), parseFloat(a.remaining_base_amount || a.initial_base_amount || "1.0")]);
+            }
+          }
+        }
+      } catch {
+        // network fallback
+      }
+    }
+    if (lgtBids.length === 0) {
+      lgtBids = hlBids.map(([p, s]) => [p * 1.0002, s * 0.8]);
+      lgtBid = lgtBids[0][0];
+    }
+    if (lgtAsks.length === 0) {
+      lgtAsks = hlAsks.map(([p, s]) => [p * 1.0002, s * 0.8]);
+      lgtAsk = lgtAsks[0][0];
+    }
 
-    const mkBids = (best: number, stepBps: number): [number, number][] => [
-      [best, 5.0],
-      [best * (1 - stepBps * 0.0001), 8.5],
-      [best * (1 - stepBps * 0.0002), 12.0],
-      [best * (1 - stepBps * 0.0003), 15.0],
-    ];
+    let binanceBid = hlBid;
+    let binanceAsk = hlAsk;
+    try {
+      const resp = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${baseCoin}USDT`);
+      if (resp.ok) {
+        const b = await resp.json();
+        if (b.bidPrice && b.askPrice) {
+          binanceBid = parseFloat(b.bidPrice);
+          binanceAsk = parseFloat(b.askPrice);
+        }
+      }
+    } catch {
+      // fallback
+    }
 
-    const mkAsks = (best: number, stepBps: number): [number, number][] => [
-      [best, 5.2],
-      [best * (1 + stepBps * 0.0001), 9.0],
-      [best * (1 + stepBps * 0.0002), 13.5],
-      [best * (1 + stepBps * 0.0003), 16.0],
-    ];
+    const vntBid = binanceBid > 0 ? binanceBid * 0.9999 : hlBid * 0.9999;
+    const vntAsk = binanceAsk > 0 ? binanceAsk * 1.0001 : hlAsk * 1.0001;
+    const rhBid = binanceBid > 0 ? binanceBid : hlBid;
+    const rhAsk = binanceAsk > 0 ? binanceAsk : hlAsk;
+
+    const fundingRates = await getLiveHyperliquidFunding();
+    const hlFunding = fundingRates[baseCoin] ?? 0.01;
+
+    const makeDto = (
+      vid: string,
+      vname: string,
+      bestBid: number,
+      bestAsk: number,
+      bids: [number, number][],
+      asks: [number, number][],
+      _feeBps: number,
+      fundingPct: number
+    ): VenueOrderBookDto => {
+      const spread = Math.max(0, bestAsk - bestBid);
+      const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : benchmark;
+      const spreadBps = mid > 0 ? (spread / mid) * 10000 : 0;
+      const totalBidDepth = bids.reduce((acc, curr) => acc + curr[1], 0);
+      const totalAskDepth = asks.reduce((acc, curr) => acc + curr[1], 0);
+
+      return {
+        venue_id: vid,
+        venue_name: vname,
+        symbol,
+        best_bid: bestBid,
+        best_ask: bestAsk,
+        spread,
+        spread_bps: spreadBps,
+        mid_price: mid,
+        total_bid_depth: totalBidDepth,
+        total_ask_depth: totalAskDepth,
+        vwap_bid: bestBid * 0.9998,
+        vwap_ask: bestAsk * 1.0002,
+        funding_rate_8h_pct: fundingPct,
+        bids,
+        asks,
+      };
+    };
 
     return [
-      {
-        venue_id: "hyperliquid",
-        venue_name: "Hyperliquid (L1)",
-        symbol,
-        best_bid: hlBid,
-        best_ask: hlAsk,
-        spread: hlAsk - hlBid,
-        spread_bps: ((hlAsk - hlBid) / base) * 10000,
-        mid_price: (hlBid + hlAsk) / 2,
-        total_bid_depth: 40.5,
-        total_ask_depth: 43.7,
-        vwap_bid: hlBid * 0.9998,
-        vwap_ask: hlAsk * 1.0002,
-        funding_rate_8h_pct: 0.024,
-        bids: mkBids(hlBid, 1.5),
-        asks: mkAsks(hlAsk, 1.5),
-      },
-      {
-        venue_id: "lighter",
-        venue_name: "Lighter (zkDEX)",
-        symbol,
-        best_bid: lgtBid,
-        best_ask: lgtAsk,
-        spread: lgtAsk - lgtBid,
-        spread_bps: ((lgtAsk - lgtBid) / base) * 10000,
-        mid_price: (lgtBid + lgtAsk) / 2,
-        total_bid_depth: 35.0,
-        total_ask_depth: 38.0,
-        vwap_bid: lgtBid * 0.9998,
-        vwap_ask: lgtAsk * 1.0002,
-        funding_rate_8h_pct: 0.008,
-        bids: mkBids(lgtBid, 1.5),
-        asks: mkAsks(lgtAsk, 1.5),
-      },
-      {
-        venue_id: "vanta",
-        venue_name: "Vanta.exchange",
-        symbol,
-        best_bid: vntBid,
-        best_ask: vntAsk,
-        spread: vntAsk - vntBid,
-        spread_bps: ((vntAsk - vntBid) / base) * 10000,
-        mid_price: (vntBid + vntAsk) / 2,
-        total_bid_depth: 45.0,
-        total_ask_depth: 48.0,
-        vwap_bid: vntBid * 0.9997,
-        vwap_ask: vntAsk * 1.0003,
-        funding_rate_8h_pct: 0.012,
-        bids: mkBids(vntBid, 1.8),
-        asks: mkAsks(vntAsk, 1.8),
-      },
-      {
-        venue_id: "robinhood",
-        venue_name: "Robinhood EVM",
-        symbol,
-        best_bid: rhBid,
-        best_ask: rhAsk,
-        spread: rhAsk - rhBid,
-        spread_bps: ((rhAsk - rhBid) / base) * 10000,
-        mid_price: (rhBid + rhAsk) / 2,
-        total_bid_depth: 28.0,
-        total_ask_depth: 32.0,
-        vwap_bid: rhBid * 0.9996,
-        vwap_ask: rhAsk * 1.0004,
-        funding_rate_8h_pct: 0.007,
-        bids: mkBids(rhBid, 2.0),
-        asks: mkAsks(rhAsk, 2.0),
-      },
+      makeDto("hyperliquid", "Hyperliquid (L1)", hlBid, hlAsk, hlBids, hlAsks, 2.0, hlFunding),
+      makeDto("lighter", "Lighter (zkDEX)", lgtBid, lgtAsk, lgtBids, lgtAsks, 1.5, hlFunding * 0.75),
+      makeDto("vanta", "Vanta.exchange", vntBid, vntAsk, [[vntBid, 12.0], [vntBid * 0.9995, 20.0]], [[vntAsk, 14.0], [vntAsk * 1.0005, 22.0]], 3.0, hlFunding * 0.9),
+      makeDto("robinhood", "Robinhood EVM", rhBid, rhAsk, [[rhBid, 8.0], [rhBid * 0.9996, 15.0]], [[rhAsk, 9.0], [rhAsk * 1.0004, 16.0]], 2.5, hlFunding * 0.8),
     ];
   }
 
-  fetchMultiMarketQuotes(symbols: string[]): TickerMarketQuoteDto[] {
+  async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {
+    const mids = await getLiveHyperliquidMids();
+    const binanceTickers = await getLiveBinanceBookTickers();
     const results: TickerMarketQuoteDto[] = [];
+
     for (const sym of symbols) {
-      const books = this.fetchOrderbooks(sym);
+      const baseCoin = sym.split("-")[0].toUpperCase();
       const ticker = PERP_TICKERS.find((t) => t.symbol === sym);
-      const basePrice = ticker ? ticker.basePrice : 100.0;
-      const baseStr = sym.split("-")[0];
+      const benchmark = ticker ? ticker.basePrice : 100.0;
 
-      let bestBid = -Infinity;
+      const hlMid = mids[baseCoin];
+      const bTicker = binanceTickers.get(`${baseCoin}USDT`) || binanceTickers.get(`${baseCoin}USDC`);
+
+      let bestBid: number;
+      let bestAsk: number;
       let bestBidVenue = "Hyperliquid";
-      let bestAsk = Infinity;
-      let bestAskVenue = "Hyperliquid";
-      let bestBuySpreadBps = 2.0;
+      let bestAskVenue = "Binance/Orderly";
 
-      for (const b of books) {
-        if (b.best_bid > bestBid) {
-          bestBid = b.best_bid;
-          bestBidVenue = b.venue_name;
+      if (bTicker && bTicker.bid > 0 && bTicker.ask > 0) {
+        if (hlMid && hlMid > 0) {
+          bestBid = Math.max(hlMid * 0.9998, bTicker.bid);
+          bestAsk = Math.min(hlMid * 1.0002, bTicker.ask);
+          bestBidVenue = hlMid * 0.9998 >= bTicker.bid ? "Hyperliquid" : "Binance/Orderly";
+          bestAskVenue = hlMid * 1.0002 <= bTicker.ask ? "Hyperliquid" : "Binance/Orderly";
+        } else {
+          bestBid = bTicker.bid;
+          bestAsk = bTicker.ask;
         }
-        if (b.best_ask < bestAsk && b.best_ask > 0) {
-          bestAsk = b.best_ask;
-          bestAskVenue = b.venue_name;
-          bestBuySpreadBps = b.spread_bps > 0 ? b.spread_bps : ((b.best_ask - b.best_bid) / b.mid_price) * 10000;
-        }
+      } else if (hlMid && hlMid > 0) {
+        bestBid = hlMid * 0.9998;
+        bestAsk = hlMid * 1.0002;
+      } else {
+        bestBid = benchmark * 0.9998;
+        bestAsk = benchmark * 1.0002;
       }
 
       const mid = (bestBid + bestAsk) / 2;
+      const spread = Math.max(0, bestAsk - bestBid);
+      const spreadBps = mid > 0 ? (spread / mid) * 10000 : 2.0;
+
       results.push({
         symbol: sym,
-        base: baseStr,
+        base: baseCoin,
         best_bid: bestBid,
         best_ask: bestAsk,
         mid_price: mid,
-        spread_bps: Math.max(0.5, bestBuySpreadBps),
+        spread_bps: Math.max(0.5, spreadBps),
         best_buy_venue: bestAskVenue,
         best_sell_venue: bestBidVenue,
         fee_bps: 2.0,
-        base_price: basePrice,
+        base_price: benchmark,
       });
     }
+
     return results;
   }
 
-  scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): SpatialOpportunityDto[] {
-    const books = this.fetchOrderbooks(symbol);
+  async scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): Promise<SpatialOpportunityDto[]> {
+    const books = await this.fetchOrderbooks(symbol);
     const opps: SpatialOpportunityDto[] = [];
 
     for (let i = 0; i < books.length; i++) {
@@ -579,17 +469,10 @@ class BrowserMockEngine {
     return opps.sort((a, b) => b.net_spread_bps - a.net_spread_bps);
   }
 
-  scanSpotOpportunities(symbolFilter?: string): SpotOpportunityDto[] {
-    const assets = [
-      { symbol: "BTC/USDC", basePrice: 96420.0, depth: 350000, latency: 12 },
-      { symbol: "ETH/USDC", basePrice: 2845.5, depth: 220000, latency: 15 },
-      { symbol: "SOL/USDC", basePrice: 198.8, depth: 140000, latency: 10 },
-      { symbol: "BNB/USDC", basePrice: 654.2, depth: 95000, latency: 16 },
-      { symbol: "SUI/USDC", basePrice: 3.45, depth: 65000, latency: 18 },
-      { symbol: "AVAX/USDC", basePrice: 34.9, depth: 70000, latency: 20 },
-      { symbol: "LINK/USDC", basePrice: 18.95, depth: 55000, latency: 14 },
-      { symbol: "NEAR/USDC", basePrice: 5.68, depth: 48000, latency: 17 },
-    ];
+  async scanSpotOpportunities(symbolFilter?: string): Promise<SpotOpportunityDto[]> {
+    const spotSymbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "AVAX", "LINK", "NEAR"];
+    const binanceTickers = await getLiveBinanceBookTickers();
+    const hlMids = await getLiveHyperliquidMids();
 
     const venues = [
       { name: "Hyperliquid Spot", feeBps: 1.5, transferCost: 0.0 },
@@ -601,19 +484,39 @@ class BrowserMockEngine {
     ];
 
     const opps: SpotOpportunityDto[] = [];
-    for (const a of assets) {
-      if (symbolFilter && symbolFilter.trim().length > 0 && !a.symbol.toLowerCase().includes(symbolFilter.toLowerCase())) {
+    for (const coin of spotSymbols) {
+      const pairSymbol = `${coin}/USDC`;
+      if (symbolFilter && symbolFilter.trim().length > 0 && !pairSymbol.toLowerCase().includes(symbolFilter.toLowerCase())) {
         continue;
       }
+
+      const ticker = PERP_TICKERS.find((t) => t.base === coin);
+      const benchmark = ticker ? ticker.basePrice : 100.0;
+      const bTicker = binanceTickers.get(`${coin}USDT`) || binanceTickers.get(`${coin}USDC`);
+      const hlMid = hlMids[coin];
+
+      const refPrice = bTicker && bTicker.bid > 0 ? (bTicker.bid + bTicker.ask) / 2 : (hlMid || benchmark);
+
       for (let i = 0; i < venues.length; i++) {
         for (let j = 0; j < venues.length; j++) {
           if (i === j) continue;
           const buy = venues[i];
           const sell = venues[j];
-          const skew = Math.sin(i * 3.7 + j * 7.1 + this.simCycle * 0.4) * 12.0;
-          const grossBps = Math.max(buy.feeBps + sell.feeBps + 2.0 + skew, 0.5);
-          const buyPrice = a.basePrice * (1.0 - skew * 0.00005);
-          const sellPrice = buyPrice * (1.0 + grossBps / 10000);
+
+          const buyPrice = buy.name.includes("Binance") && bTicker
+            ? bTicker.ask
+            : buy.name.includes("Hyperliquid") && hlMid
+            ? hlMid * 0.9998
+            : refPrice * (1.0 - (buy.feeBps * 0.0001));
+
+          const sellPrice = sell.name.includes("Binance") && bTicker
+            ? bTicker.bid
+            : sell.name.includes("Hyperliquid") && hlMid
+            ? hlMid * 1.0002
+            : refPrice * (1.0 + (sell.feeBps * 0.0001));
+
+          const grossSpread = sellPrice - buyPrice;
+          const grossBps = (grossSpread / buyPrice) * 10000;
           const transferCost = buy.transferCost + sell.transferCost;
           const tradeSize = 1000;
           const feeUsd = (buyPrice * tradeSize * buy.feeBps / 10000) + (sellPrice * tradeSize * sell.feeBps / 10000);
@@ -622,8 +525,8 @@ class BrowserMockEngine {
           const netBps = (netProfitUsd / tradeSize) * 10000;
 
           opps.push({
-            id: `spot-${a.symbol.replace("/", "-")}-${buy.name.replace(/\s+/g, "")}-${sell.name.replace(/\s+/g, "")}`,
-            symbol: a.symbol,
+            id: `spot-${coin}-USDC-${buy.name.replace(/\s+/g, "")}-${sell.name.replace(/\s+/g, "")}`,
+            symbol: pairSymbol,
             buy_venue: buy.name,
             sell_venue: sell.name,
             buy_price: Math.round(buyPrice * 100) / 100,
@@ -634,13 +537,14 @@ class BrowserMockEngine {
             transfer_cost_usd: transferCost,
             net_spread_bps: Math.round(netBps * 10) / 10,
             net_profit_usd: Math.round(netProfitUsd * 100) / 100,
-            available_depth_usd: a.depth,
-            estimated_latency_ms: a.latency,
+            available_depth_usd: 150000,
+            estimated_latency_ms: 12,
             is_executable: netBps > 2.0,
           });
         }
       }
     }
+
     return opps.sort((a, b) => b.net_spread_bps - a.net_spread_bps);
   }
 
@@ -663,9 +567,9 @@ class BrowserMockEngine {
       fees: 2.0,
       net_profit: Math.round(profit * 100) / 100,
       latency_us: 14200,
-      note: `Spot Bot flash execution: Bought ${params.symbol} on ${params.buy_venue}, sold on ${params.sell_venue}`,
+      note: `Spot paper flash execution: Bought ${params.symbol} on ${params.buy_venue}, sold on ${params.sell_venue}`,
       direction: "Spot Cash Arb",
-      trigger_spread_bps: 8.5,
+      trigger_spread_bps: params.net_spread_bps ?? 8.5,
       baseline_mean_spread_bps: 4.0,
       position_step: 1,
       max_units: 1,
@@ -682,111 +586,136 @@ class BrowserMockEngine {
       direction: "Spot Cash Arb",
       venue_a: params.buy_venue,
       venue_b: params.sell_venue,
-      spread_bps: 8.5,
-      realized_profit_usd: profit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Spot Bot execution successful: +$${profit.toFixed(2)} USD (+8.5 bps)`,
+      spread_bps: params.net_spread_bps ?? 8.5,
+      realized_profit_usd: Math.round(profit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Spot Bot execution successful: +$${profit.toFixed(2)} USD`,
     };
   }
 
-  scanFundingOpportunities(symbol: string, tradeSizeUsd: number): FundingOpportunityDto[] {
-    return [
-      {
-        id: `${symbol}-Lighter-Hyperliquid`,
-        symbol,
-        long_venue: "Lighter",
-        short_venue: "Hyperliquid",
-        net_rate_8h_pct: 0.021,
-        net_apr_pct: 22.99,
-        net_apy_pct: 25.84,
-        round_trip_fee_bps: 3.5,
-        break_even_hours: 13.3,
-        estimated_daily_income_usd: (tradeSizeUsd * 0.00021 * 3),
-        trade_size_usd: tradeSizeUsd,
-      },
-      {
-        id: `${symbol}-Robinhood-Hyperliquid`,
-        symbol,
-        long_venue: "Robinhood EVM",
-        short_venue: "Hyperliquid",
-        net_rate_8h_pct: 0.017,
-        net_apr_pct: 18.61,
-        net_apy_pct: 20.45,
-        round_trip_fee_bps: 3.5,
-        break_even_hours: 16.5,
-        estimated_daily_income_usd: (tradeSizeUsd * 0.00017 * 3),
-        trade_size_usd: tradeSizeUsd,
-      },
-      {
-        id: `${symbol}-Vanta-Hyperliquid`,
-        symbol,
-        long_venue: "Vanta.exchange",
-        short_venue: "Hyperliquid",
-        net_rate_8h_pct: 0.012,
-        net_apr_pct: 13.14,
-        net_apy_pct: 14.04,
-        round_trip_fee_bps: 3.5,
-        break_even_hours: 23.3,
-        estimated_daily_income_usd: (tradeSizeUsd * 0.00012 * 3),
-        trade_size_usd: tradeSizeUsd,
-      },
+  async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
+    const baseCoin = symbol.split("-")[0].toUpperCase();
+    const fundingRates = await getLiveHyperliquidFunding();
+    const hlRate8h = fundingRates[baseCoin] ?? 0.015;
+
+    const venues = [
+      { long: "Lighter", short: "Hyperliquid", rateMultiplier: 0.85 },
+      { long: "Robinhood EVM", short: "Hyperliquid", rateMultiplier: 0.70 },
+      { long: "Vanta.exchange", short: "Hyperliquid", rateMultiplier: 0.55 },
     ];
+
+    return venues.map((v) => {
+      const netRate8h = Math.abs(hlRate8h * (1.0 - v.rateMultiplier));
+      const netApr = netRate8h * 3 * 365;
+      const netApy = ((1 + netRate8h / 100) ** (3 * 365) - 1) * 100;
+      const dailyIncome = tradeSizeUsd * (netRate8h / 100) * 3;
+      const breakEvenHours = netRate8h > 0 ? (3.5 / (netRate8h * 10000)) * 8 : 24.0;
+
+      return {
+        id: `${symbol}-${v.long.replace(/\s+/g, "")}-${v.short}`,
+        symbol,
+        long_venue: v.long,
+        short_venue: v.short,
+        net_rate_8h_pct: Math.round(netRate8h * 10000) / 10000,
+        net_apr_pct: Math.round(netApr * 100) / 100,
+        net_apy_pct: Math.round(netApy * 100) / 100,
+        round_trip_fee_bps: 3.5,
+        break_even_hours: Math.round(breakEvenHours * 10) / 10,
+        estimated_daily_income_usd: Math.round(dailyIncome * 100) / 100,
+        trade_size_usd: tradeSizeUsd,
+      };
+    });
   }
 
-  scanPredictionOpportunities(market: string): PredictionOpportunityDto[] {
-    const list: PredictionOpportunityDto[] = [
-      {
-        id: "FED-RATE-CUT-MAY-Poly-Kalshi",
-        market_title: "FED-RATE-CUT-MAY",
-        venue_a: "Polymarket",
-        venue_b: "Kalshi",
-        strategy: "Synthetic Binary Parity",
-        buy_yes_venue: "Polymarket",
-        buy_no_venue: "Kalshi",
-        yes_price_cents: 44.0,
-        no_price_cents: 51.0,
-        total_cost_cents: 95.0,
-        guaranteed_payout_cents: 100.0,
-        net_profit_cents: 5.0,
-        roi_pct: 5.26,
-        has_arbitrage: true,
-      },
-      {
-        id: "BTC-OVER-70K-Q2-Poly-Kalshi",
-        market_title: "BTC-OVER-70K-Q2",
-        venue_a: "Polymarket",
-        venue_b: "Kalshi",
-        strategy: "Synthetic Binary Parity",
-        buy_yes_venue: "Kalshi",
-        buy_no_venue: "Polymarket",
-        yes_price_cents: 58.0,
-        no_price_cents: 38.0,
-        total_cost_cents: 96.0,
-        guaranteed_payout_cents: 100.0,
-        net_profit_cents: 4.0,
-        roi_pct: 4.17,
-        has_arbitrage: true,
-      },
-      {
-        id: "ETH-ETF-INFLOW-Poly-Kalshi",
-        market_title: "ETH-ETF-NET-INFLOW",
-        venue_a: "Polymarket",
-        venue_b: "Kalshi",
-        strategy: "Synthetic Binary Parity",
-        buy_yes_venue: "Polymarket",
-        buy_no_venue: "Kalshi",
-        yes_price_cents: 35.0,
-        no_price_cents: 61.0,
-        total_cost_cents: 96.0,
-        guaranteed_payout_cents: 100.0,
-        net_profit_cents: 4.0,
-        roi_pct: 4.17,
-        has_arbitrage: true,
-      },
-    ];
+  async scanPredictionOpportunities(market: string): Promise<PredictionOpportunityDto[]> {
+    const opps: PredictionOpportunityDto[] = [];
+    try {
+      const resp = await fetch("https://gamma-api.polymarket.com/events?closed=false&limit=15");
+      if (resp.ok) {
+        const events = await resp.json();
+        if (Array.isArray(events)) {
+          for (const ev of events) {
+            const m = ev.markets?.[0];
+            if (!m) continue;
+            let prices: number[] = [];
+            if (typeof m.outcomePrices === "string") {
+              try { prices = JSON.parse(m.outcomePrices).map(Number); } catch { /* ignore */ }
+            } else if (Array.isArray(m.outcomePrices)) {
+              prices = m.outcomePrices.map(Number);
+            }
+            if (prices.length >= 2) {
+              const yesCents = Math.round((prices[0] || 0.5) * 1000) / 10;
+              const noCents = Math.round((prices[1] || 0.5) * 1000) / 10;
+              const totalCost = yesCents + noCents;
+              const netProfit = Math.max(0, 100.0 - totalCost);
+              const roi = totalCost > 0 ? (netProfit / totalCost) * 100 : 0;
+              const title = ev.title || m.question || "Prediction Market";
 
-    if (!market) return list;
-    return list.filter((p) => p.market_title.toLowerCase().includes(market.toLowerCase()));
+              if (!market || title.toLowerCase().includes(market.toLowerCase())) {
+                opps.push({
+                  id: `poly-${ev.id || m.id}`,
+                  market_title: title,
+                  venue_a: "Polymarket",
+                  venue_b: "Kalshi",
+                  strategy: "Synthetic Binary Parity",
+                  buy_yes_venue: "Polymarket",
+                  buy_no_venue: "Kalshi",
+                  yes_price_cents: yesCents,
+                  no_price_cents: noCents,
+                  total_cost_cents: totalCost,
+                  guaranteed_payout_cents: 100.0,
+                  net_profit_cents: Math.round(netProfit * 10) / 10,
+                  roi_pct: Math.round(roi * 100) / 100,
+                  has_arbitrage: netProfit > 0,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // network fallback
+    }
+
+    if (opps.length === 0) {
+      const fallbackList: PredictionOpportunityDto[] = [
+        {
+          id: "FED-RATE-CUT-MAY-Poly-Kalshi",
+          market_title: "FED-RATE-CUT-MAY",
+          venue_a: "Polymarket",
+          venue_b: "Kalshi",
+          strategy: "Synthetic Binary Parity",
+          buy_yes_venue: "Polymarket",
+          buy_no_venue: "Kalshi",
+          yes_price_cents: 44.0,
+          no_price_cents: 51.0,
+          total_cost_cents: 95.0,
+          guaranteed_payout_cents: 100.0,
+          net_profit_cents: 5.0,
+          roi_pct: 5.26,
+          has_arbitrage: true,
+        },
+        {
+          id: "BTC-OVER-70K-Q2-Poly-Kalshi",
+          market_title: "BTC-OVER-70K-Q2",
+          venue_a: "Polymarket",
+          venue_b: "Kalshi",
+          strategy: "Synthetic Binary Parity",
+          buy_yes_venue: "Kalshi",
+          buy_no_venue: "Polymarket",
+          yes_price_cents: 58.0,
+          no_price_cents: 38.0,
+          total_cost_cents: 96.0,
+          guaranteed_payout_cents: 100.0,
+          net_profit_cents: 4.0,
+          roi_pct: 4.17,
+          has_arbitrage: true,
+        },
+      ];
+      return market ? fallbackList.filter((p) => p.market_title.toLowerCase().includes(market.toLowerCase())) : fallbackList;
+    }
+
+    return opps;
   }
 
   runStatArbStep(step: number, priceY: number, priceX: number): StatArbStepResultDto {
@@ -860,47 +789,6 @@ class BrowserMockEngine {
     };
   }
 
-  runSimStep(symbol: string, targetBps: number, orderQty: number): SimStepResultDto {
-    this.simCycle += 1;
-    const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
-    const base = ticker ? ticker.basePrice : 100.0;
-    const spreadBps = targetBps + 4.5 + Math.random() * 5.0;
-    const profit = Math.max(0.5, (spreadBps / 10000) * base * orderQty - 2.1);
-    this.pnl += profit;
-
-    const log: ExecutionLogEntry = {
-      id: `exec-${this.simCycle}`,
-      timestamp: new Date().toISOString(),
-      trade_type: "Spatial",
-      symbol,
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      leg_a_status: "FILLED",
-      leg_b_status: "FILLED",
-      success: true,
-      gross_profit: profit + 2.1,
-      fees: 2.1,
-      net_profit: profit,
-      latency_us: Math.floor(100 + Math.random() * 40),
-      note: `Atomically captured spread of ${spreadBps.toFixed(1)} BPS (+${profit.toFixed(2)})`,
-    };
-    this.logs.unshift(log);
-
-    return {
-      cycle: this.simCycle,
-      opportunity_found: true,
-      execution_success: true,
-      trade_type: "Spatial Arb",
-      direction: "BuyASellB",
-      venue_a: "Hyperliquid",
-      venue_b: "Lighter",
-      spread_bps: spreadBps,
-      realized_profit_usd: profit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Atomically captured spread of ${spreadBps.toFixed(2)} BPS (+$${profit.toFixed(2)})`,
-    };
-  }
-
   executeSpatialArbitrage(
     symbol: string,
     buyVenue: string,
@@ -916,7 +804,7 @@ class BrowserMockEngine {
     this.simCycle += 1;
     const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
     const base = ticker ? ticker.basePrice : 100.0;
-    const spreadBps = triggerSpreadBps ?? (14.8 + Math.random() * 5.2);
+    const spreadBps = triggerSpreadBps ?? 14.8;
     const grossProfit = (spreadBps / 10000) * base * orderQty;
     const fees = 2.1;
     const netProfit = grossProfit - fees;
@@ -932,11 +820,11 @@ class BrowserMockEngine {
       leg_a_status: "FILLED",
       leg_b_status: "FILLED",
       success: true,
-      gross_profit: grossProfit,
+      gross_profit: Math.round(grossProfit * 100) / 100,
       fees,
-      net_profit: netProfit,
-      latency_us: Math.floor(95 + Math.random() * 30),
-      note: `Spatial captured: Buy ${buyVenue} / Sell ${sellVenue} (+${netProfit.toFixed(2)} USD)`,
+      net_profit: Math.round(netProfit * 100) / 100,
+      latency_us: 115,
+      note: `Paper spatial fill: Buy ${buyVenue} / Sell ${sellVenue} (+${netProfit.toFixed(2)} USD)`,
       direction: direction ?? "Divergence Entry",
       trigger_spread_bps: spreadBps,
       baseline_mean_spread_bps: baselineMeanSpreadBps,
@@ -945,6 +833,7 @@ class BrowserMockEngine {
       nominal_hurdle_bps: nominalHurdleBps,
     };
     this.logs.unshift(log);
+    if (this.logs.length > 100) this.logs.pop();
 
     return {
       cycle: this.simCycle,
@@ -955,9 +844,9 @@ class BrowserMockEngine {
       venue_a: buyVenue,
       venue_b: sellVenue,
       spread_bps: spreadBps,
-      realized_profit_usd: netProfit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Executed atomic spatial arb on ${symbol} between ${buyVenue} and ${sellVenue}. Net profit: $${netProfit.toFixed(2)}`,
+      realized_profit_usd: Math.round(netProfit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Paper executed atomic spatial arb on ${symbol} between ${buyVenue} and ${sellVenue}. Net profit: $${netProfit.toFixed(2)}`,
     };
   }
 
@@ -972,7 +861,7 @@ class BrowserMockEngine {
     this.simCycle += 1;
     const tickerLong = PERP_TICKERS.find((t) => t.symbol === longSymbol);
     const baseLong = tickerLong ? tickerLong.basePrice : 100.0;
-    const spreadBps = netSpreadBps ?? (15.5 + Math.random() * 6.0);
+    const spreadBps = netSpreadBps ?? 15.5;
     const grossProfit = Math.max(0.5, (spreadBps / 10000) * baseLong * orderQty);
     const fees = 2.1;
     const netProfit = grossProfit - fees;
@@ -988,13 +877,14 @@ class BrowserMockEngine {
       leg_a_status: "FILLED",
       leg_b_status: "FILLED",
       success: true,
-      gross_profit: grossProfit,
+      gross_profit: Math.round(grossProfit * 100) / 100,
       fees,
-      net_profit: netProfit,
-      latency_us: Math.floor(105 + Math.random() * 30),
-      note: `Cross-ticker relative arb: Buy ${longSymbol} (${longVenue}) / Sell ${shortSymbol} (${shortVenue}) (+${netProfit.toFixed(2)} USD)`,
+      net_profit: Math.round(netProfit * 100) / 100,
+      latency_us: 108,
+      note: `Paper cross-ticker relative arb: Buy ${longSymbol} (${longVenue}) / Sell ${shortSymbol} (${shortVenue}) (+${netProfit.toFixed(2)} USD)`,
     };
     this.logs.unshift(log);
+    if (this.logs.length > 100) this.logs.pop();
 
     return {
       cycle: this.simCycle,
@@ -1005,9 +895,9 @@ class BrowserMockEngine {
       venue_a: `${longSymbol} (${longVenue})`,
       venue_b: `${shortSymbol} (${shortVenue})`,
       spread_bps: spreadBps,
-      realized_profit_usd: netProfit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Executed cross-ticker pair arb! Long ${longSymbol} on ${longVenue} / Short ${shortSymbol} on ${shortVenue}. Net profit: $${netProfit.toFixed(2)}`,
+      realized_profit_usd: Math.round(netProfit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Paper executed cross-ticker pair arb! Long ${longSymbol} on ${longVenue} / Short ${shortSymbol} on ${shortVenue}. Net profit: $${netProfit.toFixed(2)}`,
     };
   }
 
@@ -1026,13 +916,14 @@ class BrowserMockEngine {
       leg_a_status: "FILLED",
       leg_b_status: "FILLED",
       success: true,
-      gross_profit: netProfit + 1.8,
+      gross_profit: Math.round((netProfit + 1.8) * 100) / 100,
       fees: 1.8,
-      net_profit: netProfit,
-      latency_us: Math.floor(80 + Math.random() * 25),
-      note: `Carry opened: Long ${longVenue} / Short ${shortVenue} for ${symbol}`,
+      net_profit: Math.round(netProfit * 100) / 100,
+      latency_us: 88,
+      note: `Paper carry opened: Long ${longVenue} / Short ${shortVenue} for ${symbol}`,
     };
     this.logs.unshift(log);
+    if (this.logs.length > 100) this.logs.pop();
 
     return {
       cycle: this.simCycle,
@@ -1043,9 +934,9 @@ class BrowserMockEngine {
       venue_a: longVenue,
       venue_b: shortVenue,
       spread_bps: 18.5,
-      realized_profit_usd: netProfit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Opened delta-neutral funding carry position of $${tradeSizeUsd.toFixed(2)} on ${symbol}`,
+      realized_profit_usd: Math.round(netProfit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Paper opened delta-neutral funding carry position of $${tradeSizeUsd.toFixed(2)} on ${symbol}`,
     };
   }
 
@@ -1065,13 +956,14 @@ class BrowserMockEngine {
       leg_a_status: "FILLED",
       leg_b_status: "FILLED",
       success: true,
-      gross_profit: netProfit,
+      gross_profit: Math.round(netProfit * 100) / 100,
       fees: 0.0,
-      net_profit: netProfit,
-      latency_us: Math.floor(120 + Math.random() * 40),
-      note: `Synthetic parity filled: Buy YES (${buyYesVenue}) + Buy NO (${buyNoVenue})`,
+      net_profit: Math.round(netProfit * 100) / 100,
+      latency_us: 125,
+      note: `Paper synthetic parity filled: Buy YES (${buyYesVenue}) + Buy NO (${buyNoVenue})`,
     };
     this.logs.unshift(log);
+    if (this.logs.length > 100) this.logs.pop();
 
     return {
       cycle: this.simCycle,
@@ -1082,9 +974,9 @@ class BrowserMockEngine {
       venue_a: buyYesVenue,
       venue_b: buyNoVenue,
       spread_bps: 450.0,
-      realized_profit_usd: netProfit,
-      total_cumulative_pnl_usd: this.pnl,
-      message: `Executed atomic parity trade on ${marketTitle}. Locked in payout with profit $${netProfit.toFixed(2)}`,
+      realized_profit_usd: Math.round(netProfit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Paper executed atomic parity trade on ${marketTitle}. Locked in payout with profit $${netProfit.toFixed(2)}`,
     };
   }
 
@@ -1437,11 +1329,6 @@ export const api = {
     return mockEngine.fitOuProcess(prices, dt);
   },
 
-  async runSimulationStep(symbol: string, targetBps: number, orderQty: number): Promise<SimStepResultDto> {
-    const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<SimStepResultDto>("run_simulation_step", { symbol, targetBps, orderQty });
-    return mockEngine.runSimStep(symbol, targetBps, orderQty);
-  },
 
   async executeSpatialArbitrage(
     symbol: string,
