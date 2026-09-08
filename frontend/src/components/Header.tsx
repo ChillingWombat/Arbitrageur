@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
+import { ArbitragerLogo } from "./ArbitragerLogo";
 
 interface HeaderProps {
   status: SystemStatusDto | null;
@@ -38,14 +39,14 @@ export const Header: React.FC<HeaderProps> = ({
       <header className="h-16 border-b border-surface-border bg-surface px-4 lg:px-6 flex items-center justify-between select-none gap-3">
         {/* Left: Minimalist Branding */}
         <div className="flex items-center space-x-3 shrink-0">
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-accent" />
+          <div
+            className="flex items-center space-x-2.5 cursor-default"
+            title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER"}
+          >
+            <ArbitragerLogo className="w-5 h-5 text-accent shrink-0" />
             <span className="font-bold tracking-tight text-sm font-mono text-slate-900">
               ARBITRAGER
             </span>
-            {refreshing && (
-              <span className="w-1.5 h-1.5 rounded-full bg-accent animate-ping" title="Syncing telemetry" />
-            )}
           </div>
         </div>
 
