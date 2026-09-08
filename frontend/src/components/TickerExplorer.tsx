@@ -325,7 +325,6 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     <span className="font-bold text-xs text-slate-900 tracking-tight shrink-0">
                       {ticker.base}
                     </span>
-                    <span className="text-[10px] text-slate-500 font-mono shrink-0">-{ticker.quote}</span>
                     <span className="text-[9px] px-1 py-0.2 rounded bg-slate-200/60 text-slate-600 font-medium shrink-0">
                       PERP
                     </span>
