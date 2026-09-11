@@ -42,9 +42,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         }
       }}
     >
-      <div className="bg-surface border border-surface-border rounded-2xl w-full max-w-5xl max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+      <div className="bg-surface border border-surface-border rounded-2xl w-[1040px] h-[720px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
         {/* Modal Top Header Bar */}
-        <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+        <div className="flex items-center justify-between px-6 py-3 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
               <SettingsIcon className="w-4 h-4" />
@@ -53,9 +53,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <h2 className="text-sm font-bold font-mono text-slate-900 leading-tight">
                 System Engine Settings
               </h2>
-              <p className="text-[11px] text-slate-500 font-mono">
-                API credentials, encrypted vault, execution parameters & network configuration
-              </p>
             </div>
           </div>
 
@@ -66,7 +63,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition border border-transparent hover:border-surface-border"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Settings (ESC)"
             >
               <X className="w-4 h-4" />
@@ -74,8 +71,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Scrollable Body */}
-        <div className="flex-1 overflow-y-auto">
+        {/* Modal Fixed Container */}
+        <div className="flex-1 min-h-0 overflow-hidden">
           <EngineSettings
             systemStatus={systemStatus}
             onClose={onClose}

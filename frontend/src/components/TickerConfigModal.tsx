@@ -19,6 +19,8 @@ import {
 } from "../types/tickers";
 import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
 import { api } from "../services/api";
+import { InfoTooltip } from "./InfoTooltip";
+import { SwitchToggle } from "./SwitchToggle";
 
 export interface TickerConfigModalProps {
   isOpen: boolean;
@@ -26,6 +28,8 @@ export interface TickerConfigModalProps {
   tickerSymbol: string;
   initialStrategy?: "futures" | "funding" | "spot" | string;
   strategyConfig?: TickerStrategyConfigDto;
+  isEnabled?: boolean;
+  onToggleEnabled?: (enabled: boolean) => void;
   onSaveConfig?: (newConfig: TickerStrategyConfigDto) => Promise<void> | void;
 }
 
@@ -47,6 +51,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   tickerSymbol,
   initialStrategy = "futures",
   strategyConfig,
+  isEnabled,
+  onToggleEnabled,
   onSaveConfig,
 }) => {
   // Strategy Tab State
@@ -266,14 +272,25 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center space-x-2">
-                <span>Base Price: ${formatCurrencyPrice(ticker.basePrice)}</span>
+                <span>Base Price: {formatCurrencyPrice(ticker.basePrice)}</span>
                 <span>•</span>
                 <span>Venues: {ticker.venues.join(", ")}</span>
               </p>
             </div>
           </div>
 
-          <div className="flex items-center space-x-2.5">
+          <div className="flex items-center space-x-3">
+            {onToggleEnabled && (
+              <div className="flex items-center space-x-2 mr-1">
+                <span className="text-xs font-mono text-slate-600 font-medium">Strategy</span>
+                <SwitchToggle
+                  checked={isEnabled ?? true}
+                  onChange={onToggleEnabled}
+                  size="sm"
+                  showStatusText={true}
+                />
+              </div>
+            )}
             <span className="hidden sm:inline-block text-[10px] font-mono text-slate-400 bg-surface-raised px-2 py-0.5 rounded border border-surface-border">
               ESC to close
             </span>
@@ -376,17 +393,18 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <TrendingUp className="w-3.5 h-3.5 text-accent" />
                     <span>Hurdle Rate & Dislocation Triggers</span>
+                    <InfoTooltip text="Calculates minimum statistical spread needed for atomic entry." />
                   </h3>
-                  <span className="text-[11px] text-slate-500">
-                    Calculates minimum statistical spread needed for atomic entry
-                  </span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {/* Target Profit Input */}
                   <div className="space-y-1.5">
                     <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
-                      <span>Target Profit (BPS)</span>
+                      <span className="flex items-center">
+                        Target Profit (BPS)
+                        <InfoTooltip text="Net profit cushion locked in per round-trip after deducting taker fees and closing spread." />
+                      </span>
                       <span className="text-[10px] text-slate-400">0.1 - 100 bps</span>
                     </label>
                     <div className="flex items-center space-x-2">
@@ -401,15 +419,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       />
                       <span className="text-xs text-slate-500 font-semibold">bps</span>
                     </div>
-                    <p className="text-[10px] text-slate-500 leading-tight">
-                      Net profit cushion locked in per round-trip after deducting taker fees and closing spread.
-                    </p>
                   </div>
 
                   {/* Window Percentile Filter */}
                   <div className="space-y-1.5">
                     <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
-                      <span>Historical Window Percentile</span>
+                      <span className="flex items-center">
+                        Historical Window Percentile
+                        <InfoTooltip text="Strictly filters entries to spreads at or above this percentile of the rolling sliding window." />
+                      </span>
                       <span className="text-[10px] text-slate-400">Min 50%</span>
                     </label>
                     <select
@@ -423,9 +441,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         </option>
                       ))}
                     </select>
-                    <p className="text-[10px] text-slate-500 leading-tight">
-                      Strictly filters entries to spreads at or above this percentile of the rolling sliding window.
-                    </p>
                   </div>
                 </div>
 
@@ -448,11 +463,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
                 {/* Execution Mode */}
                 <div className="pt-2 border-t border-surface-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                  <div>
+                  <div className="flex items-center">
                     <span className="text-xs font-semibold text-slate-800">Execution Mode</span>
-                    <p className="text-[10px] text-slate-500">
-                      Choose whether to unwind automatically on convergence to zero.
-                    </p>
+                    <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Double-Way) or maintain inventory until manual rebalancing (Single-Way)." />
                   </div>
                   <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
                     <button
@@ -489,8 +502,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-accent" />
                     <span>Position Sizing & Grid Accumulation</span>
+                    <InfoTooltip text="Cross-exchange compatible lot sizing, maximum accumulated grid units, and position clearing." />
                   </h3>
-                  <span className="text-[11px] text-slate-500">Cross-Exchange Compatible Specs</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -583,8 +596,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
                     <span>Safe Effective Leverage & Margin Requirement</span>
+                    <InfoTooltip text="Calculates minimum safe leverage ratio and margin requirements across enabled exchanges." />
                   </h3>
-                  <span className="text-[11px] text-slate-500">Auto-clamped for liquidation safety</span>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">

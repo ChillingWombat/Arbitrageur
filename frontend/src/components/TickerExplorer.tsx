@@ -1,15 +1,26 @@
 import React, { useState, useMemo, useRef, useEffect } from "react";
-import { Search, X, ArrowDownAZ, Activity, DollarSign, Settings, SlidersHorizontal, ArrowUpDown, Check } from "lucide-react";
+import {
+  Search,
+  X,
+  ArrowDownAZ,
+  Activity,
+  DollarSign,
+  Settings,
+  SlidersHorizontal,
+  ArrowUpDown,
+  Check,
+  AlertTriangle,
+} from "lucide-react";
 import {
   PERP_TICKERS,
-  formatCurrencyPrice,
   formatCurrencyPnl,
   getTickerActiveVenues,
   type PerpTicker,
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
-import type { ExecutionLogEntry, TickerStrategyConfigDto, SystemStatusDto } from "../types";
+import { SwitchToggle } from "./SwitchToggle";
+import type { ExecutionLogEntry, TickerStrategyConfigDto, SystemStatusDto, RiskOverviewDto } from "../types";
 
 interface TickerExplorerProps {
   selectedSymbol: string;
@@ -17,6 +28,9 @@ interface TickerExplorerProps {
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
   status?: SystemStatusDto | null;
+  riskData?: RiskOverviewDto | null;
+  enabledTickers?: Set<string>;
+  onToggleTicker?: (symbol: string) => void;
   onOpenSettings?: () => void;
   onOpenTickerConfig?: (symbol: string) => void;
   availableTickers?: PerpTicker[];
@@ -29,6 +43,9 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   executionLogs,
   strategyConfigs: _strategyConfigs,
   status,
+  riskData,
+  enabledTickers,
+  onToggleTicker,
   onOpenSettings,
   onOpenTickerConfig,
   availableTickers,
@@ -55,9 +72,9 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
     };
   }, [showSortMenu]);
 
-  // Compute stats (transaction count and net profit) per ticker from execution logs
+  // Compute stats (transaction count, net profit, net bps, and risk/balance issues) per ticker
   const tickersWithStats: TickerWithStats[] = useMemo(() => {
-    const statsMap = new Map<string, { count: number; pnl: number; lastTime?: string }>();
+    const statsMap = new Map<string, { count: number; pnl: number; pnlBps: number; lastTime?: string }>();
 
     for (const log of executionLogs) {
       if (!log.symbol) continue;
@@ -68,9 +85,12 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         baseKey = baseKey.slice(1);
       }
 
-      const cur = statsMap.get(baseKey) || { count: 0, pnl: 0 };
+      const cur = statsMap.get(baseKey) || { count: 0, pnl: 0, pnlBps: 0 };
       cur.count += 1;
       cur.pnl += log.net_profit || 0;
+      if (log.trigger_spread_bps) {
+        cur.pnlBps += log.trigger_spread_bps;
+      }
       if (!cur.lastTime || log.timestamp > cur.lastTime) {
         cur.lastTime = log.timestamp;
       }
@@ -79,15 +99,40 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
     const baseList = availableTickers ?? PERP_TICKERS;
     return baseList.map((t) => {
-      const stat = statsMap.get(t.base.toUpperCase()) || { count: 0, pnl: 0 };
+      const stat = statsMap.get(t.base.toUpperCase()) || { count: 0, pnl: 0, pnlBps: 0 };
+      const netProfit = Math.round(stat.pnl * 100) / 100;
+      const netProfitBps =
+        stat.count > 0 && stat.pnlBps
+          ? Math.round((stat.pnlBps / stat.count) * 10) / 10
+          : t.basePrice > 0 && Math.abs(netProfit) > 0
+          ? Math.round((netProfit / (t.basePrice * 0.05)) * 10000 * 10) / 10
+          : 0;
+
+      // Detect if positions are not balanced or there are other issues
+      const netDelta = riskData?.net_deltas?.find((d) => d.asset.toUpperCase() === t.base.toUpperCase());
+      const hasUnbalancedPosition = Boolean(
+        netDelta && (!netDelta.is_neutral || Math.abs(netDelta.net_quantity) > 0.0001)
+      );
+      const config = _strategyConfigs?.get(t.symbol);
+      const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > config.maxAccumulatedUnits);
+      const hasIssue = hasUnbalancedPosition || hasConfigIssue;
+      const issueDescription = hasUnbalancedPosition
+        ? `Unbalanced Position (Net Δ: ${netDelta?.net_quantity.toFixed(3)} ${t.base})`
+        : hasConfigIssue
+        ? "Exceeded Max Grid Units"
+        : undefined;
+
       return {
         ...t,
         tradeCount: stat.count,
-        netProfit: Math.round(stat.pnl * 100) / 100,
+        netProfit,
+        netProfitBps,
+        hasIssue,
+        issueDescription,
         lastTradeTime: stat.lastTime,
       };
     });
-  }, [availableTickers, executionLogs]);
+  }, [availableTickers, executionLogs, riskData, _strategyConfigs]);
 
   // Filter and sort the tickers
   const processedTickers = useMemo(() => {
@@ -108,8 +153,11 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       });
     }
 
-    // 2. Sort
+    // 2. Sort: Issues ALWAYS prioritized at the top of the list!
     return [...list].sort((a, b) => {
+      if (a.hasIssue && !b.hasIssue) return -1;
+      if (!a.hasIssue && b.hasIssue) return 1;
+
       if (sortOption === "alpha") {
         // Alphabetical A-Z (default)
         return a.symbol.localeCompare(b.symbol);
@@ -159,24 +207,6 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       return 0;
     });
   }, [tickersWithStats, searchQuery, sortOption, activeVenueCodes]);
-
-  const venueBadgeColor = (v: string) => {
-    switch (v) {
-      case "HL":
-        return "bg-teal-500/10 text-teal-600 border-teal-500/20";
-      case "LGT":
-        return "bg-indigo-500/10 text-indigo-600 border-indigo-500/20";
-      case "VNT":
-        return "bg-emerald-500/10 text-emerald-600 border-emerald-500/20";
-      case "RH":
-        return "bg-amber-500/10 text-amber-600 border-amber-500/20";
-      case "KRK":
-        return "bg-purple-500/10 text-purple-600 border-purple-500/20";
-      default:
-        return "bg-slate-500/10 text-slate-600 border-slate-500/20";
-    }
-  };
-
 
   const totalAvailableCount = (availableTickers ?? PERP_TICKERS).length;
 
@@ -304,13 +334,10 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         </div>
       </div>
 
-      {/* WeBull Column Subheader */}
+      {/* Column Subheader */}
       <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[10px] font-mono text-slate-600 font-semibold uppercase tracking-wider">
-        <span>Symbol / Venues</span>
-        <div className="flex items-center space-x-4">
-          <span>Last Price</span>
-          <span className="w-12 text-right">Net PnL</span>
-        </div>
+        <span>Symbol</span>
+        <span className="text-right">Net PnL (USD / BPS)</span>
       </div>
 
       {/* Scrollable Ticker List */}
@@ -344,7 +371,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
             const hasTrades = ticker.tradeCount > 0;
             const isProfit = ticker.netProfit > 0;
             const isLoss = ticker.netProfit < 0;
-            const activeVenues = activeVenueCodes ? getTickerActiveVenues(ticker, activeVenueCodes) : ticker.venues;
+            const isEnabled = enabledTickers ? enabledTickers.has(ticker.symbol) : true;
+            const hasIssue = ticker.hasIssue;
 
             return (
               <div
@@ -358,56 +386,81 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     onSelectTicker(ticker.symbol);
                   }
                 }}
-                className={`w-full px-2.5 py-1.5 rounded-lg border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
-                  isSelected
+                className={`w-full px-2.5 py-2 rounded-lg border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
+                  hasIssue
+                    ? "bg-red-50/90 border-red-300 text-red-900 shadow-2xs hover:bg-red-100/90"
+                    : !isEnabled
+                    ? "opacity-40 grayscale bg-slate-100/60 border-slate-200 hover:opacity-60"
+                    : isSelected
                     ? "bg-accent-dim/70 border-accent/60 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300"
                 }`}
               >
-                {/* Left: Symbol & Venue pills */}
-                <div className="flex flex-col min-w-0 pr-1">
-                  <div className="flex items-center space-x-1.5">
-                    <span className="font-bold text-xs text-slate-900 tracking-tight">
+                {/* Left: Symbol & Status */}
+                <div className="flex items-center space-x-2 min-w-0 pr-1">
+                  {hasIssue ? (
+                    <span title={ticker.issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
+                      <AlertTriangle className="w-3.5 h-3.5 text-loss animate-pulse" />
+                    </span>
+                  ) : null}
+                  <div className="flex items-center space-x-1">
+                    <span className={`font-bold text-xs tracking-tight ${hasIssue ? "text-red-950 font-black" : "text-slate-900"}`}>
                       {ticker.base}
                     </span>
                     <span className="text-[8px] px-1 py-0.2 rounded bg-slate-200/70 text-slate-600 font-semibold">
                       PERP
                     </span>
                   </div>
-                  <div className="flex items-center space-x-0.5 mt-0.5">
-                    {activeVenues.map((v) => (
-                      <span
-                        key={v}
-                        className={`px-1 py-0.2 rounded text-[8px] font-medium border leading-tight ${venueBadgeColor(
-                          v
-                        )}`}
-                        title={`Available on ${v}`}
-                      >
-                        {v}
-                      </span>
-                    ))}
-                  </div>
+                  {hasIssue && (
+                    <span className="text-[8px] font-bold px-1.5 py-0.2 rounded bg-red-100 text-red-700 border border-red-200 uppercase">
+                      ISSUE
+                    </span>
+                  )}
+                  {!isEnabled && (
+                    <span className="text-[8px] font-medium px-1 py-0.2 rounded bg-slate-200/60 text-slate-500 uppercase">
+                      OFF
+                    </span>
+                  )}
                 </div>
 
-                {/* Right: Last Price + WeBull-style PnL pill + Configure button */}
+                {/* Right: Net PnL (USD + BPS) & Actions */}
                 <div className="flex items-center space-x-2 shrink-0">
                   <div className="flex flex-col items-end">
-                    <span className="text-[11px] font-bold text-slate-900 tabular-nums">
-                      {formatCurrencyPrice(ticker.basePrice)}
-                    </span>
                     <span
-                      className={`text-[9px] font-mono font-semibold px-1.5 py-0.2 rounded mt-0.5 tabular-nums ${
-                        isProfit
-                          ? "text-profit bg-profit-dim border border-profit-border"
-                          : isLoss
-                          ? "text-loss bg-loss-dim border border-loss-border"
-                          : "text-slate-600 bg-surface-raised border border-surface-border"
+                      className={`text-[11px] font-bold tabular-nums ${
+                        isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-700"
                       }`}
                       title={hasTrades ? `${ticker.tradeCount} txs · ${formatCurrencyPnl(ticker.netProfit)}` : "No trades executed"}
                     >
                       {formatCurrencyPnl(ticker.netProfit)}
                     </span>
+                    <span
+                      className={`text-[9px] font-mono tabular-nums leading-none ${
+                        isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-400"
+                      }`}
+                    >
+                      {ticker.netProfitBps && ticker.netProfitBps > 0
+                        ? `+${ticker.netProfitBps.toFixed(1)} bps`
+                        : ticker.netProfitBps && ticker.netProfitBps < 0
+                        ? `${ticker.netProfitBps.toFixed(1)} bps`
+                        : "0.0 bps"}
+                    </span>
                   </div>
+
+                  {/* On/Off Switch Toggle */}
+                  {onToggleTicker && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      title={isEnabled ? `Switch off ${ticker.symbol}` : `Switch on ${ticker.symbol}`}
+                      className="shrink-0 flex items-center"
+                    >
+                      <SwitchToggle
+                        checked={isEnabled}
+                        onChange={() => onToggleTicker(ticker.symbol)}
+                        size="sm"
+                      />
+                    </div>
+                  )}
 
                   {/* Configure strategy button */}
                   <button

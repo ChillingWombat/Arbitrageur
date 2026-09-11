@@ -12,6 +12,9 @@ export type TickerSortOption = "alpha" | "trades" | "pnl";
 export interface TickerWithStats extends PerpTicker {
   tradeCount: number;
   netProfit: number;
+  netProfitBps?: number;
+  hasIssue?: boolean;
+  issueDescription?: string;
   lastTradeTime?: string;
 }
 

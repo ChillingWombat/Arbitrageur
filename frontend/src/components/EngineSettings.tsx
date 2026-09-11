@@ -19,6 +19,7 @@ import {
 import { api } from "../services/api";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
+import { InfoTooltip } from "./InfoTooltip";
 
 type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
 type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "kraken" | "polymarket" | "kalshi";
@@ -51,10 +52,10 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
           e.stopPropagation();
           onChange(!checked);
         }}
-        className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent/30 ${
+        className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
-          checked ? "bg-accent" : "bg-slate-300"
+          checked ? "bg-emerald-500 border border-emerald-600 shadow-xs" : "bg-slate-200 border border-slate-300"
         }`}
       >
         <span
@@ -65,7 +66,7 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
                 : "w-3.5 h-3.5 translate-x-0.5"
               : checked
               ? "w-4 h-4 translate-x-5"
-              : "w-4 h-4 translate-x-1"
+              : "w-4 h-4 translate-x-0.5"
           }`}
         />
       </button>
@@ -471,103 +472,167 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
 
   return (
-    <div className="p-6 space-y-6 max-w-5xl select-none">
-      {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-2xl border border-surface-border shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center space-x-2">
-            <h2 className="text-base font-bold font-mono text-slate-900">
-              Arbitrager System Engine Settings
-            </h2>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-              {activeVenuesCount} / 7 Venues Enabled ({configuredCount} Configured)
+    <div className="flex h-full min-h-0 overflow-hidden select-none">
+      {/* Left Sidebar Navigation */}
+      <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
+        <div className="space-y-3">
+          <div className="px-2 pt-1 flex items-center justify-between">
+            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+              Sections
+            </span>
+            <span className="text-[10px] font-mono text-slate-500 font-semibold">
+              {activeVenuesCount}/7 active
             </span>
           </div>
-          <p className="text-xs text-slate-500 font-mono mt-1">
-            Zero-seed secure local vault, cross-venue API configuration, network ports, and execution safety
-          </p>
+
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={() => setActiveTab("exchanges")}
+              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+                activeTab === "exchanges"
+                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+              }`}
+            >
+              <div className="flex items-center space-x-2.5">
+                <Key className="w-4 h-4 text-blue-600" />
+                <span>Exchanges</span>
+              </div>
+              <span
+                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+                  activeTab === "exchanges" ? "bg-blue-100 text-blue-700 font-bold" : "bg-slate-200 text-slate-600"
+                }`}
+              >
+                {activeVenuesCount}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("balances")}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+                activeTab === "balances"
+                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+              }`}
+            >
+              <Wallet className="w-4 h-4 text-blue-600" />
+              <span>Balances</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("execution")}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+                activeTab === "execution"
+                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+              }`}
+            >
+              <Sliders className="w-4 h-4 text-blue-600" />
+              <span>Execution</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("network")}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+                activeTab === "network"
+                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+              }`}
+            >
+              <Globe className="w-4 h-4 text-blue-600" />
+              <span>Network & VPS</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab("about")}
+              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+                activeTab === "about"
+                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+              }`}
+            >
+              <Shield className="w-4 h-4 text-blue-600" />
+              <span>About</span>
+            </button>
+          </div>
         </div>
 
-        {/* Section Tabs */}
-        <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-mono border border-slate-200 overflow-x-auto self-start md:self-auto">
-          <button
-            type="button"
-            onClick={() => setActiveTab("exchanges")}
-            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
-              activeTab === "exchanges"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Key className="w-3.5 h-3.5" />
-            <span>Exchanges</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("balances")}
-            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
-              activeTab === "balances"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Wallet className="w-3.5 h-3.5" />
-            <span>Balances</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("execution")}
-            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
-              activeTab === "execution"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Sliders className="w-3.5 h-3.5" />
-            <span>Execution</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("network")}
-            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
-              activeTab === "network"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5" />
-            <span>Network & VPS</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("about")}
-            className={`px-3 py-1.5 rounded-lg transition flex items-center space-x-1.5 whitespace-nowrap ${
-              activeTab === "about"
-                ? "bg-white text-blue-600 font-semibold shadow-xs"
-                : "text-slate-600 hover:text-slate-900"
-            }`}
-          >
-            <Shield className="w-3.5 h-3.5" />
-            <span>About</span>
-          </button>
+        {/* Sidebar Status Footer */}
+        <div className="pt-3 border-t border-surface-border space-y-2">
+          <div className="px-2.5 py-1.5 rounded-lg bg-surface border border-surface-border flex items-center justify-between text-[11px] font-mono">
+            <span className="text-slate-500">Vault</span>
+            <span
+              className={`font-semibold flex items-center space-x-1 ${
+                isVaultLocked ? "text-amber-600" : "text-emerald-600"
+              }`}
+            >
+              {isVaultLocked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+              <span>{isVaultLocked ? "Locked" : "Unlocked"}</span>
+            </span>
+          </div>
+          <div className="px-2.5 py-1 rounded-lg bg-surface border border-surface-border flex items-center justify-between text-[10px] font-mono">
+            <span className="text-slate-500">Mode</span>
+            <span className="font-bold text-blue-700 uppercase">{tradingMode}</span>
+          </div>
         </div>
       </div>
 
-      {errorMsg && (
-        <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{errorMsg}</span>
-        </div>
-      )}
+      {/* Right Content Area */}
+      <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-surface">
+        <form onSubmit={handleSave} className="flex flex-col h-full min-h-0">
+          {/* Active Tab Subheader */}
+          <div className="px-6 py-3.5 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
+            <div>
+              <h3 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
+                <span>
+                  {activeTab === "exchanges" && "Exchange API Credentials & Secure Vault"}
+                  {activeTab === "balances" && "Multi-Venue Balances & Asymmetric Rebalancing"}
+                  {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
+                  {activeTab === "network" && "Network Ports & HSM Signer Configuration"}
+                  {activeTab === "about" && "About Arbitrager & Release Information"}
+                </span>
+                <InfoTooltip
+                  text={
+                    activeTab === "exchanges"
+                      ? "Configure decentralized perps & predictive market API credentials."
+                      : activeTab === "balances"
+                      ? "Monitor collateral distribution and set automated rebalancing thresholds."
+                      : activeTab === "execution"
+                      ? "Calibrate slippage tolerances, minimum depth ratio, and paper/live trading modes."
+                      : activeTab === "network"
+                      ? "Manage local daemon RPC/WS ports and remote Hardware Security Module tokens."
+                      : "Version status, open-source repository, sponsorship, and compliance notices."
+                  }
+                />
+              </h3>
+            </div>
+            {activeTab === "exchanges" && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                {activeVenuesCount} / 7 Venues Enabled ({configuredCount} Configured)
+              </span>
+            )}
+          </div>
 
-      {saved && (
-        <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
-          <CheckCircle2 className="w-4 h-4 shrink-0" />
-          <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
-        </div>
-      )}
+          {/* Scrollable Form Content */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            {errorMsg && (
+              <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </div>
+            )}
 
-      <form onSubmit={handleSave} className="space-y-6">
+            {saved && (
+              <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                <CheckCircle2 className="w-4 h-4 shrink-0" />
+                <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
+              </div>
+            )}
         {/* =================================================================== */}
         {/* SECTION 1: EXCHANGES & SECURE VAULT                                */}
         {/* =================================================================== */}
@@ -1776,54 +1841,56 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             </div>
           </div>
         )}
+      </div>
 
-        {/* Save Bar */}
-        <div className="flex items-center justify-between pt-2">
-          <div className="text-[11px] font-mono text-slate-500 flex items-center space-x-1.5">
-            <Lock className="w-3 h-3 text-slate-400" />
-            <span>Config changes immediately affect live atomic coordinator execution.</span>
-          </div>
-
-          <div className="flex items-center space-x-2.5">
-            {onClose && (
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs"
-              >
-                Done
-              </button>
-            )}
-            <button
-              type="submit"
-              disabled={loading || saving}
-              className="px-6 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50"
-            >
-              {saving ? (
-                <span>Saving...</span>
-              ) : saved ? (
-                <>
-                  <CheckCircle2 className="w-3.5 h-3.5" />
-                  <span>Saved to Engine</span>
-                </>
-              ) : (
-                <span>Save Configuration</span>
-              )}
-            </button>
-          </div>
+      {/* Pinned Save Bar */}
+      <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
+        <div className="text-[11px] font-mono text-slate-500 flex items-center space-x-1.5">
+          <Lock className="w-3 h-3 text-slate-400" />
+          <span className="hidden sm:inline">Config changes immediately affect live atomic coordinator execution.</span>
         </div>
-      </form>
 
-      {/* Vault Unlock Modal */}
-      <VaultUnlockModal
-        isOpen={showVaultModal}
-        vaultStatus={vaultStatus}
-        onClose={() => setShowVaultModal(false)}
-        onSuccess={(status) => {
-          setVaultStatus(status);
-          setShowVaultModal(false);
-        }}
-      />
-    </div>
+        <div className="flex items-center space-x-2.5">
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
+            >
+              Done
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={loading || saving}
+            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+          >
+            {saving ? (
+              <span>Saving...</span>
+            ) : saved ? (
+              <>
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Saved to Engine</span>
+              </>
+            ) : (
+              <span>Save Configuration</span>
+            )}
+          </button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+  {/* Vault Unlock Modal */}
+  <VaultUnlockModal
+    isOpen={showVaultModal}
+    vaultStatus={vaultStatus}
+    onClose={() => setShowVaultModal(false)}
+    onSuccess={(status) => {
+      setVaultStatus(status);
+      setShowVaultModal(false);
+    }}
+  />
+</div>
   );
 };

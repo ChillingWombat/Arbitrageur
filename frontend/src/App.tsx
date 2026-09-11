@@ -46,6 +46,22 @@ export const App: React.FC = () => {
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
   const [executionLogs, setExecutionLogs] = useState<ExecutionLogEntry[]>([]);
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(new Map());
+  const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => {
+    return new Set(PERP_TICKERS.map((t) => t.symbol));
+  });
+
+  const handleToggleTicker = (symbol: string, enabled?: boolean) => {
+    setEnabledTickers((prev) => {
+      const next = new Set(prev);
+      const shouldEnable = enabled !== undefined ? enabled : !next.has(symbol);
+      if (shouldEnable) {
+        next.add(symbol);
+      } else {
+        next.delete(symbol);
+      }
+      return next;
+    });
+  };
 
   const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
@@ -227,6 +243,9 @@ export const App: React.FC = () => {
           executionLogs={executionLogs}
           strategyConfigs={strategyConfigs}
           status={systemStatus}
+          riskData={riskData}
+          enabledTickers={enabledTickers}
+          onToggleTicker={handleToggleTicker}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenTickerConfig={handleOpenTickerConfig}
           availableTickers={availableTickers}
@@ -324,6 +343,8 @@ export const App: React.FC = () => {
         tickerSymbol={tickerConfigModal.symbol}
         initialStrategy={tickerConfigModal.strategy}
         strategyConfig={strategyConfigs.get(tickerConfigModal.symbol)}
+        isEnabled={enabledTickers.has(tickerConfigModal.symbol)}
+        onToggleEnabled={(enabled) => handleToggleTicker(tickerConfigModal.symbol, enabled)}
         onSaveConfig={handleSaveTickerConfig}
       />
     </div>

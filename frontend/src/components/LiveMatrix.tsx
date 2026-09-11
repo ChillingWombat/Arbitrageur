@@ -39,6 +39,8 @@ import {
 } from "../services/matrixQuant";
 import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
 import { TickerStrategyBar } from "./TickerStrategyBar";
+import { InfoTooltip } from "./InfoTooltip";
+import { SwitchToggle } from "./SwitchToggle";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { api } from "../services/api";
 
@@ -692,23 +694,16 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             ))}
           </div>
 
-          {/* Auto-Bot Toggle */}
-          <button
-            onClick={() => setAutoExecute((prev) => !prev)}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold transition ${
-              autoExecute
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100"
-                : "bg-surface-raised text-slate-500 border-surface-border hover:bg-slate-100"
-            }`}
-            title={autoExecute ? "Auto-execution bot active" : "Auto-execution bot paused"}
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                autoExecute ? "bg-emerald-500 animate-pulse" : "bg-slate-400"
-              }`}
+          {/* Auto-Bot Switch Toggle (Green for ON, White for OFF) */}
+          <div className="flex items-center space-x-1.5 px-2 py-0.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
+            <span className="text-xs font-mono font-medium text-slate-700">Auto</span>
+            <SwitchToggle
+              checked={autoExecute}
+              onChange={setAutoExecute}
+              size="sm"
+              showStatusText={true}
             />
-            <span>{autoExecute ? "Auto: ON" : "Auto: PAUSED"}</span>
-          </button>
+          </div>
 
           {/* Scan Button */}
           <button
@@ -763,10 +758,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                 <span className="px-1.5 py-0.2 rounded text-[10px] bg-accent-dim text-accent border border-accent-line font-medium">
                   Rolling {windowOption} Window
                 </span>
+                <InfoTooltip
+                  text={`Row (Y) = LONG (Buy leg) ↓ · Column (X) = SHORT (Sell leg) →. Shows Net BPS after deducting taker fees and closing spread friction, alongside delta (Δ) vs rolling ${windowOption} baseline.`}
+                />
               </h3>
-              <p className="text-[11px] text-slate-500 font-sans mt-0.5">
-                Y = <strong>LONG (Buy) ↓</strong> · X = <strong>SHORT (Sell) →</strong>. Shows Net BPS after friction &amp; Δ vs {windowOption} baseline.
-              </p>
             </div>
 
             <div className="flex items-center space-x-3 text-[11px] font-mono">
