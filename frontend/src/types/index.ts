@@ -1,5 +1,6 @@
 export interface SystemStatusDto {
   is_live_mode: boolean;
+  is_paused?: boolean;
   total_realized_pnl: number;
   total_trades_count: number;
   successful_trades_count: number;
@@ -282,6 +283,8 @@ export interface EngineSettingsDto {
   lighter_spot_enabled?: boolean;
   vanta_enabled?: boolean;
   robinhood_enabled?: boolean;
+  arcus_enabled?: boolean;
+  popdex_enabled?: boolean;
   kraken_enabled?: boolean;
   kraken_spot_enabled?: boolean;
   kraken_futures_enabled?: boolean;
@@ -317,6 +320,16 @@ export interface EngineSettingsDto {
   robinhood_private_key: string;
   robinhood_rpc_url: string;
   robinhood_router: string;
+
+  // Arcus CLOB DEX
+  arcus_api_key?: string;
+  arcus_secret?: string;
+  arcus_url?: string;
+
+  // PopDEX (Arbitrage Protocol)
+  popdex_account_index?: string;
+  popdex_api_key?: string;
+  popdex_url?: string;
 
   // Polymarket CTF CLOB
   polymarket_api_key: string;

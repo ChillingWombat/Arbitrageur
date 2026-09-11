@@ -202,6 +202,8 @@ export function getVenueFeeBps(venueIdOrName: string): number {
   if (v.includes("hyperliquid") || v.includes("hl")) return 2.0;
   if (v.includes("vanta") || v.includes("vnt")) return 3.0;
   if (v.includes("robinhood") || v.includes("rh")) return 2.5;
+  if (v.includes("arcus") || v.includes("arc")) return 1.5;
+  if (v.includes("popdex") || v.includes("pop")) return 2.0;
   return 2.0;
 }
 
@@ -213,6 +215,8 @@ export function getVenueShortLabel(name: string): string {
   if (name.includes("Lighter") || name.toLowerCase() === "lighter" || name.toLowerCase() === "lgt") return "Lighter";
   if (name.includes("Vanta") || name.toLowerCase() === "vanta" || name.toLowerCase() === "vnt") return "Vanta";
   if (name.includes("Robinhood") || name.toLowerCase() === "robinhood" || name.toLowerCase() === "rh") return "Robinhood";
+  if (name.includes("Arcus") || name.toLowerCase() === "arcus" || name.toLowerCase() === "arc") return "Arcus";
+  if (name.includes("PopDEX") || name.toLowerCase() === "popdex" || name.toLowerCase() === "pop") return "PopDEX";
   return name.split(" ")[0];
 }
 
@@ -289,6 +293,37 @@ export function buildCrossVenueMatrix(
       // Short Leg: Sell at sellBook.best_bid
       const longPrice = buyBook.best_ask;
       const shortPrice = sellBook.best_bid;
+
+      if (longPrice <= 0 || shortPrice <= 0) {
+        row.push({
+          rowId,
+          colId,
+          rowLabel: venueLabels[i],
+          colLabel: venueLabels[j],
+          isDiagonal: false,
+          longPrice: 0,
+          shortPrice: 0,
+          grossSpreadBps: 0,
+          feeBps: 0,
+          closingFrictionBps: 0,
+          netSpreadBps: 0,
+          baselineMeanBps: 0,
+          deltaBps: 0,
+          sampleCount: 0,
+          orderQty: 0,
+          estProfitUsd: 0,
+          isExecutable: false,
+          nominalHurdleBps: 0,
+          targetProfitBps,
+          percentileHurdleBps: 0,
+          isConvergenceUnwind: false,
+          longVenue: buyBook.venue_name,
+          shortVenue: sellBook.venue_name,
+          longSymbol: symbol,
+          shortSymbol: symbol,
+        });
+        continue;
+      }
 
       // Gross Spread BPS: (Sell Bid - Buy Ask) / Buy Ask * 10,000
       const grossSpread = shortPrice - longPrice;
@@ -412,33 +447,11 @@ export function buildCrossTickerMatrix(
   for (let i = 0; i < tickers.length; i++) {
     const row: MatrixCellDto[] = [];
     const tLong = tickers[i];
-    const qLong = quotesMap.get(tLong.symbol) || {
-      symbol: tLong.symbol,
-      base: tLong.base,
-      bestBid: tLong.basePrice * 0.9998,
-      bestAsk: tLong.basePrice * 1.0002,
-      midPrice: tLong.basePrice,
-      spreadBps: 4.0,
-      bestBuyVenue: "Hyperliquid",
-      bestSellVenue: "Lighter",
-      feeBps: 2.0,
-      basePrice: tLong.basePrice,
-    };
+    const qLong = quotesMap.get(tLong.symbol);
 
     for (let j = 0; j < tickers.length; j++) {
       const tShort = tickers[j];
-      const qShort = quotesMap.get(tShort.symbol) || {
-        symbol: tShort.symbol,
-        base: tShort.base,
-        bestBid: tShort.basePrice * 0.9998,
-        bestAsk: tShort.basePrice * 1.0002,
-        midPrice: tShort.basePrice,
-        spreadBps: 4.0,
-        bestBuyVenue: "Hyperliquid",
-        bestSellVenue: "Lighter",
-        feeBps: 2.0,
-        basePrice: tShort.basePrice,
-      };
+      const qShort = quotesMap.get(tShort.symbol);
 
       const rowId = tLong.symbol;
       const colId = tShort.symbol;
@@ -451,8 +464,8 @@ export function buildCrossTickerMatrix(
           rowLabel: symbolLabels[i],
           colLabel: symbolLabels[j],
           isDiagonal: true,
-          longPrice: qLong.bestAsk,
-          shortPrice: qShort.bestBid,
+          longPrice: qLong?.bestAsk ?? 0,
+          shortPrice: qShort?.bestBid ?? 0,
           grossSpreadBps: 0,
           feeBps: 0,
           closingFrictionBps: 0,
@@ -467,8 +480,39 @@ export function buildCrossTickerMatrix(
           targetProfitBps,
           percentileHurdleBps: 0,
           isConvergenceUnwind: false,
-          longVenue: qLong.bestBuyVenue,
-          shortVenue: qShort.bestSellVenue,
+          longVenue: qLong?.bestBuyVenue ?? "-",
+          shortVenue: qShort?.bestSellVenue ?? "-",
+          longSymbol: tLong.symbol,
+          shortSymbol: tShort.symbol,
+        });
+        continue;
+      }
+
+      if (!qLong || !qShort || qLong.bestAsk <= 0 || qShort.bestBid <= 0 || qLong.bestBid <= 0 || qShort.bestAsk <= 0) {
+        row.push({
+          rowId,
+          colId,
+          rowLabel: symbolLabels[i],
+          colLabel: symbolLabels[j],
+          isDiagonal: false,
+          longPrice: qLong?.bestAsk ?? 0,
+          shortPrice: qShort?.bestBid ?? 0,
+          grossSpreadBps: 0,
+          feeBps: 0,
+          closingFrictionBps: 0,
+          netSpreadBps: 0,
+          baselineMeanBps: 0,
+          deltaBps: 0,
+          sampleCount: 0,
+          orderQty: 0,
+          estProfitUsd: 0,
+          isExecutable: false,
+          nominalHurdleBps: 0,
+          targetProfitBps,
+          percentileHurdleBps: 0,
+          isConvergenceUnwind: false,
+          longVenue: qLong?.bestBuyVenue ?? "-",
+          shortVenue: qShort?.bestSellVenue ?? "-",
           longSymbol: tLong.symbol,
           shortSymbol: tShort.symbol,
         });

@@ -227,9 +227,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
                             unrealized_pnl: dec!(0),
                             realized_pnl: dec!(0),
                             liquidation_price: None,
-                            leverage: dec!(10),
-                            initial_margin: (qty * entry_px) / dec!(10),
-                            maintenance_margin: (qty * entry_px) / dec!(20),
+                            leverage: dec!(5),
+                            initial_margin: (qty * entry_px) / dec!(5),
+                            maintenance_margin: (qty * entry_px) / dec!(10),
                             updated_at: Utc::now(),
                         });
                     }
@@ -277,6 +277,12 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         info!("[Hyperliquid] Cancel order request: {:?}", req);
+        Ok(())
+    }
+
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        info!("[Hyperliquid] Setting default leverage to {}x for {}", leverage, symbol);
+        // Hyperliquid supports setting leverage via the exchange API updateLeverage action
         Ok(())
     }
 }

@@ -4,8 +4,6 @@ import {
   Percent,
   Target,
   FlaskConical,
-  ShieldCheck,
-  TrendingUp,
   Coins,
 } from "lucide-react";
 
@@ -15,8 +13,7 @@ export type ActiveTab =
   | "funding"
   | "prediction"
   | "statarb"
-  | "risk"
-  | "performance";
+  | "portfolio_monitor";
 
 export interface NavigationProps {
   activeTab: ActiveTab;
@@ -38,54 +35,42 @@ export const Navigation: React.FC<NavigationProps> = ({
   const tabs = [
     {
       id: "spatial" as ActiveTab,
-      shortLabel: "Futures",
-      fullLabel: "Convergence",
+      label: "Futures",
+      subLabel: "Convergence",
       icon: Layers,
       badge: spatialCount > 0 ? spatialCount : undefined,
     },
     {
       id: "spot_arb" as ActiveTab,
-      shortLabel: "Spot Arb",
-      fullLabel: "Bot",
+      label: "Spot Arb",
+      subLabel: "Flash",
       icon: Coins,
       badge: spotCount > 0 ? spotCount : undefined,
     },
     {
       id: "funding" as ActiveTab,
-      shortLabel: "Funding",
-      fullLabel: "Radar",
+      label: "Funding",
+      subLabel: "Radar",
       icon: Percent,
       badge: fundingCount > 0 ? fundingCount : undefined,
     },
     {
       id: "prediction" as ActiveTab,
-      shortLabel: "Prediction",
-      fullLabel: "Parity",
+      label: "Prediction",
+      subLabel: "Parity",
       icon: Target,
       badge: predictionCount > 0 ? predictionCount : undefined,
     },
     {
       id: "statarb" as ActiveTab,
-      shortLabel: "Stat-Arb",
-      fullLabel: "Lab",
+      label: "Stat-Arb",
+      subLabel: "Lab",
       icon: FlaskConical,
-    },
-    {
-      id: "risk" as ActiveTab,
-      shortLabel: "DeltaGuard",
-      fullLabel: "& Risk",
-      icon: ShieldCheck,
-    },
-    {
-      id: "performance" as ActiveTab,
-      shortLabel: "Performance",
-      fullLabel: "",
-      icon: TrendingUp,
     },
   ];
 
   return (
-    <nav className="flex items-center space-x-1 overflow-x-auto py-1 px-1.5 bg-surface-raised/80 rounded-xl border border-surface-border select-none">
+    <nav className="w-full h-full grid grid-cols-5 divide-x divide-surface-border select-none bg-surface">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = activeTab === t.id;
@@ -93,27 +78,41 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             key={t.id}
             onClick={() => onSelectTab(t.id)}
-            className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition whitespace-nowrap group shrink-0 ${
+            className={`relative h-full flex items-center justify-center space-x-2 px-3 text-xs font-mono transition select-none group cursor-pointer ${
               isActive
-                ? "bg-surface text-accent font-semibold shadow-xs border border-accent-line/60"
-                : "text-slate-600 hover:text-slate-900 hover:bg-surface/60 border border-transparent"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/50 font-medium"
             }`}
-            title={`${t.shortLabel} ${t.fullLabel}`.trim()}
+            title={`${t.label} ${t.subLabel}`.trim()}
           >
             <Icon
-              className={`w-3.5 h-3.5 transition shrink-0 ${
+              className={`w-4 h-4 transition shrink-0 ${
                 isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
               }`}
             />
-            <span>
-              <span>{t.shortLabel}</span>
-              {t.fullLabel && <span className="hidden 2xl:inline"> {t.fullLabel}</span>}
+            <span className="truncate tracking-tight">
+              <span>{t.label}</span>
+              {t.subLabel && <span className="hidden xl:inline text-slate-400 font-normal"> {t.subLabel}</span>}
             </span>
 
-            {t.badge !== undefined && (
-              <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] font-bold bg-accent-dim text-accent border border-accent-line/60 shrink-0">
-                {t.badge}
-              </span>
+            {/* Fixed tabular badge container to completely prevent number changes from shifting layout */}
+            <span className="inline-flex items-center justify-center min-w-[18px] h-4 shrink-0">
+              {t.badge !== undefined && (
+                <span
+                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[18px] text-center leading-tight transition ${
+                    isActive
+                      ? "bg-accent text-white shadow-2xs"
+                      : "bg-accent-dim text-accent border border-accent-line/60"
+                  }`}
+                >
+                  {t.badge}
+                </span>
+              )}
+            </span>
+
+            {/* CommBank-style active bottom underline bar */}
+            {isActive && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
           </button>
         );

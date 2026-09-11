@@ -9,26 +9,27 @@ import {
   type VenueSettingsFilter,
 } from "./tickers.ts";
 
-test("getEnabledConnectedVenueCodes returns all default DEXes when settings are undefined or default", () => {
+test("getEnabledConnectedVenueCodes returns empty set when settings are undefined (no synthetic connectivity)", () => {
   const defaultCodes = getEnabledConnectedVenueCodes(undefined);
-  assert.ok(defaultCodes.has("HL"));
-  assert.ok(defaultCodes.has("LGT"));
-  assert.ok(defaultCodes.has("VNT"));
-  assert.ok(defaultCodes.has("RH"));
-  assert.strictEqual(defaultCodes.has("KRK"), false);
+  assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes respects enabled toggles in paper mode", () => {
+test("getEnabledConnectedVenueCodes requires API credentials in paper mode (no synthetic data)", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
+    hyperliquid_wallet: "0x1234567890abcdef",
     lighter_enabled: true,
-    vanta_enabled: false,
+    lighter_api_key: "", // missing credentials
+    vanta_enabled: true,
+    vanta_orderly_key: "ed25519:validkey",
     robinhood_enabled: false,
+    arcus_enabled: false,
+    popdex_enabled: false,
     kraken_enabled: false,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "VNT"]);
 });
 
 test("getEnabledConnectedVenueCodes requires credentials in live mode", () => {
@@ -79,9 +80,12 @@ test("filterAvailableTickers retains only tickers with at least 2 active venues"
   assert.strictEqual(noneAvailable.length, 0);
 });
 
-test("filterAvailableTickers on full PERP_TICKERS universe with default venues returns all 52 tickers", () => {
-  const defaultCodes = getEnabledConnectedVenueCodes(null);
-  const available = filterAvailableTickers(PERP_TICKERS, defaultCodes, 2);
+test("filterAvailableTickers on full PERP_TICKERS universe returns 0 when unconfigured and 52 when venues configured", () => {
+  const unconfiguredCodes = getEnabledConnectedVenueCodes(null);
+  assert.strictEqual(filterAvailableTickers(PERP_TICKERS, unconfiguredCodes, 2).length, 0);
+
+  const configuredCodes = new Set(["HL", "LGT", "VNT", "RH", "ARC", "POP"]);
+  const available = filterAvailableTickers(PERP_TICKERS, configuredCodes, 2);
   assert.strictEqual(available.length, 52);
 });
 

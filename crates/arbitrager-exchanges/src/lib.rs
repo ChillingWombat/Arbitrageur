@@ -3,6 +3,8 @@ pub mod hyperliquid;
 pub mod lighter;
 pub mod vanta;
 pub mod robinhood;
+pub mod arcus;
+pub mod popdex;
 pub mod prediction;
 pub mod simulated;
 
@@ -11,6 +13,8 @@ pub use hyperliquid::*;
 pub use lighter::*;
 pub use vanta::*;
 pub use robinhood::*;
+pub use arcus::*;
+pub use popdex::*;
 pub use prediction::*;
 pub use simulated::*;
 
@@ -19,7 +23,7 @@ mod tests {
     use super::*;
     use arbitrager_core::exchange::ExchangeAdapter;
     use arbitrager_core::order::OrderRequest;
-    use arbitrager_core::types::{dec, Side};
+    use arbitrager_core::types::{dec, Side, VenueId};
 
     #[tokio::test]
     async fn test_simulated_exchange_trading() {
@@ -150,5 +154,18 @@ mod tests {
 
         let cached = limiter.acquire_or_cache(true).await.expect("cached call");
         assert_eq!(cached, Some("{\"balance\": 1000}".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_arcus_and_popdex_adapters() {
+        let arcus = ArcusAdapter::new(None, None, None);
+        assert_eq!(arcus.name(), "Arcus");
+        assert_eq!(arcus.venue_id(), VenueId::new("arcus"));
+        assert!(arcus.fetch_orderbook("BTC-USDC").await.is_err());
+
+        let popdex = PopDexAdapter::new(None, None, None);
+        assert_eq!(popdex.name(), "PopDEX");
+        assert_eq!(popdex.venue_id(), VenueId::new("popdex"));
+        assert!(popdex.fetch_orderbook("BTC-USDC").await.is_err());
     }
 }

@@ -1,9 +1,12 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
+use arbitrager_core::hub::MarketDataHub;
 use arbitrager_core::types::{dec, Decimal};
+use arbitrager_exchanges::arcus::ArcusAdapter;
 use arbitrager_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrager_exchanges::lighter::LighterAdapter;
+use arbitrager_exchanges::popdex::PopDexAdapter;
 use arbitrager_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrager_exchanges::robinhood::RobinhoodAdapter;
 use arbitrager_exchanges::simulated::SimulatedExchange;
@@ -67,7 +70,7 @@ impl Default for TickerStrategyConfigDto {
             current_accumulated_units: 0,
             execution_mode: "SINGLE_WAY".into(),
             unit_size: 0.005,
-            user_target_leverage: 10,
+            user_target_leverage: 5,
         }
     }
 }
@@ -98,6 +101,9 @@ fn default_git_repo() -> String { "https://github.com/arbitrager/arbitrager".int
 fn default_true() -> bool { true }
 fn default_kraken_spot_url() -> String { "https://api.kraken.com".into() }
 fn default_kraken_futures_url() -> String { "https://futures.kraken.com".into() }
+fn default_arcus_url() -> String { "https://api.arcus.exchange".into() }
+fn default_popdex_url() -> String { "https://api.popdex.trade".into() }
+fn default_popdex_account_index() -> String { "0".into() }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct VenueBalanceInfo {
@@ -149,6 +155,10 @@ pub struct EngineSettingsDto {
     pub vanta_enabled: bool,
     #[serde(default = "default_true")]
     pub robinhood_enabled: bool,
+    #[serde(default = "default_true")]
+    pub arcus_enabled: bool,
+    #[serde(default = "default_true")]
+    pub popdex_enabled: bool,
     #[serde(default)]
     pub kraken_enabled: bool,
     #[serde(default)]
@@ -238,6 +248,22 @@ pub struct EngineSettingsDto {
     #[serde(default = "default_kalshi_url")]
     pub kalshi_url: String,
 
+    // Arcus CLOB DEX
+    #[serde(default)]
+    pub arcus_api_key: String,
+    #[serde(default)]
+    pub arcus_secret: String,
+    #[serde(default = "default_arcus_url")]
+    pub arcus_url: String,
+
+    // PopDEX Protocol
+    #[serde(default = "default_popdex_account_index")]
+    pub popdex_account_index: String,
+    #[serde(default)]
+    pub popdex_api_key: String,
+    #[serde(default = "default_popdex_url")]
+    pub popdex_url: String,
+
     // Referrals, About & Sponsor Links
     #[serde(default = "default_referral_lighter")]
     pub referral_lighter: String,
@@ -264,12 +290,12 @@ impl Default for EngineSettingsDto {
             trading_mode: default_trading_mode(),
             fast_warmup_enabled: default_fast_warmup_enabled(),
             venue_rebalance_threshold_usd: default_venue_rebalance_threshold_usd(),
-            hyperliquid_enabled: true,
-            hyperliquid_spot_enabled: true,
-            lighter_enabled: true,
-            lighter_spot_enabled: true,
-            vanta_enabled: true,
-            robinhood_enabled: true,
+            hyperliquid_enabled: false,
+            hyperliquid_spot_enabled: false,
+            lighter_enabled: false,
+            lighter_spot_enabled: false,
+            vanta_enabled: false,
+            robinhood_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
             kraken_futures_enabled: false,
@@ -307,6 +333,14 @@ impl Default for EngineSettingsDto {
             kalshi_api_key_id: "".into(),
             kalshi_private_key: "".into(),
             kalshi_url: default_kalshi_url(),
+            arcus_enabled: false,
+            arcus_api_key: "".into(),
+            arcus_secret: "".into(),
+            arcus_url: default_arcus_url(),
+            popdex_enabled: false,
+            popdex_account_index: default_popdex_account_index(),
+            popdex_api_key: "".into(),
+            popdex_url: default_popdex_url(),
             referral_lighter: default_referral_lighter(),
             referral_robinhood: default_referral_robinhood(),
             sponsor_link: default_sponsor_link(),
@@ -322,12 +356,17 @@ pub struct AppEngineState {
     pub ex_lighter: Arc<SimulatedExchange>,
     pub ex_vanta: Arc<SimulatedExchange>,
     pub ex_robinhood: Arc<SimulatedExchange>,
+    pub ex_arcus: Arc<SimulatedExchange>,
+    pub ex_popdex: Arc<SimulatedExchange>,
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
     pub live_robinhood: Arc<RobinhoodAdapter>,
+    pub live_arcus: Arc<ArcusAdapter>,
+    pub live_popdex: Arc<PopDexAdapter>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
+    pub market_data_hub: Arc<MarketDataHub>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub delta_guard: RwLock<DeltaGuard>,
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
@@ -340,6 +379,7 @@ pub struct AppEngineState {
     pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
     pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
+    pub is_paused: RwLock<bool>,
 }
 
 impl AppEngineState {
@@ -348,56 +388,21 @@ impl AppEngineState {
         let ex_lighter = Arc::new(SimulatedExchange::new("lighter", "Lighter (zkDEX)", 5, dec!(1.5), dec!(100000.0)));
         let ex_vanta = Arc::new(SimulatedExchange::new("vanta", "Vanta.exchange", 4, dec!(3.0), dec!(100000.0)));
         let ex_robinhood = Arc::new(SimulatedExchange::new("robinhood", "Robinhood EVM", 8, dec!(2.5), dec!(100000.0)));
+        let ex_arcus = Arc::new(SimulatedExchange::new("arcus", "Arcus", 3, dec!(1.5), dec!(100000.0)));
+        let ex_popdex = Arc::new(SimulatedExchange::new("popdex", "PopDEX", 4, dec!(2.0), dec!(100000.0)));
 
-        // Seed initial markets
-        ex_hl.seed_market("BTC-USDC", dec!(64200.0), dec!(64208.0), dec!(8.5), dec!(0.0003));
-        ex_lighter.seed_market("BTC-USDC", dec!(64225.0), dec!(64235.0), dec!(6.2), dec!(0.0001));
-        ex_vanta.seed_market("BTC-USDC", dec!(64210.0), dec!(64218.0), dec!(9.0), dec!(0.00015));
-        ex_robinhood.seed_market("BTC-USDC", dec!(64205.0), dec!(64215.0), dec!(5.0), dec!(0.0002));
-
-        ex_hl.seed_market("ETH-USDC", dec!(3450.0), dec!(3451.2), dec!(45.0), dec!(0.00025));
-        ex_lighter.seed_market("ETH-USDC", dec!(3453.5), dec!(3454.8), dec!(38.0), dec!(0.00008));
-        ex_vanta.seed_market("ETH-USDC", dec!(3451.0), dec!(3452.1), dec!(50.0), dec!(0.00012));
-        ex_robinhood.seed_market("ETH-USDC", dec!(3450.5), dec!(3451.8), dec!(30.0), dec!(0.00018));
-
-        ex_hl.seed_market("SOL-USDC", dec!(152.2), dec!(152.4), dec!(350.0), dec!(0.0004));
-        ex_lighter.seed_market("SOL-USDC", dec!(152.8), dec!(153.0), dec!(280.0), dec!(0.0001));
-        ex_vanta.seed_market("SOL-USDC", dec!(152.4), dec!(152.6), dec!(400.0), dec!(0.0002));
-        ex_robinhood.seed_market("SOL-USDC", dec!(152.3), dec!(152.5), dec!(200.0), dec!(0.00025));
-
-        // Seed comprehensive union of 52 perp DEX tickers (each on >= 2 venues)
-        let other_tickers = [
-            "AVAX-USDC", "BNB-USDC", "ARB-USDC", "OP-USDC", "SUI-USDC", "NEAR-USDC",
-            "APT-USDC", "LINK-USDC", "DOGE-USDC", "PEPE-USDC", "WIF-USDC", "POL-USDC",
-            "TIA-USDC", "SEI-USDC", "INJ-USDC", "RENDER-USDC", "FTM-USDC", "ATOM-USDC",
-            "ADA-USDC", "XRP-USDC", "DOT-USDC", "LTC-USDC", "BCH-USDC", "UNI-USDC",
-            "AAVE-USDC", "CRV-USDC", "MKR-USDC", "LDO-USDC", "JUP-USDC", "PYTH-USDC",
-            "ONDO-USDC", "KAS-USDC", "TON-USDC", "NOT-USDC", "PENDLE-USDC", "FET-USDC",
-            "TAO-USDC", "WLD-USDC", "BLUR-USDC", "STX-USDC", "RUNE-USDC", "DYDX-USDC",
-            "ENA-USDC", "STRK-USDC", "JTO-USDC", "BONK-USDC", "FLOKI-USDC", "SHIB-USDC",
-            "AR-USDC",
-        ];
-
-        for &sym in &other_tickers {
-            let base = crate::commands::symbol_base_price(sym);
-            let depth = (dec!(500_000.0) / base).max(dec!(50.0));
-            let half_spread = base * dec!(0.00015);
-            let lgt_disloc = base * dec!(0.00028);
-            let vnt_disloc = base * dec!(0.00010);
-            let rh_disloc = base * dec!(0.00005);
-
-            ex_hl.seed_market(sym, base - half_spread, base + half_spread, depth, dec!(0.00025));
-            ex_lighter.seed_market(sym, base + lgt_disloc - half_spread, base + lgt_disloc + half_spread, depth * dec!(0.8), dec!(0.00008));
-            ex_vanta.seed_market(sym, base + vnt_disloc - half_spread, base + vnt_disloc + half_spread, depth * dec!(1.2), dec!(0.00015));
-            ex_robinhood.seed_market(sym, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
-        }
+        // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
+        // from live venue APIs once API credentials are configured by the user.
 
         let live_hl = Arc::new(HyperliquidAdapter::new(None, None, None));
         let live_lighter = Arc::new(LighterAdapter::new(None, None, None));
         let live_vanta = Arc::new(VantaAdapter::new(None, None, None, None));
         let live_robinhood = Arc::new(RobinhoodAdapter::new(None, None, None, None));
+        let live_arcus = Arc::new(ArcusAdapter::new(None, None, None));
+        let live_popdex = Arc::new(PopDexAdapter::new(None, None, None));
         let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
+        let market_data_hub = MarketDataHub::new(1024, 400);
 
         let cb_config = CircuitBreakerConfig {
             max_daily_drawdown_usd: dec!(25000.0),
@@ -422,12 +427,17 @@ impl AppEngineState {
             ex_lighter,
             ex_vanta,
             ex_robinhood,
+            ex_arcus,
+            ex_popdex,
             live_hl,
             live_lighter,
             live_vanta,
             live_robinhood,
+            live_arcus,
+            live_popdex,
             live_polymarket,
             live_kalshi,
+            market_data_hub,
             circuit_breaker: cb,
             delta_guard,
             coordinator,
@@ -440,45 +450,39 @@ impl AppEngineState {
             strategy_configs: RwLock::new(std::collections::HashMap::new()),
             vault,
             virtual_ledger,
+            is_paused: RwLock::new(false),
         }
     }
 
-    /// Ensure market is seeded dynamically if queried
-    pub fn ensure_market(&self, symbol: &str) {
-        if self.ex_hl.has_market(symbol) {
-            return;
-        }
-
-        let base = crate::commands::symbol_base_price(symbol);
-        let depth = (dec!(500_000.0) / base).max(dec!(50.0));
-        let half_spread = base * dec!(0.00015);
-        let lgt_disloc = base * dec!(0.00028);
-        let vnt_disloc = base * dec!(0.00010);
-        let rh_disloc = base * dec!(0.00005);
-
-        self.ex_hl.seed_market(symbol, base - half_spread, base + half_spread, depth, dec!(0.00025));
-        self.ex_lighter.seed_market(symbol, base + lgt_disloc - half_spread, base + lgt_disloc + half_spread, depth * dec!(0.8), dec!(0.00008));
-        self.ex_vanta.seed_market(symbol, base + vnt_disloc - half_spread, base + vnt_disloc + half_spread, depth * dec!(1.2), dec!(0.00015));
-        self.ex_robinhood.seed_market(symbol, base + rh_disloc - half_spread, base + rh_disloc + half_spread, depth * dec!(0.6), dec!(0.00018));
+    /// Ensure market is loaded - live real market data is queried from active exchange APIs
+    pub fn ensure_market(&self, _symbol: &str) {
+        // No-op: Real market data is pulled directly from configured live exchange APIs only.
+        // No synthetic markets are ever seeded or fabricated.
     }
 
-    /// Returns active venue list using live market adapters, filtered by enabled & connected settings
+    /// Returns active venue list using live market adapters, strictly filtered by enabled & connected credentials
     pub fn get_venues(&self) -> Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> {
         let is_live = *self.is_live_mode.read();
         let s = self.settings.read();
         let mut list: Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> = Vec::new();
 
-        if s.hyperliquid_enabled && (!is_live || !s.hyperliquid_wallet.trim().is_empty() || !s.hyperliquid_private_key.trim().is_empty()) {
+        if s.hyperliquid_enabled && (!s.hyperliquid_wallet.trim().is_empty() || !s.hyperliquid_private_key.trim().is_empty()) {
             list.push(("hyperliquid", if is_live { "Hyperliquid (L1 DEX)" } else { "Hyperliquid (L1)" }, self.live_hl.clone()));
         }
-        if s.lighter_enabled && (!is_live || !s.lighter_api_key.trim().is_empty()) {
+        if s.lighter_enabled && (!s.lighter_api_key.trim().is_empty() || (!s.lighter_account_index.trim().is_empty() && s.lighter_account_index.trim() != "0")) {
             list.push(("lighter", if is_live { "Lighter (zkDEX)" } else { "Lighter (zkDEX)" }, self.live_lighter.clone()));
         }
-        if s.vanta_enabled && (!is_live || !s.vanta_orderly_key.trim().is_empty() || !s.vanta_account_id.trim().is_empty()) {
+        if s.vanta_enabled && (!s.vanta_orderly_key.trim().is_empty() || !s.vanta_account_id.trim().is_empty()) {
             list.push(("vanta", if is_live { "Vanta.exchange" } else { "Vanta.exchange" }, self.live_vanta.clone()));
         }
-        if s.robinhood_enabled && (!is_live || !s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
+        if s.robinhood_enabled && (!s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
             list.push(("robinhood", if is_live { "Robinhood EVM" } else { "Robinhood EVM" }, self.live_robinhood.clone()));
+        }
+        if s.arcus_enabled && !s.arcus_api_key.trim().is_empty() {
+            list.push(("arcus", if is_live { "Arcus (CLOB DEX)" } else { "Arcus" }, self.live_arcus.clone()));
+        }
+        if s.popdex_enabled && !s.popdex_api_key.trim().is_empty() {
+            list.push(("popdex", if is_live { "PopDEX (Arbitrage Protocol)" } else { "PopDEX" }, self.live_popdex.clone()));
         }
 
         list
@@ -489,12 +493,16 @@ impl AppEngineState {
         let id_clean = venue_id.to_lowercase();
         if id_clean.contains("hyperliquid") || id_clean == "hl" {
             Some(self.live_hl.clone())
-        } else if id_clean.contains("lighter") {
+        } else if id_clean.contains("lighter") || id_clean == "lgt" {
             Some(self.live_lighter.clone())
-        } else if id_clean.contains("vanta") {
+        } else if id_clean.contains("vanta") || id_clean == "vnt" {
             Some(self.live_vanta.clone())
-        } else if id_clean.contains("robinhood") {
+        } else if id_clean.contains("robinhood") || id_clean == "rh" {
             Some(self.live_robinhood.clone())
+        } else if id_clean.contains("arcus") || id_clean == "arc" {
+            Some(self.live_arcus.clone())
+        } else if id_clean.contains("popdex") || id_clean == "pop" {
+            Some(self.live_popdex.clone())
         } else if id_clean.contains("polymarket") {
             Some(self.live_polymarket.clone())
         } else if id_clean.contains("kalshi") {
@@ -508,7 +516,6 @@ impl AppEngineState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrager_core::exchange::ExchangeAdapter;
 
     #[tokio::test]
     async fn test_app_state_initialization() {
@@ -517,19 +524,9 @@ mod tests {
         assert_eq!(*state.total_realized_profit.read(), dec!(0));
         assert!(state.circuit_breaker.is_trading_allowed().is_ok());
 
-        // Verify seeded orderbook on Hyperliquid
-        let book_hl = state.ex_hl.fetch_orderbook("BTC-USDC").await.expect("orderbook should exist");
-        assert_eq!(book_hl.best_bid_price(), Some(dec!(64200.0)));
-        assert_eq!(book_hl.best_ask_price(), Some(dec!(64208.0)));
-        assert_eq!(book_hl.spread(), Some(dec!(8.0)));
-
-        // Verify seeded orderbook on Lighter
-        let book_lighter = state.ex_lighter.fetch_orderbook("BTC-USDC").await.expect("orderbook should exist");
-        assert_eq!(book_lighter.best_bid_price(), Some(dec!(64225.0)));
-        assert_eq!(book_lighter.best_ask_price(), Some(dec!(64235.0)));
-
-        // Verify spatial dislocation: Lighter Bid (64225) > HL Ask (64208)
-        assert!(book_lighter.best_bid_price().unwrap() > book_hl.best_ask_price().unwrap());
+        // Zero synthetic venue connectivity without configured credentials
+        let unconfigured = state.get_venues();
+        assert_eq!(unconfigured.len(), 0);
     }
 
     #[tokio::test]
@@ -548,34 +545,45 @@ mod tests {
     async fn test_venues_resolution_and_adapter_lookup() {
         let state = AppEngineState::new();
 
-        // Check simulated venues by default
-        let venues_sim = state.get_venues();
-        assert_eq!(venues_sim.len(), 4);
-        assert_eq!(venues_sim[0].0, "hyperliquid");
-        assert_eq!(venues_sim[0].1, "Hyperliquid (L1)");
+        // Check unconfigured state: 0 active venues without credentials
+        let venues_unconfigured = state.get_venues();
+        assert_eq!(venues_unconfigured.len(), 0);
 
-        // Check adapter lookup
+        // Adapter lookup by name is always available
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
         assert!(state.get_adapter("vanta").is_some());
         assert!(state.get_adapter("robinhood").is_some());
+        assert!(state.get_adapter("arcus").is_some());
+        assert!(state.get_adapter("popdex").is_some());
         assert!(state.get_adapter("polymarket").is_some());
         assert!(state.get_adapter("kalshi").is_some());
         assert!(state.get_adapter("nonexistent").is_none());
 
-        // Toggle to live mode with configured credentials
+        // Configure credentials: now venues become active in both paper and live modes
         {
             let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+            s.vanta_enabled = true;
+            s.robinhood_enabled = true;
+            s.arcus_enabled = true;
+            s.popdex_enabled = true;
             s.hyperliquid_wallet = "0x1111".into();
             s.lighter_api_key = "lgt_key".into();
             s.vanta_orderly_key = "vnt_key".into();
             s.robinhood_wallet = "0x2222".into();
+            s.arcus_api_key = "arc_key".into();
+            s.popdex_api_key = "pop_key".into();
         }
+        let venues_paper = state.get_venues();
+        assert_eq!(venues_paper.len(), 6);
+        assert_eq!(venues_paper[0].0, "hyperliquid");
+
         *state.is_live_mode.write() = true;
         let venues_live = state.get_venues();
-        assert_eq!(venues_live.len(), 4);
+        assert_eq!(venues_live.len(), 6);
         assert_eq!(venues_live[0].1, "Hyperliquid (L1 DEX)");
-        assert!(state.get_adapter("hyperliquid").is_some());
     }
 
     #[tokio::test]

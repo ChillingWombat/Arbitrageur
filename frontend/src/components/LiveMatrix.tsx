@@ -1,24 +1,18 @@
 import React, { useState, useEffect, useMemo } from "react";
 import {
-  RefreshCw,
   TrendingUp,
   TrendingDown,
-  Layers,
-  Grid3X3,
   Zap,
-  CheckCircle2,
-  ArrowRight,
   SlidersHorizontal,
   History,
+  Terminal,
 } from "lucide-react";
 import type {
   VenueOrderBookDto,
   SpatialOpportunityDto,
   ExecutionLogEntry,
-  MatrixMode,
   SlidingWindowOption,
   MatrixCellDto,
-  CrossTickerExecutionParams,
   TickerStrategyConfigDto,
 } from "../types";
 import {
@@ -32,16 +26,15 @@ import {
 import {
   WINDOW_SECONDS,
   buildCrossVenueMatrix,
-  buildCrossTickerMatrix,
   getMatrixCellVisuals,
   globalSpreadTracker,
-  type TickerMarketQuote,
 } from "../services/matrixQuant";
-import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
+import { getMinCompatibleSize } from "../services/contractSpecs";
 import { TickerStrategyBar } from "./TickerStrategyBar";
 import { InfoTooltip } from "./InfoTooltip";
 import { SwitchToggle } from "./SwitchToggle";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
+import { TickerLogMonitor } from "./TickerLogMonitor";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
@@ -50,21 +43,15 @@ interface LiveMatrixProps {
   opportunities: SpatialOpportunityDto[];
   onRefresh: (qty?: number, minBps?: number) => void;
   onExecuteTrade: (opp: SpatialOpportunityDto) => Promise<void>;
-  onExecuteCrossTicker?: (params: CrossTickerExecutionParams) => Promise<void>;
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
   onOpenTickerConfig?: (symbol: string, strategy?: string) => void;
   activeVenueCodes?: Set<string>;
   availableTickers?: PerpTicker[];
+  isTickerEnabled?: boolean;
+  onToggleTicker?: (symbol: string, enabled?: boolean) => void;
+  isPaused?: boolean;
 }
-
-const TICKER_PRESETS: Record<string, string[]> = {
-  "Majors (8)": ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "BNB-USDC", "ARB-USDC", "OP-USDC", "SUI-USDC"],
-  "Top 12": ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "BNB-USDC", "ARB-USDC", "OP-USDC", "SUI-USDC", "NEAR-USDC", "LINK-USDC", "DOGE-USDC", "PEPE-USDC"],
-  "L1s": ["BTC-USDC", "ETH-USDC", "SOL-USDC", "AVAX-USDC", "BNB-USDC", "SUI-USDC", "NEAR-USDC", "APT-USDC", "SEI-USDC", "TON-USDC"],
-  "DeFi": ["UNI-USDC", "AAVE-USDC", "CRV-USDC", "MKR-USDC", "LDO-USDC", "JUP-USDC", "PENDLE-USDC", "PYTH-USDC", "LINK-USDC"],
-  "All (52)": PERP_TICKERS.map((t) => t.symbol),
-};
 
 export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   symbol,
@@ -72,12 +59,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   opportunities,
   onRefresh,
   onExecuteTrade,
-  onExecuteCrossTicker,
   loading,
   executionLogs = [],
   onOpenTickerConfig,
   activeVenueCodes,
   availableTickers,
+  isTickerEnabled = false,
+  onToggleTicker,
+  isPaused = false,
 }) => {
   const rawTicker = (availableTickers ?? PERP_TICKERS).find((t) => t.symbol === symbol) || {
     symbol,
@@ -100,20 +89,20 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   }, [rawTicker, activeVenues]);
 
   // State
-  const [matrixMode, setMatrixMode] = useState<MatrixMode>("cross-venue");
   const [windowOption, setWindowOption] = useState<SlidingWindowOption>("1m");
   const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
   const [minBps, setMinBps] = useState(5.0);
-  const [selectedPreset, setSelectedPreset] = useState<string>("Majors (8)");
   const [selectedPair, setSelectedPair] = useState<{ rowId: string; colId: string } | null>(null);
   const [executing, setExecuting] = useState(false);
-  const [executionResult, setExecutionResult] = useState<{ success: boolean; message: string } | null>(null);
-  const [autoExecute, setAutoExecute] = useState(true);
-  const [lastAutoExecMsg, setLastAutoExecMsg] = useState<string | null>(null);
+  const [autoExecute, setAutoExecute] = useState(false);
   const lastAutoExecTimeRef = React.useRef<number>(0);
 
-  // Multi-ticker quotes state for Cross-Ticker matrix
-  const [tickerQuotesMap, setTickerQuotesMap] = useState<Map<string, TickerMarketQuote>>(new Map());
+  const handleToggleAutoExecute = (enabled: boolean) => {
+    setAutoExecute(enabled);
+    if (enabled && !isTickerEnabled && onToggleTicker) {
+      onToggleTicker(symbol, true);
+    }
+  };
 
   // Per-ticker quantitative strategy configurations
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(() => new Map());
@@ -131,7 +120,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       currentAccumulatedUnits: 0,
       executionMode: "SINGLE_WAY",
       unitSize: minLot,
-      userTargetLeverage: 10,
+      userTargetLeverage: 5,
     };
   }, [symbol, strategyConfigs, activeTicker.venues, activeTicker.basePrice, minBps]);
 
@@ -177,94 +166,6 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     setOrderQty(getDefaultOrderQty(activeTicker.basePrice));
   }, [symbol, activeTicker.basePrice]);
 
-  // Derive active tickers for cross-ticker matrix
-  const activeCrossTickers: PerpTicker[] = useMemo(() => {
-    const symbolList = TICKER_PRESETS[selectedPreset] || TICKER_PRESETS["Majors (8)"];
-    const pool = availableTickers ?? PERP_TICKERS;
-    const poolSymbols = new Set(pool.map((t) => t.symbol));
-    const set = new Set(symbolList.filter((s) => poolSymbols.has(s)));
-    if (poolSymbols.has(symbol)) {
-      set.add(symbol);
-    }
-
-    return pool.filter((t) => set.has(t.symbol));
-  }, [selectedPreset, symbol, availableTickers]);
-
-  // Populate and update quotes for active cross-tickers via real multi-market backend/mock quotes
-  useEffect(() => {
-    let isMounted = true;
-
-    async function loadCrossTickerQuotes() {
-      try {
-        const symbolsToFetch = activeCrossTickers.map((t) => t.symbol);
-        const quotes = await api.fetchMultiMarketQuotes(symbolsToFetch);
-
-        if (!isMounted) return;
-
-        const map = new Map<string, TickerMarketQuote>();
-        for (const q of quotes) {
-          map.set(q.symbol, {
-            symbol: q.symbol,
-            base: q.base,
-            bestBid: q.best_bid,
-            bestAsk: q.best_ask,
-            midPrice: q.mid_price,
-            spreadBps: q.spread_bps,
-            bestBuyVenue: q.best_buy_venue,
-            bestSellVenue: q.best_sell_venue,
-            feeBps: q.fee_bps,
-            basePrice: q.base_price,
-          });
-        }
-
-        // Overlay active orderbooks for the selected symbol if already available
-        if (orderbooks.length > 0) {
-          let bestBid = -Infinity;
-          let bestBidVenue = "Hyperliquid";
-          let bestAsk = Infinity;
-          let bestBuyVenue = "Hyperliquid";
-          let bestBuySpread = 2.0;
-
-          for (const b of orderbooks) {
-            if (b.best_bid > bestBid) {
-              bestBid = b.best_bid;
-              bestBidVenue = b.venue_name;
-            }
-            if (b.best_ask < bestAsk && b.best_ask > 0) {
-              bestAsk = b.best_ask;
-              bestBuyVenue = b.venue_name;
-              bestBuySpread = b.spread_bps > 0 ? b.spread_bps : ((b.best_ask - b.best_bid) / b.mid_price) * 10000;
-            }
-          }
-
-          const mid = (bestBid + bestAsk) / 2;
-          map.set(symbol, {
-            symbol,
-            base: symbol.split("-")[0],
-            bestBid: bestBid > 0 ? bestBid : activeTicker.basePrice * 0.9998,
-            bestAsk: bestAsk < Infinity ? bestAsk : activeTicker.basePrice * 1.0002,
-            midPrice: mid > 0 ? mid : activeTicker.basePrice,
-            spreadBps: Math.max(0.5, bestBuySpread),
-            bestBuyVenue,
-            bestSellVenue: bestBidVenue,
-            feeBps: 2.0,
-            basePrice: activeTicker.basePrice,
-          });
-        }
-
-        setTickerQuotesMap(map);
-      } catch (err) {
-        console.error("Failed to load cross ticker quotes:", err);
-      }
-    }
-
-    loadCrossTickerQuotes();
-
-    return () => {
-      isMounted = false;
-    };
-  }, [activeCrossTickers, orderbooks, symbol, activeTicker.basePrice]);
-
   // Derive execution stats for the currently selected ticker
   const tickerStats = useMemo(() => {
     let count = 0;
@@ -302,25 +203,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     );
   }, [symbol, orderbooks, windowSeconds, orderQty, minBps, currentStrategyConfig]);
 
-  // Build Cross-Ticker Matrix
-  const crossTickerMatrix = useMemo(() => {
-    const tradeNotional = orderQty * activeTicker.basePrice;
-    return buildCrossTickerMatrix(
-      activeCrossTickers,
-      tickerQuotesMap,
-      windowSeconds,
-      tradeNotional,
-      minBps,
-      currentStrategyConfig,
-      globalSpreadTracker
-    );
-  }, [activeCrossTickers, tickerQuotesMap, windowSeconds, orderQty, activeTicker.basePrice, minBps, currentStrategyConfig]);
-
   // Derive selected cell cleanly from selectedPair coordinates and current active matrix grid
   const selectedCell = useMemo<MatrixCellDto | null>(() => {
     if (!selectedPair) return null;
-    const activeGrid = matrixMode === "cross-venue" ? venueMatrix.grid : crossTickerMatrix.grid;
-    for (const row of activeGrid) {
+    for (const row of venueMatrix.grid) {
       for (const cell of row) {
         if (cell.rowId === selectedPair.rowId && cell.colId === selectedPair.colId) {
           return cell;
@@ -328,113 +214,65 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       }
     }
     return null;
-  }, [selectedPair, matrixMode, venueMatrix.grid, crossTickerMatrix.grid]);
+  }, [selectedPair, venueMatrix.grid]);
 
   // Execution handler
   const handleExecuteCellTrade = async (cell: MatrixCellDto) => {
     if (cell.isDiagonal || executing) return;
     setExecuting(true);
-    setExecutionResult(null);
 
     try {
-      if (matrixMode === "cross-venue") {
-        const opp: SpatialOpportunityDto = {
-          id: `${cell.longSymbol}-${cell.rowId}-${cell.colId}`,
-          symbol: cell.longSymbol,
-          buy_venue: cell.longVenue,
-          sell_venue: cell.shortVenue,
-          buy_price: cell.longPrice,
-          sell_price: cell.shortPrice,
-          gross_spread: cell.shortPrice - cell.longPrice,
-          gross_spread_bps: cell.grossSpreadBps,
-          fee_bps: cell.feeBps,
-          net_spread_bps: cell.netSpreadBps,
-          order_qty: cell.orderQty,
-          estimated_profit_usd: cell.estProfitUsd,
-          is_executable: cell.isExecutable,
-          direction: cell.isConvergenceUnwind ? "Convergence Unwind" : "Divergence Entry",
-          trigger_spread_bps: cell.netSpreadBps,
-          baseline_mean_spread_bps: cell.baselineMeanBps,
-          position_step: cell.isConvergenceUnwind
-            ? currentStrategyConfig.currentAccumulatedUnits
-            : currentStrategyConfig.currentAccumulatedUnits + 1,
-          max_units: currentStrategyConfig.maxAccumulatedUnits,
-          nominal_hurdle_bps: cell.nominalHurdleBps,
-        };
-        await onExecuteTrade(opp);
+      const opp: SpatialOpportunityDto = {
+        id: `${cell.longSymbol}-${cell.rowId}-${cell.colId}`,
+        symbol: cell.longSymbol,
+        buy_venue: cell.longVenue,
+        sell_venue: cell.shortVenue,
+        buy_price: cell.longPrice,
+        sell_price: cell.shortPrice,
+        gross_spread: cell.shortPrice - cell.longPrice,
+        gross_spread_bps: cell.grossSpreadBps,
+        fee_bps: cell.feeBps + cell.closingFrictionBps,
+        net_spread_bps: cell.netSpreadBps,
+        order_qty: cell.orderQty,
+        estimated_profit_usd: cell.estProfitUsd,
+        is_executable: cell.isExecutable,
+        direction: cell.isConvergenceUnwind ? "Convergence Unwind" : "Divergence Entry",
+        trigger_spread_bps: cell.netSpreadBps,
+        baseline_mean_spread_bps: cell.baselineMeanBps,
+        position_step: cell.isConvergenceUnwind
+          ? currentStrategyConfig.currentAccumulatedUnits
+          : currentStrategyConfig.currentAccumulatedUnits + 1,
+        max_units: currentStrategyConfig.maxAccumulatedUnits,
+        nominal_hurdle_bps: nominalHurdleBps,
+      };
 
-        // Update accumulated units
-        if (cell.isConvergenceUnwind) {
-          handleUpdateStrategyConfig({
-            ...currentStrategyConfig,
-            currentAccumulatedUnits: Math.max(0, currentStrategyConfig.currentAccumulatedUnits - 1),
-          });
-        } else {
-          handleUpdateStrategyConfig({
-            ...currentStrategyConfig,
-            currentAccumulatedUnits: Math.min(
-              currentStrategyConfig.maxAccumulatedUnits,
-              currentStrategyConfig.currentAccumulatedUnits + 1
-            ),
-          });
-        }
+      await onExecuteTrade(opp);
 
-        setExecutionResult({
-          success: true,
-          message: `${cell.isConvergenceUnwind ? "Unwound convergence" : "Filled atomically"}! Buy ${cell.longVenue} / Sell ${cell.shortVenue} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
+      // Track accumulated grid steps
+      if (cell.isConvergenceUnwind) {
+        handleUpdateStrategyConfig({
+          ...currentStrategyConfig,
+          currentAccumulatedUnits: Math.max(0, currentStrategyConfig.currentAccumulatedUnits - 1),
         });
       } else {
-        const params: CrossTickerExecutionParams = {
-          longSymbol: cell.longSymbol,
-          shortSymbol: cell.shortSymbol,
-          longVenue: cell.longVenue,
-          shortVenue: cell.shortVenue,
-          orderQty: cell.orderQty,
-          estProfitUsd: cell.estProfitUsd,
-          netSpreadBps: cell.netSpreadBps,
-        };
-        if (onExecuteCrossTicker) {
-          await onExecuteCrossTicker(params);
-        } else {
-          await api.executeCrossTickerArbitrage(params);
-          onRefresh(orderQty, minBps);
-        }
-
-        if (cell.isConvergenceUnwind) {
-          handleUpdateStrategyConfig({
-            ...currentStrategyConfig,
-            currentAccumulatedUnits: Math.max(0, currentStrategyConfig.currentAccumulatedUnits - 1),
-          });
-        } else {
-          handleUpdateStrategyConfig({
-            ...currentStrategyConfig,
-            currentAccumulatedUnits: Math.min(
-              currentStrategyConfig.maxAccumulatedUnits,
-              currentStrategyConfig.currentAccumulatedUnits + 1
-            ),
-          });
-        }
-
-        setExecutionResult({
-          success: true,
-          message: `${cell.isConvergenceUnwind ? "Unwound convergence pair" : "Executed pair trade"}! Long ${cell.rowLabel} / Short ${cell.colLabel} (+${formatCurrencyPnl(cell.estProfitUsd)})`,
+        handleUpdateStrategyConfig({
+          ...currentStrategyConfig,
+          currentAccumulatedUnits: Math.min(
+            currentStrategyConfig.maxAccumulatedUnits,
+            currentStrategyConfig.currentAccumulatedUnits + 1
+          ),
         });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setExecutionResult({
-        success: false,
-        message: `Execution rejected: ${msg}`,
-      });
+      console.error("Auto-execution trade dispatch error:", err);
     } finally {
       setExecuting(false);
-      setTimeout(() => setExecutionResult(null), 5000);
     }
   };
 
   // Automated Execution Engine Loop for Futures Spread Convergence
   useEffect(() => {
-    if (!autoExecute || executing) return;
+    if (!autoExecute || executing || !isTickerEnabled || isPaused) return;
 
     const now = Date.now();
     if (now - lastAutoExecTimeRef.current < 4000) return; // 4s cooldown between auto-trades
@@ -460,18 +298,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
     if (bestCell) {
       lastAutoExecTimeRef.current = now;
-      setLastAutoExecMsg(
-        `⚡ Auto-Executed ${bestCell.longSymbol}: Long ${bestCell.longVenue} / Short ${bestCell.shortVenue} (+${bestCell.netSpreadBps.toFixed(1)} BPS Net)`
-      );
       handleExecuteCellTrade(bestCell);
     }
-  }, [autoExecute, executing, venueMatrix.grid, currentStrategyConfig]);
+  }, [autoExecute, executing, venueMatrix.grid, currentStrategyConfig, isTickerEnabled, isPaused]);
 
   // Derive best off-diagonal opportunity from active matrix grid
   const bestMatrixCell = useMemo<MatrixCellDto | null>(() => {
-    const activeGrid = matrixMode === "cross-venue" ? venueMatrix.grid : crossTickerMatrix.grid;
     let best: MatrixCellDto | null = null;
-    for (const row of activeGrid) {
+    for (const row of venueMatrix.grid) {
       for (const cell of row) {
         if (cell.isDiagonal) continue;
         if (!best || cell.netSpreadBps > best.netSpreadBps) {
@@ -480,10 +314,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       }
     }
     return best;
-  }, [matrixMode, venueMatrix.grid, crossTickerMatrix.grid]);
-
-  // Active cell displayed in the Instant Atomic Execution Dock (selected cell or top dislocation)
-  const activeDockCell = selectedCell && !selectedCell.isDiagonal ? selectedCell : bestMatrixCell;
+  }, [venueMatrix.grid]);
 
   // Best Bid & Ask across all venues for Consolidated Level 2 Quote Board
   const overallBestBid = useMemo(() => {
@@ -506,17 +337,17 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     return Math.round((7.0 + 0.6 + currentStrategyConfig.targetProfitBps) * 100) / 100;
   }, [currentStrategyConfig.targetProfitBps]);
 
-  const safeLeverage = useMemo(() => {
-    return computeSafeLeverage(
-      symbol,
-      activeTicker.venues,
-      activeTicker.basePrice,
-      currentStrategyConfig.unitSize,
-      currentStrategyConfig.userTargetLeverage
-    );
-  }, [symbol, activeTicker.venues, activeTicker.basePrice, currentStrategyConfig]);
+  const [bottomTab, setBottomTab] = useState<"opportunities" | "history" | "logs">("opportunities");
 
-  const [bottomTab, setBottomTab] = useState<"opportunities" | "history">("opportunities");
+  const tickerLogsCount = useMemo(() => {
+    const symKey = symbol.toUpperCase();
+    const baseKey = symKey.split(/[-_/]/)[0];
+    return (executionLogs || []).filter((l) => {
+      if (!l.symbol) return false;
+      const logKey = l.symbol.toUpperCase();
+      return logKey === symKey || logKey.split(/[-_/]/)[0] === baseKey;
+    }).length;
+  }, [executionLogs, symbol]);
 
   return (
     <div className="p-3.5 space-y-3 overflow-y-auto h-full text-slate-900 font-sans">
@@ -524,22 +355,12 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       <div className="bg-surface rounded-xl border border-surface-border p-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-2.5 text-xs font-mono select-none">
         {/* Left: Ticker identity, top price, max dislocation, and strategy chips */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Symbol & Venue Pills */}
+          {/* Symbol Pill */}
           <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border">
             <span className="font-bold text-slate-900 text-sm">{symbol}</span>
             <span className="text-[10px] font-semibold px-1.5 py-0.2 bg-blue-50 text-accent rounded border border-blue-200">
               PERP
             </span>
-            <div className="flex items-center space-x-1 ml-1">
-              {activeTicker.venues.map((v) => (
-                <span
-                  key={v}
-                  className="text-[9px] px-1 py-0.2 rounded font-semibold bg-white text-slate-600 border border-surface-border"
-                >
-                  {v}
-                </span>
-              ))}
-            </div>
           </div>
 
           {/* Top-of-Book Mid Price & Spread */}
@@ -547,7 +368,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             <div className="flex items-center space-x-2 bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border">
               <span className="text-slate-400 text-[11px]">Mid:</span>
               <span className="font-bold text-slate-900">
-                {formatCurrencyPrice(orderbooks[0]?.mid_price || activeTicker.basePrice)}
+                {orderbooks[0]?.mid_price && orderbooks[0].mid_price > 0 ? formatCurrencyPrice(orderbooks[0].mid_price) : "—"}
               </span>
               <span className="text-slate-300">|</span>
               <span className="text-slate-400 text-[11px]">Book Spread:</span>
@@ -624,58 +445,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           )}
         </div>
 
-        {/* Right: Controls (Matrix Mode, Sliding Window, Auto-Bot, Scan) */}
+        {/* Right: Controls (Sliding Window, Auto-Bot) */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Mode Toggle */}
-          <div className="flex items-center bg-surface-raised p-0.5 rounded-lg border border-surface-border">
-            <button
-              onClick={() => {
-                setMatrixMode("cross-venue");
-                setSelectedPair(null);
-              }}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-medium transition ${
-                matrixMode === "cross-venue"
-                  ? "bg-surface text-accent shadow-2xs font-semibold border border-surface-border"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <Grid3X3 className="w-3 h-3" />
-              <span>Cross-Venue</span>
-            </button>
-            <button
-              onClick={() => {
-                setMatrixMode("cross-ticker");
-                setSelectedPair(null);
-              }}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded text-xs font-medium transition ${
-                matrixMode === "cross-ticker"
-                  ? "bg-surface text-accent shadow-2xs font-semibold border border-surface-border"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <Layers className="w-3 h-3" />
-              <span>Cross-Ticker</span>
-            </button>
-          </div>
-
-          {/* Preset (if cross-ticker) */}
-          {matrixMode === "cross-ticker" && (
-            <select
-              value={selectedPreset}
-              onChange={(e) => {
-                setSelectedPreset(e.target.value);
-                setSelectedPair(null);
-              }}
-              className="bg-surface border border-surface-border rounded-md px-2 py-1 text-xs font-mono text-slate-800 focus:outline-none"
-            >
-              {Object.keys(TICKER_PRESETS).map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          )}
-
           {/* Sliding Window */}
           <div className="flex items-center space-x-0.5 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-xs">
             {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
@@ -696,42 +467,16 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
           {/* Auto-Bot Switch Toggle (Green for ON, White for OFF) */}
           <div className="flex items-center space-x-1.5 px-2 py-0.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
-            <span className="text-xs font-mono font-medium text-slate-700">Auto</span>
+            <span className="text-xs font-mono font-medium text-slate-700">Auto Bot</span>
             <SwitchToggle
               checked={autoExecute}
-              onChange={setAutoExecute}
+              onChange={handleToggleAutoExecute}
               size="sm"
               showStatusText={true}
             />
           </div>
-
-          {/* Scan Button */}
-          <button
-            onClick={() => onRefresh(orderQty, minBps)}
-            disabled={loading}
-            className="flex items-center space-x-1 px-2.5 py-1 bg-surface hover:bg-surface-raised border border-surface-border rounded-lg text-xs font-medium text-slate-700 transition shadow-2xs"
-            title="Scan orderbooks now"
-          >
-            <RefreshCw
-              className={`w-3 h-3 ${loading ? "animate-spin text-accent" : "text-slate-500"}`}
-            />
-            <span>Scan</span>
-          </button>
         </div>
       </div>
-
-      {/* Auto-execution notification notice */}
-      {lastAutoExecMsg && (
-        <div className="px-3 py-1.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs font-mono text-emerald-800 flex items-center justify-between shadow-2xs">
-          <span>{lastAutoExecMsg}</span>
-          <button
-            onClick={() => setLastAutoExecMsg(null)}
-            className="text-emerald-600 hover:text-emerald-900 text-xs font-bold ml-2"
-          >
-            ×
-          </button>
-        </div>
-      )}
 
       {/* 2. Strategy Parameters Ribbon */}
       <TickerStrategyBar
@@ -750,11 +495,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-surface-border pb-2.5">
             <div>
               <h3 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-2">
-                <span>
-                  {matrixMode === "cross-venue"
-                    ? `Arbitrage Dislocation Matrix — [${symbol}]`
-                    : `Cross-Ticker Relative Value — [${selectedPreset}]`}
-                </span>
+                <span>Arbitrage Dislocation Matrix — [{symbol}]</span>
                 <span className="px-1.5 py-0.2 rounded text-[10px] bg-accent-dim text-accent border border-accent-line font-medium">
                   Rolling {windowOption} Window
                 </span>
@@ -797,9 +538,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
           {/* Matrix Table */}
           <div className="overflow-auto max-h-[500px] rounded-lg border border-surface-border">
-            {matrixMode === "cross-venue" ? (
-              venueMatrix.grid.length < 2 ? (
-                <div className="py-12 text-center text-slate-500 font-mono text-xs px-4 space-y-1.5">
+            {venueMatrix.grid.length < 2 ? (
+              <div className="py-12 text-center text-slate-500 font-mono text-xs px-4 space-y-1.5">
                   <div className="font-bold text-slate-800 text-sm">Cross-Venue Arbitrage Unavailable</div>
                   <div className="text-[11px] text-slate-500">
                     At least 2 enabled &amp; connected exchanges are required for this ticker.
@@ -900,110 +640,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                     })}
                   </tbody>
                 </table>
-              )
-            ) : (
-              /* Cross-Ticker Matrix Grid */
-              crossTickerMatrix.grid.length === 0 ? (
-                <div className="py-12 text-center text-slate-400 font-mono text-xs">
-                  Building multi-market matrix for {selectedPreset}...
-                </div>
-              ) : (
-                <table className="w-full border-collapse font-mono text-xs">
-                  <thead className="sticky top-0 z-20 bg-surface-raised shadow-2xs">
-                    <tr className="bg-surface-raised border-b border-surface-border">
-                      <th className="p-2.5 text-left font-semibold text-slate-500 uppercase text-[10px] tracking-wider border-r border-b border-surface-border min-w-[120px] sticky top-0 left-0 bg-surface-raised z-30">
-                        <div className="flex items-center justify-between">
-                          <span>LONG ↓</span>
-                          <span>SHORT →</span>
-                        </div>
-                      </th>
-                      {crossTickerMatrix.symbolLabels.map((colSymbol, j) => {
-                        const sym = crossTickerMatrix.symbols[j];
-                        const quote = tickerQuotesMap.get(sym);
-                        return (
-                          <th
-                            key={sym}
-                            className="p-2 text-center font-bold text-slate-800 border-r border-b border-surface-border last:border-r-0 min-w-[110px] sticky top-0 bg-surface-raised z-20"
-                          >
-                            <div className="text-[11px] text-slate-900">{colSymbol}</div>
-                            <div className="text-[10px] font-normal text-profit mt-0.5">
-                              Bid: {quote ? formatCurrencyPrice(quote.bestBid) : "..."}
-                            </div>
-                          </th>
-                        );
-                      })}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-surface-border">
-                    {crossTickerMatrix.grid.map((row, i) => {
-                      const rowLabel = crossTickerMatrix.symbolLabels[i];
-                      const rowSym = crossTickerMatrix.symbols[i];
-                      const quote = tickerQuotesMap.get(rowSym);
-
-                      return (
-                        <tr key={rowSym} className="hover:bg-surface-raised/40 transition">
-                          <td className="p-2.5 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10">
-                            <div className="text-[11px] font-bold text-slate-900">{rowLabel}</div>
-                            <div className="text-[10px] font-normal text-loss mt-0.5">
-                              Ask: {quote ? formatCurrencyPrice(quote.bestAsk) : "..."}
-                            </div>
-                          </td>
-
-                          {row.map((cell) => {
-                            const isSelected =
-                              selectedCell?.rowId === cell.rowId && selectedCell?.colId === cell.colId;
-                            const visuals = getMatrixCellVisuals(cell, minBps);
-
-                            if (cell.isDiagonal) {
-                              return (
-                                <td
-                                  key={`${cell.rowId}-${cell.colId}`}
-                                  className="p-2.5 text-center border-r border-surface-border last:border-r-0 bg-surface-raised/40 select-none"
-                                >
-                                  <span className="text-slate-400 font-mono text-sm">—</span>
-                                </td>
-                              );
-                            }
-
-                            return (
-                              <td
-                                key={`${cell.rowId}-${cell.colId}`}
-                                onClick={() => setSelectedPair({ rowId: cell.rowId, colId: cell.colId })}
-                                className={`p-2 text-center border-r border-surface-border last:border-r-0 cursor-pointer transition select-none ${
-                                  visuals.bgClass
-                                } ${isSelected ? "ring-2 ring-accent shadow-xs" : ""}`}
-                                title={`Click to target: Long ${cell.rowLabel} / Short ${cell.colLabel}`}
-                              >
-                                <div className="flex flex-col items-center justify-center space-y-0.5">
-                                  <div className={`text-xs font-mono font-bold ${visuals.textClass}`}>
-                                    {cell.netSpreadBps > 0 ? "+" : ""}
-                                    {cell.netSpreadBps.toFixed(1)} BPS
-                                  </div>
-
-                                  <div
-                                    className={`flex items-center space-x-0.5 px-1 py-0.2 rounded text-[9px] font-mono ${visuals.deltaBadgeBg}`}
-                                  >
-                                    {cell.deltaBps > 0 ? (
-                                      <TrendingUp className="w-2 h-2 inline" />
-                                    ) : cell.deltaBps < 0 ? (
-                                      <TrendingDown className="w-2 h-2 inline" />
-                                    ) : null}
-                                    <span>
-                                      Δ {cell.deltaBps > 0 ? "+" : ""}
-                                      {cell.deltaBps.toFixed(1)}
-                                    </span>
-                                  </div>
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              )
-            )}
+              )}
           </div>
         </div>
 
@@ -1097,176 +734,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               </span>
             </div>
           </div>
-
-          {/* Widget 2: Instant Atomic Execution Dock */}
-          <div className="bg-surface rounded-xl border border-surface-border p-3.5 shadow-2xs space-y-3">
-            <div className="flex items-center justify-between border-b border-surface-border pb-2">
-              <div className="flex items-center space-x-2">
-                <Zap className="w-3.5 h-3.5 text-accent" />
-                <span className="font-mono text-xs font-bold text-slate-900">
-                  Instant Atomic Execution Dock
-                </span>
-                <span
-                  className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-semibold ${
-                    selectedCell
-                      ? "bg-blue-50 text-accent border border-blue-200"
-                      : "bg-surface-raised text-slate-600 border border-surface-border"
-                  }`}
-                >
-                  {selectedCell ? "Selected Cell" : "Top Dislocation (Auto)"}
-                </span>
-              </div>
-              {selectedCell && (
-                <button
-                  onClick={() => setSelectedPair(null)}
-                  className="text-[10px] font-mono text-slate-500 hover:text-accent underline transition"
-                  title="Reset to top opportunity"
-                >
-                  Reset to Top
-                </button>
-              )}
-            </div>
-
-            {activeDockCell ? (
-              <div className="space-y-3">
-                {/* Route Header */}
-                <div className="bg-surface-raised p-2.5 rounded-lg border border-surface-border font-mono text-xs flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center space-x-2">
-                    <span className="px-1.5 py-0.5 rounded bg-loss-dim text-loss font-bold border border-loss-border text-[10px]">
-                      LONG
-                    </span>
-                    <span className="font-bold text-slate-900">{activeDockCell.rowLabel}</span>
-                    <span className="text-slate-500">({activeDockCell.longVenue})</span>
-                    <span className="text-loss font-semibold">
-                      @{formatCurrencyPrice(activeDockCell.longPrice)}
-                    </span>
-                  </div>
-
-                  <ArrowRight className="w-3.5 h-3.5 text-slate-400" />
-
-                  <div className="flex items-center space-x-2">
-                    <span className="px-1.5 py-0.5 rounded bg-profit-dim text-profit font-bold border border-profit-border text-[10px]">
-                      SHORT
-                    </span>
-                    <span className="font-bold text-slate-900">{activeDockCell.colLabel}</span>
-                    <span className="text-slate-500">({activeDockCell.shortVenue})</span>
-                    <span className="text-profit font-semibold">
-                      @{formatCurrencyPrice(activeDockCell.shortPrice)}
-                    </span>
-                  </div>
-                </div>
-
-                {/* 4 Quant Metrics Grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-center">
-                  <div className="bg-surface-raised p-2 rounded-lg border border-surface-border">
-                    <div className="text-[10px] text-slate-400 uppercase">Gross Spread</div>
-                    <div className="text-xs font-bold text-slate-900 mt-0.5">
-                      +{activeDockCell.grossSpreadBps.toFixed(1)} BPS
-                    </div>
-                  </div>
-
-                  <div className="bg-surface-raised p-2 rounded-lg border border-surface-border">
-                    <div className="text-[10px] text-slate-400 uppercase">Friction</div>
-                    <div className="text-xs font-bold text-loss mt-0.5">
-                      -{(activeDockCell.feeBps + activeDockCell.closingFrictionBps).toFixed(1)} BPS
-                    </div>
-                  </div>
-
-                  <div className="bg-surface-raised p-2 rounded-lg border border-surface-border">
-                    <div className="text-[10px] text-slate-400 uppercase">Net Spread</div>
-                    <div
-                      className={`text-xs font-bold mt-0.5 ${
-                        activeDockCell.netSpreadBps >= minBps
-                          ? "text-profit"
-                          : activeDockCell.netSpreadBps > 0
-                          ? "text-accent"
-                          : "text-slate-500"
-                      }`}
-                    >
-                      {activeDockCell.netSpreadBps > 0 ? "+" : ""}
-                      {activeDockCell.netSpreadBps.toFixed(1)} BPS
-                    </div>
-                  </div>
-
-                  <div className="bg-surface-raised p-2 rounded-lg border border-surface-border">
-                    <div className="text-[10px] text-slate-400 uppercase">Est. Profit</div>
-                    <div
-                      className={`text-xs font-bold mt-0.5 ${
-                        activeDockCell.estProfitUsd >= 0 ? "text-profit" : "text-loss"
-                      }`}
-                    >
-                      {formatCurrencyPnl(activeDockCell.estProfitUsd)}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Order Sizing & Margin Row */}
-                <div className="flex items-center justify-between text-xs font-mono bg-surface-raised p-2 rounded-lg border border-surface-border">
-                  <div className="flex items-center space-x-2">
-                    <span className="text-slate-500">Qty:</span>
-                    <input
-                      type="number"
-                      step={orderQty >= 1000 ? "100" : orderQty >= 10 ? "1" : orderQty >= 1 ? "0.1" : "0.001"}
-                      min="0.00000001"
-                      value={orderQty}
-                      onChange={(e) => setOrderQty(parseFloat(e.target.value) || 0.1)}
-                      className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <span className="text-slate-500">{activeTicker.base}</span>
-                  </div>
-
-                  <div className="text-[11px] text-slate-600">
-                    Lev: <strong className="text-slate-800">{safeLeverage.effectiveLeverage}x</strong> · Req:{" "}
-                    <strong className="text-slate-800">
-                      ${((safeLeverage.totalMarginRequiredUsd * orderQty) / (currentStrategyConfig.unitSize || 1)).toFixed(0)}
-                    </strong>
-                  </div>
-                </div>
-
-                {/* Execution Result Feedback */}
-                {executionResult && (
-                  <div
-                    className={`text-xs font-mono px-2.5 py-1.5 rounded-lg border flex items-center space-x-1.5 ${
-                      executionResult.success
-                        ? "bg-profit-dim text-profit border-profit-border"
-                        : "bg-loss-dim text-loss border-loss-border"
-                    }`}
-                  >
-                    {executionResult.success && <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />}
-                    <span className="truncate">{executionResult.message}</span>
-                  </div>
-                )}
-
-                {/* One-Click Execute Button */}
-                <button
-                  onClick={() => handleExecuteCellTrade(activeDockCell)}
-                  disabled={executing || loading}
-                  className={`w-full py-2.5 px-4 rounded-lg text-xs font-mono font-bold transition flex items-center justify-center space-x-2 shadow-2xs ${
-                    executing
-                      ? "bg-slate-200 text-slate-500 cursor-not-allowed"
-                      : activeDockCell.isExecutable
-                      ? "bg-accent hover:bg-accent-hover text-white cursor-pointer"
-                      : "bg-surface-raised hover:bg-surface border border-surface-border text-slate-800 cursor-pointer"
-                  }`}
-                >
-                  <Zap className={`w-3.5 h-3.5 ${executing ? "animate-spin" : ""}`} />
-                  <span>
-                    {executing
-                      ? "Routing Concurrent IOC Orders..."
-                      : `Execute Atomic Arbitrage (${activeDockCell.rowLabel} ➔ ${activeDockCell.colLabel})`}
-                  </span>
-                </button>
-              </div>
-            ) : (
-              <div className="py-8 text-center text-slate-400 font-mono text-xs">
-                Scanning orderbooks for active arbitrage opportunities...
-              </div>
-            )}
-          </div>
         </div>
       </div>
 
-      {/* 4. Bottom Docked Tabbed Panel: Ranked Opportunities vs Execution History */}
+      {/* 4. Bottom Docked Tabbed Panel: Ranked Opportunities vs Execution History vs Log Monitor */}
       <div className="bg-surface rounded-xl border border-surface-border shadow-2xs overflow-hidden">
         {/* Tab Switcher */}
         <div className="flex items-center space-x-1 border-b border-surface-border px-4 pt-2 bg-surface-raised">
@@ -1296,6 +767,20 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             <span>Execution History & Telemetry</span>
             <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-surface-raised text-slate-600 border border-surface-border">
               {executionLogs?.length || 0}
+            </span>
+          </button>
+          <button
+            onClick={() => setBottomTab("logs")}
+            className={`flex items-center space-x-1.5 px-3 py-2 text-xs font-mono font-semibold border-b-2 transition ${
+              bottomTab === "logs"
+                ? "border-accent text-accent bg-surface"
+                : "border-transparent text-slate-500 hover:text-slate-900"
+            }`}
+          >
+            <Terminal className="w-3.5 h-3.5" />
+            <span>Log Monitor</span>
+            <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-surface-raised text-slate-600 border border-surface-border">
+              {tickerLogsCount}
             </span>
           </button>
         </div>
@@ -1396,13 +881,25 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                 </table>
               </div>
             )
-          ) : (
+          ) : bottomTab === "history" ? (
             <div className="max-h-96 overflow-y-auto">
               <TickerTransactionHistory
                 symbol={symbol}
                 logs={executionLogs || []}
                 config={currentStrategyConfig}
                 onRefresh={() => onRefresh(orderQty, minBps)}
+              />
+            </div>
+          ) : (
+            <div className="overflow-y-auto">
+              <TickerLogMonitor
+                symbol={symbol}
+                strategyName="Futures Convergence"
+                config={currentStrategyConfig}
+                executionLogs={executionLogs || []}
+                orderbooks={orderbooks}
+                autoBotEnabled={autoExecute}
+                isPaused={isPaused}
               />
             </div>
           )}

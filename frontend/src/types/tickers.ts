@@ -67,6 +67,8 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   lighter: "LGT",
   vanta: "VNT",
   robinhood: "RH",
+  arcus: "ARC",
+  popdex: "POP",
   kraken: "KRK",
 };
 
@@ -75,6 +77,8 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   LGT: "lighter",
   VNT: "vanta",
   RH: "robinhood",
+  ARC: "arcus",
+  POP: "popdex",
   KRK: "kraken",
 };
 
@@ -95,6 +99,10 @@ export interface VenueSettingsFilter {
   robinhood_enabled?: boolean;
   robinhood_wallet?: string;
   robinhood_private_key?: string;
+  arcus_enabled?: boolean;
+  arcus_api_key?: string;
+  popdex_enabled?: boolean;
+  popdex_api_key?: string;
   kraken_enabled?: boolean;
   kraken_spot_enabled?: boolean;
   kraken_futures_enabled?: boolean;
@@ -103,58 +111,66 @@ export interface VenueSettingsFilter {
 }
 
 /**
- * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "KRK") based on engine settings
- * and whether live trading mode is engaged.
+ * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "ARC", "POP", "KRK") based on engine settings.
+ * Strictly requires configured API credentials/keys for venues in BOTH paper and live trading.
+ * No synthetic venue connectivity is permitted without real configured API access.
  */
 export function getEnabledConnectedVenueCodes(
   settings?: VenueSettingsFilter | null,
-  isLiveMode?: boolean
+  _isLiveMode?: boolean
 ): Set<string> {
   const active = new Set<string>();
   if (!settings) {
-    // Default baseline: standard 4 DEXes enabled
-    active.add("HL");
-    active.add("LGT");
-    active.add("VNT");
-    active.add("RH");
     return active;
   }
 
-  const live = isLiveMode !== undefined ? isLiveMode : (settings.trading_mode === "real");
-
-  // 1. Hyperliquid (L1 DEX)
-  if (settings.hyperliquid_enabled !== false) {
-    if (!live || Boolean(settings.hyperliquid_wallet?.trim() || settings.hyperliquid_private_key?.trim())) {
+  // 1. Hyperliquid (L1 DEX): requires wallet address or private key
+  if (settings.hyperliquid_enabled === true) {
+    if (Boolean(settings.hyperliquid_wallet?.trim() || settings.hyperliquid_private_key?.trim())) {
       active.add("HL");
     }
   }
 
-  // 2. Lighter (zkDEX)
-  if (settings.lighter_enabled !== false) {
-    if (!live || Boolean(settings.lighter_api_key?.trim() || (settings.lighter_account_index && settings.lighter_account_index !== "0"))) {
+  // 2. Lighter (zkDEX): requires API private key or nonzero account index
+  if (settings.lighter_enabled === true) {
+    if (Boolean(settings.lighter_api_key?.trim() || (settings.lighter_account_index && settings.lighter_account_index.trim() !== "" && settings.lighter_account_index.trim() !== "0"))) {
       active.add("LGT");
     }
   }
 
-  // 3. Vanta.exchange (Omnichain perps)
-  if (settings.vanta_enabled !== false) {
-    if (!live || Boolean(settings.vanta_orderly_key?.trim() || settings.vanta_account_id?.trim())) {
+  // 3. Vanta.exchange (Omnichain perps): requires Orderly key or account ID
+  if (settings.vanta_enabled === true) {
+    if (Boolean(settings.vanta_orderly_key?.trim() || settings.vanta_account_id?.trim())) {
       active.add("VNT");
     }
   }
 
-  // 4. Robinhood EVM
-  if (settings.robinhood_enabled !== false) {
-    if (!live || Boolean(settings.robinhood_wallet?.trim() || settings.robinhood_private_key?.trim())) {
+  // 4. Robinhood EVM: requires wallet or private key
+  if (settings.robinhood_enabled === true) {
+    if (Boolean(settings.robinhood_wallet?.trim() || settings.robinhood_private_key?.trim())) {
       active.add("RH");
     }
   }
 
-  // 5. Kraken Spot & Futures
+  // 5. Arcus (CLOB DEX): requires Arcus API key
+  if (settings.arcus_enabled === true) {
+    if (Boolean(settings.arcus_api_key?.trim())) {
+      active.add("ARC");
+    }
+  }
+
+  // 6. PopDEX (Arbitrage Protocol): requires PopDEX API key
+  if (settings.popdex_enabled === true) {
+    if (Boolean(settings.popdex_api_key?.trim())) {
+      active.add("POP");
+    }
+  }
+
+  // 7. Kraken Spot & Futures: requires Spot or Futures API key
   if (settings.kraken_enabled === true) {
     const spotOk = Boolean(settings.kraken_spot_enabled && settings.kraken_spot_api_key?.trim());
     const futuresOk = Boolean(settings.kraken_futures_enabled && settings.kraken_futures_api_key?.trim());
-    if (!live || spotOk || futuresOk) {
+    if (spotOk || futuresOk) {
       active.add("KRK");
     }
   }

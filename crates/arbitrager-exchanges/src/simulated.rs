@@ -298,9 +298,9 @@ impl ExchangeAdapter for SimulatedExchange {
                     unrealized_pnl: dec!(0),
                     realized_pnl: dec!(0),
                     liquidation_price: None,
-                    leverage: dec!(10),
-                    initial_margin: notional / dec!(10),
-                    maintenance_margin: notional / dec!(20),
+                    leverage: dec!(5),
+                    initial_margin: notional / dec!(5),
+                    maintenance_margin: notional / dec!(10),
                     updated_at: Utc::now(),
                 });
             }
@@ -341,6 +341,16 @@ impl ExchangeAdapter for SimulatedExchange {
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        let mut acc = self.account.write();
+        for pos in &mut acc.positions {
+            if pos.symbol == symbol {
+                pos.leverage = Decimal::from(leverage);
+            }
+        }
         Ok(())
     }
 }

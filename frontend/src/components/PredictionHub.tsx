@@ -1,22 +1,27 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Filter } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
+import { SwitchToggle } from "./SwitchToggle";
 
 interface PredictionHubProps {
   opportunities: PredictionOpportunityDto[];
   onSearch: (market: string) => void;
   onExecutePrediction?: (opp: PredictionOpportunityDto) => Promise<void>;
   loading?: boolean;
+  isPaused?: boolean;
 }
 
 export const PredictionHub: React.FC<PredictionHubProps> = ({
   opportunities,
   onSearch,
   onExecutePrediction,
+  isPaused = false,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
+  const [autoPredictionEnabled, setAutoPredictionEnabled] = useState(false);
+  const lastAutoPredExecRef = useRef<number>(0);
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -35,6 +40,20 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
     }
   };
 
+  // Automated Execution Loop when user manually enables Auto Parity
+  useEffect(() => {
+    if (!autoPredictionEnabled || executingId || !opportunities.length || isPaused) return;
+
+    const now = Date.now();
+    if (now - lastAutoPredExecRef.current < 6000) return; // 6s cooldown
+
+    const bestOpp = opportunities.find((o) => o.net_profit_cents >= 1.0);
+    if (bestOpp) {
+      lastAutoPredExecRef.current = now;
+      handleExecute(bestOpp);
+    }
+  }, [autoPredictionEnabled, executingId, opportunities, isPaused]);
+
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Header Info */}
@@ -48,25 +67,38 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           </p>
         </div>
 
-        {/* Filter Search */}
-        <form onSubmit={handleSearch} className="flex items-center space-x-2">
-          <div className="relative">
-            <input
-              type="text"
-              placeholder="Search contract (e.g. FED, BTC)..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-64 pl-8 pr-3 py-1.5 bg-surface border border-surface-border rounded-lg text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+        <div className="flex items-center space-x-3">
+          {/* Auto Parity Bot Switch (Green for ON, White for OFF) */}
+          <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-surface-raised border border-surface-border rounded-lg shadow-2xs">
+            <span className="text-xs font-mono font-medium text-slate-700">Auto Bot</span>
+            <SwitchToggle
+              checked={autoPredictionEnabled}
+              onChange={setAutoPredictionEnabled}
+              size="sm"
+              showStatusText={true}
             />
-            <Filter className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
           </div>
-          <button
-            type="submit"
-            className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-lg transition shadow-xs"
-          >
-            Filter
-          </button>
-        </form>
+
+          {/* Filter Search */}
+          <form onSubmit={handleSearch} className="flex items-center space-x-2">
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Search contract (e.g. FED, BTC)..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-56 pl-8 pr-3 py-1.5 bg-surface border border-surface-border rounded-lg text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+              />
+              <Filter className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+            </div>
+            <button
+              type="submit"
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-lg transition shadow-xs"
+            >
+              Filter
+            </button>
+          </form>
+        </div>
       </div>
 
       {/* Synthetic Formula Explanation Card */}

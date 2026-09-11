@@ -40,12 +40,31 @@ impl LighterAdapter {
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        // 1. Check rate limiter and in-memory single-flight cache
+        if let Ok(Some(cached_str)) = self.rate_limiter.acquire_or_cache_path(path, true).await {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
+                return Ok(val);
+            }
+        }
+
         let url = format!("{}{}", self.base_url, path);
-        let resp = self.client.get(&url).send().await?;
+        let resp = match self.client.get(&url).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.rate_limiter.record_failure(false);
+                return Err(e.into());
+            }
+        };
+
         if !resp.status().is_success() {
+            let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            self.rate_limiter.record_failure(is_429);
             anyhow::bail!("Lighter API error: {} {}", resp.status(), path);
         }
-        let data = resp.json::<serde_json::Value>().await?;
+
+        let text = resp.text().await?;
+        self.rate_limiter.record_success_path(path, text.clone());
+        let data = serde_json::from_str::<serde_json::Value>(&text)?;
         Ok(data)
     }
 }
@@ -253,9 +272,9 @@ impl ExchangeAdapter for LighterAdapter {
                             unrealized_pnl: dec!(0),
                             realized_pnl: dec!(0),
                             liquidation_price: None,
-                            leverage: dec!(10),
-                            initial_margin: (sz.abs() * entry_px) / dec!(10),
-                            maintenance_margin: (sz.abs() * entry_px) / dec!(20),
+                            leverage: dec!(5),
+                            initial_margin: (sz.abs() * entry_px) / dec!(5),
+                            maintenance_margin: (sz.abs() * entry_px) / dec!(10),
                             updated_at: Utc::now(),
                         });
                     }
@@ -302,6 +321,11 @@ impl ExchangeAdapter for LighterAdapter {
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         info!("[Lighter] Cancel order: {:?}", req);
+        Ok(())
+    }
+
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        info!("[Lighter] Setting default leverage to {}x for {}", leverage, symbol);
         Ok(())
     }
 }

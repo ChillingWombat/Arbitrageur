@@ -1,10 +1,13 @@
 import React, { useState } from "react";
+import { Pause, Play } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
 import { ArbitragerLogo } from "./ArbitragerLogo";
 
 interface HeaderProps {
   status: SystemStatusDto | null;
+  isPaused?: boolean;
+  onTogglePause?: (paused: boolean) => void;
   onResetCircuitBreaker: () => void;
   onEmergencyKillswitch: () => void;
   onToggleLiveMode?: (enabled: boolean) => void;
@@ -20,6 +23,8 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({
   status,
+  isPaused: propIsPaused,
+  onTogglePause,
   onResetCircuitBreaker,
   onEmergencyKillswitch,
   refreshing,
@@ -33,12 +38,13 @@ export const Header: React.FC<HeaderProps> = ({
   const [showKillModal, setShowKillModal] = useState(false);
 
   const isTripped = status?.circuit_breaker_tripped ?? false;
+  const isPaused = propIsPaused ?? status?.is_paused ?? false;
 
   return (
     <>
-      <header className="h-12 border-b border-surface-border bg-surface px-4 lg:px-6 flex items-center justify-between select-none gap-3">
-        {/* Left: Minimalist Branding */}
-        <div className="flex items-center space-x-3 shrink-0">
+      <header className="h-12 border-b border-surface-border bg-surface flex items-stretch select-none">
+        {/* Left: Minimalist Branding (w-72 aligned with TickerExplorer's right border) */}
+        <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
           <div
             className="flex items-center space-x-2.5 cursor-default"
             title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER"}
@@ -50,8 +56,8 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Center: Top Section Switcher Navigation Bar */}
-        <div className="flex-1 flex justify-center min-w-0 px-2 overflow-x-auto">
+        {/* Center: Top Section Switcher Navigation Bar (flush with dividers) */}
+        <div className="flex-1 flex items-stretch min-w-0">
           <Navigation
             activeTab={activeTab}
             onSelectTab={onSelectTab}
@@ -63,19 +69,7 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right: Metrics & Risk Actions */}
-        <div className="flex items-center space-x-2.5 shrink-0">
-          {/* Circuit Breaker Status */}
-          <div
-            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-xs font-mono font-medium ${
-              isTripped
-                ? "bg-loss-dim border-loss-border text-loss"
-                : "bg-profit-dim border-profit-border text-profit"
-            }`}
-          >
-            <span className={`w-1.5 h-1.5 rounded-full ${isTripped ? "bg-loss animate-pulse" : "bg-profit"}`} />
-            <span className="hidden sm:inline">{isTripped ? "CB: Tripped" : "Risk: Normal"}</span>
-          </div>
-
+        <div className="border-l border-surface-border flex items-center space-x-2.5 px-4 shrink-0">
           {/* Reset CB if tripped */}
           {isTripped && (
             <button
@@ -83,9 +77,36 @@ export const Header: React.FC<HeaderProps> = ({
               className="px-2 py-1 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium transition cursor-pointer"
               title="Reset Circuit Breaker"
             >
-              Reset
+              Reset CB
             </button>
           )}
+
+          {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
+          <button
+            onClick={() => onTogglePause?.(!isPaused)}
+            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 cursor-pointer shadow-xs ${
+              isPaused
+                ? "bg-amber-500 hover:bg-amber-600 text-white animate-pulse"
+                : "bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border"
+            }`}
+            title={
+              isPaused
+                ? "Continue Trading: Resume automated and manual executions (Positions Preserved)"
+                : "Pause Trading: Temporarily suspend executions (Positions are NOT cleared)"
+            }
+          >
+            {isPaused ? (
+              <>
+                <Play className="w-3.5 h-3.5 fill-current" />
+                <span>CONTINUE</span>
+              </>
+            ) : (
+              <>
+                <Pause className="w-3.5 h-3.5" />
+                <span>PAUSE</span>
+              </>
+            )}
+          </button>
 
           {/* Emergency Kill Switch */}
           <button

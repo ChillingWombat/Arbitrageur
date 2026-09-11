@@ -53,6 +53,7 @@ fn main() {
             commands::trigger_emergency_killswitch,
             commands::get_execution_logs,
             commands::set_live_mode,
+            commands::set_engine_paused,
             commands::get_engine_settings,
             commands::save_engine_settings,
             commands::get_ticker_strategy_config,

@@ -51,15 +51,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold font-mono text-slate-900 leading-tight">
-                System Engine Settings
+                System Setting
               </h2>
             </div>
           </div>
 
           <div className="flex items-center space-x-2.5">
-            <span className="hidden sm:inline-block text-[10px] font-mono text-slate-400 bg-surface-raised px-2 py-0.5 rounded border border-surface-border">
-              ESC to close
-            </span>
             <button
               type="button"
               onClick={onClose}

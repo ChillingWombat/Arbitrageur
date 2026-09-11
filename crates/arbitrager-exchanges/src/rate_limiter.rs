@@ -1,11 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::time::sleep;
 use tracing::{warn, debug};
 
-/// Rate limit backoff and cached request coordinator.
-/// Pattern reverse-engineered from high-frequency DEX arbitrage production tools.
+/// Rate limit backoff and cached request coordinator with path-level request coalescing.
+/// Pattern reverse-engineered from high-frequency DEX arbitrage production tools (e.g. PopDEX / Lighter bot).
 #[derive(Debug, Clone)]
 pub struct AccountRequestCoordinator {
     venue_name: String,
@@ -22,6 +23,7 @@ struct CoordinatorState {
     backoff_until: Option<Instant>,
     consecutive_failures: u32,
     cached_data: Option<(Instant, String)>,
+    cached_paths: HashMap<String, (Instant, String)>,
 }
 
 impl AccountRequestCoordinator {
@@ -43,12 +45,14 @@ impl AccountRequestCoordinator {
                 backoff_until: None,
                 consecutive_failures: 0,
                 cached_data: None,
+                cached_paths: HashMap::new(),
             })),
         }
     }
 
-    /// Pre-request check: Wait if needed, or return cached payload if within TTL.
-    pub async fn acquire_or_cache(&self, allow_cache: bool) -> Result<Option<String>, anyhow::Error> {
+    /// Pre-request check for a specific API path/query:
+    /// Returns Some(cached_json) if fresh in cache (request coalescing), or throttles and permits request.
+    pub async fn acquire_or_cache_path(&self, path: &str, allow_cache: bool) -> Result<Option<String>, anyhow::Error> {
         let now = Instant::now();
         let wait_dur;
 
@@ -59,11 +63,11 @@ impl AccountRequestCoordinator {
                 if now < until {
                     let backoff_left = until - now;
                     if allow_cache {
-                        if let Some((cached_at, ref payload)) = state.cached_data {
-                            if now.duration_since(cached_at) < self.cache_ttl * 2 {
+                        if let Some((cached_at, ref payload)) = state.cached_paths.get(path) {
+                            if now.duration_since(*cached_at) < self.cache_ttl * 3 {
                                 debug!(
-                                    "[{}] In backoff ({:?} remaining), returning cached data",
-                                    self.venue_name, backoff_left
+                                    "[{}] In backoff ({:?} remaining), returning cached path data for {}",
+                                    self.venue_name, backoff_left, path
                                 );
                                 return Ok(Some(payload.clone()));
                             }
@@ -77,10 +81,10 @@ impl AccountRequestCoordinator {
                 }
             }
 
-            // 2. Check fresh cache
+            // 2. Check fresh cache for this exact path
             if allow_cache {
-                if let Some((cached_at, ref payload)) = state.cached_data {
-                    if now.duration_since(cached_at) < self.cache_ttl {
+                if let Some((cached_at, ref payload)) = state.cached_paths.get(path) {
+                    if now.duration_since(*cached_at) < self.cache_ttl {
                         return Ok(Some(payload.clone()));
                     }
                 }
@@ -111,12 +115,23 @@ impl AccountRequestCoordinator {
         Ok(None)
     }
 
-    /// Record a successful HTTP response.
-    pub fn record_success(&self, payload: String) {
+    /// Pre-request check: Wait if needed, or return cached payload if within TTL.
+    pub async fn acquire_or_cache(&self, allow_cache: bool) -> Result<Option<String>, anyhow::Error> {
+        self.acquire_or_cache_path("default", allow_cache).await
+    }
+
+    /// Record a successful HTTP response for a specific path.
+    pub fn record_success_path(&self, path: &str, payload: String) {
         let mut state = self.state.lock();
         state.consecutive_failures = 0;
         state.backoff_until = None;
+        state.cached_paths.insert(path.to_string(), (Instant::now(), payload.clone()));
         state.cached_data = Some((Instant::now(), payload));
+    }
+
+    /// Record a successful HTTP response.
+    pub fn record_success(&self, payload: String) {
+        self.record_success_path("default", payload);
     }
 
     /// Record an error or 429 Rate Limit.

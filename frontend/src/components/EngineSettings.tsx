@@ -7,7 +7,6 @@ import {
   Key,
   Lock,
   Sliders,
-  Shield,
   ExternalLink,
   Wallet,
   Globe,
@@ -15,14 +14,16 @@ import {
   AlertTriangle,
   Scale,
   RefreshCw,
+  Info,
 } from "lucide-react";
 import { api } from "../services/api";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
+import { ArbitragerLogo } from "./ArbitragerLogo";
 
 type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
-type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "robinhood" | "kraken" | "polymarket" | "kalshi";
+type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "arcus" | "popdex" | "robinhood" | "kraken" | "polymarket" | "kalshi";
 
 interface ToggleSwitchProps {
   checked: boolean;
@@ -55,11 +56,13 @@ const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
         className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
-          checked ? "bg-emerald-500 border border-emerald-600 shadow-xs" : "bg-slate-200 border border-slate-300"
+          checked ? "bg-emerald-500 border border-emerald-600 shadow-xs" : "bg-white border border-slate-300 shadow-xs"
         }`}
       >
         <span
-          className={`inline-block rounded-full bg-white shadow-xs transform transition-transform ${
+          className={`inline-block rounded-full shadow-xs transform transition-transform ${
+            checked ? "bg-white" : "bg-slate-400"
+          } ${
             isSm
               ? checked
                 ? "w-3.5 h-3.5 translate-x-4"
@@ -101,12 +104,12 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [bindAddress, setBindAddress] = useState("127.0.0.1");
 
   // Exchange Enablement Toggles
-  const [hlEnabled, setHlEnabled] = useState(true);
-  const [hlSpotEnabled, setHlSpotEnabled] = useState(true);
-  const [lighterEnabled, setLighterEnabled] = useState(true);
-  const [lighterSpotEnabled, setLighterSpotEnabled] = useState(true);
-  const [vantaEnabled, setVantaEnabled] = useState(true);
-  const [robinhoodEnabled, setRobinhoodEnabled] = useState(true);
+  const [hlEnabled, setHlEnabled] = useState(false);
+  const [hlSpotEnabled, setHlSpotEnabled] = useState(false);
+  const [lighterEnabled, setLighterEnabled] = useState(false);
+  const [lighterSpotEnabled, setLighterSpotEnabled] = useState(false);
+  const [vantaEnabled, setVantaEnabled] = useState(false);
+  const [robinhoodEnabled, setRobinhoodEnabled] = useState(false);
   const [krakenEnabled, setKrakenEnabled] = useState(false);
   const [krakenSpotEnabled, setKrakenSpotEnabled] = useState(false);
   const [krakenFuturesEnabled, setKrakenFuturesEnabled] = useState(false);
@@ -139,6 +142,18 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [robinhoodRpcUrl, setRobinhoodRpcUrl] = useState("https://rpc.robinhood.network");
   const [robinhoodRouter, setRobinhoodRouter] = useState("0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
   const [robinhoodSubaccountIndex, setRobinhoodSubaccountIndex] = useState<string>("");
+
+  // Arcus CLOB DEX
+  const [arcusEnabled, setArcusEnabled] = useState(false);
+  const [arcusApiKey, setArcusApiKey] = useState("");
+  const [arcusSecret, setArcusSecret] = useState("");
+  const [arcusUrl, setArcusUrl] = useState("https://api.arcus.exchange");
+
+  // PopDEX (Arbitrage Protocol)
+  const [popdexEnabled, setPopdexEnabled] = useState(false);
+  const [popdexAccountIndex, setPopdexAccountIndex] = useState("0");
+  const [popdexApiKey, setPopdexApiKey] = useState("");
+  const [popdexUrl, setPopdexUrl] = useState("https://api.popdex.trade");
 
   // Kraken (Spot & Futures)
   const [krakenSpotApiKey, setKrakenSpotApiKey] = useState("");
@@ -261,17 +276,27 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         setKalshiPrivateKey(s.kalshi_private_key || "");
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
 
-        setHlEnabled(s.hyperliquid_enabled ?? true);
-        setHlSpotEnabled(s.hyperliquid_spot_enabled ?? true);
-        setLighterEnabled(s.lighter_enabled ?? true);
-        setLighterSpotEnabled(s.lighter_spot_enabled ?? true);
-        setVantaEnabled(s.vanta_enabled ?? true);
-        setRobinhoodEnabled(s.robinhood_enabled ?? true);
+        setHlEnabled(s.hyperliquid_enabled ?? false);
+        setHlSpotEnabled(s.hyperliquid_spot_enabled ?? false);
+        setLighterEnabled(s.lighter_enabled ?? false);
+        setLighterSpotEnabled(s.lighter_spot_enabled ?? false);
+        setVantaEnabled(s.vanta_enabled ?? false);
+        setRobinhoodEnabled(s.robinhood_enabled ?? false);
+        setArcusEnabled(s.arcus_enabled ?? false);
+        setPopdexEnabled(s.popdex_enabled ?? false);
         setKrakenEnabled(s.kraken_enabled ?? false);
         setKrakenSpotEnabled(s.kraken_spot_enabled ?? false);
         setKrakenFuturesEnabled(s.kraken_futures_enabled ?? false);
         setPolymarketEnabled(s.polymarket_enabled ?? false);
         setKalshiEnabled(s.kalshi_enabled ?? false);
+
+        setArcusApiKey(s.arcus_api_key || "");
+        setArcusSecret(s.arcus_secret || "");
+        setArcusUrl(s.arcus_url || "https://api.arcus.exchange");
+
+        setPopdexAccountIndex(s.popdex_account_index || "0");
+        setPopdexApiKey(s.popdex_api_key || "");
+        setPopdexUrl(s.popdex_url || "https://api.popdex.trade");
 
         setKrakenSpotApiKey(s.kraken_spot_api_key || "");
         setKrakenSpotSecret(s.kraken_spot_secret || "");
@@ -314,6 +339,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "ONLINE", latency_ms: 2, fee_bps: 2.0 },
     { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "ONLINE", latency_ms: 5, fee_bps: 1.5 },
     { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "ONLINE", latency_ms: 4, fee_bps: 3.0 },
+    { id: "arcus", name: "Arcus DEX", market_type: "Fast CLOB", status: "ONLINE", latency_ms: 3, fee_bps: 1.5 },
+    { id: "popdex", name: "PopDEX", market_type: "Lighter Hybrid", status: "ONLINE", latency_ms: 4, fee_bps: 2.0 },
     { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "ONLINE", latency_ms: 8, fee_bps: 2.5 },
     { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "ONLINE", latency_ms: 22, fee_bps: 16.0 },
     { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 12, fee_bps: 0.0 },
@@ -349,11 +376,19 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         lighter_spot_enabled: lighterSpotEnabled,
         vanta_enabled: vantaEnabled,
         robinhood_enabled: robinhoodEnabled,
+        arcus_enabled: arcusEnabled,
+        popdex_enabled: popdexEnabled,
         kraken_enabled: krakenEnabled,
         kraken_spot_enabled: krakenSpotEnabled,
         kraken_futures_enabled: krakenFuturesEnabled,
         polymarket_enabled: polymarketEnabled,
         kalshi_enabled: kalshiEnabled,
+        arcus_api_key: arcusApiKey.trim(),
+        arcus_secret: arcusSecret.trim(),
+        arcus_url: arcusUrl.trim(),
+        popdex_account_index: popdexAccountIndex.trim(),
+        popdex_api_key: popdexApiKey.trim(),
+        popdex_url: popdexUrl.trim(),
         kraken_spot_api_key: krakenSpotApiKey.trim(),
         kraken_spot_secret: krakenSpotSecret.trim(),
         kraken_spot_url: krakenSpotUrl.trim(),
@@ -436,6 +471,10 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         return lighterEnabled && Boolean(lighterApiKey);
       case "vanta":
         return vantaEnabled && Boolean(vantaOrderlyKey || vantaAccountId);
+      case "arcus":
+        return arcusEnabled && Boolean(arcusApiKey);
+      case "popdex":
+        return popdexEnabled && Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0"));
       case "robinhood":
         return robinhoodEnabled && Boolean(robinhoodWallet || robinhoodPrivateKey);
       case "kraken":
@@ -453,6 +492,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     isVenueConfigured("hyperliquid"),
     isVenueConfigured("lighter"),
     isVenueConfigured("vanta"),
+    isVenueConfigured("arcus"),
+    isVenueConfigured("popdex"),
     isVenueConfigured("robinhood"),
     isVenueConfigured("kraken"),
     isVenueConfigured("polymarket"),
@@ -463,6 +504,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     hlEnabled,
     lighterEnabled,
     vantaEnabled,
+    arcusEnabled,
+    popdexEnabled,
     robinhoodEnabled,
     krakenEnabled,
     polymarketEnabled,
@@ -472,121 +515,115 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
 
   return (
-    <div className="flex h-full min-h-0 overflow-hidden select-none">
-      {/* Left Sidebar Navigation */}
-      <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
-        <div className="space-y-3">
-          <div className="px-2 pt-1 flex items-center justify-between">
-            <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
-              Sections
-            </span>
-            <span className="text-[10px] font-mono text-slate-500 font-semibold">
-              {activeVenuesCount}/7 active
-            </span>
-          </div>
-
-          <div className="space-y-1">
-            <button
-              type="button"
-              onClick={() => setActiveTab("exchanges")}
-              className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
+    <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
+      {/* Top Section Navigation Bar */}
+      <div className="border-b border-surface-border bg-slate-50/80 px-6 shrink-0 flex items-center justify-between">
+        {/* Navigation Tabs */}
+        <div className="flex items-stretch space-x-1 -mb-px">
+          <button
+            type="button"
+            onClick={() => setActiveTab("exchanges")}
+            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+              activeTab === "exchanges"
+                ? "border-accent text-accent font-bold bg-surface"
+                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+            }`}
+          >
+            <Key className={`w-3.5 h-3.5 ${activeTab === "exchanges" ? "text-accent" : "text-slate-500"}`} />
+            <span>Exchanges</span>
+            <span
+              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
                 activeTab === "exchanges"
-                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+                  ? "bg-blue-100 text-blue-700 font-bold"
+                  : "bg-slate-200 text-slate-600"
               }`}
             >
-              <div className="flex items-center space-x-2.5">
-                <Key className="w-4 h-4 text-blue-600" />
-                <span>Exchanges</span>
-              </div>
-              <span
-                className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
-                  activeTab === "exchanges" ? "bg-blue-100 text-blue-700 font-bold" : "bg-slate-200 text-slate-600"
-                }`}
-              >
-                {activeVenuesCount}
-              </span>
-            </button>
+              {activeVenuesCount}
+            </span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("balances")}
-              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
-                activeTab === "balances"
-                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
-              }`}
-            >
-              <Wallet className="w-4 h-4 text-blue-600" />
-              <span>Balances</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("balances")}
+            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+              activeTab === "balances"
+                ? "border-accent text-accent font-bold bg-surface"
+                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+            }`}
+          >
+            <Wallet className={`w-3.5 h-3.5 ${activeTab === "balances" ? "text-accent" : "text-slate-500"}`} />
+            <span>Balances</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("execution")}
-              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
-                activeTab === "execution"
-                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
-              }`}
-            >
-              <Sliders className="w-4 h-4 text-blue-600" />
-              <span>Execution</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("execution")}
+            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+              activeTab === "execution"
+                ? "border-accent text-accent font-bold bg-surface"
+                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+            }`}
+          >
+            <Sliders className={`w-3.5 h-3.5 ${activeTab === "execution" ? "text-accent" : "text-slate-500"}`} />
+            <span>Execution</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("network")}
-              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
-                activeTab === "network"
-                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
-              }`}
-            >
-              <Globe className="w-4 h-4 text-blue-600" />
-              <span>Network & VPS</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab("network")}
+            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+              activeTab === "network"
+                ? "border-accent text-accent font-bold bg-surface"
+                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+            }`}
+          >
+            <Globe className={`w-3.5 h-3.5 ${activeTab === "network" ? "text-accent" : "text-slate-500"}`} />
+            <span>Network &amp; VPS</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => setActiveTab("about")}
-              className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer ${
-                activeTab === "about"
-                  ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
-              }`}
-            >
-              <Shield className="w-4 h-4 text-blue-600" />
-              <span>About</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => setActiveTab("about")}
+            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+              activeTab === "about"
+                ? "border-accent text-accent font-bold bg-surface"
+                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+            }`}
+          >
+            <Info className={`w-3.5 h-3.5 ${activeTab === "about" ? "text-accent" : "text-slate-500"}`} />
+            <span>About</span>
+          </button>
         </div>
 
-        {/* Sidebar Status Footer */}
-        <div className="pt-3 border-t border-surface-border space-y-2">
-          <div className="px-2.5 py-1.5 rounded-lg bg-surface border border-surface-border flex items-center justify-between text-[11px] font-mono">
-            <span className="text-slate-500">Vault</span>
-            <span
-              className={`font-semibold flex items-center space-x-1 ${
-                isVaultLocked ? "text-amber-600" : "text-emerald-600"
-              }`}
-            >
-              {isVaultLocked ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
-              <span>{isVaultLocked ? "Locked" : "Unlocked"}</span>
-            </span>
+        {/* Right Status Badges (Vault status & Trading mode) */}
+        <div className="flex items-center space-x-2 py-2">
+          <div
+            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-[11px] font-mono font-medium ${
+              isVaultLocked
+                ? "bg-amber-50 border-amber-200 text-amber-700"
+                : "bg-emerald-50 border-emerald-200 text-emerald-700"
+            }`}
+            title="Local Secure Vault Encryption Status"
+          >
+            {isVaultLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+            <span>Vault: {isVaultLocked ? "Locked" : "Unlocked"}</span>
           </div>
-          <div className="px-2.5 py-1 rounded-lg bg-surface border border-surface-border flex items-center justify-between text-[10px] font-mono">
-            <span className="text-slate-500">Mode</span>
-            <span className="font-bold text-blue-700 uppercase">{tradingMode}</span>
+
+          <div
+            className="px-2.5 py-1 rounded-lg border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1 shadow-2xs"
+            title={`Execution mode: ${tradingMode.toUpperCase()}`}
+          >
+            <span className="text-slate-400 font-normal">Mode:</span>
+            <span className="font-bold text-accent uppercase">{tradingMode}</span>
           </div>
         </div>
       </div>
 
-      {/* Right Content Area */}
+      {/* Main Content Form Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-surface">
         <form onSubmit={handleSave} className="flex flex-col h-full min-h-0">
           {/* Active Tab Subheader */}
-          <div className="px-6 py-3.5 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
+          <div className="px-6 py-3 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
             <div>
               <h3 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
                 <span>
@@ -613,7 +650,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             </div>
             {activeTab === "exchanges" && (
               <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                {activeVenuesCount} / 7 Venues Enabled ({configuredCount} Configured)
+                {activeVenuesCount} / 9 Venues Enabled ({configuredCount} Configured)
               </span>
             )}
           </div>
@@ -638,40 +675,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         {/* =================================================================== */}
         {(activeTab === "exchanges" || activeTab === "all") && (
           <div className="space-y-4">
-            {/* Referral Links Promotion Card */}
-            <div className="p-4 bg-gradient-to-r from-blue-50/70 via-indigo-50/50 to-blue-50/70 border border-blue-200 rounded-2xl shadow-xs">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h4 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
-                    <span>⚡ Exchange Referral Links (Fee Tier Discounts)</span>
-                  </h4>
-                  <p className="text-[11px] text-slate-600 font-mono mt-0.5">
-                    Create accounts with zero taker surcharges and support project maintenance:
-                  </p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <a
-                    href={referralLighter}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
-                  >
-                    <span>Lighter (SOLO)</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                  <a
-                    href={referralRobinhood}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-3 py-1.5 bg-surface hover:bg-surface-raised border border-blue-300 text-accent rounded-xl text-xs font-mono font-semibold transition shadow-xs flex items-center space-x-1"
-                  >
-                    <span>Robinhood Chain (SOLO)</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-              </div>
-            </div>
-
             {/* Local Encrypted Vault Banner */}
             <div className="p-4 bg-surface border border-surface-border rounded-2xl shadow-xs flex items-center justify-between gap-4">
               <div className="flex items-center space-x-3">
@@ -730,20 +733,32 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             {/* Exchange Filter Selector */}
             <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-xs font-mono">
               <span className="text-slate-500 text-[11px] mr-2">Filter Venue:</span>
-              {(["all", "hyperliquid", "lighter", "vanta", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => (
-                <button
-                  key={vf}
-                  type="button"
-                  onClick={() => setVenueFilter(vf)}
-                  className={`px-2.5 py-1 rounded-lg transition capitalize ${
-                    venueFilter === vf
-                      ? "bg-accent text-white font-semibold shadow-xs"
-                      : "bg-surface text-slate-600 hover:bg-surface-raised border border-surface-border"
-                  }`}
-                >
-                  {vf}
-                </button>
-              ))}
+              {(["all", "hyperliquid", "lighter", "vanta", "arcus", "popdex", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => {
+                const label = vf === "all" ? "All"
+                  : vf === "hyperliquid" ? "Hyperliquid"
+                  : vf === "lighter" ? "Lighter"
+                  : vf === "vanta" ? "Vanta"
+                  : vf === "arcus" ? "Arcus"
+                  : vf === "popdex" ? "PopDEX"
+                  : vf === "robinhood" ? "Robinhood"
+                  : vf === "kraken" ? "Kraken"
+                  : vf === "polymarket" ? "Polymarket"
+                  : "Kalshi";
+                return (
+                  <button
+                    key={vf}
+                    type="button"
+                    onClick={() => setVenueFilter(vf)}
+                    className={`px-2.5 py-1 rounded-lg transition text-xs font-mono ${
+                      venueFilter === vf
+                        ? "bg-accent text-white font-semibold shadow-xs"
+                        : "bg-surface text-slate-600 hover:bg-surface-raised border border-surface-border"
+                    }`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
             </div>
 
             {/* Exchange 1: Hyperliquid */}
@@ -1134,6 +1149,154 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                         disabled={loading}
                         value={robinhoodRouter}
                         onChange={(e) => setRobinhoodRouter(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exchange: Arcus DEX */}
+            {(venueFilter === "all" || venueFilter === "arcus") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Arcus (CLOB DEX)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      High-Throughput CLOB
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("arcus")?.fee_bps ?? 1.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={arcusEnabled}
+                      onChange={setArcusEnabled}
+                      label={arcusEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!arcusEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Arcus exchange is disabled. Toggle switch to enable and configure API credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">API Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={arcusApiKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "arc_..."}
+                        onChange={(e) => setArcusApiKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">API Secret:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("arcus_secret")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["arcus_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["arcus_secret"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["arcus_secret"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={arcusSecret}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                        onChange={(e) => setArcusSecret(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={arcusUrl}
+                        onChange={(e) => setArcusUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Exchange: PopDEX */}
+            {(venueFilter === "all" || venueFilter === "popdex") && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      PopDEX (Arbitrage Protocol)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Lighter Multi-Leg Hybrid
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("popdex")?.fee_bps ?? 2.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={popdexEnabled}
+                      onChange={setPopdexEnabled}
+                      label={popdexEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!popdexEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    PopDEX is disabled. Toggle switch to enable and configure API credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">Account Index / Address:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={popdexAccountIndex}
+                        placeholder="0"
+                        onChange={(e) => setPopdexAccountIndex(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">API Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={popdexApiKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "pop_..."}
+                        onChange={(e) => setPopdexApiKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={popdexUrl}
+                        onChange={(e) => setPopdexUrl(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
@@ -1754,15 +1917,12 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
                 <div className="flex items-center space-x-3">
                   <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
-                    <Shield className="w-5 h-5" />
+                    <ArbitragerLogo size={22} className="text-accent" />
                   </div>
                   <div>
                     <h3 className="text-sm font-bold font-mono text-slate-900">
                       About Arbitrager ({version})
                     </h3>
-                    <p className="text-xs text-slate-500 font-mono mt-0.5">
-                      High-frequency cross-venue statistical & spatial arbitrage platform
-                    </p>
                   </div>
                 </div>
 
@@ -1844,39 +2004,32 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
       </div>
 
       {/* Pinned Save Bar */}
-      <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
-        <div className="text-[11px] font-mono text-slate-500 flex items-center space-x-1.5">
-          <Lock className="w-3 h-3 text-slate-400" />
-          <span className="hidden sm:inline">Config changes immediately affect live atomic coordinator execution.</span>
-        </div>
-
-        <div className="flex items-center space-x-2.5">
-          {onClose && (
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
-            >
-              Done
-            </button>
-          )}
+      <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-end space-x-2.5">
+        {onClose && (
           <button
-            type="submit"
-            disabled={loading || saving}
-            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
           >
-            {saving ? (
-              <span>Saving...</span>
-            ) : saved ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Saved to Engine</span>
-              </>
-            ) : (
-              <span>Save Configuration</span>
-            )}
+            Done
           </button>
-        </div>
+        )}
+        <button
+          type="submit"
+          disabled={loading || saving}
+          className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+        >
+          {saving ? (
+            <span>Saving...</span>
+          ) : saved ? (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Saved to Engine</span>
+            </>
+          ) : (
+            <span>Save Configuration</span>
+          )}
+        </button>
       </div>
     </form>
   </div>

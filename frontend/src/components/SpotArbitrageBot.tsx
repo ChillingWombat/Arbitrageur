@@ -10,24 +10,29 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from "../types";
+import { SwitchToggle } from "./SwitchToggle";
 
 interface SpotArbitrageBotProps {
   executionLogs: ExecutionLogEntry[];
   onRefreshAll: () => Promise<void>;
   onOpenConfig?: (symbol: string, strategy?: string) => void;
+  isPaused?: boolean;
 }
 
 export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   executionLogs,
   onRefreshAll,
   onOpenConfig,
+  isPaused = false,
 }) => {
   const [opportunities, setOpportunities] = useState<SpotOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
   const [loading, setLoading] = useState(false);
   const [selectedOpp, setSelectedOpp] = useState<SpotOpportunityDto | null>(null);
 
-  // Execution Bot Parameters
+  // Execution Bot Parameters (default to OFF, manually enabled by user)
+  const [autoBotEnabled, setAutoBotEnabled] = useState(false);
+  const lastAutoSpotExecRef = React.useRef<number>(0);
   const [tradeSizeUsd, setTradeSizeUsd] = useState(1000);
   const [maxSlippageBps, setMaxSlippageBps] = useState(5.0);
   const [botStatus, setBotStatus] = useState<"idle" | "verifying" | "dispatching" | "filled" | "error">("idle");
@@ -94,6 +99,21 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
     }
   };
 
+  // Automated Execution Loop when user manually enables the Spot Bot
+  useEffect(() => {
+    if (!autoBotEnabled || botStatus === "verifying" || botStatus === "dispatching" || isPaused) return;
+
+    const now = Date.now();
+    if (now - lastAutoSpotExecRef.current < 5000) return; // 5s cooldown
+
+    const bestCandidate = opportunities.find((o) => o.net_spread_bps >= 15.0);
+    if (bestCandidate) {
+      lastAutoSpotExecRef.current = now;
+      setSelectedOpp(bestCandidate);
+      handleDeployBot();
+    }
+  }, [autoBotEnabled, botStatus, opportunities, isPaused]);
+
   const spotLogs = executionLogs.filter(
     (l) => l.trade_type.toLowerCase().includes("spot") || l.direction?.toLowerCase().includes("spot")
   );
@@ -123,6 +143,17 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
+          {/* Auto Bot Switch Toggle (Green for ON, White for OFF) */}
+          <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-surface border border-surface-border rounded-lg shadow-2xs">
+            <span className="text-xs font-mono font-medium text-slate-700">Auto Bot</span>
+            <SwitchToggle
+              checked={autoBotEnabled}
+              onChange={setAutoBotEnabled}
+              size="sm"
+              showStatusText={true}
+            />
+          </div>
+
           <button
             type="button"
             onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}

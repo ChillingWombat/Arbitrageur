@@ -6,8 +6,7 @@ import { LiveMatrix } from "./components/LiveMatrix";
 import { FundingRadar } from "./components/FundingRadar";
 import { PredictionHub } from "./components/PredictionHub";
 import { StatArbLab } from "./components/StatArbLab";
-import { RiskOperations } from "./components/RiskOperations";
-import { StrategyPerformance } from "./components/StrategyPerformance";
+import { PortfolioMonitor } from "./components/PortfolioMonitor";
 import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { TickerConfigModal } from "./components/TickerConfigModal";
@@ -21,7 +20,6 @@ import type {
   PredictionOpportunityDto,
   RiskOverviewDto,
   ExecutionLogEntry,
-  CrossTickerExecutionParams,
   TickerStrategyConfigDto,
   EngineSettingsDto,
 } from "./types";
@@ -46,9 +44,8 @@ export const App: React.FC = () => {
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
   const [executionLogs, setExecutionLogs] = useState<ExecutionLogEntry[]>([]);
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(new Map());
-  const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => {
-    return new Set(PERP_TICKERS.map((t) => t.symbol));
-  });
+  const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => new Set());
+  const [isPaused, setIsPaused] = useState(false);
 
   const handleToggleTicker = (symbol: string, enabled?: boolean) => {
     setEnabledTickers((prev) => {
@@ -61,6 +58,12 @@ export const App: React.FC = () => {
       }
       return next;
     });
+  };
+
+  const handleToggleAllTickers = (enableAll: boolean) => {
+    setEnabledTickers(
+      enableAll ? new Set(availableTickers.map((t) => t.symbol)) : new Set()
+    );
   };
 
   const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
@@ -118,6 +121,9 @@ export const App: React.FC = () => {
       ]);
 
       setSystemStatus(status);
+      if (status && typeof status.is_paused === "boolean") {
+        setIsPaused(status.is_paused);
+      }
       setEngineSettings(settings);
       setOrderbooks(books);
       setSpatialOpps(spatial);
@@ -162,6 +168,16 @@ export const App: React.FC = () => {
     await refreshAllData();
   };
 
+  const handleTogglePause = async (paused: boolean) => {
+    setIsPaused(paused);
+    try {
+      await api.setEnginePaused(paused);
+      await refreshAllData();
+    } catch (err) {
+      console.error("Failed to toggle pause status:", err);
+    }
+  };
+
   const handleToggleLiveMode = async (enabled: boolean) => {
     await api.setLiveMode(enabled);
     await refreshAllData();
@@ -180,11 +196,6 @@ export const App: React.FC = () => {
       opp.max_units,
       opp.nominal_hurdle_bps
     );
-    await refreshAllData();
-  };
-
-  const handleExecuteCrossTicker = async (params: CrossTickerExecutionParams) => {
-    await api.executeCrossTickerArbitrage(params);
     await refreshAllData();
   };
 
@@ -221,6 +232,8 @@ export const App: React.FC = () => {
       {/* Top Header Bar with Section Switcher Navigation */}
       <Header
         status={systemStatus}
+        isPaused={isPaused}
+        onTogglePause={handleTogglePause}
         onResetCircuitBreaker={handleResetCircuitBreaker}
         onEmergencyKillswitch={handleEmergencyKillswitch}
         onToggleLiveMode={handleToggleLiveMode}
@@ -246,10 +259,15 @@ export const App: React.FC = () => {
           riskData={riskData}
           enabledTickers={enabledTickers}
           onToggleTicker={handleToggleTicker}
+          onToggleAllTickers={handleToggleAllTickers}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenTickerConfig={handleOpenTickerConfig}
           availableTickers={availableTickers}
           activeVenueCodes={activeVenueCodes}
+          isPaused={isPaused}
+          onResetCircuitBreaker={handleResetCircuitBreaker}
+          onOpenPortfolioMonitor={() => setActiveTab("portfolio_monitor")}
+          isPortfolioActive={activeTab === "portfolio_monitor"}
         />
 
         {/* Workspace Content Pane */}
@@ -261,12 +279,14 @@ export const App: React.FC = () => {
               opportunities={spatialOpps}
               onRefresh={refreshAllData}
               onExecuteTrade={handleExecuteTrade}
-              onExecuteCrossTicker={handleExecuteCrossTicker}
               loading={refreshing}
               executionLogs={executionLogs}
               onOpenTickerConfig={handleOpenTickerConfig}
               activeVenueCodes={activeVenueCodes}
               availableTickers={availableTickers}
+              isTickerEnabled={enabledTickers.has(selectedSymbol)}
+              onToggleTicker={handleToggleTicker}
+              isPaused={isPaused}
             />
           )}
 
@@ -275,6 +295,7 @@ export const App: React.FC = () => {
               executionLogs={executionLogs}
               onRefreshAll={refreshAllData}
               onOpenConfig={handleOpenTickerConfig}
+              isPaused={isPaused}
             />
           )}
 
@@ -288,6 +309,7 @@ export const App: React.FC = () => {
               loading={refreshing}
               executionLogs={executionLogs}
               onOpenConfig={handleOpenTickerConfig}
+              isPaused={isPaused}
             />
           )}
 
@@ -300,6 +322,7 @@ export const App: React.FC = () => {
               }}
               onExecutePrediction={handleExecutePrediction}
               loading={refreshing}
+              isPaused={isPaused}
             />
           )}
 
@@ -313,15 +336,16 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "risk" && (
-            <RiskOperations
+          {activeTab === "portfolio_monitor" && (
+            <PortfolioMonitor
+              activeSymbol={selectedSymbol}
               riskData={riskData}
+              status={systemStatus}
               onResetCircuitBreaker={handleResetCircuitBreaker}
               onTriggerKillswitch={handleEmergencyKillswitch}
+              onRefreshAll={refreshAllData}
             />
           )}
-
-          {activeTab === "performance" && <StrategyPerformance activeSymbol={selectedSymbol} />}
         </main>
       </div>
 

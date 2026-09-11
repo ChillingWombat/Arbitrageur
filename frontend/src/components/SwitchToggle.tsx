@@ -39,12 +39,14 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
           checked
             ? "bg-emerald-500 border border-emerald-600 shadow-xs"
-            : "bg-slate-200 border border-slate-300 hover:bg-slate-300/80"
+            : "bg-white border border-slate-300 hover:border-slate-400 shadow-2xs"
         }`}
         title={label ? `${label}: ${checked ? "ON" : "OFF"}` : checked ? "ON" : "OFF"}
       >
         <span
-          className={`inline-block rounded-full bg-white shadow-md transform transition-transform duration-200 ease-in-out ${
+          className={`inline-block rounded-full shadow-sm transform transition-transform duration-200 ease-in-out ${
+            checked ? "bg-white" : "bg-slate-400"
+          } ${
             isSm
               ? checked
                 ? "w-3.5 h-3.5 translate-x-4"

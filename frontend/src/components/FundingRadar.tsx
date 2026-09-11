@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { SlidersHorizontal } from "lucide-react";
 import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
-import { PERP_TICKERS, formatCurrencyPnl } from "../types/tickers";
+import { formatCurrencyPnl } from "../types/tickers";
+import { SwitchToggle } from "./SwitchToggle";
 
 interface FundingRadarProps {
   opportunities: FundingOpportunityDto[];
@@ -12,6 +13,7 @@ interface FundingRadarProps {
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
   onOpenConfig?: (symbol: string, strategy?: string) => void;
+  isPaused?: boolean;
 }
 
 export const FundingRadar: React.FC<FundingRadarProps> = ({
@@ -22,19 +24,13 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   onExecuteCarry,
   executionLogs = [],
   onOpenConfig,
+  isPaused = false,
 }) => {
   const [holdingDays, setHoldingDays] = useState(14);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
-
-  const activeTicker = PERP_TICKERS.find((t) => t.symbol === symbol) || {
-    symbol,
-    base: symbol.split("-")[0],
-    quote: symbol.split("-")[1] || "USDC",
-    name: symbol,
-    venues: ["HL", "LGT", "VNT"],
-    basePrice: 100,
-  };
+  const [autoCarryEnabled, setAutoCarryEnabled] = useState(false);
+  const lastAutoCarryExecRef = useRef<number>(0);
 
   // Derive execution stats for the currently selected ticker
   const tickerStats = useMemo(() => {
@@ -69,6 +65,21 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     }
   };
 
+  // Automated Execution Loop when user manually enables Auto Carry
+  useEffect(() => {
+    if (!autoCarryEnabled || executingId || !opportunities.length || isPaused) return;
+
+    const now = Date.now();
+    if (now - lastAutoCarryExecRef.current < 8000) return; // 8s cooldown
+
+    // Select top funding carry opportunity with positive net yield
+    const topOpp = opportunities.find((o) => o.symbol === symbol && o.net_apr_pct > 0);
+    if (topOpp) {
+      lastAutoCarryExecRef.current = now;
+      handleExecute(topOpp);
+    }
+  }, [autoCarryEnabled, executingId, opportunities, symbol, isPaused]);
+
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Top Banner & Configuration */}
@@ -84,17 +95,21 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
         {/* Inputs */}
         <div className="flex flex-wrap items-center gap-3">
+          {/* Auto Carry Bot Switch (Green for ON, White for OFF) */}
+          <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-surface-raised border border-surface-border rounded-lg shadow-2xs">
+            <span className="text-xs font-mono font-medium text-slate-700">Auto Carry</span>
+            <SwitchToggle
+              checked={autoCarryEnabled}
+              onChange={setAutoCarryEnabled}
+              size="sm"
+              showStatusText={true}
+            />
+          </div>
+
           <div className="flex items-center space-x-2">
             <span className="text-xs font-mono uppercase text-slate-500 font-semibold">Active:</span>
             <div className="text-xs font-mono font-bold text-slate-900 bg-surface-raised px-2.5 py-1.5 rounded-md border border-surface-border flex items-center space-x-2">
               <span>{symbol}</span>
-              <span className="flex space-x-1">
-                {activeTicker.venues.map((v) => (
-                  <span key={v} className="text-[9px] px-1 py-0.2 rounded font-semibold bg-accent-dim text-accent border border-accent-line/40">
-                    {v}
-                  </span>
-                ))}
-              </span>
               <span
                 className="text-[10px] px-1.5 py-0.2 rounded bg-surface border border-surface-border font-medium text-slate-700"
                 title={`${tickerStats.count} strategy executions`}

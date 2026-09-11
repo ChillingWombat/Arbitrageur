@@ -42,6 +42,9 @@ export function normalizeVenueKey(v: string): string {
   if (s.includes("lighter") || s === "lgt") return "lighter";
   if (s.includes("vanta") || s === "vnt") return "vanta";
   if (s.includes("robin") || s === "rh") return "robinhood";
+  if (s.includes("arcus") || s === "arc") return "arcus";
+  if (s.includes("pop") || s === "popdex") return "popdex";
+  if (s.includes("kraken") || s === "krk") return "kraken";
   if (s.includes("poly")) return "polymarket";
   if (s.includes("kalshi")) return "kalshi";
   return s;
@@ -63,6 +66,10 @@ export function getVenueContractSpec(venueKey: string, symbol: string, basePrice
         return { venueId: "lighter", minOrderSize: 0.001, stepSize: 0.001, maxLeverage: 20, contractMultiplier: 1.0 };
       case "vanta":
         return { venueId: "vanta", minOrderSize: 0.001, stepSize: 0.001, maxLeverage: 20, contractMultiplier: 1.0 };
+      case "arcus":
+        return { venueId: "arcus", minOrderSize: 0.0005, stepSize: 0.0005, maxLeverage: 25, contractMultiplier: 1.0 };
+      case "popdex":
+        return { venueId: "popdex", minOrderSize: 0.001, stepSize: 0.001, maxLeverage: 20, contractMultiplier: 1.0 };
       case "robinhood":
         return { venueId: "robinhood", minOrderSize: 0.005, stepSize: 0.001, maxLeverage: 10, contractMultiplier: 1.0 };
       default:
@@ -215,8 +222,9 @@ export function computeSafeLeverage(
     }
   }
 
-  // Safe effective leverage is min of all venue max leverages and user target leverage
-  const target = userTargetLeverage && userTargetLeverage > 0 ? userTargetLeverage : minVenueLeverage;
+  // Safe effective leverage is min of all venue max leverages and user target leverage (defaulting to 5x when available)
+  const defaultTarget = Math.min(minVenueLeverage, 5);
+  const target = userTargetLeverage && userTargetLeverage > 0 ? userTargetLeverage : defaultTarget;
   const effectiveLeverage = Math.max(1, Math.min(minVenueLeverage, target));
 
   // Compute notional and margin requirements

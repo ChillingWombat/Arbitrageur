@@ -45,4 +45,10 @@ pub trait ExchangeAdapter: Send + Sync {
     async fn subscribe_funding(&self, _symbols: &[String]) -> anyhow::Result<broadcast::Receiver<FundingRate>> {
         anyhow::bail!("WebSocket funding streaming not implemented for venue {}", self.name());
     }
+
+    /// Set or update leverage for a given symbol/perp contract.
+    /// Default implementation is a graceful no-op returning Ok(()) for venues where dynamic leverage API is not supported.
+    async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
+        Ok(())
+    }
 }

@@ -4,6 +4,7 @@ pub mod quote;
 pub mod order;
 pub mod position;
 pub mod exchange;
+pub mod hub;
 
 pub use types::*;
 pub use market::*;
@@ -11,6 +12,7 @@ pub use quote::*;
 pub use order::*;
 pub use position::*;
 pub use exchange::*;
+pub use hub::*;
 
 #[cfg(test)]
 mod tests {
@@ -89,4 +91,31 @@ mod tests {
         let dist_short = short_pos.liquidation_distance_pct().expect("short dist");
         assert_eq!(dist_short, dec!(0.10));
     }
+
+    #[tokio::test]
+    async fn test_market_data_hub_ingestion_and_broadcast() {
+        let hub = MarketDataHub::new(128, 1000);
+        let mut subscriber = hub.subscribe();
+
+        let mut book = OrderBook::new("hyperliquid".into(), "BTC-USDC".into());
+        book.bids.push(BookLevel::new(dec!(60000.0), dec!(1.5)));
+        book.asks.push(BookLevel::new(dec!(60005.0), dec!(2.0)));
+
+        let event = hub.update_orderbook(book.clone());
+        assert_eq!(event.symbol, "BTC-USDC");
+        assert_eq!(event.best_bid, Some(dec!(60000.0)));
+        assert_eq!(event.best_ask, Some(dec!(60005.0)));
+        assert_eq!(event.sequence, 1);
+
+        // Verify broadcast delivery
+        let received = subscriber.recv().await.expect("receive broadcast event");
+        assert_eq!(received.sequence, 1);
+        assert_eq!(received.venue_id, VenueId::new("hyperliquid"));
+
+        // Verify cache retrieval
+        let cached = hub.get_orderbook(&VenueId::new("hyperliquid"), "BTC-USDC").expect("cached book");
+        assert_eq!(cached.best_bid_price(), Some(dec!(60000.0)));
+        assert_eq!(cached.best_ask_price(), Some(dec!(60005.0)));
+    }
 }
+

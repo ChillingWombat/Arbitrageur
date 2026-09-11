@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
@@ -22,9 +21,9 @@ import type {
   VenueBalanceInfo,
   StrategyMetrics,
   WfoOptimizationResult,
-} from "../types";
+} from "../types/index.ts";
 
-import { PERP_TICKERS, VENUE_ID_TO_CODE, getEnabledConnectedVenueCodes } from "../types/tickers";
+import { PERP_TICKERS, getEnabledConnectedVenueCodes } from "../types/tickers.ts";
 
 // Check if running inside Tauri IPC environment
 function isTauriEnvironment(): boolean {
@@ -154,18 +153,21 @@ class BrowserMockEngine {
   private pnl = 0.0;
   private simCycle = 0;
   private isLive = false;
+  private isPaused = false;
   private cbTripped = false;
   private settings: EngineSettingsDto = {
     hsm_url: "http://127.0.0.1:8787/sign",
     hmac_token: "••••••••••••••••••••••••",
     max_slippage_bps: 15.0,
     min_depth_ratio: 3.0,
-    hyperliquid_enabled: true,
-    hyperliquid_spot_enabled: true,
-    lighter_enabled: true,
-    lighter_spot_enabled: true,
-    vanta_enabled: true,
-    robinhood_enabled: true,
+    hyperliquid_enabled: false,
+    hyperliquid_spot_enabled: false,
+    lighter_enabled: false,
+    lighter_spot_enabled: false,
+    vanta_enabled: false,
+    robinhood_enabled: false,
+    arcus_enabled: false,
+    popdex_enabled: false,
     kraken_enabled: false,
     kraken_spot_enabled: false,
     kraken_futures_enabled: false,
@@ -191,6 +193,12 @@ class BrowserMockEngine {
     robinhood_private_key: "",
     robinhood_rpc_url: "https://rpc.robinhood.network",
     robinhood_router: "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba",
+    arcus_api_key: "",
+    arcus_secret: "",
+    arcus_url: "https://api.arcus.exchange",
+    popdex_account_index: "0",
+    popdex_api_key: "",
+    popdex_url: "https://api.popdex.trade",
     polymarket_api_key: "",
     polymarket_secret: "",
     polymarket_passphrase: "",
@@ -220,6 +228,7 @@ class BrowserMockEngine {
     const activeCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
     return {
       is_live_mode: this.isLive,
+      is_paused: this.isPaused,
       total_realized_pnl: this.pnl,
       total_trades_count: this.logs.length,
       successful_trades_count: this.logs.filter((l) => l.success).length,
@@ -232,6 +241,8 @@ class BrowserMockEngine {
         { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: activeCodes.has("HL") ? "ONLINE" : "OFFLINE", latency_ms: 2, fee_bps: 2.0 },
         { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: activeCodes.has("LGT") ? "ONLINE" : "OFFLINE", latency_ms: 5, fee_bps: 1.5 },
         { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: activeCodes.has("VNT") ? "ONLINE" : "OFFLINE", latency_ms: 4, fee_bps: 3.0 },
+        { id: "arcus", name: "Arcus DEX", market_type: "Fast CLOB", status: activeCodes.has("ARC") ? "ONLINE" : "OFFLINE", latency_ms: 3, fee_bps: 1.5 },
+        { id: "popdex", name: "PopDEX", market_type: "Lighter Hybrid", status: activeCodes.has("POP") ? "ONLINE" : "OFFLINE", latency_ms: 4, fee_bps: 2.0 },
         { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: activeCodes.has("RH") ? "ONLINE" : "OFFLINE", latency_ms: 8, fee_bps: 2.5 },
         { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: activeCodes.has("KRK") ? "ONLINE" : "STANDBY", latency_ms: 25, fee_bps: 16.0 },
         { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: this.settings.polymarket_enabled ? "ONLINE" : "STANDBY", latency_ms: 12, fee_bps: 0.0 },
@@ -241,162 +252,136 @@ class BrowserMockEngine {
   }
 
   async fetchOrderbooks(symbol: string): Promise<VenueOrderBookDto[]> {
+    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
+    if (activeVenueCodes.size === 0) {
+      return [];
+    }
+
     const baseCoin = symbol.split("-")[0].toUpperCase();
-    const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
-    const benchmark = ticker ? ticker.basePrice : 100.0;
+    const candidateBooks: VenueOrderBookDto[] = [];
 
-    let hlBid = benchmark * 0.9998;
-    let hlAsk = benchmark * 1.0002;
-    let hlBids: [number, number][] = [];
-    let hlAsks: [number, number][] = [];
+    // Hyperliquid L2 book (queried only if credentials configured)
+    if (activeVenueCodes.has("HL")) {
+      let hlBids: [number, number][] = [];
+      let hlAsks: [number, number][] = [];
+      let hlBid = 0;
+      let hlAsk = 0;
 
-    try {
-      const resp = await fetch("https://api.hyperliquid.xyz/info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "l2Book", coin: baseCoin }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data && data.levels && data.levels.length >= 2) {
-          const rawBids = data.levels[0] || [];
-          const rawAsks = data.levels[1] || [];
-          if (rawBids.length > 0) {
-            hlBid = parseFloat(rawBids[0].px);
-            hlBids = rawBids.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
-          }
-          if (rawAsks.length > 0) {
-            hlAsk = parseFloat(rawAsks[0].px);
-            hlAsks = rawAsks.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
-          }
-        }
-      }
-    } catch {
-      // network fallback
-    }
-
-    if (hlBids.length === 0) {
-      hlBids = [
-        [hlBid, 5.0],
-        [hlBid * 0.9998, 8.5],
-        [hlBid * 0.9995, 12.0],
-        [hlBid * 0.9992, 15.0],
-      ];
-    }
-    if (hlAsks.length === 0) {
-      hlAsks = [
-        [hlAsk, 5.2],
-        [hlAsk * 1.0002, 9.0],
-        [hlAsk * 1.0005, 13.5],
-        [hlAsk * 1.0008, 16.0],
-      ];
-    }
-
-    let lgtBid = hlBid;
-    let lgtAsk = hlAsk;
-    let lgtBids: [number, number][] = [];
-    let lgtAsks: [number, number][] = [];
-    const marketId = LIGHTER_MARKET_MAP[baseCoin];
-    if (marketId !== undefined) {
       try {
-        const resp = await fetch(`https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=${marketId}&limit=10`);
+        const resp = await fetch("https://api.hyperliquid.xyz/info", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "l2Book", coin: baseCoin }),
+        });
         if (resp.ok) {
           const data = await resp.json();
-          if (data && data.code === 200) {
-            if (data.bids && data.bids.length > 0) {
-              lgtBid = parseFloat(data.bids[0].price);
-              lgtBids = data.bids.slice(0, 5).map((b: any) => [parseFloat(b.price), parseFloat(b.remaining_base_amount || b.initial_base_amount || "1.0")]);
+          if (data && data.levels && data.levels.length >= 2) {
+            const rawBids = data.levels[0] || [];
+            const rawAsks = data.levels[1] || [];
+            if (rawBids.length > 0) {
+              hlBid = parseFloat(rawBids[0].px);
+              hlBids = rawBids.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
             }
-            if (data.asks && data.asks.length > 0) {
-              lgtAsk = parseFloat(data.asks[0].price);
-              lgtAsks = data.asks.slice(0, 5).map((a: any) => [parseFloat(a.price), parseFloat(a.remaining_base_amount || a.initial_base_amount || "1.0")]);
+            if (rawAsks.length > 0) {
+              hlAsk = parseFloat(rawAsks[0].px);
+              hlAsks = rawAsks.slice(0, 5).map((l: any) => [parseFloat(l.px), parseFloat(l.sz)]);
             }
           }
         }
       } catch {
-        // network fallback
+        // network error - fail closed, no synthetic data
+      }
+
+      if (hlBids.length > 0 && hlAsks.length > 0 && hlBid > 0 && hlAsk > 0) {
+        const fundingRates = await getLiveHyperliquidFunding();
+        const hlFunding = fundingRates[baseCoin] ?? 0.0;
+        const totalBidDepth = hlBids.reduce((acc, curr) => acc + curr[1], 0);
+        const totalAskDepth = hlAsks.reduce((acc, curr) => acc + curr[1], 0);
+        const mid = (hlBid + hlAsk) / 2;
+        const spread = Math.max(0, hlAsk - hlBid);
+        const spreadBps = mid > 0 ? (spread / mid) * 10000 : 0;
+        const vwap_bid = totalBidDepth > 0 ? hlBids.reduce((acc, curr) => acc + curr[0] * curr[1], 0) / totalBidDepth : hlBid;
+        const vwap_ask = totalAskDepth > 0 ? hlAsks.reduce((acc, curr) => acc + curr[0] * curr[1], 0) / totalAskDepth : hlAsk;
+
+        candidateBooks.push({
+          venue_id: "hyperliquid",
+          venue_name: "Hyperliquid (L1)",
+          symbol,
+          best_bid: hlBid,
+          best_ask: hlAsk,
+          spread,
+          spread_bps: spreadBps,
+          mid_price: mid,
+          total_bid_depth: totalBidDepth,
+          total_ask_depth: totalAskDepth,
+          vwap_bid,
+          vwap_ask,
+          funding_rate_8h_pct: hlFunding,
+          bids: hlBids,
+          asks: hlAsks,
+        });
       }
     }
-    if (lgtBids.length === 0) {
-      lgtBids = hlBids.map(([p, s]) => [p * 1.0002, s * 0.8]);
-      lgtBid = lgtBids[0][0];
-    }
-    if (lgtAsks.length === 0) {
-      lgtAsks = hlAsks.map(([p, s]) => [p * 1.0002, s * 0.8]);
-      lgtAsk = lgtAsks[0][0];
-    }
 
-    let binanceBid = hlBid;
-    let binanceAsk = hlAsk;
-    try {
-      const resp = await fetch(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=${baseCoin}USDT`);
-      if (resp.ok) {
-        const b = await resp.json();
-        if (b.bidPrice && b.askPrice) {
-          binanceBid = parseFloat(b.bidPrice);
-          binanceAsk = parseFloat(b.askPrice);
+    // Lighter zkDEX book (queried only if credentials configured)
+    if (activeVenueCodes.has("LGT")) {
+      const marketId = LIGHTER_MARKET_MAP[baseCoin];
+      if (marketId !== undefined) {
+        let lgtBids: [number, number][] = [];
+        let lgtAsks: [number, number][] = [];
+        let lgtBid = 0;
+        let lgtAsk = 0;
+
+        try {
+          const resp = await fetch(`https://mainnet.zklighter.elliot.ai/api/v1/orderBookOrders?market_id=${marketId}&limit=10`);
+          if (resp.ok) {
+            const data = await resp.json();
+            if (data && data.code === 200) {
+              if (data.bids && data.bids.length > 0) {
+                lgtBid = parseFloat(data.bids[0].price);
+                lgtBids = data.bids.slice(0, 5).map((b: any) => [parseFloat(b.price), parseFloat(b.remaining_base_amount || b.initial_base_amount || "1.0")]);
+              }
+              if (data.asks && data.asks.length > 0) {
+                lgtAsk = parseFloat(data.asks[0].price);
+                lgtAsks = data.asks.slice(0, 5).map((a: any) => [parseFloat(a.price), parseFloat(a.remaining_base_amount || a.initial_base_amount || "1.0")]);
+              }
+            }
+          }
+        } catch {
+          // network error - fail closed, no synthetic data
+        }
+
+        if (lgtBids.length > 0 && lgtAsks.length > 0 && lgtBid > 0 && lgtAsk > 0) {
+          const totalBidDepth = lgtBids.reduce((acc, curr) => acc + curr[1], 0);
+          const totalAskDepth = lgtAsks.reduce((acc, curr) => acc + curr[1], 0);
+          const mid = (lgtBid + lgtAsk) / 2;
+          const spread = Math.max(0, lgtAsk - lgtBid);
+          const spreadBps = mid > 0 ? (spread / mid) * 10000 : 0;
+          const vwap_bid = totalBidDepth > 0 ? lgtBids.reduce((acc, curr) => acc + curr[0] * curr[1], 0) / totalBidDepth : lgtBid;
+          const vwap_ask = totalAskDepth > 0 ? lgtAsks.reduce((acc, curr) => acc + curr[0] * curr[1], 0) / totalAskDepth : lgtAsk;
+
+          candidateBooks.push({
+            venue_id: "lighter",
+            venue_name: "Lighter (zkDEX)",
+            symbol,
+            best_bid: lgtBid,
+            best_ask: lgtAsk,
+            spread,
+            spread_bps: spreadBps,
+            mid_price: mid,
+            total_bid_depth: totalBidDepth,
+            total_ask_depth: totalAskDepth,
+            vwap_bid,
+            vwap_ask,
+            funding_rate_8h_pct: 0.0,
+            bids: lgtBids,
+            asks: lgtAsks,
+          });
         }
       }
-    } catch {
-      // fallback
     }
 
-    const vntBid = binanceBid > 0 ? binanceBid * 0.9999 : hlBid * 0.9999;
-    const vntAsk = binanceAsk > 0 ? binanceAsk * 1.0001 : hlAsk * 1.0001;
-    const rhBid = binanceBid > 0 ? binanceBid : hlBid;
-    const rhAsk = binanceAsk > 0 ? binanceAsk : hlAsk;
-
-    const fundingRates = await getLiveHyperliquidFunding();
-    const hlFunding = fundingRates[baseCoin] ?? 0.01;
-
-    const makeDto = (
-      vid: string,
-      vname: string,
-      bestBid: number,
-      bestAsk: number,
-      bids: [number, number][],
-      asks: [number, number][],
-      _feeBps: number,
-      fundingPct: number
-    ): VenueOrderBookDto => {
-      const spread = Math.max(0, bestAsk - bestBid);
-      const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : benchmark;
-      const spreadBps = mid > 0 ? (spread / mid) * 10000 : 0;
-      const totalBidDepth = bids.reduce((acc, curr) => acc + curr[1], 0);
-      const totalAskDepth = asks.reduce((acc, curr) => acc + curr[1], 0);
-
-      return {
-        venue_id: vid,
-        venue_name: vname,
-        symbol,
-        best_bid: bestBid,
-        best_ask: bestAsk,
-        spread,
-        spread_bps: spreadBps,
-        mid_price: mid,
-        total_bid_depth: totalBidDepth,
-        total_ask_depth: totalAskDepth,
-        vwap_bid: bestBid * 0.9998,
-        vwap_ask: bestAsk * 1.0002,
-        funding_rate_8h_pct: fundingPct,
-        bids,
-        asks,
-      };
-    };
-
-    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
-    const candidateBooks: VenueOrderBookDto[] = [
-      makeDto("hyperliquid", "Hyperliquid (L1)", hlBid, hlAsk, hlBids, hlAsks, 2.0, hlFunding),
-      makeDto("lighter", "Lighter (zkDEX)", lgtBid, lgtAsk, lgtBids, lgtAsks, 1.5, hlFunding * 0.75),
-      makeDto("vanta", "Vanta.exchange", vntBid, vntAsk, [[vntBid, 12.0], [vntBid * 0.9995, 20.0]], [[vntAsk, 14.0], [vntAsk * 1.0005, 22.0]], 3.0, hlFunding * 0.9),
-      makeDto("robinhood", "Robinhood EVM", rhBid, rhAsk, [[rhBid, 8.0], [rhBid * 0.9996, 15.0]], [[rhAsk, 9.0], [rhAsk * 1.0004, 16.0]], 2.5, hlFunding * 0.8),
-      makeDto("kraken", "Kraken Spot & Futures", binanceBid > 0 ? binanceBid : hlBid, binanceAsk > 0 ? binanceAsk : hlAsk, [[hlBid, 10.0], [hlBid * 0.9994, 18.0]], [[hlAsk, 10.0], [hlAsk * 1.0006, 18.0]], 16.0, hlFunding * 0.85),
-    ];
-
-    return candidateBooks.filter((book) => {
-      const code = VENUE_ID_TO_CODE[book.venue_id];
-      return code ? activeVenueCodes.has(code) : true;
-    });
+    return candidateBooks;
   }
 
   async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {
@@ -412,32 +397,26 @@ class BrowserMockEngine {
       const hlMid = mids[baseCoin];
       const bTicker = binanceTickers.get(`${baseCoin}USDT`) || binanceTickers.get(`${baseCoin}USDC`);
 
-      let bestBid: number;
-      let bestAsk: number;
-      let bestBidVenue = "Hyperliquid";
-      let bestAskVenue = "Binance/Orderly";
+      let bestBid = 0;
+      let bestAsk = 0;
+      let bestBidVenue = "-";
+      let bestAskVenue = "-";
 
       if (bTicker && bTicker.bid > 0 && bTicker.ask > 0) {
-        if (hlMid && hlMid > 0) {
-          bestBid = Math.max(hlMid * 0.9998, bTicker.bid);
-          bestAsk = Math.min(hlMid * 1.0002, bTicker.ask);
-          bestBidVenue = hlMid * 0.9998 >= bTicker.bid ? "Hyperliquid" : "Binance/Orderly";
-          bestAskVenue = hlMid * 1.0002 <= bTicker.ask ? "Hyperliquid" : "Binance/Orderly";
-        } else {
-          bestBid = bTicker.bid;
-          bestAsk = bTicker.ask;
-        }
+        bestBid = bTicker.bid;
+        bestAsk = bTicker.ask;
+        bestBidVenue = "Binance";
+        bestAskVenue = "Binance";
       } else if (hlMid && hlMid > 0) {
-        bestBid = hlMid * 0.9998;
-        bestAsk = hlMid * 1.0002;
-      } else {
-        bestBid = benchmark * 0.9998;
-        bestAsk = benchmark * 1.0002;
+        bestBid = hlMid;
+        bestAsk = hlMid;
+        bestBidVenue = "Hyperliquid";
+        bestAskVenue = "Hyperliquid";
       }
 
-      const mid = (bestBid + bestAsk) / 2;
-      const spread = Math.max(0, bestAsk - bestBid);
-      const spreadBps = mid > 0 ? (spread / mid) * 10000 : 2.0;
+      const mid = bestBid > 0 && bestAsk > 0 ? (bestBid + bestAsk) / 2 : 0;
+      const spread = bestBid > 0 && bestAsk > 0 ? Math.max(0, bestAsk - bestBid) : 0;
+      const spreadBps = mid > 0 ? (spread / mid) * 10000 : 0;
 
       results.push({
         symbol: sym,
@@ -445,7 +424,7 @@ class BrowserMockEngine {
         best_bid: bestBid,
         best_ask: bestAsk,
         mid_price: mid,
-        spread_bps: Math.max(0.5, spreadBps),
+        spread_bps: spreadBps,
         best_buy_venue: bestAskVenue,
         best_sell_venue: bestBidVenue,
         fee_bps: 2.0,
@@ -496,18 +475,38 @@ class BrowserMockEngine {
   }
 
   async scanSpotOpportunities(symbolFilter?: string): Promise<SpotOpportunityDto[]> {
-    const spotSymbols = ["BTC", "ETH", "SOL", "BNB", "SUI", "AVAX", "LINK", "NEAR"];
+    const spotSymbols = ["BTC", "ETH", "SOL", "BNB", "AVAX", "LINK", "NEAR"];
     const binanceTickers = await getLiveBinanceBookTickers();
-    const hlMids = await getLiveHyperliquidMids();
 
-    const venues = [
-      { name: "Hyperliquid Spot", feeBps: 1.5, transferCost: 0.0 },
-      { name: "Lighter Spot", feeBps: 0.0, transferCost: 0.0 },
-      { name: "Binance Spot", feeBps: 7.5, transferCost: 0.8 },
-      { name: "Coinbase Spot", feeBps: 15.0, transferCost: 1.5 },
-      { name: "OKX Spot", feeBps: 8.0, transferCost: 0.8 },
-      { name: "Kraken Spot", feeBps: 16.0, transferCost: 1.2 },
-    ];
+    const krakenPairs: Record<string, string> = {
+      BTC: "XBTUSDC",
+      ETH: "ETHUSDC",
+      SOL: "SOLUSD",
+      AVAX: "AVAXUSD",
+      LINK: "LINKUSD",
+    };
+
+    const krakenTickers = new Map<string, { bid: number; ask: number }>();
+    try {
+      const resp = await fetch("https://api.kraken.com/0/public/Ticker?pair=XBTUSDC,ETHUSDC,SOLUSD,AVAXUSD,LINKUSD");
+      if (resp.ok) {
+        const kdata = await resp.json();
+        if (kdata && kdata.result) {
+          for (const [coin, kpair] of Object.entries(krakenPairs)) {
+            const entry = kdata.result[kpair] || kdata.result[`X${kpair}`];
+            if (entry && entry.b && entry.a) {
+              const bid = parseFloat(entry.b[0]);
+              const ask = parseFloat(entry.a[0]);
+              if (bid > 0 && ask > 0) {
+                krakenTickers.set(coin, { bid, ask });
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // network failure
+    }
 
     const opps: SpotOpportunityDto[] = [];
     for (const coin of spotSymbols) {
@@ -516,12 +515,18 @@ class BrowserMockEngine {
         continue;
       }
 
-      const ticker = PERP_TICKERS.find((t) => t.base === coin);
-      const benchmark = ticker ? ticker.basePrice : 100.0;
       const bTicker = binanceTickers.get(`${coin}USDT`) || binanceTickers.get(`${coin}USDC`);
-      const hlMid = hlMids[coin];
+      const kTicker = krakenTickers.get(coin);
 
-      const refPrice = bTicker && bTicker.bid > 0 ? (bTicker.bid + bTicker.ask) / 2 : (hlMid || benchmark);
+      // Require real live quotes on both exchanges - zero synthetic data
+      if (!bTicker || !kTicker || bTicker.bid <= 0 || bTicker.ask <= 0 || kTicker.bid <= 0 || kTicker.ask <= 0) {
+        continue;
+      }
+
+      const venues = [
+        { name: "Binance Spot", bid: bTicker.bid, ask: bTicker.ask, feeBps: 7.5, transferCost: 0.8 },
+        { name: "Kraken Spot", bid: kTicker.bid, ask: kTicker.ask, feeBps: 16.0, transferCost: 1.2 },
+      ];
 
       for (let i = 0; i < venues.length; i++) {
         for (let j = 0; j < venues.length; j++) {
@@ -529,17 +534,10 @@ class BrowserMockEngine {
           const buy = venues[i];
           const sell = venues[j];
 
-          const buyPrice = buy.name.includes("Binance") && bTicker
-            ? bTicker.ask
-            : buy.name.includes("Hyperliquid") && hlMid
-            ? hlMid * 0.9998
-            : refPrice * (1.0 - (buy.feeBps * 0.0001));
+          const buyPrice = buy.ask;
+          const sellPrice = sell.bid;
 
-          const sellPrice = sell.name.includes("Binance") && bTicker
-            ? bTicker.bid
-            : sell.name.includes("Hyperliquid") && hlMid
-            ? hlMid * 1.0002
-            : refPrice * (1.0 + (sell.feeBps * 0.0001));
+          if (sellPrice <= buyPrice) continue;
 
           const grossSpread = sellPrice - buyPrice;
           const grossBps = (grossSpread / buyPrice) * 10000;
@@ -575,6 +573,9 @@ class BrowserMockEngine {
   }
 
   executeSpotArbitrage(params: SpotExecutionParams): SimStepResultDto {
+    if (this.isPaused) {
+      throw new Error("Trading engine is PAUSED. Positions are preserved, but executions are suspended.");
+    }
     this.simCycle += 1;
     const profit = Math.max(params.trade_size_usd * 0.00085, 4.5);
     this.pnl += profit;
@@ -619,38 +620,23 @@ class BrowserMockEngine {
     };
   }
 
-  async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
+  async scanFundingOpportunities(symbol: string, _tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
+    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
+    if (activeVenueCodes.size < 2) {
+      return [];
+    }
+
     const baseCoin = symbol.split("-")[0].toUpperCase();
     const fundingRates = await getLiveHyperliquidFunding();
-    const hlRate8h = fundingRates[baseCoin] ?? 0.015;
+    const hlRate8h = fundingRates[baseCoin];
 
-    const venues = [
-      { long: "Lighter", short: "Hyperliquid", rateMultiplier: 0.85 },
-      { long: "Robinhood EVM", short: "Hyperliquid", rateMultiplier: 0.70 },
-      { long: "Vanta.exchange", short: "Hyperliquid", rateMultiplier: 0.55 },
-    ];
+    // Fail closed: if Hyperliquid rate is missing or fewer than 2 real connected venues have rates, return empty
+    if (hlRate8h === undefined || !activeVenueCodes.has("HL")) {
+      return [];
+    }
 
-    return venues.map((v) => {
-      const netRate8h = Math.abs(hlRate8h * (1.0 - v.rateMultiplier));
-      const netApr = netRate8h * 3 * 365;
-      const netApy = ((1 + netRate8h / 100) ** (3 * 365) - 1) * 100;
-      const dailyIncome = tradeSizeUsd * (netRate8h / 100) * 3;
-      const breakEvenHours = netRate8h > 0 ? (3.5 / (netRate8h * 10000)) * 8 : 24.0;
-
-      return {
-        id: `${symbol}-${v.long.replace(/\s+/g, "")}-${v.short}`,
-        symbol,
-        long_venue: v.long,
-        short_venue: v.short,
-        net_rate_8h_pct: Math.round(netRate8h * 10000) / 10000,
-        net_apr_pct: Math.round(netApr * 100) / 100,
-        net_apy_pct: Math.round(netApy * 100) / 100,
-        round_trip_fee_bps: 3.5,
-        break_even_hours: Math.round(breakEvenHours * 10) / 10,
-        estimated_daily_income_usd: Math.round(dailyIncome * 100) / 100,
-        trade_size_usd: tradeSizeUsd,
-      };
-    });
+    // Never synthesize fake multipliers against unconfigured venues
+    return [];
   }
 
   async scanPredictionOpportunities(market: string): Promise<PredictionOpportunityDto[]> {
@@ -827,6 +813,9 @@ class BrowserMockEngine {
     maxUnits?: number,
     nominalHurdleBps?: number
   ): SimStepResultDto {
+    if (this.isPaused) {
+      throw new Error("Trading engine is PAUSED. Positions are preserved, but executions are suspended.");
+    }
     this.simCycle += 1;
     const ticker = PERP_TICKERS.find((t) => t.symbol === symbol);
     const base = ticker ? ticker.basePrice : 100.0;
@@ -928,6 +917,9 @@ class BrowserMockEngine {
   }
 
   executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number): SimStepResultDto {
+    if (this.isPaused) {
+      throw new Error("Trading engine is PAUSED. Positions are preserved, but executions are suspended.");
+    }
     this.simCycle += 1;
     const netProfit = tradeSizeUsd * 0.00018 * 3;
     this.pnl += netProfit;
@@ -967,6 +959,9 @@ class BrowserMockEngine {
   }
 
   executePredictionArbitrage(marketTitle: string, buyYesVenue: string, buyNoVenue: string, quantity: number): SimStepResultDto {
+    if (this.isPaused) {
+      throw new Error("Trading engine is PAUSED. Positions are preserved, but executions are suspended.");
+    }
     this.simCycle += 1;
     const profitPerContract = 0.045;
     const netProfit = profitPerContract * quantity;
@@ -1066,6 +1061,11 @@ class BrowserMockEngine {
     return this.isLive;
   }
 
+  setEnginePaused(paused: boolean): boolean {
+    this.isPaused = paused;
+    return this.isPaused;
+  }
+
   private strategyConfigs = new Map<string, TickerStrategyConfigDto>();
 
   getTickerStrategyConfig(symbol: string): TickerStrategyConfigDto {
@@ -1079,7 +1079,7 @@ class BrowserMockEngine {
       currentAccumulatedUnits: 0,
       executionMode: "SINGLE_WAY",
       unitSize: 0.005,
-      userTargetLeverage: 10,
+      userTargetLeverage: 5,
     };
   }
 
@@ -1142,6 +1142,8 @@ class BrowserMockEngine {
       { venue: "hyperliquid", balance_usd: 84250.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
       { venue: "lighter", balance_usd: 62100.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
       { venue: "vanta", balance_usd: 48900.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "arcus", balance_usd: 52000.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "popdex", balance_usd: 41000.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
       { venue: "robinhood", balance_usd: 35400.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
     ];
   }
@@ -1237,10 +1239,14 @@ class BrowserMockEngine {
 
 const mockEngine = new BrowserMockEngine();
 
-// Tauri core IPC using statically imported invoke
+// Tauri core IPC dynamically loaded when inside desktop environment
 async function getTauriCore() {
   if (isTauriEnvironment()) {
-    return { invoke };
+    try {
+      return await import("@tauri-apps/api/core");
+    } catch {
+      return null;
+    }
   }
   return null;
 }
@@ -1255,7 +1261,7 @@ function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
       currentAccumulatedUnits: 0,
       executionMode: "SINGLE_WAY",
       unitSize: 0.005,
-      userTargetLeverage: 10,
+      userTargetLeverage: 5,
     };
   }
   return {
@@ -1264,9 +1270,9 @@ function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
     windowPercentile: Number(c.windowPercentile ?? c.window_percentile ?? 50),
     maxAccumulatedUnits: Number(c.maxAccumulatedUnits ?? c.max_accumulated_units ?? 3),
     currentAccumulatedUnits: Number(c.currentAccumulatedUnits ?? c.current_accumulated_units ?? 0),
-    executionMode: (c.executionMode ?? c.execution_mode ?? "SINGLE_WAY"),
+    executionMode: c.executionMode || c.execution_mode || "SINGLE_WAY",
     unitSize: Number(c.unitSize ?? c.unit_size ?? 0.005),
-    userTargetLeverage: Number(c.userTargetLeverage ?? c.user_target_leverage ?? 10),
+    userTargetLeverage: Number(c.userTargetLeverage ?? c.user_target_leverage ?? 5),
   };
 }
 
@@ -1283,14 +1289,21 @@ export const api = {
 
   async fetchOrderbooks(symbol: string): Promise<VenueOrderBookDto[]> {
     const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<VenueOrderBookDto[]>("fetch_orderbooks", { symbol });
+    if (tauri) {
+      try {
+        return await tauri.invoke<VenueOrderBookDto[]>("fetch_orderbooks", { symbol });
+      } catch (e) {
+        console.warn("Tauri invoke fetch_orderbooks error:", e);
+      }
+    }
     return mockEngine.fetchOrderbooks(symbol);
   },
 
   async scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): Promise<SpatialOpportunityDto[]> {
-    if (isTauriEnvironment()) {
+    const tauri = await getTauriCore();
+    if (tauri) {
       try {
-        return await invoke<SpatialOpportunityDto[]>("scan_spatial_opportunities", { symbol, minBps, orderQty });
+        return await tauri.invoke<SpatialOpportunityDto[]>("scan_spatial_opportunities", { symbol, minBps, orderQty });
       } catch (e) {
         console.warn("Tauri invoke scan_spatial_opportunities error:", e);
       }
@@ -1299,9 +1312,10 @@ export const api = {
   },
 
   async scanSpotOpportunities(symbol?: string): Promise<SpotOpportunityDto[]> {
-    if (isTauriEnvironment()) {
+    const tauri = await getTauriCore();
+    if (tauri) {
       try {
-        return await invoke<SpotOpportunityDto[]>("scan_spot_opportunities", { symbol: symbol || "" });
+        return await tauri.invoke<SpotOpportunityDto[]>("scan_spot_opportunities", { symbol: symbol || "" });
       } catch (e) {
         console.warn("Tauri invoke scan_spot_opportunities error:", e);
       }
@@ -1310,9 +1324,10 @@ export const api = {
   },
 
   async executeSpotArbitrage(params: SpotExecutionParams): Promise<SimStepResultDto> {
-    if (isTauriEnvironment()) {
+    const tauri = await getTauriCore();
+    if (tauri) {
       try {
-        return await invoke<SimStepResultDto>("execute_spot_arbitrage", { params });
+        return await tauri.invoke<SimStepResultDto>("execute_spot_arbitrage", { params });
       } catch (e) {
         console.warn("Tauri invoke execute_spot_arbitrage error:", e);
       }
@@ -1498,6 +1513,12 @@ export const api = {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<boolean>("set_live_mode", { enabled });
     return mockEngine.setLiveMode(enabled);
+  },
+
+  async setEnginePaused(paused: boolean): Promise<boolean> {
+    const tauri = await getTauriCore();
+    if (tauri) return tauri.invoke<boolean>("set_engine_paused", { paused });
+    return mockEngine.setEnginePaused(paused);
   },
 
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
