@@ -1,13 +1,12 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use reqwest::Client;
-use tracing::info;
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrager_core::position::{AccountSnapshot, Balance};
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrager_core::types::{dec, Decimal, OrderStatus, VenueId};
+use arbitrager_core::types::{dec, Decimal, VenueId};
 
 /// Robinhood EVM DEX & Bridge router adapter for Lighter cross-chain trading.
 #[allow(dead_code)]
@@ -219,27 +218,11 @@ impl ExchangeAdapter for RobinhoodAdapter {
         })
     }
 
-    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        info!("[Robinhood EVM] Executing router swap: {:?}", order);
-        Ok(OrderResponse {
-            order_id: format!("0x{}", hex::encode(uuid::Uuid::new_v4().as_bytes())),
-            client_order_id: order.client_order_id.clone(),
-            venue: self.venue_id.clone(),
-            symbol: order.symbol.clone(),
-            status: OrderStatus::Filled,
-            original_qty: order.quantity,
-            filled_qty: order.quantity,
-            remaining_qty: dec!(0),
-            avg_fill_price: order.price,
-            fee: dec!(0.0003) * order.quantity * order.price.unwrap_or(dec!(0)),
-            fee_currency: "USDC".to_string(),
-            raw_response: None,
-            timestamp: Utc::now(),
-        })
+    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
     }
 
-    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
-        info!("[Robinhood EVM] Cancel router swap: {:?}", req);
-        Ok(())
+    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
+        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
     }
 }

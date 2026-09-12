@@ -199,7 +199,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       setWindowPercentile(50);
       setSlidingWindow("30s");
       setMaxAccumulatedUnits(5);
-      setUserTargetLeverage(15);
+      setUserTargetLeverage(5);
       setExecutionMode("SINGLE_WAY");
     }
   };
@@ -429,7 +429,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       type="button"
                       onClick={() => applyPreset("aggressive")}
                       className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-lg border border-surface-border transition cursor-pointer shadow-2xs"
-                      title="Aggressive: TP 2.5 bps, 50% percentile, 5 units, 15x lev"
+                      title="Aggressive: TP 2.5 bps, 50% percentile, 5 units, 5x lev"
                     >
                       Aggressive
                     </button>
@@ -683,10 +683,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         type="number"
                         step="1"
                         min="1"
-                        max="50"
+                        max="5"
                         value={userTargetLeverage}
                         onChange={(e) =>
-                          setUserTargetLeverage(Math.max(1, Math.min(50, parseInt(e.target.value, 10) || 5)))
+                          setUserTargetLeverage(Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 5)))
                         }
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                       />
@@ -822,7 +822,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Min Realized Net Profit (USD)</label>
+                    <label className="text-slate-700 font-medium">Min Expected Net Profit (USD)</label>
                     <input
                       type="number"
                       step="0.5"

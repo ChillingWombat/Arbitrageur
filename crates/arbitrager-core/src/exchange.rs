@@ -47,8 +47,8 @@ pub trait ExchangeAdapter: Send + Sync {
     }
 
     /// Set or update leverage for a given symbol/perp contract.
-    /// Default implementation is a graceful no-op returning Ok(()) for venues where dynamic leverage API is not supported.
+    /// Default implementation fails closed: venues without a leverage API must not silently pretend to apply it.
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        Ok(())
+        anyhow::bail!("Leverage updates are not implemented for venue {}", self.name());
     }
 }

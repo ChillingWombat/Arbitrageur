@@ -14,6 +14,7 @@ import {
   Scale,
   RefreshCw,
   Info,
+  Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
@@ -223,6 +224,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [inlinePasscode, setInlinePasscode] = useState("");
   const [inlineUnlocking, setInlineUnlocking] = useState(false);
   const [inlineVaultError, setInlineVaultError] = useState<string | null>(null);
+  const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
   const handleInlineUnlock = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -238,6 +240,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
       }
       setVaultStatus(updatedStatus);
       setInlinePasscode("");
+      const sanitized = await api.getEngineSettings();
+      setConfiguredVenues(sanitized.configured_venues || []);
     } catch (err) {
       setInlineVaultError(err instanceof Error ? err.message : "Incorrect master passcode");
     } finally {
@@ -275,13 +279,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     if (found) return found;
     return {
       venue: id,
-      balance_usd: 50000.0,
-      equity_usd: 50000.0,
-      available_margin_usd: 50000.0,
-      margin_rate_pct: 4.0,
+      balance_usd: 0,
+      equity_usd: 0,
+      available_margin_usd: 0,
+      margin_rate_pct: 0,
       min_required_usd: venueRebalanceThresholdUsd,
       needs_rebalance: false,
-      status: "HEALTHY",
+      status: "UNKNOWN",
       recommended_action: null,
     };
   };
@@ -315,6 +319,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     const loadSettings = async () => {
       try {
         const s: EngineSettingsDto = await api.getEngineSettings();
+        setConfiguredVenues(s.configured_venues || []);
         setHsmUrl(s.hsm_url || "http://127.0.0.1:8787/sign");
         setHmacToken(s.hmac_token || "");
         setMaxSlippageBps(s.max_slippage_bps ?? 15.0);
@@ -420,15 +425,15 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   }, [systemStatus]);
 
   const defaultVenues: VenueStatusDto[] = [
-    { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "ONLINE", latency_ms: 2, fee_bps: 2.0 },
-    { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "ONLINE", latency_ms: 5, fee_bps: 1.5 },
-    { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "ONLINE", latency_ms: 4, fee_bps: 3.0 },
-    { id: "arcus", name: "Arcus DEX", market_type: "Fast CLOB", status: "ONLINE", latency_ms: 3, fee_bps: 1.5 },
-    { id: "popdex", name: "PopDEX", market_type: "Lighter Hybrid", status: "ONLINE", latency_ms: 4, fee_bps: 2.0 },
-    { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "ONLINE", latency_ms: 8, fee_bps: 2.5 },
-    { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "ONLINE", latency_ms: 22, fee_bps: 16.0 },
-    { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 12, fee_bps: 0.0 },
-    { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "ONLINE", latency_ms: 15, fee_bps: 10.0 },
+    { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 2.0 },
+    { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 1.5 },
+    { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "OFFLINE", latency_ms: 0, fee_bps: 3.0 },
+    { id: "arcus", name: "Arcus DEX", market_type: "Fast CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 1.5 },
+    { id: "popdex", name: "PopDEX", market_type: "Lighter Hybrid", status: "OFFLINE", latency_ms: 0, fee_bps: 2.0 },
+    { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "OFFLINE", latency_ms: 0, fee_bps: 2.5 },
+    { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 16.0 },
+    { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "OFFLINE", latency_ms: 0, fee_bps: 0.0 },
+    { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "OFFLINE", latency_ms: 0, fee_bps: 10.0 },
   ];
   const displayVenues = liveVenues.length > 0 ? liveVenues : defaultVenues;
 
@@ -454,6 +459,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         trading_mode: tradingMode,
         fast_warmup_enabled: fastWarmupEnabled,
         venue_rebalance_threshold_usd: venueRebalanceThresholdUsd,
+        configured_venues: configuredVenues,
         hyperliquid_enabled: hlEnabled,
         hyperliquid_spot_enabled: hlSpotEnabled,
         lighter_enabled: lighterEnabled,
@@ -514,10 +520,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
       await api.saveEngineSettings(payload);
 
-      // Also sync live mode in backend state if tradingMode changed
-      await api.setLiveMode(tradingMode === "real");
+      // Live execution is disabled until authenticated adapters exist; always report paper mode
+      await api.setLiveMode(false);
 
-      onSettingsSaved?.(payload);
+      const sanitized = await api.getEngineSettings();
+      setConfiguredVenues(sanitized.configured_venues || []);
+      clearCredentialInputs();
+
+      onSettingsSaved?.(sanitized);
 
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
@@ -529,12 +539,99 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     }
   };
 
+  const clearCredentialInputs = () => {
+    setHmacToken("");
+    setHyperliquidWallet("");
+    setHyperliquidPrivateKey("");
+    setHyperliquidAccountIndex("");
+    setHyperliquidSubaccountIndex("");
+    setLighterAccountIndex("0");
+    setLighterApiKey("");
+    setLighterSubaccountIndex("");
+    setVantaAccountId("");
+    setVantaOrderlyKey("");
+    setVantaOrderlySecret("");
+    setVantaSubaccountIndex("");
+    setRobinhoodWallet("");
+    setRobinhoodPrivateKey("");
+    setRobinhoodSubaccountIndex("");
+    setArcusApiKey("");
+    setArcusSecret("");
+    setPopdexAccountIndex("0");
+    setPopdexApiKey("");
+    setKrakenSpotApiKey("");
+    setKrakenSpotSecret("");
+    setKrakenFuturesApiKey("");
+    setKrakenFuturesSecret("");
+    setPolymarketApiKey("");
+    setPolymarketSecret("");
+    setPolymarketPassphrase("");
+    setKalshiApiKeyId("");
+    setKalshiPrivateKey("");
+    setInlinePasscode("");
+  };
+
   const handleLockVault = async () => {
     try {
       const s = await api.lockVault();
       setVaultStatus(s);
+      setConfiguredVenues([]);
+      clearCredentialInputs();
     } catch (err) {
       console.error("Lock error:", err);
+    }
+  };
+
+  const vaultCredentialIds = (id: ExchangeId): string[] => {
+    if (id === "kraken") {
+      return ["kraken_spot", "kraken_futures"].filter((v) =>
+        configuredVenues.includes(v)
+      );
+    }
+    return configuredVenues.includes(id) ? [id] : [];
+  };
+
+  const handleRemoveCredentials = async () => {
+    const ids = vaultCredentialIds(selectedExchange);
+    if (ids.length === 0) return;
+    const label =
+      EXCHANGES_ALPHABETICAL.find((ex) => ex.id === selectedExchange)?.name ||
+      selectedExchange;
+    if (
+      !window.confirm(
+        `Remove encrypted credentials for ${label}? This cannot be undone.`
+      )
+    ) {
+      return;
+    }
+    setErrorMsg(null);
+    try {
+      for (const id of ids) {
+        await api.deleteExchangeCredentials(id);
+      }
+      const sanitized = await api.getEngineSettings();
+      setConfiguredVenues(sanitized.configured_venues || []);
+      clearCredentialInputs();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleRemoveHsmToken = async () => {
+    if (!configuredVenues.includes("remote_hsm")) return;
+    if (
+      !window.confirm("Remove the encrypted HSM token? This cannot be undone.")
+    ) {
+      return;
+    }
+    setErrorMsg(null);
+    try {
+      await api.deleteExchangeCredentials("remote_hsm");
+      const sanitized = await api.getEngineSettings();
+      setConfiguredVenues(sanitized.configured_venues || []);
+      clearCredentialInputs();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -548,25 +645,30 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   };
 
   const isVenueConfigured = (venue: string): boolean => {
+    const configured = (id: string) => configuredVenues.includes(id);
     switch (venue) {
       case "hyperliquid":
-        return hlEnabled && Boolean(hyperliquidWallet || hyperliquidPrivateKey);
+        return hlEnabled && (configured("hyperliquid") || Boolean(hyperliquidWallet || hyperliquidPrivateKey));
       case "lighter":
-        return lighterEnabled && Boolean(lighterApiKey);
+        return lighterEnabled && (configured("lighter") || Boolean(lighterApiKey));
       case "vanta":
-        return vantaEnabled && Boolean(vantaOrderlyKey || vantaAccountId);
+        return vantaEnabled && (configured("vanta") || Boolean(vantaOrderlyKey || vantaAccountId));
       case "arcus":
-        return arcusEnabled && Boolean(arcusApiKey);
+        return arcusEnabled && (configured("arcus") || Boolean(arcusApiKey));
       case "popdex":
-        return popdexEnabled && Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0"));
+        return popdexEnabled && (configured("popdex") || Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0")));
       case "robinhood":
-        return robinhoodEnabled && Boolean(robinhoodWallet || robinhoodPrivateKey);
+        return robinhoodEnabled && (configured("robinhood") || Boolean(robinhoodWallet || robinhoodPrivateKey));
       case "kraken":
-        return krakenEnabled && ((krakenSpotEnabled && Boolean(krakenSpotApiKey)) || (krakenFuturesEnabled && Boolean(krakenFuturesApiKey)));
+        return krakenEnabled && (
+          configured("kraken_spot") || configured("kraken_futures") ||
+          (krakenSpotEnabled && Boolean(krakenSpotApiKey)) ||
+          (krakenFuturesEnabled && Boolean(krakenFuturesApiKey))
+        );
       case "polymarket":
-        return polymarketEnabled && Boolean(polymarketApiKey || polymarketSecret);
+        return polymarketEnabled && (configured("polymarket") || Boolean(polymarketApiKey || polymarketSecret));
       case "kalshi":
-        return kalshiEnabled && Boolean(kalshiApiKeyId || kalshiPrivateKey);
+        return kalshiEnabled && (configured("kalshi") || Boolean(kalshiApiKeyId || kalshiPrivateKey));
       default:
         return false;
     }
@@ -596,7 +698,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     kalshiEnabled,
   ].filter(Boolean).length;
 
-  const isVaultLocked = vaultStatus ? !vaultStatus.is_unlocked : false;
+  const isVaultLocked = !api.isTauri || !vaultStatus?.is_unlocked;
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
@@ -694,19 +796,45 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
           </button>
         </div>
 
-        {/* Right Header: Lock Vault action when Unlocked and on Exchanges Tab */}
+        {/* Right Header: Lock Vault / Remove Credentials actions when unlocked on Exchanges Tab */}
         <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
           {activeTab === "exchanges" && !isVaultLocked && (
-            <button
-              type="button"
-              onClick={handleLockVault}
-              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
-              title="Lock sensitive exchange credentials now"
-            >
-              <Lock className="w-3.5 h-3.5 text-slate-500" />
-              <span>Lock Vault</span>
-            </button>
+            <>
+              {vaultCredentialIds(selectedExchange).length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleRemoveCredentials}
+                  className="px-2.5 py-1 rounded-lg border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                  title="Permanently remove the selected venue's stored credentials from the vault"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                  <span>Remove Credentials</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleLockVault}
+                className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                title="Lock sensitive exchange credentials now"
+              >
+                <Lock className="w-3.5 h-3.5 text-slate-500" />
+                <span>Lock Vault</span>
+              </button>
+            </>
           )}
+          {activeTab === "network" &&
+            !isVaultLocked &&
+            configuredVenues.includes("remote_hsm") && (
+              <button
+                type="button"
+                onClick={handleRemoveHsmToken}
+                className="px-2.5 py-1 rounded-lg border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                title="Permanently remove the stored HSM token from the vault"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                <span>Remove HSM Token</span>
+              </button>
+            )}
         </div>
       </div>
 
@@ -1863,37 +1991,48 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <div className="w-12 h-12 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
                       <Lock className="w-5 h-5 text-accent" />
                     </div>
-                    <div>
-                      <h4 className="text-sm font-bold font-mono text-slate-900">Vault Locked</h4>
-                      <p className="text-xs text-slate-500 font-sans mt-1">
-                        Enter master passcode to unlock exchange API credentials
-                      </p>
-                    </div>
+                    {api.isTauri ? (
+                      <>
+                        <div>
+                          <h4 className="text-sm font-bold font-mono text-slate-900">Vault Locked</h4>
+                          <p className="text-xs text-slate-500 font-sans mt-1">
+                            Enter master passcode to unlock exchange API credentials
+                          </p>
+                        </div>
 
-                    {inlineVaultError && (
-                      <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-[11px] font-mono text-red-600">
-                        {inlineVaultError}
+                        {inlineVaultError && (
+                          <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-[11px] font-mono text-red-600">
+                            {inlineVaultError}
+                          </div>
+                        )}
+
+                        <form onSubmit={(e) => { e.preventDefault(); handleInlineUnlock(e); }} className="space-y-3">
+                          <input
+                            type="password"
+                            value={inlinePasscode}
+                            onChange={(e) => setInlinePasscode(e.target.value)}
+                            placeholder="Enter master passcode..."
+                            autoFocus
+                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                          />
+                          <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); handleInlineUnlock(); }}
+                            disabled={inlineUnlocking || !inlinePasscode}
+                            className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer"
+                          >
+                            {inlineUnlocking ? "Unlocking..." : "Unlock Vault"}
+                          </button>
+                        </form>
+                      </>
+                    ) : (
+                      <div>
+                        <h4 className="text-sm font-bold font-mono text-slate-900">Browser Demo Mode</h4>
+                        <p className="text-xs text-slate-500 font-sans mt-1">
+                          Secure credential storage is available only in the desktop application.
+                        </p>
                       </div>
                     )}
-
-                    <form onSubmit={(e) => { e.preventDefault(); handleInlineUnlock(e); }} className="space-y-3">
-                      <input
-                        type="password"
-                        value={inlinePasscode}
-                        onChange={(e) => setInlinePasscode(e.target.value)}
-                        placeholder="Enter master passcode..."
-                        autoFocus
-                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
-                      />
-                      <button
-                        type="button"
-                        onClick={(e) => { e.preventDefault(); handleInlineUnlock(); }}
-                        disabled={inlineUnlocking || !inlinePasscode}
-                        className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer"
-                      >
-                        {inlineUnlocking ? "Unlocking..." : "Unlock Vault"}
-                      </button>
-                    </form>
                   </div>
                 </div>
               )}
@@ -1933,7 +2072,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
                 <label className="text-slate-800 font-bold block text-xs">Trading Mode</label>
                 <p className="text-[11px] text-slate-500">
-                  Switch between risk-free simulation and active DEX order placement:
+                  Switch between paper simulation and active DEX order placement:
                 </p>
 
                 <div className="flex items-center space-x-3 pt-1">
@@ -1948,16 +2087,16 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     />
                     <span className="font-semibold text-slate-800">Paper Trading (Live Feeds)</span>
                   </label>
-                  <label className="flex items-center space-x-2 cursor-pointer">
+                  <label className="flex items-center space-x-2 cursor-not-allowed opacity-60">
                     <input
                       type="radio"
                       name="trading_mode"
                       value="real"
                       checked={tradingMode === "real"}
-                      onChange={() => setTradingMode("real")}
+                      disabled
                       className="text-amber-600 focus:ring-amber-500"
                     />
-                    <span className="font-semibold text-amber-800">Real Trading (Live Execution)</span>
+                    <span className="font-semibold text-amber-800">Real Trading (Unavailable — authenticated execution not implemented)</span>
                   </label>
                 </div>
               </div>
@@ -2071,10 +2210,10 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
               <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-[11px] overflow-x-auto select-text font-mono">
-                <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787 --ws-port 8789</code>
+                <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787</code>
               </div>
               <p className="text-[10px] text-slate-500">
-                You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded">systemctl start arbitrager</code>) to auto-restart on server reboot.
+                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded">systemctl start arbitrager</code>) to auto-restart on server reboot.
               </p>
             </div>
           </div>
@@ -2167,7 +2306,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   This software is provided for research, simulation, and educational quantitative finance purposes. Cross-market arbitrage and algorithmic trading involve inherent execution risks, including market volatility, network latency spikes, smart contract bugs, API rate limits, and liquidity slippage. Past simulation performance does not guarantee future financial returns.
                 </p>
                 <p>
-                  No private keys or seed phrases are stored remotely or accessed by any third party; all credentials remain encrypted locally on your system using AES-256-GCM. Users are solely responsible for compliance with their local jurisdiction regulations and exchange terms of service.
+                  No private keys or seed phrases are stored remotely or accessed by any third party; all credentials remain encrypted locally on your system using AES-256-GCM with Argon2id key derivation. Users are solely responsible for compliance with their local jurisdiction regulations and exchange terms of service.
                 </p>
               </div>
             </div>
@@ -2219,9 +2358,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     </form>
   </div>
 
-  {/* Vault Unlock Modal */}
+  {/* Vault Unlock Modal (desktop only) */}
   <VaultUnlockModal
-    isOpen={showVaultModal}
+    isOpen={showVaultModal && api.isTauri}
     vaultStatus={vaultStatus}
     onClose={() => setShowVaultModal(false)}
     onSuccess={(status) => {

@@ -279,6 +279,15 @@ export const App: React.FC = () => {
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
 
+      {!api.isTauri && (
+        <div
+          role="status"
+          className="px-4 py-1.5 text-xs font-medium text-center bg-amber-100 text-amber-900 border-b border-amber-300"
+        >
+          Browser demo mode — execution, balances, PnL, risk, and calibration are synthetic; public quote views may use unauthenticated market data. Desktop IPC and exchange order submission are unavailable.
+        </div>
+      )}
+
       {/* Main Workspace Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Ticker Explorer Panel (Union of Perp DEX Tickers >= 2 Venues) */}

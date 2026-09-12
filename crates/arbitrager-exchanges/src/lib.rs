@@ -21,9 +21,10 @@ pub use simulated::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use arbitrager_core::exchange::ExchangeAdapter;
     use arbitrager_core::order::OrderRequest;
-    use arbitrager_core::types::{dec, Side, VenueId};
+    use arbitrager_core::types::{dec, Decimal, Side, VenueId};
 
     #[tokio::test]
     async fn test_simulated_exchange_trading() {
@@ -52,7 +53,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulated_exchange_depth_consumption() {
-        let exchange = SimulatedExchange::new("sim_b", "Simulated Exchange B", 0, dec!(0.0), dec!(10000.0));
+        let exchange = SimulatedExchange::new("sim_b", "Simulated Exchange B", 0, dec!(0.0), dec!(1000000.0));
         // Seed market with 2.0 BTC ask at level 0
         exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
 
@@ -77,7 +78,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simulated_exchange_realized_pnl_and_margin() {
-        let exchange = SimulatedExchange::new("sim_c", "Simulated Exchange C", 0, dec!(0.0), dec!(10000.0));
+        let exchange = SimulatedExchange::new("sim_c", "Simulated Exchange C", 0, dec!(0.0), dec!(1000000.0));
         exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(5.0), dec!(0.0));
 
         // Open Long 1.0 BTC @ 60010
@@ -99,8 +100,247 @@ mod tests {
         // Position should be removed completely
         assert_eq!(acc_closed.positions.len(), 0);
         // Equity should have increased by realized profit (60500 - 60010 = +490)
-        assert_eq!(acc_closed.equity, dec!(10000.0) + dec!(490.0));
+        assert_eq!(acc_closed.equity, dec!(1000000.0) + dec!(490.0));
         assert_eq!(acc_closed.maintenance_margin, dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_exchange_partial_fill_on_insufficient_depth() {
+        let exchange = SimulatedExchange::new("sim_d", "Simulated Exchange D", 0, dec!(0.0), dec!(1000000.0));
+        // 2.0 per level * (1 + i*0.2) for 10 levels: total ask depth = 2.0 * (10 + 0.2*45) = 38.0
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        let order = OrderRequest::new_limit(
+            exchange.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(70000.0),
+            dec!(50.0),
+        );
+        let resp = exchange.place_order(order).await.expect("partial fill order");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::PartiallyFilled);
+        assert_eq!(resp.filled_qty, dec!(38.0));
+        assert_eq!(resp.remaining_qty, dec!(12.0));
+        assert!(resp.avg_fill_price.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_simulated_limit_buy_below_best_ask_rejects() {
+        let exchange = SimulatedExchange::new("sim_e", "Simulated Exchange E", 0, dec!(0.0), dec!(10000.0));
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Buy, dec!(60000.0), dec!(1.0));
+        let resp = exchange.place_order(order).await.expect("place");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Rejected);
+        assert_eq!(resp.filled_qty, dec!(0));
+        assert_eq!(resp.remaining_qty, dec!(1.0));
+        assert_eq!(resp.avg_fill_price, None);
+        assert_eq!(resp.fee, dec!(0));
+
+        let book = exchange.fetch_orderbook("BTC-USDC").await.expect("book");
+        assert_eq!(book.asks[0].size, dec!(2.0));
+        let acc = exchange.fetch_account().await.expect("acc");
+        assert!(acc.positions.is_empty());
+        assert_eq!(acc.equity, dec!(10000.0));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_limit_buy_fills_only_eligible_asks() {
+        let exchange = SimulatedExchange::new("sim_f", "Simulated Exchange F", 0, dec!(0.0), dec!(1000000.0));
+        // asks: 60010 @ 2.0, 60010.5 @ 2.4, ...
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        // Limit 60010 accepts only the first ask level: partial fill of 2.0
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Buy, dec!(60010.0), dec!(3.0));
+        let resp = exchange.place_order(order).await.expect("place");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::PartiallyFilled);
+        assert_eq!(resp.filled_qty, dec!(2.0));
+        assert_eq!(resp.remaining_qty, dec!(1.0));
+        assert_eq!(resp.avg_fill_price, Some(dec!(60010.0)));
+
+        // Second level must be untouched
+        let book = exchange.fetch_orderbook("BTC-USDC").await.expect("book");
+        assert_eq!(book.asks[0].price, dec!(60010.5));
+        assert_eq!(book.asks[0].size, dec!(2.4));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_limit_sell_fills_only_eligible_bids() {
+        let exchange = SimulatedExchange::new("sim_g", "Simulated Exchange G", 0, dec!(0.0), dec!(1000000.0));
+        // bids: 60000 @ 2.0, 59999.5 @ 2.4, ...
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        // Limit 59999.75 accepts only the top bid: partial fill of 2.0
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Sell, dec!(59999.75), dec!(3.0));
+        let resp = exchange.place_order(order).await.expect("place");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::PartiallyFilled);
+        assert_eq!(resp.filled_qty, dec!(2.0));
+        assert_eq!(resp.remaining_qty, dec!(1.0));
+        assert_eq!(resp.avg_fill_price, Some(dec!(60000.0)));
+
+        // Limit above all bids rejects entirely
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Sell, dec!(60001.0), dec!(1.0));
+        let resp = exchange.place_order(order).await.expect("place");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Rejected);
+        assert_eq!(resp.filled_qty, dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_replace_orderbook_validates() {
+        let exchange = SimulatedExchange::new("sim_h", "Simulated Exchange H", 0, dec!(0.0), dec!(10000.0));
+
+        // Malformed: crossed book rejected
+        let mut bad = arbitrager_core::quote::OrderBook::new(exchange.venue_id(), "ETH-USDC".into());
+        bad.bids.push(arbitrager_core::quote::BookLevel::new(dec!(3100.0), dec!(1.0)));
+        bad.asks.push(arbitrager_core::quote::BookLevel::new(dec!(3000.0), dec!(1.0)));
+        assert!(exchange.replace_orderbook(bad).is_err());
+        assert!(!exchange.has_market("ETH-USDC"));
+
+        let mut foreign = arbitrager_core::quote::OrderBook::new("other_venue".into(), "ETH-USDC".into());
+        foreign.bids.push(arbitrager_core::quote::BookLevel::new(dec!(2999.0), dec!(1.0)));
+        foreign.asks.push(arbitrager_core::quote::BookLevel::new(dec!(3001.0), dec!(1.0)));
+        assert!(exchange.replace_orderbook(foreign).is_err());
+        assert!(!exchange.has_market("ETH-USDC"));
+
+        // Valid book with matching venue accepted and retrievable
+        let mut good = arbitrager_core::quote::OrderBook::new(exchange.venue_id(), "ETH-USDC".into());
+        good.bids.push(arbitrager_core::quote::BookLevel::new(dec!(2999.0), dec!(1.0)));
+        good.asks.push(arbitrager_core::quote::BookLevel::new(dec!(3001.0), dec!(1.0)));
+        exchange.replace_orderbook(good).expect("replace");
+        let book = exchange.fetch_orderbook("ETH-USDC").await.expect("fetch");
+        assert_eq!(book.best_ask_price(), Some(dec!(3001.0)));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_set_leverage_rejects_out_of_range() {
+        let exchange = SimulatedExchange::new("sim_i", "Simulated Exchange I", 0, dec!(0.0), dec!(10000.0));
+        assert!(exchange.set_leverage("BTC-USDC", 0).await.is_err());
+        assert!(exchange.set_leverage("BTC-USDC", 6).await.is_err());
+        assert!(exchange.set_leverage("BTC-USDC", 1).await.is_ok());
+        assert!(exchange.set_leverage("BTC-USDC", 5).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_simulated_set_leverage_applies_to_new_position() {
+        let exchange = SimulatedExchange::new("sim_j", "Simulated Exchange J", 0, dec!(0.0), dec!(100000.0));
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+        exchange.set_leverage("BTC-USDC", 2).await.expect("set leverage");
+
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Buy, dec!(60010.0), dec!(1.0));
+        exchange.place_order(order).await.expect("place");
+
+        let acc = exchange.fetch_account().await.expect("acc");
+        let pos = &acc.positions[0];
+        assert_eq!(pos.leverage, dec!(2));
+        assert_eq!(pos.initial_margin, dec!(1.0) * dec!(60010.0) / dec!(2));
+        assert_eq!(pos.maintenance_margin, dec!(1.0) * dec!(60010.0) / dec!(4));
+        assert_eq!(acc.free_margin, dec!(100000.0) - pos.initial_margin);
+    }
+
+    #[tokio::test]
+    async fn test_simulated_set_leverage_updates_existing_position() {
+        let exchange = SimulatedExchange::new("sim_k", "Simulated Exchange K", 0, dec!(0.0), dec!(100000.0));
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Buy, dec!(60010.0), dec!(1.0));
+        exchange.place_order(order).await.expect("place");
+
+        exchange.set_leverage("BTC-USDC", 1).await.expect("set leverage");
+
+        let acc = exchange.fetch_account().await.expect("acc");
+        let pos = &acc.positions[0];
+        assert_eq!(pos.leverage, dec!(1));
+        assert_eq!(pos.initial_margin, dec!(1.0) * dec!(60010.0));
+        assert_eq!(acc.free_margin, dec!(100000.0) - dec!(60010.0));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_insufficient_margin_rejects_without_consumption() {
+        let exchange = SimulatedExchange::new("sim_l", "Simulated Exchange L", 0, dec!(0.0), dec!(1000.0));
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(2.0), dec!(0.0));
+
+        // 1.0 BTC @ 60010 needs 12002 initial margin at 5x; only 1000 free
+        let order = OrderRequest::new_limit(exchange.venue_id(), "BTC-USDC", Side::Buy, dec!(60010.0), dec!(1.0));
+        let res = exchange.place_order(order).await;
+        assert!(res.is_err());
+
+        let book = exchange.fetch_orderbook("BTC-USDC").await.expect("book");
+        assert_eq!(book.asks[0].price, dec!(60010.0));
+        assert_eq!(book.asks[0].size, dec!(2.0));
+        let acc = exchange.fetch_account().await.expect("acc");
+        assert!(acc.positions.is_empty());
+        assert_eq!(acc.equity, dec!(1000.0));
+        assert_eq!(acc.free_margin, dec!(1000.0));
+    }
+
+    #[tokio::test]
+    async fn test_simulated_fetch_funding_rate_requires_seed() {
+        let exchange = SimulatedExchange::new("sim_m", "Simulated Exchange M", 0, dec!(0.0), dec!(10000.0));
+        assert!(exchange.fetch_funding_rate("BTC-USDC").await.is_err());
+        exchange.seed_market("BTC-USDC", dec!(60000.0), dec!(60010.0), dec!(1.0), dec!(0.0003));
+        let fr = exchange.fetch_funding_rate("BTC-USDC").await.expect("seeded rate");
+        assert_eq!(fr.rate, dec!(0.0003));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_simulated_concurrent_orders_cannot_overcommit_margin() {
+        let exchange = Arc::new(SimulatedExchange::new(
+            "sim_conc",
+            "Simulated Exchange Concurrent",
+            1,
+            dec!(0.0),
+            dec!(10000.0),
+        ));
+        exchange.seed_market("AAA-USDC", dec!(100.0), dec!(100.1), dec!(1000.0), dec!(0.0));
+        exchange.seed_market("BBB-USDC", dec!(100.0), dec!(100.1), dec!(1000.0), dec!(0.0));
+
+        let ex_a = exchange.clone();
+        let ex_b = exchange.clone();
+        let h1 = tokio::spawn(async move {
+            ex_a.place_order(OrderRequest::new_limit(
+                ex_a.venue_id(),
+                "AAA-USDC",
+                Side::Buy,
+                dec!(100.1),
+                dec!(400.0),
+            ))
+            .await
+        });
+        let h2 = tokio::spawn(async move {
+            ex_b.place_order(OrderRequest::new_limit(
+                ex_b.venue_id(),
+                "BBB-USDC",
+                Side::Buy,
+                dec!(100.1),
+                dec!(400.0),
+            ))
+            .await
+        });
+        let ra = h1.await.expect("join a");
+        let rb = h2.await.expect("join b");
+
+        let (a_ok, b_ok) = (ra.is_ok(), rb.is_ok());
+        assert_ne!(a_ok, b_ok, "exactly one order must succeed: {:?} {:?}", ra, rb);
+        let err = if a_ok { rb.unwrap_err() } else { ra.unwrap_err() };
+        assert!(
+            err.to_string().contains("Insufficient free margin"),
+            "unexpected error: {}",
+            err
+        );
+
+        let acc = exchange.fetch_account().await.expect("account");
+        assert_eq!(acc.positions.len(), 1);
+        let total_im: Decimal = acc.positions.iter().map(|p| p.initial_margin).sum();
+        assert!(total_im <= acc.equity, "initial margin {} exceeds equity {}", total_im, acc.equity);
+        assert!(acc.free_margin >= dec!(0));
+        assert_eq!(acc.free_margin, acc.equity - total_im);
+
+        let rejected_symbol = if a_ok { "BBB-USDC" } else { "AAA-USDC" };
+        let book = exchange.fetch_orderbook(rejected_symbol).await.expect("book");
+        assert_eq!(book.asks.len(), 10);
+        assert_eq!(book.asks[0].size, dec!(1000.0));
+        let untouched: Decimal = book.asks.iter().map(|l| l.size).sum();
+        assert_eq!(untouched, dec!(19000.0), "rejected order consumed book depth");
     }
 
     #[test]

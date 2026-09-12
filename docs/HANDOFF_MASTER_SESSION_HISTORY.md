@@ -1,5 +1,7 @@
 # Master Handoff & Session History: Arbitrager Cross-Market Quantitative Terminal
 
+> **Historical record.** This document captures the development history as it happened. Some feature claims below describe aspirational or since-disabled functionality; for the current, accurate safety and capability status, see `README.md` → *Current Safety Status*.
+
 **Document Version**: 2.0.0  
 **Generated At**: 2026-09-12  
 **Repository**: `/mnt/Data/Projects/Arbitrager`  
@@ -119,7 +121,7 @@ The user requested a ground-up Rust engine managed with Pixi:
 └── frontend/                     # Tauri Desktop & React UI
     ├── package.json              # Vite, React, Lucide-React, Tailwind CSS
     ├── src-tauri/                # Tauri v2 Desktop Host
-    │   ├── Cargo.toml            # Tauri dependencies (Argon2, ChaCha20Poly1305, Reqwest)
+    │   ├── Cargo.toml            # Tauri dependencies (Argon2id, AES-256-GCM)
     │   └── src/
     │       ├── main.rs           # Entry point, WebKitGTK env flags, command registration
     │       ├── commands.rs       # All IPC command handlers and 25 unit tests
@@ -221,4 +223,4 @@ DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
    - Package systemd service templates (`arbitrager@9100.service`, `arbitrager@9101.service`) for multi-instance deployment on remote Ubuntu VPS instances.
 
 ---
-*Security Notice: All API keys, secrets, private keys, and passcodes are strictly excluded. The credential vault is encrypted with Argon2id + ChaCha20Poly1305 and `keychain.toml` is permanently ignored.*
+*Security Notice: All API keys, secrets, private keys, and passcodes are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*

@@ -70,12 +70,12 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
 
   useEffect(() => {
     loadStrategyMetrics();
-    runCalibration();
+    if (!api.isTauri) runCalibration();
   }, [activeSymbol]);
 
   const handleRefresh = () => {
     loadStrategyMetrics();
-    runCalibration();
+    if (!api.isTauri) runCalibration();
     onRefreshAll?.();
   };
 
@@ -154,7 +154,7 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
             </span>
           </div>
           <p className="text-xs lg:text-sm text-slate-600 font-mono mt-1">
-            Consolidated multi-venue exposure, real-time DeltaGuard neutrality, margin safeguards, and strategy attribution.
+            Consolidated multi-venue exposure, current in-memory DeltaGuard neutrality, margin safeguards, and strategy attribution.
           </p>
         </div>
 
@@ -446,11 +446,17 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
 
           <button
             onClick={runCalibration}
-            disabled={calibrating}
-            className="px-4 py-2 bg-accent hover:bg-blue-600 text-white rounded-xl text-xs lg:text-sm font-mono font-bold transition shadow-xs flex items-center space-x-2 cursor-pointer"
+            disabled={calibrating || api.isTauri}
+            className="px-4 py-2 bg-accent hover:bg-blue-600 disabled:bg-slate-400 disabled:hover:bg-slate-400 text-white rounded-xl text-xs lg:text-sm font-mono font-bold transition shadow-xs flex items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
           >
             <Sliders className={`w-4 h-4 ${calibrating ? "animate-spin" : ""}`} />
-            <span>{calibrating ? "Optimizing..." : `Run WFO (${activeSymbol})`}</span>
+            <span>
+              {api.isTauri
+                ? "WFO unavailable — recorded quote history required"
+                : calibrating
+                  ? "Optimizing..."
+                  : `Run Demo WFO (${activeSymbol})`}
+            </span>
           </button>
         </div>
 
@@ -515,7 +521,9 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
           </div>
         ) : (
           <div className="py-8 text-center text-slate-400 font-mono text-xs lg:text-sm">
-            Click Run WFO to optimize parameter configurations for {activeSymbol}.
+            {api.isTauri
+              ? "WFO unavailable — recorded quote history required."
+              : `Click Run Demo WFO to optimize parameter configurations for ${activeSymbol}.`}
           </div>
         )}
       </div>

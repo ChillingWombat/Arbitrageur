@@ -52,8 +52,8 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
   useEffect(() => {
     loadMetrics();
-    // Auto-run initial calibration preview for the active symbol
-    runCalibration();
+    // Demo-only calibration preview; native WFO requires recorded quote history
+    if (!api.isTauri) runCalibration();
   }, [activeSymbol]);
 
   // Aggregate totals across all strategies
@@ -275,11 +275,17 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
           <button
             onClick={runCalibration}
-            disabled={calibrating}
+            disabled={calibrating || api.isTauri}
             className="px-4 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0"
           >
             <Sliders className={`w-3.5 h-3.5 ${calibrating ? "animate-spin" : ""}`} />
-            <span>{calibrating ? "Optimizing..." : `Run WFO for ${activeSymbol}`}</span>
+            <span>
+              {api.isTauri
+                ? "WFO unavailable — recorded quote history required"
+                : calibrating
+                  ? "Optimizing..."
+                  : `Run Demo WFO for ${activeSymbol}`}
+            </span>
           </button>
         </div>
 

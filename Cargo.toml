@@ -49,6 +49,8 @@ crossterm = "0.27"
 ratatui = "0.27"
 rand = "0.8"
 aes-gcm = "0.10"
+argon2 = "0.5"
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Internal crates
 arbitrager-core = { path = "crates/arbitrager-core" }

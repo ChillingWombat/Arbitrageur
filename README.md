@@ -14,14 +14,29 @@ The system targets **Spatial Price Differences** (orderbook spread capture) and 
 
 ---
 
+## Current Safety Status
+
+This repository is a **research and paper-trading platform only**. Read this before running anything:
+
+- **Live trading is disabled and fails closed.** Order signing, submission, and cancellation are not implemented for any venue. Every real/live order action and every unsupported native execution path (spot, cross-ticker, funding, prediction, triangular) returns an explicit error rather than simulating success; spatial **paper** execution on the built-in simulator remains supported.
+- **The desktop app admits only Hyperliquid and Lighter**, and only their **read-only public orderbook feeds**. Lighter funding-rate ingestion is unavailable.
+- **Vanta, Robinhood, Arcus, PopDEX, Polymarket, and Kalshi adapters are scaffolds.** They are not wired into native scanning or execution and cannot place orders.
+- **Browser mode is an explicitly synthetic demo** for execution, balances, P&L, risk, and calibration; public quote views may fetch unauthenticated market data, which discloses your IP address and the requested symbols to those endpoints. The demo is never used as a fallback when desktop IPC fails — Tauri command errors propagate to the UI.
+- **Paper spatial execution** uses freshly fetched, identity- and structure-validated orderbooks, bounded IOC (immediate-or-cancel) simulation, a maximum 5x leverage, and margin/delta/depth/slippage checks. Only **one open pair per symbol** is supported because the closing/convergence lifecycle remains on the backlog.
+- **Credential vault:** local AES-256-GCM encryption with Argon2id key derivation, `0600` file / `0700` directory permissions on Unix, and write-only secret entry from the UI (there is no credential-read IPC). Even so, **only ever enter read-only or minimum-permission API credentials — never funded signing keys**.
+
+Nothing here is production-ready, and there is no real-time WebSocket streaming.
+
+---
+
 ## 🌟 Key Features & Innovations
 
-- **Ultra-Low Latency in Rust:** Sub-microsecond calculation latency (Kalman filter update in **19.15 ns**, Ornstein-Uhlenbeck MLE fitting in **71.98 µs**, Bertram threshold solver in **3.33 µs**).
-- **Atomic Multi-Leg Coordination:** Concurrent parallel order execution (`tokio::join!`) with automated emergency unwind to eliminate legging risk.
+- **Low-Latency Math in Rust:** Nanosecond/microsecond-scale calculation latency (historical machine-specific examples below — not guaranteed).
+- **Concurrent Two-Leg Coordination:** Parallel order dispatch (`tokio::join!`) with best-effort emergency compensation; unresolved residual exposure trips the circuit breaker and is surfaced for operator review rather than hidden.
 - **Microstructure Depth Verification:** Calculates true Volume-Weighted Average Price (VWAP) across orderbook levels to prevent execution on phantom liquidity.
-- **Enterprise Risk Guardrails:**
+- **Risk Guardrails:**
   - **Circuit Breaker:** Dollar drawdown halts, percentage stops, consecutive failure tripwires.
-  - **DeltaGuard:** Real-time cross-exchange signed net delta exposure tracker enforcing true delta neutrality.
+  - **DeltaGuard:** In-memory signed net delta exposure tracker per asset.
   - **MarginMonitor:** Maintenance margin ratio monitoring and liquidation distance buffer warnings (< 15%).
 - **Hardened Rate Limiting:** `AccountRequestCoordinator` with token bucket throttling, in-memory TTL caching, and exponential backoff on HTTP 429 errors.
 - **Modern Pixi Environment:** Unified environment and workflow management with zero-config reproducibility.
@@ -32,10 +47,10 @@ The system targets **Spatial Price Differences** (orderbook spread capture) and 
 
 Built on rigorous academic quant algorithms implemented in pure Rust (`arbitrager-math`):
 - **Ornstein-Uhlenbeck (OU) Mean-Reversion Process:** Continuous SDE $dX_t = \theta (\mu - X_t) dt + \sigma dW_t$ with closed-form MLE parameter estimation and half-life calculation $t_{1/2} = \frac{\ln 2}{\theta}$.
-- **Bertram (2010) Optimal Analytic Thresholds:** Solves for trade entry and exit levels that analytically maximize expected return per unit time under transaction costs $c$.
+- **Bertram-Style Threshold Search:** Numerical search for trade entry and exit levels targeting improved expected return per unit time under transaction costs $c$ (inspired by Bertram 2010; not a closed-form analytic solver).
 - **2D Online Kalman Filter:** Recursively estimates dynamic hedge ratio $\beta_t$ and intercept $\alpha_t$ in $O(1)$ operations with zero allocation.
 - **Funding Carry Compounding:** Hourly continuous rate normalization, APR/APY compounding ($\text{APY} = (1 + \Delta r_{\text{hourly}})^{8760} - 1$), and transaction fee break-even amortization time.
-- **Prediction Market Synthetic Parity:** Binary Arrow-Debreu arbitrage ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$) and complete set Dutch book linear programming.
+- **Prediction Market Parity Research:** Cross-venue binary contract comparison ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$). A $1 payout is conditional on both contracts having identical settlement terms; displayed returns are indicative, never guaranteed.
 
 ---
 
@@ -79,40 +94,40 @@ pixi run check
 pixi run test
 ```
 
-### 3. Run Microsecond Quantitative Benchmarks
+### 3. Run Quantitative Benchmarks
 ```bash
 pixi run bench
 ```
-*Benchmark Output:*
+*Example output from one historical development machine — machine-specific and not guaranteed:*
 ```text
 1. Kalman Filter 2D update (1,000,000 iterations):
    Per-update latency: 19.15 nanoseconds (52.21M updates/sec)
 2. Ornstein-Uhlenbeck MLE fitting (10,000 fits on 5000-point series):
    Per-fit latency: 71.98 microseconds
-3. Bertram Optimal Threshold Analytic Solver (10,000 solves):
+3. Bertram-Style Threshold Search (10,000 solves):
    Per-solve latency: 3.33 microseconds
 ```
 
 ### 4. Run Paper Trading Simulation
-Simulates concurrent spatial price spread and funding carry trading between Hyperliquid, Lighter, and Vanta:
+Research/demo only: simulates spatial spread and funding carry trading between in-process simulated venues (no live execution):
 ```bash
 pixi run run-sim
 ```
 
 ### 5. Scan Funding Rate Carry Opportunities
-Displays normalized hourly rates, APR, APY, break-even hours, and daily income:
+Research demo using static example rates: displays normalized hourly rates, APR, APY, break-even hours, and estimated daily income (not live venue data):
 ```bash
 pixi run run-funding
 ```
 
 ### 6. Run Statistical Arbitrage Pair Tracker
-Tracks cointegrated asset pairs with dynamic Kalman filter hedge ratios:
+Tracks cointegrated asset pairs with dynamic Kalman filter hedge ratios on a synthetic series:
 ```bash
 pixi run run-stat
 ```
 
 ### 7. Scan Prediction Markets
-Evaluates synthetic binary arbitrage between Polymarket and Kalshi:
+Research demo evaluating cross-venue binary contract parity between Polymarket and Kalshi; any payout is conditional on identical settlement terms (not live venue execution):
 ```bash
 pixi run run-prediction
 ```
@@ -124,21 +139,21 @@ pixi run run-prediction
 Arbitrager includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
 
 ### 🌟 Frontend Capabilities
-- **⚡ Spatial Matrix:** Real-time L2 orderbooks across Hyperliquid, Lighter, Vanta, and Robinhood with depth visualization, volume-weighted average price (VWAP) calculation, and one-click atomic execution.
-- **📈 Funding Carry Radar:** Continuous funding carry opportunities across perpetual venues with normalized 8h / 1h rates, APR, compounded APY, break-even amortization time, and holding duration yield simulation.
-- **🎯 Prediction Parity Hub:** Arrow-Debreu binary synthetic arbitrage pairing Polymarket CTF CLOB and Kalshi CFTC contracts ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$) with guaranteed settlement payoff curves.
-- **🔬 Stat-Arb Lab:** Real-time 2D Kalman filter dynamic hedge ratio ($\beta_t$) and z-score sparkline chart, Bertram (2010) optimal threshold analytic solver, and Ornstein-Uhlenbeck AR(1) MLE fitting.
-- **🛡️ DeltaGuard & Risk Operations:** Real-time signed net delta tracking per asset, circuit breaker tripwires (dollar & percentage drawdown), maintenance margin proximity, and manual emergency kill switch.
-- **🧪 Simulation Studio:** High-frequency paper trading engine with continuous auto-run loop, tick-by-tick order trace, and automated emergency unwind visualization.
-- **⚙️ Hardened Key Management:** Remote HSM signer configuration (Cloudflare Worker / Docker container), DEX router contract allowlists, and smart order routing slippage limits.
+- **⚡ Spatial Matrix:** Read-only public L2 orderbooks from Hyperliquid and Lighter (the only admitted venues) with depth visualization, VWAP calculation, and one-click **paper** execution against the built-in simulator.
+- **📈 Funding Carry Radar:** Funding carry research view with normalized rates, APR, compounded APY, and break-even estimates; native funding execution is disabled (Lighter funding ingestion is unavailable).
+- **🎯 Prediction Parity Hub:** Cross-venue parity research for Polymarket CTF CLOB and Kalshi CFTC contracts ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$); payouts are conditional on identical settlement terms and shown returns are indicative only.
+- **🔬 Stat-Arb Lab:** In-memory 2D Kalman filter dynamic hedge ratio ($\beta_t$) and z-score sparkline chart, Bertram-style numerical threshold search, and Ornstein-Uhlenbeck AR(1) MLE fitting.
+- **🛡️ DeltaGuard & Risk Operations:** Current in-memory signed net delta tracking per asset, circuit breaker tripwires (dollar & percentage drawdown), maintenance margin proximity, and manual emergency kill switch.
+- **🧪 Simulation Studio:** High-frequency paper trading engine with continuous auto-run loop, tick-by-tick order trace, and emergency unwind visualization.
+- **⚙️ Credential Vault:** Local encrypted credential storage (AES-256-GCM + Argon2id); remote HSM signing and live order submission are not implemented.
 
 ### 🚀 Running the Frontend
 
-#### 1. Web Dev Server (Browser Mode with Reactive Mock Engine)
+#### 1. Web Dev Server (Browser Mode — Demo Engine)
 ```bash
 pixi run dev-frontend
 ```
-Open `http://localhost:1420` in your browser.
+Open `http://localhost:1420` in your browser. In browser mode, execution, balances, P&L, risk, and calibration are synthetic; public quote views may use unauthenticated market data fetched directly from venue endpoints (which discloses your IP address and requested symbols). Desktop IPC and order submission are unavailable.
 
 #### 2. Build Production Web Assets
 ```bash

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ use arbitrager_execution::smart_routing::SmartOrderRouter;
 use arbitrager_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrager_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use arbitrager_risk::delta_guard::DeltaGuard;
+use zeroize::Zeroize;
+use crate::vault::ExchangeCredentials;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ExecutionLogEntry {
@@ -83,7 +86,7 @@ impl Default for TickerStrategyConfigDto {
 }
 
 fn default_hsm_url() -> String { "http://127.0.0.1:8787/sign".into() }
-fn default_hmac_token() -> String { "••••••••••••••••••••••••".into() }
+fn default_hmac_token() -> String { String::new() }
 fn default_max_slippage() -> f64 { 15.0 }
 fn default_min_depth_ratio() -> f64 { 3.0 }
 fn default_hyperliquid_url() -> String { "https://api.hyperliquid.xyz".into() }
@@ -128,7 +131,9 @@ pub struct VenueBalanceInfo {
     pub recommended_action: Option<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+// Intentionally no Debug: this DTO transiently holds credential material
+// submitted by the UI and must never be printable.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct EngineSettingsDto {
     #[serde(default = "default_hsm_url")]
     pub hsm_url: String,
@@ -277,6 +282,10 @@ pub struct EngineSettingsDto {
     #[serde(default = "default_popdex_url")]
     pub popdex_url: String,
 
+    // Vault-derived credential configuration state (venue IDs only, no secrets)
+    #[serde(default)]
+    pub configured_venues: Vec<String>,
+
     // Referrals, About & Sponsor Links
     #[serde(default = "default_referral_lighter")]
     pub referral_lighter: String,
@@ -354,12 +363,259 @@ impl Default for EngineSettingsDto {
             popdex_account_index: default_popdex_account_index(),
             popdex_api_key: "".into(),
             popdex_url: default_popdex_url(),
+            configured_venues: Vec::new(),
             referral_lighter: default_referral_lighter(),
             referral_robinhood: default_referral_robinhood(),
             sponsor_link: default_sponsor_link(),
             version: default_app_version(),
             git_repo: default_git_repo(),
         }
+    }
+}
+
+fn has_secret_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && !trimmed.chars().all(|c| c == '•')
+}
+
+fn has_index_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed != "0"
+}
+
+impl EngineSettingsDto {
+    /// Extract submitted credential material into vault-bound records. A
+    /// record is emitted only when at least one credential, public
+    /// identifier, or index field is supplied for that venue.
+    pub fn submitted_credentials(&self) -> Vec<ExchangeCredentials> {
+        let mut out = Vec::new();
+
+        if has_secret_value(&self.hmac_token) {
+            out.push(ExchangeCredentials {
+                venue: "remote_hsm".into(),
+                api_key: String::new(),
+                api_secret: self.hmac_token.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: true,
+            });
+        }
+
+        let hyperliquid_supplied = has_secret_value(&self.hyperliquid_wallet)
+            || has_secret_value(&self.hyperliquid_private_key)
+            || self.hyperliquid_account_index.is_some()
+            || self.hyperliquid_subaccount_index.is_some();
+        if hyperliquid_supplied {
+            out.push(ExchangeCredentials {
+                venue: "hyperliquid".into(),
+                api_key: String::new(),
+                api_secret: self.hyperliquid_private_key.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: if has_secret_value(&self.hyperliquid_wallet) {
+                    Some(self.hyperliquid_wallet.trim().to_string())
+                } else {
+                    None
+                },
+                account_index: self.hyperliquid_account_index,
+                subaccount_index: self.hyperliquid_subaccount_index,
+                enabled: self.hyperliquid_enabled || self.hyperliquid_spot_enabled,
+            });
+        }
+
+        let lighter_account_index = self.lighter_account_index.trim().parse::<u32>().ok();
+        let lighter_supplied = has_secret_value(&self.lighter_api_key)
+            || has_index_value(&self.lighter_account_index)
+            || self.lighter_subaccount_index.is_some();
+        if lighter_supplied {
+            out.push(ExchangeCredentials {
+                venue: "lighter".into(),
+                api_key: self.lighter_api_key.trim().to_string(),
+                api_secret: String::new(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: lighter_account_index,
+                subaccount_index: self.lighter_subaccount_index,
+                enabled: self.lighter_enabled || self.lighter_spot_enabled,
+            });
+        }
+
+        let vanta_supplied = has_secret_value(&self.vanta_account_id)
+            || has_secret_value(&self.vanta_orderly_key)
+            || has_secret_value(&self.vanta_orderly_secret)
+            || self.vanta_subaccount_index.is_some();
+        if vanta_supplied {
+            out.push(ExchangeCredentials {
+                venue: "vanta".into(),
+                api_key: self.vanta_orderly_key.trim().to_string(),
+                api_secret: self.vanta_orderly_secret.trim().to_string(),
+                passphrase: None,
+                account_id: if has_secret_value(&self.vanta_account_id) {
+                    Some(self.vanta_account_id.trim().to_string())
+                } else {
+                    None
+                },
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: self.vanta_subaccount_index,
+                enabled: self.vanta_enabled,
+            });
+        }
+
+        let robinhood_supplied = has_secret_value(&self.robinhood_wallet)
+            || has_secret_value(&self.robinhood_private_key)
+            || self.robinhood_subaccount_index.is_some();
+        if robinhood_supplied {
+            out.push(ExchangeCredentials {
+                venue: "robinhood".into(),
+                api_key: String::new(),
+                api_secret: self.robinhood_private_key.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: if has_secret_value(&self.robinhood_wallet) {
+                    Some(self.robinhood_wallet.trim().to_string())
+                } else {
+                    None
+                },
+                account_index: None,
+                subaccount_index: self.robinhood_subaccount_index,
+                enabled: self.robinhood_enabled,
+            });
+        }
+
+        if has_secret_value(&self.arcus_api_key) || has_secret_value(&self.arcus_secret) {
+            out.push(ExchangeCredentials {
+                venue: "arcus".into(),
+                api_key: self.arcus_api_key.trim().to_string(),
+                api_secret: self.arcus_secret.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: self.arcus_enabled,
+            });
+        }
+
+        let popdex_account_index = self.popdex_account_index.trim().parse::<u32>().ok();
+        if has_secret_value(&self.popdex_api_key) || has_index_value(&self.popdex_account_index) {
+            out.push(ExchangeCredentials {
+                venue: "popdex".into(),
+                api_key: self.popdex_api_key.trim().to_string(),
+                api_secret: String::new(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: popdex_account_index,
+                subaccount_index: None,
+                enabled: self.popdex_enabled,
+            });
+        }
+
+        if has_secret_value(&self.kraken_spot_api_key) || has_secret_value(&self.kraken_spot_secret)
+        {
+            out.push(ExchangeCredentials {
+                venue: "kraken_spot".into(),
+                api_key: self.kraken_spot_api_key.trim().to_string(),
+                api_secret: self.kraken_spot_secret.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: self.kraken_enabled && self.kraken_spot_enabled,
+            });
+        }
+
+        if has_secret_value(&self.kraken_futures_api_key)
+            || has_secret_value(&self.kraken_futures_secret)
+        {
+            out.push(ExchangeCredentials {
+                venue: "kraken_futures".into(),
+                api_key: self.kraken_futures_api_key.trim().to_string(),
+                api_secret: self.kraken_futures_secret.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: self.kraken_enabled && self.kraken_futures_enabled,
+            });
+        }
+
+        let polymarket_supplied = has_secret_value(&self.polymarket_api_key)
+            || has_secret_value(&self.polymarket_secret)
+            || has_secret_value(&self.polymarket_passphrase);
+        if polymarket_supplied {
+            out.push(ExchangeCredentials {
+                venue: "polymarket".into(),
+                api_key: self.polymarket_api_key.trim().to_string(),
+                api_secret: self.polymarket_secret.trim().to_string(),
+                passphrase: if has_secret_value(&self.polymarket_passphrase) {
+                    Some(self.polymarket_passphrase.trim().to_string())
+                } else {
+                    None
+                },
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: self.polymarket_enabled,
+            });
+        }
+
+        if has_secret_value(&self.kalshi_api_key_id) || has_secret_value(&self.kalshi_private_key) {
+            out.push(ExchangeCredentials {
+                venue: "kalshi".into(),
+                api_key: self.kalshi_api_key_id.trim().to_string(),
+                api_secret: self.kalshi_private_key.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                enabled: self.kalshi_enabled,
+            });
+        }
+
+        out
+    }
+
+    /// Remove every credential identifier/secret held in settings. URLs,
+    /// router addresses, enable toggles, and risk/network settings are kept.
+    pub fn clear_credential_material(&mut self) {
+        self.hmac_token.zeroize();
+        self.kraken_spot_api_key.zeroize();
+        self.kraken_spot_secret.zeroize();
+        self.kraken_futures_api_key.zeroize();
+        self.kraken_futures_secret.zeroize();
+        self.hyperliquid_wallet.zeroize();
+        self.hyperliquid_private_key.zeroize();
+        self.hyperliquid_account_index = None;
+        self.hyperliquid_subaccount_index = None;
+        self.lighter_account_index.zeroize();
+        self.lighter_api_key.zeroize();
+        self.lighter_subaccount_index = None;
+        self.vanta_account_id.zeroize();
+        self.vanta_orderly_key.zeroize();
+        self.vanta_orderly_secret.zeroize();
+        self.vanta_subaccount_index = None;
+        self.robinhood_wallet.zeroize();
+        self.robinhood_private_key.zeroize();
+        self.robinhood_subaccount_index = None;
+        self.arcus_api_key.zeroize();
+        self.arcus_secret.zeroize();
+        self.popdex_account_index.zeroize();
+        self.popdex_api_key.zeroize();
+        self.polymarket_api_key.zeroize();
+        self.polymarket_secret.zeroize();
+        self.polymarket_passphrase.zeroize();
+        self.kalshi_api_key_id.zeroize();
+        self.kalshi_private_key.zeroize();
     }
 }
 
@@ -393,10 +649,33 @@ pub struct AppEngineState {
     pub vault: RwLock<crate::vault::SecureVault>,
     pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
+    pub execution_lock: tokio::sync::Mutex<()>,
+}
+
+/// Canonical venue resolution: only exact trimmed lowercase IDs, documented
+/// aliases, and the current display labels are accepted. Substring matches
+/// such as "evilhyperliquid" are rejected.
+pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
+    match input.trim().to_lowercase().as_str() {
+        "hyperliquid"
+        | "hl"
+        | "hyperliquid (l1)"
+        | "hyperliquid (l1 dex)"
+        | "hyperliquid (l1, read-only)" => Some("hyperliquid"),
+        "lighter"
+        | "lgt"
+        | "lighter (zkdex)"
+        | "lighter (zkdex, read-only)" => Some("lighter"),
+        _ => None,
+    }
 }
 
 impl AppEngineState {
     pub fn new() -> Self {
+        Self::new_with_vault_path(crate::vault::SecureVault::default_path())
+    }
+
+    pub fn new_with_vault_path(vault_path: PathBuf) -> Self {
         let ex_hl = Arc::new(SimulatedExchange::new("hyperliquid", "Hyperliquid (L1)", 2, dec!(2.0), dec!(100000.0)));
         let ex_lighter = Arc::new(SimulatedExchange::new("lighter", "Lighter (zkDEX)", 5, dec!(1.5), dec!(100000.0)));
         let ex_vanta = Arc::new(SimulatedExchange::new("vanta", "Vanta.exchange", 4, dec!(3.0), dec!(100000.0)));
@@ -423,7 +702,7 @@ impl AppEngineState {
             max_consecutive_errors: 5,
             max_spread_divergence_bps: dec!(250.0),
         };
-        let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(400000.0)));
+        let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(200000.0)));
         let delta_guard = RwLock::new(DeltaGuard::new(dec!(2500.0)));
         let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
@@ -432,7 +711,7 @@ impl AppEngineState {
         let settings = RwLock::new(EngineSettingsDto::default());
 
         let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
-        let vault = RwLock::new(crate::vault::SecureVault::new_with_path(crate::vault::SecureVault::default_path()));
+        let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let virtual_ledger = RwLock::new(arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new());
 
         Self {
@@ -464,6 +743,7 @@ impl AppEngineState {
             vault,
             virtual_ledger,
             is_paused: RwLock::new(false),
+            execution_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -473,56 +753,84 @@ impl AppEngineState {
         // No synthetic markets are ever seeded or fabricated.
     }
 
-    /// Returns active venue list using live market adapters, strictly filtered by enabled & connected credentials
-    pub fn get_venues(&self) -> Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> {
-        let is_live = *self.is_live_mode.read();
+    /// Returns admitted venue adapters. Only Hyperliquid and Lighter are
+    /// exposed as read-only native market-data adapters, and only in paper
+    /// mode; no adapter is admitted while live mode is active. Public
+    /// read-only feeds require enablement, not secrets.
+    pub fn get_venues(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        &'static str,
+        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+    )> {
+        let mut list: Vec<(
+            &'static str,
+            &'static str,
+            Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+        )> = Vec::new();
+        if *self.is_live_mode.read() {
+            return list;
+        }
         let s = self.settings.read();
-        let mut list: Vec<(&'static str, &'static str, Arc<dyn arbitrager_core::exchange::ExchangeAdapter>)> = Vec::new();
-
-        if s.hyperliquid_enabled && (!s.hyperliquid_wallet.trim().is_empty() || !s.hyperliquid_private_key.trim().is_empty()) {
-            list.push(("hyperliquid", if is_live { "Hyperliquid (L1 DEX)" } else { "Hyperliquid (L1)" }, self.live_hl.clone()));
+        if s.hyperliquid_enabled {
+            list.push((
+                "hyperliquid",
+                "Hyperliquid (L1, Read-Only)",
+                self.live_hl.clone(),
+            ));
         }
-        if s.lighter_enabled && (!s.lighter_api_key.trim().is_empty() || (!s.lighter_account_index.trim().is_empty() && s.lighter_account_index.trim() != "0")) {
-            list.push(("lighter", if is_live { "Lighter (zkDEX)" } else { "Lighter (zkDEX)" }, self.live_lighter.clone()));
+        if s.lighter_enabled {
+            list.push((
+                "lighter",
+                "Lighter (zkDEX, Read-Only)",
+                self.live_lighter.clone(),
+            ));
         }
-        if s.vanta_enabled && (!s.vanta_orderly_key.trim().is_empty() || !s.vanta_account_id.trim().is_empty()) {
-            list.push(("vanta", if is_live { "Vanta.exchange" } else { "Vanta.exchange" }, self.live_vanta.clone()));
-        }
-        if s.robinhood_enabled && (!s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
-            list.push(("robinhood", if is_live { "Robinhood EVM" } else { "Robinhood EVM" }, self.live_robinhood.clone()));
-        }
-        if s.arcus_enabled && !s.arcus_api_key.trim().is_empty() {
-            list.push(("arcus", if is_live { "Arcus (CLOB DEX)" } else { "Arcus" }, self.live_arcus.clone()));
-        }
-        if s.popdex_enabled && !s.popdex_api_key.trim().is_empty() {
-            list.push(("popdex", if is_live { "PopDEX (Arbitrage Protocol)" } else { "PopDEX" }, self.live_popdex.clone()));
-        }
-
         list
     }
 
-    /// Resolves an exchange adapter by venue identifier or name using live market adapters
-    pub fn get_adapter(&self, venue_id: &str) -> Option<Arc<dyn arbitrager_core::exchange::ExchangeAdapter>> {
-        let id_clean = venue_id.to_lowercase();
-        if id_clean.contains("hyperliquid") || id_clean == "hl" {
-            Some(self.live_hl.clone())
-        } else if id_clean.contains("lighter") || id_clean == "lgt" {
-            Some(self.live_lighter.clone())
-        } else if id_clean.contains("vanta") || id_clean == "vnt" {
-            Some(self.live_vanta.clone())
-        } else if id_clean.contains("robinhood") || id_clean == "rh" {
-            Some(self.live_robinhood.clone())
-        } else if id_clean.contains("arcus") || id_clean == "arc" {
-            Some(self.live_arcus.clone())
-        } else if id_clean.contains("popdex") || id_clean == "pop" {
-            Some(self.live_popdex.clone())
-        } else if id_clean.contains("polymarket") {
-            Some(self.live_polymarket.clone())
-        } else if id_clean.contains("kalshi") {
-            Some(self.live_kalshi.clone())
-        } else {
-            None
+    /// Resolves an exchange adapter by venue identifier or documented alias.
+    /// Only canonical exact matches are accepted and only venues admitted by
+    /// `get_venues` are reachable; disabled, unsupported, unknown names, and
+    /// near-match substrings return None.
+    pub fn get_adapter(
+        &self,
+        venue_id: &str,
+    ) -> Option<Arc<dyn arbitrager_core::exchange::ExchangeAdapter>> {
+        let canonical = canonical_venue_id(venue_id)?;
+        self.get_venues()
+            .into_iter()
+            .find(|(vid, _, _)| *vid == canonical)
+            .map(|(_, _, adapter)| adapter)
+    }
+
+    /// Resolves the paper execution exchange for a venue. A simulator is
+    /// returned only when the venue is currently admitted by `get_venues`;
+    /// no other venue has a paper exchange.
+    pub fn get_paper_exchange(&self, venue_id: &str) -> Option<Arc<SimulatedExchange>> {
+        let canonical = canonical_venue_id(venue_id)?;
+        let admitted = self
+            .get_venues()
+            .into_iter()
+            .any(|(vid, _, _)| vid == canonical);
+        if !admitted {
+            return None;
         }
+        match canonical {
+            "hyperliquid" => Some(self.ex_hl.clone()),
+            "lighter" => Some(self.ex_lighter.clone()),
+            _ => None,
+        }
+    }
+
+    /// All paper exchanges used for portfolio accounting, regardless of
+    /// venue enablement toggles.
+    pub fn paper_exchanges(&self) -> Vec<(&'static str, Arc<SimulatedExchange>)> {
+        vec![
+            ("hyperliquid", self.ex_hl.clone()),
+            ("lighter", self.ex_lighter.clone()),
+        ]
     }
 }
 
@@ -558,22 +866,11 @@ mod tests {
     async fn test_venues_resolution_and_adapter_lookup() {
         let state = AppEngineState::new();
 
-        // Check unconfigured state: 0 active venues without credentials
         let venues_unconfigured = state.get_venues();
         assert_eq!(venues_unconfigured.len(), 0);
-
-        // Adapter lookup by name is always available
-        assert!(state.get_adapter("hyperliquid").is_some());
-        assert!(state.get_adapter("lighter").is_some());
-        assert!(state.get_adapter("vanta").is_some());
-        assert!(state.get_adapter("robinhood").is_some());
-        assert!(state.get_adapter("arcus").is_some());
-        assert!(state.get_adapter("popdex").is_some());
-        assert!(state.get_adapter("polymarket").is_some());
-        assert!(state.get_adapter("kalshi").is_some());
+        assert!(state.get_adapter("hyperliquid").is_none());
         assert!(state.get_adapter("nonexistent").is_none());
 
-        // Configure credentials: now venues become active in both paper and live modes
         {
             let mut s = state.settings.write();
             s.hyperliquid_enabled = true;
@@ -582,21 +879,90 @@ mod tests {
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
             s.popdex_enabled = true;
-            s.hyperliquid_wallet = "0x1111".into();
-            s.lighter_api_key = "lgt_key".into();
-            s.vanta_orderly_key = "vnt_key".into();
-            s.robinhood_wallet = "0x2222".into();
-            s.arcus_api_key = "arc_key".into();
-            s.popdex_api_key = "pop_key".into();
+            s.polymarket_enabled = true;
+            s.kalshi_enabled = true;
         }
         let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 6);
+        assert_eq!(venues_paper.len(), 2);
         assert_eq!(venues_paper[0].0, "hyperliquid");
+        assert_eq!(venues_paper[1].0, "lighter");
+
+        assert!(state.get_adapter("hyperliquid").is_some());
+        assert!(state.get_adapter("lighter").is_some());
+        assert!(state.get_adapter("vanta").is_none());
+        assert!(state.get_adapter("robinhood").is_none());
+        assert!(state.get_adapter("arcus").is_none());
+        assert!(state.get_adapter("popdex").is_none());
+        assert!(state.get_adapter("polymarket").is_none());
+        assert!(state.get_adapter("kalshi").is_none());
+        assert!(state.get_adapter("nonexistent").is_none());
 
         *state.is_live_mode.write() = true;
-        let venues_live = state.get_venues();
-        assert_eq!(venues_live.len(), 6);
-        assert_eq!(venues_live[0].1, "Hyperliquid (L1 DEX)");
+        assert_eq!(state.get_venues().len(), 0);
+        assert!(state.get_adapter("hyperliquid").is_none());
+        assert!(state.get_adapter("lighter").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_canonical_venue_resolution_rejects_near_matches() {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+        }
+
+        for alias in [
+            "hyperliquid",
+            "HL",
+            "Hyperliquid (L1, Read-Only)",
+            " hyperliquid ",
+        ] {
+            assert!(
+                state.get_adapter(alias).is_some(),
+                "alias '{}' must resolve",
+                alias
+            );
+            assert!(
+                state.get_paper_exchange(alias).is_some(),
+                "paper alias '{}' must resolve",
+                alias
+            );
+        }
+        for alias in ["lighter", "LGT", "Lighter (zkDEX, Read-Only)"] {
+            assert!(state.get_adapter(alias).is_some());
+            assert!(state.get_paper_exchange(alias).is_some());
+        }
+
+        for bad in [
+            "evilhyperliquid",
+            "hyperliquid-evil",
+            "lighter-attacker",
+            "my lighter",
+            "hyperliquidx",
+            "vanta",
+            "",
+            "hl hl",
+        ] {
+            assert!(
+                state.get_adapter(bad).is_none(),
+                "'{}' must not resolve to an adapter",
+                bad
+            );
+            assert!(
+                state.get_paper_exchange(bad).is_none(),
+                "'{}' must not resolve to a paper exchange",
+                bad
+            );
+        }
+
+        {
+            let mut s = state.settings.write();
+            s.lighter_enabled = false;
+        }
+        assert!(state.get_adapter("lighter").is_none());
+        assert!(state.get_paper_exchange("lighter").is_none());
+        assert!(state.get_adapter("hyperliquid").is_some());
     }
 
     #[tokio::test]
@@ -606,6 +972,7 @@ mod tests {
         assert_eq!(s.max_slippage_bps, 15.0);
         assert_eq!(s.min_depth_ratio, 3.0);
         assert!(!s.hsm_url.is_empty());
+        assert!(s.hmac_token.is_empty());
         assert!(!s.robinhood_router.is_empty());
         assert_eq!(s.hyperliquid_url, "https://api.hyperliquid.xyz");
         assert_eq!(s.lighter_url, "https://mainnet.zklighter.elliot.ai");

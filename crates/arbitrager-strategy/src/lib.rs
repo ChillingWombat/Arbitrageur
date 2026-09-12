@@ -57,8 +57,9 @@ mod tests {
 
         let result = strat.execute_signal(&signal, &coordinator).await;
         match result {
-            ArbitrageExecutionResult::Success { realized_profit, .. } => {
-                assert!(realized_profit > dec!(0));
+            ArbitrageExecutionResult::Success { realized_profit, leg_a, leg_b } => {
+                // Realized cash P&L on an open is fee outflow only
+                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -99,7 +100,7 @@ mod tests {
                 assert_eq!(leg_a.symbol, "FED-YES");
                 assert_eq!(leg_b.venue, ex_kalshi.venue_id());
                 assert_eq!(leg_b.symbol, "FED-NO");
-                assert!(realized_profit > dec!(0), "Expected positive realized profit for synthetic pair, got {}", realized_profit);
+                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -136,7 +137,7 @@ mod tests {
                 assert_eq!(leg_b.venue, ex_kalshi.venue_id());
                 assert_eq!(leg_b.symbol, "ELEC-YES");
                 assert_eq!(leg_b.avg_fill_price, Some(dec!(0.42)));
-                assert!(realized_profit > dec!(0), "Expected positive realized profit, got {}", realized_profit);
+                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
             }
             other => panic!("Expected Success, got {:?}", other),
         }

@@ -70,6 +70,74 @@ impl OrderBook {
         }
     }
 
+    /// Rejects books that cannot safely drive execution: empty symbol, missing
+    /// bids/asks, nonpositive prices or sizes, unsorted levels, or a
+    /// crossed/locked book (`best_bid >= best_ask`).
+    pub fn validate_for_execution(&self) -> Result<(), String> {
+        if self.symbol.trim().is_empty() {
+            return Err("order book symbol is empty".to_string());
+        }
+        if self.bids.is_empty() {
+            return Err(format!("order book {} has no bids", self.symbol));
+        }
+        if self.asks.is_empty() {
+            return Err(format!("order book {} has no asks", self.symbol));
+        }
+        for level in &self.bids {
+            if level.price <= dec!(0) {
+                return Err(format!(
+                    "order book {} has nonpositive bid price {}",
+                    self.symbol, level.price
+                ));
+            }
+            if level.size <= dec!(0) {
+                return Err(format!(
+                    "order book {} has nonpositive bid size {}",
+                    self.symbol, level.size
+                ));
+            }
+        }
+        for level in &self.asks {
+            if level.price <= dec!(0) {
+                return Err(format!(
+                    "order book {} has nonpositive ask price {}",
+                    self.symbol, level.price
+                ));
+            }
+            if level.size <= dec!(0) {
+                return Err(format!(
+                    "order book {} has nonpositive ask size {}",
+                    self.symbol, level.size
+                ));
+            }
+        }
+        for pair in self.bids.windows(2) {
+            if pair[0].price < pair[1].price {
+                return Err(format!(
+                    "order book {} bids are not monotonically descending",
+                    self.symbol
+                ));
+            }
+        }
+        for pair in self.asks.windows(2) {
+            if pair[0].price > pair[1].price {
+                return Err(format!(
+                    "order book {} asks are not monotonically ascending",
+                    self.symbol
+                ));
+            }
+        }
+        if let (Some(bid), Some(ask)) = (self.best_bid_price(), self.best_ask_price()) {
+            if bid >= ask {
+                return Err(format!(
+                    "order book {} is crossed or locked: best bid {} >= best ask {}",
+                    self.symbol, bid, ask
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Calculate volume-weighted average price (VWAP) for executing a buy of size `target_qty`
     /// traversing the asks. Returns (vwap, remaining_unfilled_qty, slippage_pct).
     pub fn buy_execution_vwap(&self, target_qty: Decimal) -> Option<(Decimal, Decimal, Decimal)> {
@@ -206,4 +274,70 @@ pub struct MarkPrice {
     pub mark_price: Decimal,
     pub index_price: Decimal,
     pub timestamp: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_book() -> OrderBook {
+        let mut book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        book.bids.push(BookLevel::new(dec!(100.0), dec!(1.0)));
+        book.bids.push(BookLevel::new(dec!(99.5), dec!(2.0)));
+        book.asks.push(BookLevel::new(dec!(100.5), dec!(1.0)));
+        book.asks.push(BookLevel::new(dec!(101.0), dec!(2.0)));
+        book
+    }
+
+    #[test]
+    fn validate_accepts_valid_book() {
+        assert!(valid_book().validate_for_execution().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_symbol() {
+        let mut book = valid_book();
+        book.symbol = "  ".to_string();
+        assert!(book.validate_for_execution().unwrap_err().contains("symbol"));
+    }
+
+    #[test]
+    fn validate_rejects_missing_side() {
+        let mut book = valid_book();
+        book.asks.clear();
+        assert!(book.validate_for_execution().unwrap_err().contains("asks"));
+        let mut book = valid_book();
+        book.bids.clear();
+        assert!(book.validate_for_execution().unwrap_err().contains("bids"));
+    }
+
+    #[test]
+    fn validate_rejects_nonpositive_price_and_size() {
+        let mut book = valid_book();
+        book.asks[0].price = dec!(0);
+        assert!(book.validate_for_execution().unwrap_err().contains("nonpositive ask price"));
+        let mut book = valid_book();
+        book.bids[1].size = dec!(-1);
+        assert!(book.validate_for_execution().unwrap_err().contains("nonpositive bid size"));
+    }
+
+    #[test]
+    fn validate_rejects_unsorted_levels() {
+        let mut book = valid_book();
+        book.bids.swap(0, 1);
+        assert!(book.validate_for_execution().unwrap_err().contains("descending"));
+        let mut book = valid_book();
+        book.asks.swap(0, 1);
+        assert!(book.validate_for_execution().unwrap_err().contains("ascending"));
+    }
+
+    #[test]
+    fn validate_rejects_crossed_and_locked_book() {
+        let mut book = valid_book();
+        book.bids[0].price = dec!(101.0);
+        assert!(book.validate_for_execution().unwrap_err().contains("crossed"));
+        let mut book = valid_book();
+        book.asks[0].price = dec!(100.0);
+        assert!(book.validate_for_execution().unwrap_err().contains("crossed"));
+    }
 }

@@ -24,7 +24,6 @@ fn main() {
     let engine_state = Arc::new(AppEngineState::new());
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(engine_state)
         .setup(|app| {
             if let Some(window) = app.get_webview_window("main") {
@@ -63,8 +62,7 @@ fn main() {
             commands::initialize_vault,
             commands::unlock_vault,
             commands::lock_vault,
-            commands::get_exchange_credentials,
-            commands::save_exchange_credentials,
+            commands::delete_exchange_credentials,
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::run_wfo_calibration,

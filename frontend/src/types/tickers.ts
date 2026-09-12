@@ -114,85 +114,30 @@ export interface VenueSettingsFilter {
   kalshi_enabled?: boolean;
   kalshi_api_key?: string;
   kalshi_email?: string;
+  configured_venues?: string[];
 }
 
 /**
- * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "ARC", "POP", "KRK", "POLY", "KALSHI") based on engine settings.
- * Strictly requires configured API credentials/keys for venues in BOTH paper and live trading.
- * No synthetic venue connectivity is permitted without real configured API access.
+ * Determines the set of natively connected venue codes from sanitized engine settings.
+ * Only Hyperliquid ("HL") and Lighter ("LGT") expose read-only native market-data
+ * adapters in this phase, and only outside live trading mode. Public read-only
+ * feeds require the venue's enable toggle, not secrets; connectivity is never
+ * inferred from credential-looking strings.
  */
 export function getEnabledConnectedVenueCodes(
   settings?: VenueSettingsFilter | null,
-  _isLiveMode?: boolean
+  isLiveMode?: boolean
 ): Set<string> {
   const active = new Set<string>();
-  if (!settings) {
+  if (!settings || isLiveMode === true || settings.trading_mode === "real") {
     return active;
   }
 
-  // 1. Hyperliquid (L1 DEX): requires wallet address or private key
   if (settings.hyperliquid_enabled === true) {
-    if (Boolean(settings.hyperliquid_wallet?.trim() || settings.hyperliquid_private_key?.trim())) {
-      active.add("HL");
-    }
+    active.add("HL");
   }
-
-  // 2. Lighter (zkDEX): requires API private key or nonzero account index
   if (settings.lighter_enabled === true) {
-    if (Boolean(settings.lighter_api_key?.trim() || (settings.lighter_account_index && settings.lighter_account_index.trim() !== "" && settings.lighter_account_index.trim() !== "0"))) {
-      active.add("LGT");
-    }
-  }
-
-  // 3. Vanta.exchange (Omnichain perps): requires Orderly key or account ID
-  if (settings.vanta_enabled === true) {
-    if (Boolean(settings.vanta_orderly_key?.trim() || settings.vanta_account_id?.trim())) {
-      active.add("VNT");
-    }
-  }
-
-  // 4. Robinhood EVM: requires wallet or private key
-  if (settings.robinhood_enabled === true) {
-    if (Boolean(settings.robinhood_wallet?.trim() || settings.robinhood_private_key?.trim())) {
-      active.add("RH");
-    }
-  }
-
-  // 5. Arcus (CLOB DEX): requires Arcus API key
-  if (settings.arcus_enabled === true) {
-    if (Boolean(settings.arcus_api_key?.trim())) {
-      active.add("ARC");
-    }
-  }
-
-  // 6. PopDEX (Arbitrage Protocol): requires PopDEX API key
-  if (settings.popdex_enabled === true) {
-    if (Boolean(settings.popdex_api_key?.trim())) {
-      active.add("POP");
-    }
-  }
-
-  // 7. Kraken Spot & Futures: requires Spot or Futures API key
-  if (settings.kraken_enabled === true) {
-    const spotOk = Boolean(settings.kraken_spot_enabled && settings.kraken_spot_api_key?.trim());
-    const futuresOk = Boolean(settings.kraken_futures_enabled && settings.kraken_futures_api_key?.trim());
-    if (spotOk || futuresOk) {
-      active.add("KRK");
-    }
-  }
-
-  // 8. Polymarket CTF: requires API key
-  if (settings.polymarket_enabled === true) {
-    if (Boolean(settings.polymarket_api_key?.trim() || settings.polymarket_secret?.trim())) {
-      active.add("POLY");
-    }
-  }
-
-  // 9. Kalshi CFTC: requires API key
-  if (settings.kalshi_enabled === true) {
-    if (Boolean(settings.kalshi_api_key?.trim() || settings.kalshi_email?.trim())) {
-      active.add("KALSHI");
-    }
+    active.add("LGT");
   }
 
   return active;

@@ -70,14 +70,12 @@ enum Commands {
     },
     /// Benchmark quantitative calculations and latency
     Benchmark,
-    /// Run headless 24/7 background arbitrage daemon on a VPS
+    /// Run headless read-only placeholder daemon exposing a health endpoint
     Serve {
         #[arg(short, long, default_value_t = 8787)]
         port: u16,
-        #[arg(short, long, default_value = "0.0.0.0")]
+        #[arg(short, long, default_value = "127.0.0.1")]
         bind: String,
-        #[arg(long, default_value_t = 8789)]
-        ws_port: u16,
     },
 }
 
@@ -115,8 +113,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Benchmark => {
             run_benchmarks().await?;
         }
-        Commands::Serve { port, bind, ws_port } => {
-            run_serve(&bind, port, ws_port).await?;
+        Commands::Serve { port, bind } => {
+            run_serve(&bind, port).await?;
         }
     }
 
@@ -367,13 +365,13 @@ async fn run_prediction_arb(market: &str) -> anyhow::Result<()> {
     println!("- Kalshi:     YES Ask = {:.2}¢, NO Ask = {:.2}¢", kalshi_yes * dec!(100), kalshi_no * dec!(100));
 
     if let Some(opp) = evaluate_prediction_cross_venue("Polymarket", poly_yes, poly_no, "Kalshi", kalshi_yes, kalshi_no, dec!(10.0)) {
-        println!("\n🎯 SYNTHETIC PREDICTION ARBITRAGE FOUND!");
+        println!("\n🎯 CROSS-VENUE PARITY CANDIDATE FOUND!");
         println!("Strategy: {}", opp.strategy_name);
         println!("Total Purchase Cost: {:.2}¢ per pair", opp.total_cost * dec!(100));
-        println!("Guaranteed Settlement Payout: 100.00¢");
-        println!("Net Profit per contract: +{:.2}¢ ({:.2}%)", opp.net_profit * dec!(100), opp.net_return_pct);
+        println!("Conditional Settlement Payout: 100.00¢ (only when both contracts have identical settlement terms)");
+        println!("Indicative Net Return per contract: +{:.2}¢ ({:.2}%)", opp.net_profit * dec!(100), opp.net_return_pct);
     } else {
-        println!("\nNo risk-free synthetic arbitrage at current market prices.");
+        println!("\nNo cross-venue parity opportunity at current market prices.");
     }
 
     Ok(())
@@ -422,7 +420,7 @@ async fn run_benchmarks() -> anyhow::Result<()> {
         compute_bertram_thresholds(&ou, 0.002);
     }
     let elapsed = start.elapsed();
-    println!("3. Bertram Optimal Threshold Analytic Solver ({} solves):", solve_count);
+    println!("3. Bertram-Style Numerical Threshold Search ({} solves):", solve_count);
     println!("   Total time: {:?}", elapsed);
     println!("   Per-solve latency: {:.2} microseconds", (elapsed.as_micros() as f64) / (solve_count as f64));
 
@@ -430,17 +428,21 @@ async fn run_benchmarks() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_serve(bind: &str, port: u16, ws_port: u16) -> anyhow::Result<()> {
-    println!("\n[VPS DAEMON] Starting Cross-Market Arbitrage Headless Server (24/7 Mode)...");
-    println!("  -> RPC Listener:      http://{}:{}", bind, port);
-    println!("  -> WebSocket Stream:  ws://{}:{}", bind, ws_port);
-    println!("  -> Active Venues:     Hyperliquid, Lighter, Vanta, Robinhood");
+fn daemon_health_response() -> &'static str {
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"not_ready\",\"mode\":\"read_only_placeholder\",\"market_data_connected\":false,\"trading_enabled\":false}\n"
+}
+
+async fn run_serve(bind: &str, port: u16) -> anyhow::Result<()> {
+    println!("\n[DAEMON] Starting read-only placeholder server...");
+    println!("  -> Health Listener:   http://{}:{}", bind, port);
+    println!("  -> Market Data:       none (no feed ingestion running)");
+    println!("  -> Execution:         disabled (no order submission implemented)");
     println!("  -> Process PID:       {}", std::process::id());
     println!("Press Ctrl+C to safely exit.\n");
 
     let rpc_addr = format!("{}:{}", bind, port);
     let listener = tokio::net::TcpListener::bind(&rpc_addr).await?;
-    println!("✅ Arbitrager Core Daemon listening on {}", rpc_addr);
+    println!("Daemon health endpoint listening on {}", rpc_addr);
 
     tokio::spawn(async move {
         loop {
@@ -450,8 +452,7 @@ async fn run_serve(bind: &str, port: u16, ws_port: u16) -> anyhow::Result<()> {
                     let mut buf = [0u8; 1024];
                     if let Ok(n) = socket.read(&mut buf).await {
                         if n > 0 {
-                            let response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"healthy\",\"mode\":\"daemon\",\"vps_ready\":true}\n";
-                            let _ = socket.write_all(response.as_bytes()).await;
+                            let _ = socket.write_all(daemon_health_response().as_bytes()).await;
                         }
                     }
                 });
@@ -459,11 +460,11 @@ async fn run_serve(bind: &str, port: u16, ws_port: u16) -> anyhow::Result<()> {
         }
     });
 
-    println!("[INFO] Strategy execution engines initialized. Running continuous telemetry loop...");
+    println!("[INFO] Placeholder status loop running; no strategies are active.");
     let mut loop_count = 0;
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
         loop_count += 1;
-        tracing::info!(heartbeat = loop_count, "Arbitrage daemon heartbeat: all venue feeds connected, delta neutral.");
+        tracing::info!(heartbeat = loop_count, "Daemon heartbeat: read-only placeholder, no market data ingestion, no execution.");
     }
 }

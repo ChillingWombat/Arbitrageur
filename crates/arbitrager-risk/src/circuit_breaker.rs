@@ -75,9 +75,13 @@ impl CircuitBreaker {
         self.is_tripped.store(true, Ordering::SeqCst);
     }
 
-    /// Reset after operator review.
+    /// Reset after operator review. The drawdown baseline is re-anchored to
+    /// the current equity so prior losses are not carried into the new window.
     pub fn reset(&self) {
         warn!("Circuit breaker manually RESET by operator");
+        let current = *self.current_equity.read();
+        *self.day_start_equity.write() = current;
+        *self.peak_equity.write() = current;
         *self.trip_reason.write() = None;
         *self.tripped_at.write() = None;
         self.consecutive_errors.store(0, Ordering::SeqCst);
@@ -178,5 +182,38 @@ impl CircuitBreaker {
     /// Get optional trip reason string
     pub fn trip_reason(&self) -> Option<String> {
         self.trip_reason.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reset_reanchors_drawdown_baseline() {
+        let cb = CircuitBreaker::new(
+            CircuitBreakerConfig {
+                max_daily_drawdown_usd: dec!(1000.0),
+                ..CircuitBreakerConfig::default()
+            },
+            dec!(100000.0),
+        );
+
+        // Drop equity below the drawdown limit and confirm the trip
+        cb.update_equity(dec!(98000.0));
+        assert!(cb.is_tripped());
+
+        // Operator reset must re-anchor the baseline at current equity so a
+        // further small loss does not instantly re-trip on the stale baseline
+        cb.reset();
+        assert!(!cb.is_tripped());
+        assert_eq!(cb.day_start_equity(), dec!(98000.0));
+        assert_eq!(cb.peak_equity(), dec!(98000.0));
+        assert_eq!(cb.current_drawdown_usd(), dec!(0));
+
+        cb.update_equity(dec!(97500.0));
+        assert!(!cb.is_tripped());
+        cb.update_equity(dec!(96900.0));
+        assert!(cb.is_tripped());
     }
 }

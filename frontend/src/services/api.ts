@@ -19,7 +19,6 @@ import type {
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
   VaultStatus,
-  ExchangeCredentials,
   VenueBalanceInfo,
   StrategyMetrics,
   WfoOptimizationResult,
@@ -150,8 +149,8 @@ async function getLiveBinanceBookTickers(): Promise<Map<string, { bid: number; a
   return cachedBinanceTickers?.tickers || new Map();
 }
 
-// Fallback live market paper engine for browser mode
-class BrowserMockEngine {
+// Explicit browser-only demo engine. Never used as a desktop IPC fallback.
+class BrowserDemoEngine {
   private pnl = 0.0;
   private simCycle = 0;
   private isLive = false;
@@ -214,6 +213,7 @@ class BrowserMockEngine {
     trading_mode: "paper",
     fast_warmup_enabled: true,
     venue_rebalance_threshold_usd: 500.0,
+    configured_venues: [],
     referral_lighter: "https://app.lighter.xyz/?referral=SOLO&source=none",
     referral_robinhood: "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none",
     sponsor_link: "https://buymeacoffee.com/dav1d1010",
@@ -262,7 +262,7 @@ class BrowserMockEngine {
     const baseCoin = symbol.split("-")[0].toUpperCase();
     const candidateBooks: VenueOrderBookDto[] = [];
 
-    // Hyperliquid L2 book (queried only if credentials configured)
+    // Hyperliquid L2 book (read-only public feed, queried when the venue is enabled)
     if (activeVenueCodes.has("HL")) {
       let hlBids: [number, number][] = [];
       let hlAsks: [number, number][] = [];
@@ -325,7 +325,7 @@ class BrowserMockEngine {
       }
     }
 
-    // Lighter zkDEX book (queried only if credentials configured)
+    // Lighter zkDEX book (read-only public feed, queried when the venue is enabled)
     if (activeVenueCodes.has("LGT")) {
       const marketId = LIGHTER_MARKET_MAP[baseCoin];
       if (marketId !== undefined) {
@@ -1218,6 +1218,28 @@ class BrowserMockEngine {
     return { ...this.settings };
   }
 
+  private hasCredentialMaterial(s: EngineSettingsDto): boolean {
+    const str = (v?: string | null) =>
+      typeof v === "string" && v.trim() !== "" && ![...v.trim()].every((c) => c === "•");
+    const indexStr = (v?: string | null) => str(v) && v!.trim() !== "0";
+    const num = (v?: number | null) => v !== undefined && v !== null;
+    return (
+      str(s.hmac_token) ||
+      str(s.kraken_spot_api_key) || str(s.kraken_spot_secret) ||
+      str(s.kraken_futures_api_key) || str(s.kraken_futures_secret) ||
+      str(s.hyperliquid_wallet) || str(s.hyperliquid_private_key) ||
+      num(s.hyperliquid_account_index) || num(s.hyperliquid_subaccount_index) ||
+      indexStr(s.lighter_account_index) || str(s.lighter_api_key) || num(s.lighter_subaccount_index) ||
+      str(s.vanta_account_id) || str(s.vanta_orderly_key) || str(s.vanta_orderly_secret) ||
+      num(s.vanta_subaccount_index) ||
+      str(s.robinhood_wallet) || str(s.robinhood_private_key) || num(s.robinhood_subaccount_index) ||
+      str(s.arcus_api_key) || str(s.arcus_secret) ||
+      indexStr(s.popdex_account_index) || str(s.popdex_api_key) ||
+      str(s.polymarket_api_key) || str(s.polymarket_secret) || str(s.polymarket_passphrase) ||
+      str(s.kalshi_api_key_id) || str(s.kalshi_private_key)
+    );
+  }
+
   saveEngineSettings(settings: EngineSettingsDto): string {
     if (settings.max_slippage_bps <= 0 || settings.max_slippage_bps > 500) {
       throw new Error("Max slippage tolerance must be between 0.1 and 500 BPS");
@@ -1225,7 +1247,10 @@ class BrowserMockEngine {
     if (settings.min_depth_ratio < 1.0) {
       throw new Error("Min depth ratio must be at least 1.0");
     }
-    this.settings = { ...settings };
+    if (this.hasCredentialMaterial(settings)) {
+      throw new Error("Exchange credentials cannot be stored in browser demo mode");
+    }
+    this.settings = { ...settings, configured_venues: [] };
     return "Configuration successfully applied and persistent in runtime engine";
   }
 
@@ -1244,8 +1269,11 @@ class BrowserMockEngine {
   }
 
   setLiveMode(enabled: boolean): boolean {
-    this.isLive = enabled;
-    return this.isLive;
+    if (enabled) {
+      throw new Error("Live execution is unavailable in browser demo mode");
+    }
+    this.isLive = false;
+    return false;
   }
 
   setEnginePaused(paused: boolean): boolean {
@@ -1279,34 +1307,21 @@ class BrowserMockEngine {
   }
 
   private vaultStatus: VaultStatus = {
-    is_initialized: true,
-    is_unlocked: true,
-    unlocked_until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+    is_initialized: false,
+    is_unlocked: false,
+    unlocked_until: null,
   };
-  private exchangeCredentials: ExchangeCredentials[] = [
-    { venue: "hyperliquid", api_key: "0x1a8f9c...4b", api_secret: "••••••••••••", passphrase: null, account_index: 0, subaccount_index: null, enabled: true },
-    { venue: "lighter", api_key: "0x3e71d8...c2", api_secret: "••••••••••••", passphrase: null, account_index: 0, subaccount_index: 1, enabled: true },
-    { venue: "vanta", api_key: "ord_key_99812", api_secret: "••••••••••••", passphrase: null, account_index: null, subaccount_index: null, enabled: true },
-    { venue: "robinhood", api_key: "0x89e5db...ba", api_secret: "••••••••••••", passphrase: null, account_index: null, subaccount_index: null, enabled: true },
-  ];
 
   getVaultStatus(): VaultStatus {
     return this.vaultStatus;
   }
 
   initializeVault(_password: string): VaultStatus {
-    this.vaultStatus = {
-      is_initialized: true,
-      is_unlocked: true,
-      unlocked_until: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
-    };
-    return this.vaultStatus;
+    throw new Error("Secure credential storage is unavailable in browser demo mode");
   }
 
   unlockVault(_password: string): VaultStatus {
-    this.vaultStatus.is_unlocked = true;
-    this.vaultStatus.unlocked_until = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    return this.vaultStatus;
+    throw new Error("Secure credential storage is unavailable in browser demo mode");
   }
 
   lockVault(): VaultStatus {
@@ -1315,27 +1330,8 @@ class BrowserMockEngine {
     return this.vaultStatus;
   }
 
-  getExchangeCredentials(): ExchangeCredentials[] {
-    if (!this.vaultStatus.is_unlocked) throw new Error("Vault is locked. Enter password to view credentials.");
-    return this.exchangeCredentials;
-  }
-
-  saveExchangeCredentials(_password: string, credentials: ExchangeCredentials[]): void {
-    this.exchangeCredentials = credentials;
-  }
-
   getVenueBalances(): VenueBalanceInfo[] {
-    return [
-      { venue: "arcus", balance_usd: 52000.0, equity_usd: 54200.0, available_margin_usd: 52000.0, margin_rate_pct: 4.1, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "hyperliquid", balance_usd: 84250.0, equity_usd: 88500.0, available_margin_usd: 84250.0, margin_rate_pct: 4.8, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "kalshi", balance_usd: 24800.0, equity_usd: 25500.0, available_margin_usd: 24800.0, margin_rate_pct: 2.7, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "kraken", balance_usd: 58300.0, equity_usd: 61000.0, available_margin_usd: 58300.0, margin_rate_pct: 4.4, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "lighter", balance_usd: 62100.0, equity_usd: 65000.0, available_margin_usd: 62100.0, margin_rate_pct: 4.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "polymarket", balance_usd: 29500.0, equity_usd: 30200.0, available_margin_usd: 29500.0, margin_rate_pct: 2.3, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "popdex", balance_usd: 41000.0, equity_usd: 42500.0, available_margin_usd: 41000.0, margin_rate_pct: 3.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "robinhood", balance_usd: 35400.0, equity_usd: 37000.0, available_margin_usd: 35400.0, margin_rate_pct: 4.3, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "vanta", balance_usd: 48900.0, equity_usd: 51200.0, available_margin_usd: 48900.0, margin_rate_pct: 4.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-    ];
+    return [];
   }
 
   getStrategyPerformance(strategyId?: string): StrategyMetrics[] {
@@ -1427,18 +1423,66 @@ class BrowserMockEngine {
   }
 }
 
-const mockEngine = new BrowserMockEngine();
+const demoEngine = new BrowserDemoEngine();
 
 // Tauri core IPC dynamically loaded when inside desktop environment
 async function getTauriCore() {
-  if (isTauriEnvironment()) {
-    try {
-      return await import("@tauri-apps/api/core");
-    } catch {
-      return null;
-    }
-  }
-  return null;
+  if (!isTauriEnvironment()) return null;
+  return import("@tauri-apps/api/core");
+}
+
+export async function invokeDesktopOrDemo<T>(
+  command: string,
+  args: Record<string, unknown> | undefined,
+  demo: () => T | Promise<T>,
+  loadCore: () => Promise<{ invoke: <R>(command: string, args?: Record<string, unknown>) => Promise<R> } | null> = getTauriCore,
+): Promise<T> {
+  const core = await loadCore();
+  return core ? core.invoke<T>(command, args) : demo();
+}
+
+// Commands registered in the desktop invoke handler (src-tauri/src/main.rs).
+// Triangle scan/execute are intentionally absent: no authenticated three-leg
+// coordinator exists, so those API methods fail closed on desktop.
+const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
+  "get_system_status",
+  "fetch_orderbooks",
+  "scan_spatial_opportunities",
+  "scan_spot_opportunities",
+  "execute_spot_arbitrage",
+  "scan_funding_opportunities",
+  "scan_prediction_opportunities",
+  "run_stat_arb_step",
+  "compute_optimal_thresholds",
+  "fit_ou_process",
+  "execute_spatial_arbitrage",
+  "execute_cross_ticker_arbitrage",
+  "fetch_multi_market_quotes",
+  "execute_funding_carry",
+  "execute_prediction_arbitrage",
+  "get_risk_overview",
+  "reset_circuit_breaker",
+  "trigger_emergency_killswitch",
+  "get_execution_logs",
+  "set_live_mode",
+  "set_engine_paused",
+  "get_engine_settings",
+  "save_engine_settings",
+  "get_ticker_strategy_config",
+  "save_ticker_strategy_config",
+  "get_all_ticker_strategy_configs",
+  "get_vault_status",
+  "initialize_vault",
+  "unlock_vault",
+  "lock_vault",
+  "delete_exchange_credentials",
+  "get_venue_balances",
+  "get_strategy_performance",
+  "run_wfo_calibration",
+]);
+
+export function nativeCommandAvailable(command: string): boolean {
+  return NATIVE_COMMANDS.has(command);
 }
 
 function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
@@ -1474,97 +1518,63 @@ export const api = {
   async getSystemStatus(): Promise<SystemStatusDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<SystemStatusDto>("get_system_status");
-    return mockEngine.getSystemStatus();
+    return demoEngine.getSystemStatus();
   },
 
   async fetchOrderbooks(symbol: string): Promise<VenueOrderBookDto[]> {
-    const tauri = await getTauriCore();
-    if (tauri) {
-      try {
-        return await tauri.invoke<VenueOrderBookDto[]>("fetch_orderbooks", { symbol });
-      } catch (e) {
-        console.warn("Tauri invoke fetch_orderbooks error:", e);
-      }
-    }
-    return mockEngine.fetchOrderbooks(symbol);
+    return invokeDesktopOrDemo("fetch_orderbooks", { symbol }, () => demoEngine.fetchOrderbooks(symbol));
   },
 
   async scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): Promise<SpatialOpportunityDto[]> {
-    const tauri = await getTauriCore();
-    if (tauri) {
-      try {
-        return await tauri.invoke<SpatialOpportunityDto[]>("scan_spatial_opportunities", { symbol, minBps, orderQty });
-      } catch (e) {
-        console.warn("Tauri invoke scan_spatial_opportunities error:", e);
-      }
-    }
-    return mockEngine.scanSpatialOpportunities(symbol, minBps, orderQty);
+    return invokeDesktopOrDemo("scan_spatial_opportunities", { symbol, minBps, orderQty }, () =>
+      demoEngine.scanSpatialOpportunities(symbol, minBps, orderQty));
   },
 
   async scanSpotOpportunities(symbol?: string): Promise<SpotOpportunityDto[]> {
-    const tauri = await getTauriCore();
-    if (tauri) {
-      try {
-        return await tauri.invoke<SpotOpportunityDto[]>("scan_spot_opportunities", { symbol: symbol || "" });
-      } catch (e) {
-        console.warn("Tauri invoke scan_spot_opportunities error:", e);
-      }
-    }
-    return mockEngine.scanSpotOpportunities(symbol);
+    return invokeDesktopOrDemo("scan_spot_opportunities", { symbol: symbol || "" }, () =>
+      demoEngine.scanSpotOpportunities(symbol));
   },
 
   async executeSpotArbitrage(params: SpotExecutionParams): Promise<SimStepResultDto> {
-    const tauri = await getTauriCore();
-    if (tauri) {
-      try {
-        return await tauri.invoke<SimStepResultDto>("execute_spot_arbitrage", { params });
-      } catch (e) {
-        console.warn("Tauri invoke execute_spot_arbitrage error:", e);
-      }
-    }
-    return mockEngine.executeSpotArbitrage(params);
+    return invokeDesktopOrDemo("execute_spot_arbitrage", { params }, () => demoEngine.executeSpotArbitrage(params));
   },
 
   async scanTriangleOpportunities(filterAsset?: string): Promise<TriangleOpportunityDto[]> {
     const tauri = await getTauriCore();
     if (tauri) {
-      try {
-        return await tauri.invoke<TriangleOpportunityDto[]>("scan_triangle_opportunities", { filterAsset });
-      } catch {
-        // fallback to engine
-      }
+      if (!nativeCommandAvailable("scan_triangle_opportunities")) return [];
+      return tauri.invoke<TriangleOpportunityDto[]>("scan_triangle_opportunities", { filterAsset });
     }
-    return mockEngine.scanTriangleOpportunities(filterAsset);
+    return demoEngine.scanTriangleOpportunities(filterAsset);
   },
 
   async executeTriangleArbitrage(params: TriangleExecutionParams): Promise<SimStepResultDto> {
     const tauri = await getTauriCore();
     if (tauri) {
-      try {
-        return await tauri.invoke<SimStepResultDto>("execute_triangle_arbitrage", { params });
-      } catch (e) {
-        console.warn("Tauri invoke execute_triangle_arbitrage error:", e);
+      if (!nativeCommandAvailable("execute_triangle_arbitrage")) {
+        throw new Error("Native triangular execution is unavailable until an authenticated three-leg coordinator is implemented");
       }
+      return tauri.invoke<SimStepResultDto>("execute_triangle_arbitrage", { params });
     }
-    return mockEngine.executeTriangleArbitrage(params);
+    return demoEngine.executeTriangleArbitrage(params);
   },
 
   async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<FundingOpportunityDto[]>("scan_funding_opportunities", { symbol, tradeSizeUsd });
-    return mockEngine.scanFundingOpportunities(symbol, tradeSizeUsd);
+    return demoEngine.scanFundingOpportunities(symbol, tradeSizeUsd);
   },
 
   async scanPredictionOpportunities(market: string): Promise<PredictionOpportunityDto[]> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<PredictionOpportunityDto[]>("scan_prediction_opportunities", { market });
-    return mockEngine.scanPredictionOpportunities(market);
+    return demoEngine.scanPredictionOpportunities(market);
   },
 
   async runStatArbStep(step: number, priceY: number, priceX: number): Promise<StatArbStepResultDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<StatArbStepResultDto>("run_stat_arb_step", { step, priceY, priceX });
-    return mockEngine.runStatArbStep(step, priceY, priceX);
+    return demoEngine.runStatArbStep(step, priceY, priceX);
   },
 
   async computeOptimalThresholds(
@@ -1575,13 +1585,13 @@ export const api = {
   ): Promise<BertramThresholdDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<BertramThresholdDto>("compute_optimal_thresholds", { theta, mu, sigma, transactionCost });
-    return mockEngine.computeBertramThresholds(theta, mu, sigma, transactionCost);
+    return demoEngine.computeBertramThresholds(theta, mu, sigma, transactionCost);
   },
 
   async fitOuProcess(prices: number[], dt: number): Promise<OuFitDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<OuFitDto>("fit_ou_process", { prices, dt });
-    return mockEngine.fitOuProcess(prices, dt);
+    return demoEngine.fitOuProcess(prices, dt);
   },
 
 
@@ -1611,7 +1621,7 @@ export const api = {
         maxUnits,
         nominalHurdleBps,
       });
-    return mockEngine.executeSpatialArbitrage(
+    return demoEngine.executeSpatialArbitrage(
       symbol,
       buyVenue,
       sellVenue,
@@ -1657,7 +1667,7 @@ export const api = {
         netSpreadBps: p.netSpreadBps,
       });
     }
-    return mockEngine.executeCrossTickerArbitrage(
+    return demoEngine.executeCrossTickerArbitrage(
       p.longSymbol,
       p.shortSymbol,
       p.longVenue,
@@ -1672,67 +1682,67 @@ export const api = {
     if (tauri) {
       return tauri.invoke<TickerMarketQuoteDto[]>("fetch_multi_market_quotes", { symbols });
     }
-    return mockEngine.fetchMultiMarketQuotes(symbols);
+    return demoEngine.fetchMultiMarketQuotes(symbols);
   },
 
   async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number): Promise<SimStepResultDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd });
-    return mockEngine.executeFundingCarry(symbol, longVenue, shortVenue, tradeSizeUsd);
+    return demoEngine.executeFundingCarry(symbol, longVenue, shortVenue, tradeSizeUsd);
   },
 
   async executePredictionArbitrage(marketTitle: string, buyYesVenue: string, buyNoVenue: string, quantity: number): Promise<SimStepResultDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<SimStepResultDto>("execute_prediction_arbitrage", { marketTitle, buyYesVenue, buyNoVenue, quantity });
-    return mockEngine.executePredictionArbitrage(marketTitle, buyYesVenue, buyNoVenue, quantity);
+    return demoEngine.executePredictionArbitrage(marketTitle, buyYesVenue, buyNoVenue, quantity);
   },
 
   async getEngineSettings(): Promise<EngineSettingsDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<EngineSettingsDto>("get_engine_settings");
-    return mockEngine.getEngineSettings();
+    return demoEngine.getEngineSettings();
   },
 
   async saveEngineSettings(settings: EngineSettingsDto): Promise<string> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<string>("save_engine_settings", { settings });
-    return mockEngine.saveEngineSettings(settings);
+    return demoEngine.saveEngineSettings(settings);
   },
 
   async getRiskOverview(): Promise<RiskOverviewDto> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<RiskOverviewDto>("get_risk_overview");
-    return mockEngine.getRiskOverview();
+    return demoEngine.getRiskOverview();
   },
 
   async resetCircuitBreaker(): Promise<string> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<string>("reset_circuit_breaker");
-    return mockEngine.resetCircuitBreaker();
+    return demoEngine.resetCircuitBreaker();
   },
 
   async triggerKillswitch(): Promise<string> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<string>("trigger_emergency_killswitch");
-    return mockEngine.triggerKillswitch();
+    return demoEngine.triggerKillswitch();
   },
 
   async getExecutionLogs(): Promise<ExecutionLogEntry[]> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<ExecutionLogEntry[]>("get_execution_logs");
-    return mockEngine.getExecutionLogs();
+    return demoEngine.getExecutionLogs();
   },
 
   async setLiveMode(enabled: boolean): Promise<boolean> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<boolean>("set_live_mode", { enabled });
-    return mockEngine.setLiveMode(enabled);
+    return demoEngine.setLiveMode(enabled);
   },
 
   async setEnginePaused(paused: boolean): Promise<boolean> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<boolean>("set_engine_paused", { paused });
-    return mockEngine.setEnginePaused(paused);
+    return demoEngine.setEnginePaused(paused);
   },
 
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
@@ -1741,13 +1751,13 @@ export const api = {
       const res = await tauri.invoke<TickerStrategyConfigDto>("get_ticker_strategy_config", { symbol });
       return normalizeTickerStrategyConfig(res);
     }
-    return normalizeTickerStrategyConfig(mockEngine.getTickerStrategyConfig(symbol));
+    return normalizeTickerStrategyConfig(demoEngine.getTickerStrategyConfig(symbol));
   },
 
   async saveTickerStrategyConfig(config: TickerStrategyConfigDto): Promise<void> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<void>("save_ticker_strategy_config", { config });
-    return mockEngine.saveTickerStrategyConfig(config);
+    return demoEngine.saveTickerStrategyConfig(config);
   },
 
   async getAllTickerStrategyConfigs(): Promise<TickerStrategyConfigDto[]> {
@@ -1756,61 +1766,55 @@ export const api = {
       const res = await tauri.invoke<TickerStrategyConfigDto[]>("get_all_ticker_strategy_configs");
       return (res || []).map(normalizeTickerStrategyConfig);
     }
-    return mockEngine.getAllTickerStrategyConfigs().map(normalizeTickerStrategyConfig);
+    return demoEngine.getAllTickerStrategyConfigs().map(normalizeTickerStrategyConfig);
   },
 
   async getVaultStatus(): Promise<VaultStatus> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<VaultStatus>("get_vault_status");
-    return mockEngine.getVaultStatus();
+    return demoEngine.getVaultStatus();
   },
 
   async initializeVault(password: string): Promise<VaultStatus> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<VaultStatus>("initialize_vault", { password });
-    return mockEngine.initializeVault(password);
+    return demoEngine.initializeVault(password);
   },
 
   async unlockVault(password: string): Promise<VaultStatus> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<VaultStatus>("unlock_vault", { password });
-    return mockEngine.unlockVault(password);
+    return demoEngine.unlockVault(password);
   },
 
   async lockVault(): Promise<VaultStatus> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<VaultStatus>("lock_vault");
-    return mockEngine.lockVault();
+    return demoEngine.lockVault();
   },
 
-  async getExchangeCredentials(): Promise<ExchangeCredentials[]> {
+  async deleteExchangeCredentials(venue: string): Promise<boolean> {
     const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<ExchangeCredentials[]>("get_exchange_credentials");
-    return mockEngine.getExchangeCredentials();
-  },
-
-  async saveExchangeCredentials(password: string, credentials: ExchangeCredentials[]): Promise<void> {
-    const tauri = await getTauriCore();
-    if (tauri) return tauri.invoke<void>("save_exchange_credentials", { password, credentials });
-    return mockEngine.saveExchangeCredentials(password, credentials);
+    if (tauri) return tauri.invoke<boolean>("delete_exchange_credentials", { venue });
+    throw new Error("Secure credential storage is unavailable in browser demo mode");
   },
 
   async getVenueBalances(): Promise<VenueBalanceInfo[]> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<VenueBalanceInfo[]>("get_venue_balances");
-    return mockEngine.getVenueBalances();
+    return demoEngine.getVenueBalances();
   },
 
   async getStrategyPerformance(strategyId?: string): Promise<StrategyMetrics[]> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<StrategyMetrics[]>("get_strategy_performance", { strategyId });
-    return mockEngine.getStrategyPerformance(strategyId);
+    return demoEngine.getStrategyPerformance(strategyId);
   },
 
   async runWfoCalibration(symbol: string): Promise<WfoOptimizationResult> {
     const tauri = await getTauriCore();
     if (tauri) return tauri.invoke<WfoOptimizationResult>("run_wfo_calibration", { symbol });
-    return mockEngine.runWfoCalibration(symbol);
+    return demoEngine.runWfoCalibration(symbol);
   },
 };
 

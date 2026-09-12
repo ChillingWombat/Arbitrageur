@@ -2,19 +2,22 @@ use std::sync::Arc;
 use tauri::State;
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
-use arbitrager_core::types::{dec, Decimal, Side};
+use arbitrager_core::types::{dec, Decimal, Side, VenueId};
+use arbitrager_core::quote::OrderBook;
 use arbitrager_math::funding_carry::evaluate_funding_carry;
 use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrager_math::ou_process::OuModelParams;
-use arbitrager_math::prediction_synthetic::evaluate_prediction_cross_venue;
 use arbitrager_math::spatial_spread::evaluate_spatial_spread;
+use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_execution::coordinator::ArbitrageExecutionResult;
-use arbitrager_strategy::funding_rate_arb::FundingRateArbStrategy;
-use arbitrager_strategy::prediction_market_arb::PredictionMarketArbStrategy;
+use arbitrager_execution::smart_routing::SmartOrderRouter;
+use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use crate::state::{AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto, VenueBalanceInfo};
-use crate::vault::{ExchangeCredentials, VaultStatus};
+use crate::vault::VaultStatus;
 use arbitrager_execution::virtual_ledger::StrategyMetrics;
-use arbitrager_math::calibration::{QuoteObservation, WfoOptimizationResult, run_walk_forward_optimization};
+use arbitrager_math::calibration::WfoOptimizationResult;
+
+const LIVE_EXECUTION_DISABLED: &str = "Live execution is disabled until an authenticated adapter can sign, submit, and reconcile orders";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemStatusDto {
@@ -254,65 +257,54 @@ fn venue_fee_bps(vid: &str) -> Decimal {
     }
 }
 
-pub fn symbol_base_price(symbol: &str) -> Decimal {
-    let s = symbol.to_uppercase();
-    let base = s.split('-').next().unwrap_or(&s);
-    match base {
-        "BTC" => dec!(64200.0),
-        "ETH" => dec!(3450.0),
-        "SOL" => dec!(152.2),
-        "AVAX" => dec!(28.5),
-        "BNB" => dec!(585.0),
-        "ARB" => dec!(0.58),
-        "OP" => dec!(1.45),
-        "SUI" => dec!(1.82),
-        "NEAR" => dec!(4.65),
-        "APT" => dec!(8.40),
-        "LINK" => dec!(11.80),
-        "DOGE" => dec!(0.125),
-        "PEPE" => dec!(0.0000095),
-        "WIF" => dec!(1.75),
-        "POL" | "MATIC" => dec!(0.38),
-        "TIA" => dec!(5.20),
-        "SEI" => dec!(0.32),
-        "INJ" => dec!(21.50),
-        "RENDER" => dec!(5.80),
-        "FTM" => dec!(0.68),
-        "ATOM" => dec!(4.85),
-        "ADA" => dec!(0.36),
-        "XRP" => dec!(0.58),
-        "DOT" => dec!(4.40),
-        "LTC" => dec!(65.50),
-        "BCH" => dec!(340.0),
-        "UNI" => dec!(7.20),
-        "AAVE" => dec!(145.0),
-        "CRV" => dec!(0.28),
-        "MKR" => dec!(1650.0),
-        "LDO" => dec!(1.15),
-        "JUP" => dec!(0.85),
-        "PYTH" => dec!(0.34),
-        "ONDO" => dec!(0.72),
-        "KAS" => dec!(0.16),
-        "TON" => dec!(5.40),
-        "NOT" => dec!(0.0082),
-        "PENDLE" => dec!(4.10),
-        "FET" => dec!(1.35),
-        "TAO" => dec!(320.0),
-        "WLD" => dec!(1.65),
-        "BLUR" => dec!(0.22),
-        "STX" => dec!(1.75),
-        "RUNE" => dec!(4.90),
-        "DYDX" => dec!(1.05),
-        "ENA" => dec!(0.35),
-        "STRK" => dec!(0.42),
-        "JTO" => dec!(2.30),
-        "BONK" => dec!(0.000021),
-        "FLOKI" => dec!(0.00014),
-        "SHIB" => dec!(0.000014),
-        "AR" => dec!(20.50),
-        _ => dec!(100.0),
+fn validate_market_symbol(symbol: &str) -> Result<(), String> {
+    if symbol.is_empty() || symbol.len() > 64 {
+        return Err("Invalid market symbol: must be 1-64 characters".into());
     }
+    if symbol != symbol.trim() {
+        return Err("Invalid market symbol: no leading/trailing whitespace".into());
+    }
+    if !symbol
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.'))
+    {
+        return Err(
+            "Invalid market symbol: only ASCII alphanumeric, '-', '_', '/', '.' allowed".into(),
+        );
+    }
+    if !symbol.chars().next().unwrap_or(' ').is_ascii_alphanumeric() || symbol.contains("..") {
+        return Err("Invalid market symbol: must start with an alphanumeric and not contain '..'".into());
+    }
+    let has_empty_segment = symbol
+        .split(['-', '/', '_'])
+        .any(|seg| seg.is_empty());
+    if has_empty_segment {
+        return Err("Invalid market symbol: empty base/quote segment".into());
+    }
+    Ok(())
 }
+
+fn validate_adapter_book(
+    book: &OrderBook,
+    expected_venue: &VenueId,
+    expected_symbol: &str,
+) -> Result<(), String> {
+    if &book.venue != expected_venue {
+        return Err(format!(
+            "order book venue '{}' does not match expected venue '{}'",
+            book.venue, expected_venue
+        ));
+    }
+    if book.symbol != expected_symbol {
+        return Err(format!(
+            "order book symbol '{}' does not match requested symbol '{}'",
+            book.symbol, expected_symbol
+        ));
+    }
+    book.validate_for_execution()
+}
+
+
 
 // ---------------------------------------------------------------------------
 // Implementation functions (pure, unit-testable without Tauri State wrapper)
@@ -320,35 +312,19 @@ pub fn symbol_base_price(symbol: &str) -> Decimal {
 
 pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStatusDto, String> {
     let cb = &state.circuit_breaker;
-    let is_tripped = cb.is_tripped();
     let is_live = *state.is_live_mode.read();
     let total_pnl = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
     let logs = state.execution_logs.read();
     let success_count = logs.iter().filter(|l| l.success).count();
 
-    let cb_status_str = match cb.trip_reason() {
-        Some(reason) => format!("TRIPPED: {}", reason),
-        None => if is_tripped { "TRIPPED: Manual halt".into() } else { "ACTIVE".into() },
-    };
-
     let s = state.settings.read();
-    let hl_creds = !s.hyperliquid_wallet.trim().is_empty() || !s.hyperliquid_private_key.trim().is_empty();
-    let lgt_creds = !s.lighter_api_key.trim().is_empty() || (!s.lighter_account_index.trim().is_empty() && s.lighter_account_index.trim() != "0");
-    let vnt_creds = !s.vanta_orderly_key.trim().is_empty() || !s.vanta_account_id.trim().is_empty();
-    let rh_creds = !s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty();
-    let arc_creds = !s.arcus_api_key.trim().is_empty();
-    let pop_creds = !s.popdex_api_key.trim().is_empty();
-    let krk_creds = !s.kraken_spot_api_key.trim().is_empty() || !s.kraken_futures_api_key.trim().is_empty();
-    let poly_creds = !s.polymarket_api_key.trim().is_empty();
-    let kal_creds = !s.kalshi_api_key_id.trim().is_empty();
-
-    let venue_status = |enabled: bool, has_creds: bool| -> &str {
+    let venue_status = |enabled: bool, supported: bool| -> &str {
         if !enabled {
             "OFFLINE"
-        } else if !has_creds {
-            "NO_API_KEY"
+        } else if supported {
+            "READ_ONLY"
         } else {
-            "ONLINE"
+            "UNSUPPORTED"
         }
     };
 
@@ -357,78 +333,88 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "hyperliquid".into(),
             name: if is_live { "Hyperliquid (L1 DEX)".into() } else { "Hyperliquid (L1)".into() },
             market_type: "Perpetual CLOB".into(),
-            status: venue_status(s.hyperliquid_enabled, hl_creds).into(),
-            latency_ms: if hl_creds { 22 } else { 0 },
+            status: venue_status(s.hyperliquid_enabled, true).into(),
+            latency_ms: 0,
             fee_bps: 2.0,
         },
         VenueStatusDto {
             id: "lighter".into(),
             name: "Lighter (zkDEX)".into(),
             market_type: "zk-Rollup CLOB".into(),
-            status: venue_status(s.lighter_enabled, lgt_creds).into(),
-            latency_ms: if lgt_creds { 35 } else { 0 },
+            status: venue_status(s.lighter_enabled, true).into(),
+            latency_ms: 0,
             fee_bps: 1.5,
         },
         VenueStatusDto {
             id: "vanta".into(),
             name: "Vanta.exchange".into(),
             market_type: "Omnichain Perps".into(),
-            status: venue_status(s.vanta_enabled, vnt_creds).into(),
-            latency_ms: if vnt_creds { 28 } else { 0 },
+            status: venue_status(s.vanta_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 3.0,
         },
         VenueStatusDto {
             id: "arcus".into(),
             name: "Arcus DEX".into(),
             market_type: "Fast CLOB".into(),
-            status: venue_status(s.arcus_enabled, arc_creds).into(),
-            latency_ms: if arc_creds { 24 } else { 0 },
+            status: venue_status(s.arcus_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 1.5,
         },
         VenueStatusDto {
             id: "popdex".into(),
             name: "PopDEX".into(),
             market_type: "Lighter Hybrid".into(),
-            status: venue_status(s.popdex_enabled, pop_creds).into(),
-            latency_ms: if pop_creds { 30 } else { 0 },
+            status: venue_status(s.popdex_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 2.0,
         },
         VenueStatusDto {
             id: "robinhood".into(),
             name: "Robinhood EVM".into(),
             market_type: "EVM DEX Aggregator".into(),
-            status: venue_status(s.robinhood_enabled, rh_creds).into(),
-            latency_ms: if rh_creds { 45 } else { 0 },
+            status: venue_status(s.robinhood_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 2.5,
         },
         VenueStatusDto {
             id: "kraken".into(),
             name: "Kraken".into(),
             market_type: "Spot & Futures CLOB".into(),
-            status: venue_status(s.kraken_enabled || s.kraken_spot_enabled || s.kraken_futures_enabled, krk_creds).into(),
-            latency_ms: if krk_creds { 25 } else { 0 },
+            status: venue_status(
+                s.kraken_enabled || s.kraken_spot_enabled || s.kraken_futures_enabled,
+                false,
+            )
+            .into(),
+            latency_ms: 0,
             fee_bps: 16.0,
         },
         VenueStatusDto {
             id: "polymarket".into(),
             name: "Polymarket (CTF CLOB)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.polymarket_enabled, poly_creds).into(),
-            latency_ms: if poly_creds { 60 } else { 0 },
+            status: venue_status(s.polymarket_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 0.0,
         },
         VenueStatusDto {
             id: "kalshi".into(),
             name: "Kalshi (CFTC)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.kalshi_enabled, kal_creds).into(),
-            latency_ms: if kal_creds { 75 } else { 0 },
+            status: venue_status(s.kalshi_enabled, false).into(),
+            latency_ms: 0,
             fee_bps: 10.0,
         },
     ];
 
     let current_drawdown = cb.current_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
     let max_drawdown = cb.max_daily_drawdown_usd().to_string().parse::<f64>().unwrap_or(25000.0);
+
+    let is_tripped = cb.is_tripped();
+    let cb_status_str = match cb.trip_reason() {
+        Some(reason) => format!("TRIPPED: {}", reason),
+        None => if is_tripped { "TRIPPED: Manual halt".into() } else { "ACTIVE".into() },
+    };
 
     Ok(SystemStatusDto {
         is_live_mode: is_live,
@@ -446,6 +432,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
 }
 
 pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Result<Vec<VenueOrderBookDto>, String> {
+    validate_market_symbol(symbol)?;
     state.ensure_market(symbol);
     let venues = state.get_venues();
     let mut result = Vec::new();
@@ -455,15 +442,20 @@ pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Resu
         let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, symbol, Some(std::time::Duration::from_millis(350)));
         let book = match maybe_book {
             Some(b) => b,
-            None => {
-                if let Ok(b) = adapter.fetch_orderbook(symbol).await {
+            None => match adapter.fetch_orderbook(symbol).await {
+                Ok(b) => {
+                    if validate_adapter_book(&b, &venue_id, symbol).is_err() {
+                        continue;
+                    }
                     state.market_data_hub.update_orderbook(b.clone());
                     b
-                } else {
-                    continue;
                 }
-            }
+                Err(_) => continue,
+            },
         };
+        if validate_adapter_book(&book, &venue_id, symbol).is_err() {
+            continue;
+        }
 
         let best_bid = book.best_bid_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
         let best_ask = book.best_ask_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
@@ -527,13 +519,17 @@ pub async fn fetch_multi_market_quotes_impl(
     symbols: Vec<String>,
     state: &AppEngineState,
 ) -> Result<Vec<TickerMarketQuoteDto>, String> {
+    if symbols.len() > 100 {
+        return Err("Too many symbols requested (max 100)".into());
+    }
+    for sym in &symbols {
+        validate_market_symbol(sym)?;
+    }
     let venues = state.get_venues();
     let mut quotes = Vec::with_capacity(symbols.len());
 
     for sym in symbols {
         state.ensure_market(&sym);
-        let base_px = symbol_base_price(&sym);
-        let base_f = base_px.to_string().parse::<f64>().unwrap_or(100.0);
         let base_str = sym.split('-').next().unwrap_or(&sym).to_string();
 
         let mut best_bid = 0.0f64;
@@ -548,15 +544,20 @@ pub async fn fetch_multi_market_quotes_impl(
             let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, &sym, Some(std::time::Duration::from_millis(500)));
             let book = match maybe_book {
                 Some(b) => b,
-                None => {
-                    if let Ok(b) = adapter.fetch_orderbook(&sym).await {
+                None => match adapter.fetch_orderbook(&sym).await {
+                    Ok(b) => {
+                        if validate_adapter_book(&b, &venue_id, &sym).is_err() {
+                            continue;
+                        }
                         state.market_data_hub.update_orderbook(b.clone());
                         b
-                    } else {
-                        continue;
                     }
-                }
+                    Err(_) => continue,
+                },
             };
+            if validate_adapter_book(&book, &venue_id, &sym).is_err() {
+                continue;
+            }
 
             if let Some(bid) = book.best_bid_price() {
                 let b_f = bid.to_string().parse::<f64>().unwrap_or(0.0);
@@ -600,7 +601,7 @@ pub async fn fetch_multi_market_quotes_impl(
             best_buy_venue: best_buy_v,
             best_sell_venue: best_sell_v,
             fee_bps: fee,
-            base_price: base_f,
+            base_price: mid,
         });
     }
 
@@ -613,6 +614,13 @@ pub async fn scan_spatial_opportunities_impl(
     order_qty: f64,
     state: &AppEngineState,
 ) -> Result<Vec<SpatialOpportunityDto>, String> {
+    validate_market_symbol(symbol)?;
+    if !order_qty.is_finite() || order_qty <= 0.0 {
+        return Err("order_qty must be a finite positive number".into());
+    }
+    if !min_bps.is_finite() || min_bps < 0.0 {
+        return Err("min_bps must be finite and nonnegative".into());
+    }
     state.ensure_market(symbol);
     let venues = state.get_venues();
     if venues.len() < 2 {
@@ -625,15 +633,20 @@ pub async fn scan_spatial_opportunities_impl(
         let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, symbol, Some(std::time::Duration::from_millis(350)));
         let book = match maybe_book {
             Some(b) => b,
-            None => {
-                if let Ok(b) = adapter.fetch_orderbook(symbol).await {
+            None => match adapter.fetch_orderbook(symbol).await {
+                Ok(b) => {
+                    if validate_adapter_book(&b, &venue_id, symbol).is_err() {
+                        continue;
+                    }
                     state.market_data_hub.update_orderbook(b.clone());
                     b
-                } else {
-                    continue;
                 }
-            }
+                Err(_) => continue,
+            },
         };
+        if validate_adapter_book(&book, &venue_id, symbol).is_err() {
+            continue;
+        }
         books.push((*vid, *vname, book, venue_fee_bps(vid)));
     }
 
@@ -641,7 +654,18 @@ pub async fn scan_spatial_opportunities_impl(
         return Ok(Vec::new());
     }
 
-    let target_qty_dec = Decimal::from_f64_retain(order_qty).unwrap_or(dec!(0.5));
+    let target_qty_dec = Decimal::from_f64_retain(order_qty)
+        .ok_or_else(|| "order_qty is outside supported decimal range".to_string())?;
+    let (max_slippage_bps, min_depth_ratio) = {
+        let s = state.settings.read();
+        (s.max_slippage_bps, s.min_depth_ratio)
+    };
+    let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
+        .ok_or_else(|| "Invalid max slippage setting".to_string())?;
+    let min_depth_dec = Decimal::from_f64_retain(min_depth_ratio)
+        .ok_or_else(|| "Invalid min depth ratio setting".to_string())?;
+    let router = SmartOrderRouter::new(max_slip_dec);
+    let required_depth = target_qty_dec * min_depth_dec;
     let mut opps = Vec::new();
 
     for i in 0..books.len() {
@@ -659,6 +683,37 @@ pub async fn scan_spatial_opportunities_impl(
                 let best_ask = book_buy.best_ask_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
                 let best_bid = book_sell.best_bid_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
 
+                let is_executable = net_spread_bps_f >= min_bps
+                    && match (book_buy.best_ask_price(), book_sell.best_bid_price()) {
+                        (Some(buy_ref), Some(sell_ref)) => {
+                            let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
+                            let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
+                            let mut bv = book_buy.clone();
+                            bv.asks.retain(|l| l.price <= buy_limit);
+                            let mut sv = book_sell.clone();
+                            sv.bids.retain(|l| l.price >= sell_limit);
+                            let buy_depth: Decimal = bv.asks.iter().map(|l| l.size).sum();
+                            let sell_depth: Decimal = sv.bids.iter().map(|l| l.size).sum();
+                            arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+                                &bv,
+                                Side::Buy,
+                                target_qty_dec,
+                                max_slip_dec,
+                            )
+                            .is_ok()
+                                && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+                                    &sv,
+                                    Side::Sell,
+                                    target_qty_dec,
+                                    max_slip_dec,
+                                )
+                                .is_ok()
+                                && buy_depth >= required_depth
+                                && sell_depth >= required_depth
+                        }
+                        _ => false,
+                    };
+
                 opps.push(SpatialOpportunityDto {
                     id: format!("{}-{}-{}", symbol, buy_id, sell_id),
                     symbol: symbol.to_string(),
@@ -672,7 +727,7 @@ pub async fn scan_spatial_opportunities_impl(
                     net_spread_bps: net_spread_bps_f,
                     order_qty: opp.executable_qty.to_string().parse::<f64>().unwrap_or(order_qty),
                     estimated_profit_usd: est_profit_f,
-                    is_executable: net_spread_bps_f >= min_bps,
+                    is_executable,
                 });
             }
         }
@@ -686,148 +741,8 @@ pub async fn scan_spot_opportunities_impl(
     symbol_filter: &str,
     state: &AppEngineState,
 ) -> Result<Vec<SpotOpportunityDto>, String> {
-    let spot_venues_count = {
-        let s = state.settings.read();
-        let mut count = 0;
-        if s.kraken_enabled && s.kraken_spot_enabled && !s.kraken_spot_api_key.trim().is_empty() {
-            count += 1;
-        }
-        if s.arcus_enabled && !s.arcus_api_key.trim().is_empty() {
-            count += 1;
-        }
-        if s.robinhood_enabled && (!s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
-            count += 1;
-        }
-        count
-    };
-
-    // Fail-closed: Zero synthetic data without at least 2 real configured spot venues
-    if spot_venues_count < 2 {
-        return Ok(Vec::new());
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(3000))
-        .build()
-        .unwrap_or_default();
-
-    let symbols_query = "%5B%22BTCUSDT%22,%22ETHUSDT%22,%22SOLUSDT%22,%22BNBUSDT%22,%22SUIUSDT%22,%22AVAXUSDT%22,%22LINKUSDT%22,%22NEARUSDT%22%5D";
-    let binance_url = format!("https://api.binance.com/api/v3/ticker/bookTicker?symbols={}", symbols_query);
-    let kraken_url = "https://api.kraken.com/0/public/Ticker?pair=XBTUSDC,ETHUSDC,SOLUSDC,AVAXUSDC,LINKUSDC";
-
-    let (binance_res, kraken_res) = tokio::join!(
-        client.get(&binance_url).send(),
-        client.get(kraken_url).send()
-    );
-
-    let mut binance_quotes: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
-    if let Ok(resp) = binance_res {
-        if resp.status().is_success() {
-            if let Ok(tickers) = resp.json::<Vec<serde_json::Value>>().await {
-                for t in tickers {
-                    if let (Some(sym), Some(bp), Some(ap)) = (
-                        t.get("symbol").and_then(|s| s.as_str()),
-                        t.get("bidPrice").and_then(|p| p.as_str()).and_then(|s| s.parse::<f64>().ok()),
-                        t.get("askPrice").and_then(|p| p.as_str()).and_then(|s| s.parse::<f64>().ok()),
-                    ) {
-                        if bp > 0.0 && ap > 0.0 {
-                            binance_quotes.insert(sym.to_string(), (bp, ap));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let mut kraken_quotes: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
-    if let Ok(resp) = kraken_res {
-        if resp.status().is_success() {
-            if let Ok(val) = resp.json::<serde_json::Value>().await {
-                if let Some(res_map) = val.get("result").and_then(|r| r.as_object()) {
-                    for (k, v) in res_map {
-                        let ask = v.get("a").and_then(|a| a.as_array()).and_then(|arr| arr.first()).and_then(|s| s.as_str()).and_then(|s| s.parse::<f64>().ok());
-                        let bid = v.get("b").and_then(|b| b.as_array()).and_then(|arr| arr.first()).and_then(|s| s.as_str()).and_then(|s| s.parse::<f64>().ok());
-                        if let (Some(b), Some(a)) = (bid, ask) {
-                            if b > 0.0 && a > 0.0 {
-                                kraken_quotes.insert(k.to_string(), (b, a));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let asset_pairs = vec![
-        ("BTC/USDC", "BTCUSDT", "XBTUSDC", 450000.0, 12),
-        ("ETH/USDC", "ETHUSDT", "ETHUSDC", 280000.0, 15),
-        ("SOL/USDC", "SOLUSDT", "SOLUSDC", 180000.0, 10),
-        ("AVAX/USDC", "AVAXUSDT", "AVAXUSDC", 95000.0, 20),
-        ("LINK/USDC", "LINKUSDT", "LINKUSDC", 75000.0, 14),
-    ];
-
-    let mut opps = Vec::new();
-
-    for (sym, binance_pair, kraken_pair, depth, latency) in asset_pairs {
-        if !symbol_filter.is_empty() && !sym.to_lowercase().contains(&symbol_filter.to_lowercase()) {
-            continue;
-        }
-
-        let binance_quote = binance_quotes.get(binance_pair);
-        let kraken_quote = kraken_quotes.get(kraken_pair);
-
-        let ((b_bid, b_ask), (k_bid, k_ask)) = match (binance_quote, kraken_quote) {
-            (Some(b), Some(k)) => (*b, *k),
-            _ => continue,
-        };
-
-        let pair_venues = [
-            ("Binance Spot", b_bid, b_ask, 7.5, 0.8),
-            ("Kraken Spot", k_bid, k_ask, 16.0, 1.2),
-        ];
-
-        for i in 0..pair_venues.len() {
-            for j in 0..pair_venues.len() {
-                if i == j { continue; }
-                let (buy_name, _b_bid, buy_price, buy_fee, buy_transfer) = pair_venues[i];
-                let (sell_name, sell_price, _s_ask, sell_fee, sell_transfer) = pair_venues[j];
-
-                if sell_price <= buy_price {
-                    continue;
-                }
-
-                let gross_spread = sell_price - buy_price;
-                let gross_bps = (gross_spread / buy_price) * 10000.0;
-                let transfer_cost = buy_transfer + sell_transfer;
-                let trade_size = 1000.0;
-                let fee_usd = (trade_size * buy_fee / 10000.0) + (trade_size * sell_fee / 10000.0);
-                let gross_profit = gross_spread * (trade_size / buy_price);
-                let net_profit_usd = gross_profit - fee_usd - transfer_cost;
-                let net_bps = (net_profit_usd / trade_size) * 10000.0;
-
-                opps.push(SpotOpportunityDto {
-                    id: format!("spot-{}-{}-{}", sym.replace('/', "-"), buy_name.replace(' ', ""), sell_name.replace(' ', "")),
-                    symbol: sym.to_string(),
-                    buy_venue: buy_name.to_string(),
-                    sell_venue: sell_name.to_string(),
-                    buy_price: (buy_price * 100.0).round() / 100.0,
-                    sell_price: (sell_price * 100.0).round() / 100.0,
-                    gross_spread_bps: (gross_bps * 10.0).round() / 10.0,
-                    buy_fee_bps: buy_fee,
-                    sell_fee_bps: sell_fee,
-                    transfer_cost_usd: transfer_cost,
-                    net_spread_bps: (net_bps * 10.0).round() / 10.0,
-                    net_profit_usd: (net_profit_usd * 100.0).round() / 100.0,
-                    available_depth_usd: depth,
-                    estimated_latency_ms: latency,
-                    is_executable: net_bps > 0.0 && net_profit_usd > 0.0,
-                });
-            }
-        }
-    }
-
-    opps.sort_by(|a, b| b.net_spread_bps.partial_cmp(&a.net_spread_bps).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(opps)
+    let _ = (symbol_filter, state);
+    Ok(Vec::new())
 }
 
 pub async fn execute_spot_arbitrage_impl(
@@ -840,71 +755,8 @@ pub async fn execute_spot_arbitrage_impl(
     if *state.is_paused.read() {
         return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
     }
-
-    let cycle = {
-        let mut c = state.sim_step_counter.write();
-        *c += 1;
-        *c
-    };
-    let spread_bps = params.net_spread_bps.unwrap_or(8.5);
-    let profit_usd = (params.trade_size_usd * (spread_bps / 10000.0)).max(0.5);
-
-    {
-        let mut pnl = state.total_realized_profit.write();
-        *pnl = *pnl + Decimal::from_f64_retain(profit_usd).unwrap_or(dec!(5.0));
-    }
-
-    let now = Utc::now();
-    let log_id = format!("exec-spot-{}", cycle);
-    let log_entry = ExecutionLogEntry {
-        id: log_id,
-        timestamp: now.to_rfc3339(),
-        trade_type: "Spot Cross-Exchange".to_string(),
-        symbol: params.symbol.clone(),
-        venue_a: params.buy_venue.clone(),
-        venue_b: params.sell_venue.clone(),
-        leg_a_status: "FILLED".to_string(),
-        leg_b_status: "FILLED".to_string(),
-        success: true,
-        gross_profit: profit_usd + 2.0,
-        fees: 2.0,
-        net_profit: profit_usd,
-        latency_us: 14200,
-        note: format!("Spot Bot flash execution: Bought {} on {}, sold on {}", params.symbol, params.buy_venue, params.sell_venue),
-        direction: Some("Spot Cash Arb".to_string()),
-        trigger_spread_bps: Some(spread_bps),
-        baseline_mean_spread_bps: Some(4.0),
-        position_step: Some(1),
-        max_units: Some(1),
-        nominal_hurdle_bps: Some(5.0),
-    };
-
-    {
-        let mut logs = state.execution_logs.write();
-        logs.insert(0, log_entry);
-        if logs.len() > 100 {
-            logs.truncate(100);
-        }
-    }
-
-    let current_total_pnl = {
-        let pnl = state.total_realized_profit.read();
-        pnl.to_string().parse::<f64>().unwrap_or(0.0)
-    };
-
-    Ok(SimStepResultDto {
-        cycle,
-        opportunity_found: true,
-        execution_success: true,
-        trade_type: "Spot Cross-Exchange".to_string(),
-        direction: "Spot Cash Arb".to_string(),
-        venue_a: params.buy_venue,
-        venue_b: params.sell_venue,
-        spread_bps,
-        realized_profit_usd: profit_usd,
-        total_cumulative_pnl_usd: current_total_pnl,
-        message: format!("Spot Bot execution successful: +${:.2} USD (+{:.1} bps)", profit_usd, spread_bps),
-    })
+    let _ = params;
+    Err("Native 'spot' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
 pub async fn scan_funding_opportunities_impl(
@@ -912,13 +764,18 @@ pub async fn scan_funding_opportunities_impl(
     trade_size_usd: f64,
     state: &AppEngineState,
 ) -> Result<Vec<FundingOpportunityDto>, String> {
+    validate_market_symbol(symbol)?;
+    if !trade_size_usd.is_finite() || trade_size_usd <= 0.0 {
+        return Err("trade_size_usd must be a finite positive number".into());
+    }
     state.ensure_market(symbol);
     let venues = state.get_venues();
     if venues.len() < 2 {
         return Ok(Vec::new());
     }
 
-    let size_dec = Decimal::from_f64_retain(trade_size_usd).unwrap_or(dec!(25000.0));
+    let size_dec = Decimal::from_f64_retain(trade_size_usd)
+        .ok_or_else(|| "trade_size_usd is outside supported decimal range".to_string())?;
     let mut rates = Vec::new();
 
     for (vid, vname, adapter) in &venues {
@@ -969,91 +826,8 @@ pub async fn scan_prediction_opportunities_impl(
     market: &str,
     state: &AppEngineState,
 ) -> Result<Vec<PredictionOpportunityDto>, String> {
-    let (poly_ok, kalshi_ok) = {
-        let s = state.settings.read();
-        let p_ok = s.polymarket_enabled && (!s.polymarket_api_key.trim().is_empty() || !s.polymarket_secret.trim().is_empty());
-        let k_ok = s.kalshi_enabled && (!s.kalshi_api_key_id.trim().is_empty() || !s.kalshi_private_key.trim().is_empty());
-        (p_ok, k_ok)
-    };
-
-    // Fail-closed: Zero synthetic data without configured Polymarket and Kalshi credentials
-    if !poly_ok || !kalshi_ok {
-        return Ok(Vec::new());
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(2500))
-        .build()
-        .unwrap_or_default();
-
-    let mut results = Vec::new();
-
-    let events = match client.get("https://gamma-api.polymarket.com/events?closed=false&limit=15").send().await {
-        Ok(resp) if resp.status().is_success() => {
-            resp.json::<Vec<serde_json::Value>>().await.unwrap_or_default()
-        }
-        _ => Vec::new(),
-    };
-
-    if !events.is_empty() {
-        for ev in events {
-            let title = ev.get("title").and_then(|t| t.as_str()).unwrap_or("Event");
-            if !market.is_empty() && !title.to_lowercase().contains(&market.to_lowercase()) {
-                continue;
-            }
-
-            if let Some(m_arr) = ev.get("markets").and_then(|m| m.as_array()) {
-                if let Some(m0) = m_arr.first() {
-                    let mut yes_px = 0.50f64;
-                    let mut no_px = 0.50f64;
-
-                    if let Some(prices_raw) = m0.get("outcomePrices").and_then(|p| p.as_str()) {
-                        if let Ok(parsed) = serde_json::from_str::<Vec<String>>(prices_raw) {
-                            if parsed.len() >= 2 {
-                                yes_px = parsed[0].parse::<f64>().unwrap_or(0.50);
-                                no_px = parsed[1].parse::<f64>().unwrap_or(0.50);
-                            }
-                        }
-                    } else if let Some(prices_arr) = m0.get("outcomePrices").and_then(|p| p.as_array()) {
-                        if prices_arr.len() >= 2 {
-                            yes_px = prices_arr[0].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.50);
-                            no_px = prices_arr[1].as_str().and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.50);
-                        }
-                    }
-
-                    let a_yes_dec = Decimal::from_f64_retain(yes_px).unwrap_or(dec!(0.50));
-                    let a_no_dec = Decimal::from_f64_retain(no_px).unwrap_or(dec!(0.50));
-                    let b_yes_dec = (dec!(1.0) - a_no_dec).min(dec!(0.99)).max(dec!(0.01));
-                    let b_no_dec = (dec!(1.0) - a_yes_dec).min(dec!(0.99)).max(dec!(0.01));
-                    let fee_dec = dec!(5.0);
-
-                    if let Some(opp) = evaluate_prediction_cross_venue("Polymarket", a_yes_dec, a_no_dec, "Kalshi", b_yes_dec, b_no_dec, fee_dec) {
-                        let cost_cents = (opp.total_cost * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0);
-                        let profit_cents = (opp.net_profit * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0);
-
-                        results.push(PredictionOpportunityDto {
-                            id: format!("{}-Poly-Kalshi", title.replace(' ', "-")),
-                            market_title: title.into(),
-                            venue_a: "Polymarket".into(),
-                            venue_b: "Kalshi".into(),
-                            strategy: opp.strategy_name,
-                            buy_yes_venue: opp.buy_yes_venue,
-                            buy_no_venue: opp.buy_no_venue,
-                            yes_price_cents: opp.yes_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0,
-                            no_price_cents: opp.no_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0,
-                            total_cost_cents: cost_cents,
-                            guaranteed_payout_cents: 100.0,
-                            net_profit_cents: profit_cents,
-                            roi_pct: opp.net_return_pct.to_string().parse::<f64>().unwrap_or(0.0),
-                            has_arbitrage: profit_cents > 0.0,
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(results)
+    let _ = (market, state);
+    Ok(Vec::new())
 }
 
 pub fn run_stat_arb_step_impl(
@@ -1062,6 +836,9 @@ pub fn run_stat_arb_step_impl(
     price_x: f64,
     state: &AppEngineState,
 ) -> Result<StatArbStepResultDto, String> {
+    if !price_y.is_finite() || price_y <= 0.0 || !price_x.is_finite() || price_x <= 0.0 {
+        return Err("prices must be finite and positive".into());
+    }
     let mut kf = state.kalman_filter.write();
     let (hedge_ratio, residual) = kf.update(price_x, price_y);
     let z = kf.spread_z_score();
@@ -1097,6 +874,13 @@ pub fn compute_optimal_thresholds_impl(
     sigma: f64,
     transaction_cost: f64,
 ) -> Result<BertramThresholdDto, String> {
+    if !theta.is_finite()
+        || !mu.is_finite()
+        || !sigma.is_finite()
+        || !transaction_cost.is_finite()
+    {
+        return Err("Invalid parameters: all inputs must be finite".into());
+    }
     if theta <= 0.0 || sigma <= 0.0 || transaction_cost < 0.0 {
         return Err("Invalid parameters: theta > 0, sigma > 0, and transaction_cost >= 0 required".into());
     }
@@ -1136,8 +920,11 @@ pub fn fit_ou_process_impl(prices: &[f64], dt: f64) -> Result<OuFitDto, String> 
     if prices.len() < 10 {
         return Err("Need at least 10 price points to fit Ornstein-Uhlenbeck process".into());
     }
-    if dt <= 0.0 {
-        return Err("Time step dt must be positive".into());
+    if prices.iter().any(|p| !p.is_finite()) {
+        return Err("Price series must contain only finite values".into());
+    }
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err("Time step dt must be finite and positive".into());
     }
 
     let params = OuModelParams::fit(prices, dt)
@@ -1153,6 +940,7 @@ pub fn fit_ou_process_impl(prices: &[f64], dt: f64) -> Result<OuFitDto, String> 
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_spatial_arbitrage_impl(
     symbol: &str,
     buy_venue: &str,
@@ -1166,121 +954,348 @@ pub async fn execute_spatial_arbitrage_impl(
     nominal_hurdle_bps: Option<f64>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
+    if !order_qty.is_finite() || order_qty <= 0.0 {
+        return Err("order_qty must be a finite positive number".into());
+    }
+    if buy_venue.trim().is_empty() || sell_venue.trim().is_empty() {
+        return Err("Buy and sell venues must both be specified".into());
+    }
+    if buy_venue.eq_ignore_ascii_case(sell_venue) {
+        return Err("Buy and sell venues must be distinct".into());
+    }
+    validate_market_symbol(symbol)?;
+    let hurdle_dec = match nominal_hurdle_bps {
+        Some(h) if !h.is_finite() || h < 0.0 => {
+            return Err("nominal_hurdle_bps must be finite and nonnegative".into());
+        }
+        Some(h) => Some(
+            Decimal::from_f64_retain(h)
+                .ok_or("nominal_hurdle_bps is outside supported decimal range")?,
+        ),
+        None => None,
+    };
+
+    let _execution_guard = state.execution_lock.lock().await;
+
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
     }
     if *state.is_paused.read() {
         return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
     }
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+    let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
     state.ensure_market(symbol);
 
-    let buy_adapter = state.get_adapter(buy_venue).ok_or_else(|| format!("Buy venue '{}' not found", buy_venue))?;
-    let sell_adapter = state.get_adapter(sell_venue).ok_or_else(|| format!("Sell venue '{}' not found", sell_venue))?;
-
+    let buy_adapter = state
+        .get_adapter(buy_venue)
+        .ok_or_else(|| format!("Buy venue '{}' is not admitted for paper execution", buy_venue))?;
+    let sell_adapter = state
+        .get_adapter(sell_venue)
+        .ok_or_else(|| format!("Sell venue '{}' is not admitted for paper execution", sell_venue))?;
     let buy_vid = buy_adapter.venue_id();
     let sell_vid = sell_adapter.venue_id();
-
-    let book_buy_opt = state.market_data_hub.get_valid_orderbook(&buy_vid, symbol, Some(std::time::Duration::from_secs(60)));
-    let book_sell_opt = state.market_data_hub.get_valid_orderbook(&sell_vid, symbol, Some(std::time::Duration::from_secs(60)));
-
-    let ref_buy = if let Some(ref b) = book_buy_opt {
-        b.best_ask_price().unwrap_or(dec!(0))
-    } else if let Ok(t) = buy_adapter.fetch_ticker(symbol).await {
-        t.ask
-    } else {
-        dec!(0)
-    };
-
-    let ref_sell = if let Some(ref b) = book_sell_opt {
-        b.best_bid_price().unwrap_or(dec!(0))
-    } else if let Ok(t) = sell_adapter.fetch_ticker(symbol).await {
-        t.bid
-    } else {
-        dec!(0)
-    };
-
-    if ref_buy <= dec!(0) || ref_sell <= dec!(0) {
-        return Err(format!("Invalid market quotes for symbol {}: Buy Ask={}, Sell Bid={}", symbol, ref_buy, ref_sell));
+    if crate::state::canonical_venue_id(buy_venue)
+        == crate::state::canonical_venue_id(sell_venue)
+    {
+        return Err("Buy and sell venues must resolve to distinct canonical venues".into());
     }
+    let buy_paper = state
+        .get_paper_exchange(buy_vid.as_str())
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", buy_venue))?;
+    let sell_paper = state
+        .get_paper_exchange(sell_vid.as_str())
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", sell_venue))?;
 
-    let qty_dec = Decimal::from_f64_retain(order_qty).unwrap_or(dec!(0.5));
-    let order_buy = state.coordinator.router().build_ioc_order(
-        buy_adapter.venue_id(),
+    // Order books must come from the hub cache (max age 2s) or a fresh fetch
+    // through the admitted read-only adapter; ticker data is not a substitute.
+    // Cached or fetched, a book must carry the exact requested venue and symbol
+    // and pass execution validation before it is trusted or cached.
+    let book_buy = match state.market_data_hub.get_valid_orderbook(
+        &buy_vid,
         symbol,
-        Side::Buy,
-        ref_buy,
-        qty_dec,
-    );
-    let order_sell = state.coordinator.router().build_ioc_order(
-        sell_adapter.venue_id(),
-        symbol,
-        Side::Sell,
-        ref_sell,
-        qty_dec,
-    );
-
-    // Set target leverage (5x by default or user-configured) whenever supported by the venue API
-    let target_leverage = state.strategy_configs.read().get(symbol).map(|c| c.user_target_leverage).unwrap_or(5);
-    let _ = buy_adapter.set_leverage(symbol, target_leverage).await;
-    let _ = sell_adapter.set_leverage(symbol, target_leverage).await;
-
-    let is_live = *state.is_live_mode.read();
-    let res = if is_live {
-        state.coordinator.execute_two_leg(&buy_adapter, order_buy, &sell_adapter, order_sell).await
-    } else {
-        let gross_pnl = (ref_sell - ref_buy) * qty_dec;
-        let fee_dec = (ref_buy * qty_dec * dec!(0.00025)) + (ref_sell * qty_dec * dec!(0.00025));
-        let eff_profit = (gross_pnl - fee_dec).max(dec!(0.5));
-        
-        let cycle_id = format!("paper-spatial-{}", state.sim_step_counter.read());
-        state.virtual_ledger.write().open_cycle(
-            cycle_id.clone(),
-            "spatial".to_string(),
-            symbol.to_string(),
-            buy_venue.to_string(),
-            sell_venue.to_string(),
-            trigger_spread_bps.unwrap_or(10.0),
-            order_qty,
-            ref_buy.to_string().parse::<f64>().unwrap_or(0.0),
-            order_qty,
-            ref_sell.to_string().parse::<f64>().unwrap_or(0.0),
-            (eff_profit * dec!(0.05)).to_string().parse::<f64>().unwrap_or(0.0),
-        );
-
-        ArbitrageExecutionResult::Success {
-            leg_a: arbitrager_core::order::OrderResponse {
-                order_id: format!("paper-a-{}", cycle_id),
-                client_order_id: format!("paper-client-a-{}", cycle_id),
-                venue: buy_adapter.venue_id(),
-                symbol: symbol.to_string(),
-                status: arbitrager_core::types::OrderStatus::Filled,
-                original_qty: qty_dec,
-                filled_qty: qty_dec,
-                remaining_qty: dec!(0),
-                avg_fill_price: Some(ref_buy),
-                fee: ref_buy * qty_dec * dec!(0.00025),
-                fee_currency: "USDC".to_string(),
-                raw_response: None,
-                timestamp: Utc::now(),
-            },
-            leg_b: arbitrager_core::order::OrderResponse {
-                order_id: format!("paper-b-{}", cycle_id),
-                client_order_id: format!("paper-client-b-{}", cycle_id),
-                venue: sell_adapter.venue_id(),
-                symbol: symbol.to_string(),
-                status: arbitrager_core::types::OrderStatus::Filled,
-                original_qty: qty_dec,
-                filled_qty: qty_dec,
-                remaining_qty: dec!(0),
-                avg_fill_price: Some(ref_sell),
-                fee: ref_sell * qty_dec * dec!(0.00025),
-                fee_currency: "USDC".to_string(),
-                raw_response: None,
-                timestamp: Utc::now(),
-            },
-            realized_profit: eff_profit,
+        Some(std::time::Duration::from_secs(2)),
+    ) {
+        Some(b) => b,
+        None => {
+            let b = buy_adapter
+                .fetch_orderbook(symbol)
+                .await
+                .map_err(|e| format!("No fresh {} orderbook for {}: {}", buy_venue, symbol, e))?;
+            validate_adapter_book(&b, &buy_vid, symbol)
+                .map_err(|e| format!("Buy-side order book rejected: {}", e))?;
+            state.market_data_hub.update_orderbook(b.clone());
+            b
         }
     };
+    let book_sell = match state.market_data_hub.get_valid_orderbook(
+        &sell_vid,
+        symbol,
+        Some(std::time::Duration::from_secs(2)),
+    ) {
+        Some(b) => b,
+        None => {
+            let b = sell_adapter
+                .fetch_orderbook(symbol)
+                .await
+                .map_err(|e| format!("No fresh {} orderbook for {}: {}", sell_venue, symbol, e))?;
+            validate_adapter_book(&b, &sell_vid, symbol)
+                .map_err(|e| format!("Sell-side order book rejected: {}", e))?;
+            state.market_data_hub.update_orderbook(b.clone());
+            b
+        }
+    };
+    validate_adapter_book(&book_buy, &buy_vid, symbol)
+        .map_err(|e| format!("Buy-side order book rejected: {}", e))?;
+    validate_adapter_book(&book_sell, &sell_vid, symbol)
+        .map_err(|e| format!("Sell-side order book rejected: {}", e))?;
+
+    let qty_dec = Decimal::from_f64_retain(order_qty)
+        .filter(|q| *q > dec!(0))
+        .ok_or_else(|| "Invalid order quantity".to_string())?;
+    let (max_slippage_bps, min_depth_ratio) = {
+        let s = state.settings.read();
+        (s.max_slippage_bps, s.min_depth_ratio)
+    };
+    let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
+        .ok_or_else(|| "Invalid max slippage setting".to_string())?;
+    let min_depth_dec = Decimal::from_f64_retain(min_depth_ratio)
+        .ok_or_else(|| "Invalid min depth ratio setting".to_string())?;
+
+    // Preflight must see exactly what the bounded IOC orders can reach:
+    // retain only asks at or below the buy limit and bids at or above the
+    // sell limit before evaluating slippage, depth ratio, and VWAP.
+    let router = SmartOrderRouter::new(max_slip_dec);
+    let buy_ref = book_buy
+        .best_ask_price()
+        .ok_or_else(|| format!("No asks on buy-side book for {}", symbol))?;
+    let sell_ref = book_sell
+        .best_bid_price()
+        .ok_or_else(|| format!("No bids on sell-side book for {}", symbol))?;
+    let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
+    let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
+
+    let mut book_buy_exec = book_buy.clone();
+    book_buy_exec.asks.retain(|l| l.price <= buy_limit);
+    let mut book_sell_exec = book_sell.clone();
+    book_sell_exec.bids.retain(|l| l.price >= sell_limit);
+
+    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        &book_buy_exec,
+        Side::Buy,
+        qty_dec,
+        max_slip_dec,
+    )
+    .map_err(|v| {
+        format!(
+            "Buy-side slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+            buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+        )
+    })?;
+    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        &book_sell_exec,
+        Side::Sell,
+        qty_dec,
+        max_slip_dec,
+    )
+    .map_err(|v| {
+        format!(
+            "Sell-side slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+            sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+        )
+    })?;
+
+    let buy_depth: Decimal = book_buy_exec.asks.iter().map(|l| l.size).sum();
+    let sell_depth: Decimal = book_sell_exec.bids.iter().map(|l| l.size).sum();
+    let required_depth = qty_dec * min_depth_dec;
+    if buy_depth < required_depth || sell_depth < required_depth {
+        return Err(format!(
+            "Insufficient order book depth ratio: required {} per leg ({}x order), buy side offers {}, sell side offers {}",
+            required_depth, min_depth_dec, buy_depth, sell_depth
+        ));
+    }
+
+    let (buy_vwap, buy_remaining, _) = book_buy_exec
+        .buy_execution_vwap(qty_dec)
+        .ok_or_else(|| format!("No executable buy depth on {}", buy_venue))?;
+    let (sell_vwap, sell_remaining, _) = book_sell_exec
+        .sell_execution_vwap(qty_dec)
+        .ok_or_else(|| format!("No executable sell depth on {}", sell_venue))?;
+    if buy_remaining > dec!(0) || sell_remaining > dec!(0) {
+        return Err("Requested quantity exceeds executable book depth within IOC limits".into());
+    }
+
+    let fee_buy = buy_vwap * qty_dec * venue_fee_bps(buy_vid.as_str()) / dec!(10000);
+    let fee_sell = sell_vwap * qty_dec * venue_fee_bps(sell_vid.as_str()) / dec!(10000);
+    let expected_net = (sell_vwap - buy_vwap) * qty_dec - fee_buy - fee_sell;
+    let notional = ((buy_vwap + sell_vwap) / dec!(2)) * qty_dec;
+    let net_bps = if notional > dec!(0) {
+        (expected_net / notional) * dec!(10000)
+    } else {
+        dec!(0)
+    };
+    if expected_net <= dec!(0) {
+        return Err(format!(
+            "Spread is not profitable after fees: expected net {} USD",
+            expected_net
+        ));
+    }
+    if let Some(h) = hurdle_dec {
+        if net_bps < h {
+            return Err(format!(
+                "Calculated net spread {} BPS is below nominal hurdle {} BPS",
+                net_bps, h
+            ));
+        }
+    }
+
+    state
+        .delta_guard
+        .read()
+        .check_proposed_pair(
+            symbol,
+            Side::Buy,
+            qty_dec,
+            buy_vwap,
+            symbol,
+            Side::Sell,
+            qty_dec,
+            sell_vwap,
+        )
+        .map_err(|(asset, exposure)| {
+            format!(
+                "Delta neutrality breach on {}: proposed net exposure ${} exceeds limit",
+                asset, exposure
+            )
+        })?;
+
+    let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    let acc_buy = buy_paper.fetch_account().await.map_err(|e| e.to_string())?;
+    let acc_sell = sell_paper.fetch_account().await.map_err(|e| e.to_string())?;
+    for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
+        match margin_monitor.evaluate_account(acc) {
+            MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
+                return Err(format!(
+                    "Paper account {} margin status is critical/breached; execution refused",
+                    vname
+                ));
+            }
+            _ => {}
+        }
+    }
+    let target_leverage = state
+        .strategy_configs
+        .read()
+        .get(symbol)
+        .map(|c| c.user_target_leverage)
+        .unwrap_or(5);
+    if !(1..=5).contains(&target_leverage) {
+        return Err(format!(
+            "Configured leverage {} for {} is out of range; must be 1..=5",
+            target_leverage, symbol
+        ));
+    }
+    let leverage = Decimal::from(target_leverage);
+    let im_buy = (buy_vwap * qty_dec) / leverage;
+    if im_buy > acc_buy.free_margin {
+        return Err(format!(
+            "Insufficient free margin on {}: required {} > available {}",
+            buy_venue, im_buy, acc_buy.free_margin
+        ));
+    }
+    let im_sell = (sell_vwap * qty_dec) / leverage;
+    if im_sell > acc_sell.free_margin {
+        return Err(format!(
+            "Insufficient free margin on {}: required {} > available {}",
+            sell_venue, im_sell, acc_sell.free_margin
+        ));
+    }
+    if acc_buy.get_position(symbol).is_some() || acc_sell.get_position(symbol).is_some() {
+        return Err(format!(
+            "An open paper position already exists for {}; closing lifecycle is not implemented",
+            symbol
+        ));
+    }
+
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+    }
+    if *state.is_paused.read() {
+        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+    }
+
+    buy_paper
+        .replace_orderbook(book_buy.clone())
+        .map_err(|e| e.to_string())?;
+    sell_paper
+        .replace_orderbook(book_sell.clone())
+        .map_err(|e| e.to_string())?;
+
+    let order_buy = router.build_ioc_order(
+        buy_paper.venue_id(),
+        symbol,
+        Side::Buy,
+        buy_ref,
+        qty_dec,
+    );
+    let order_sell = router.build_ioc_order(
+        sell_paper.venue_id(),
+        symbol,
+        Side::Sell,
+        sell_ref,
+        qty_dec,
+    );
+
+    buy_paper
+        .set_leverage(symbol, target_leverage)
+        .await
+        .map_err(|e| e.to_string())?;
+    sell_paper
+        .set_leverage(symbol, target_leverage)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let buy_exec: Arc<dyn arbitrager_core::exchange::ExchangeAdapter> = buy_paper;
+    let sell_exec: Arc<dyn arbitrager_core::exchange::ExchangeAdapter> = sell_paper;
+
+    let mut equity_before = dec!(0);
+    for (_, paper) in state.paper_exchanges() {
+        equity_before += paper
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+            .equity;
+    }
+
+    let started = std::time::Instant::now();
+    let res = state
+        .coordinator
+        .execute_two_leg(&buy_exec, order_buy, &sell_exec, order_sell)
+        .await;
+    let latency_us = started.elapsed().as_micros() as u64;
+    let net_bps_f = net_bps.to_string().parse::<f64>().unwrap_or(0.0);
+
+    let mut equity_after = dec!(0);
+    for (_, paper) in state.paper_exchanges() {
+        equity_after += paper
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+            .equity;
+    }
+    let attempt_pnl = equity_after - equity_before;
+    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+    // Realized portfolio P&L is always derived from actual paper-account
+    // equity: fees, unwind slippage, and any residual loss are included;
+    // unrealized open-position exposure is not marked into it.
+    let total_f = {
+        let mut total_pnl = state.total_realized_profit.write();
+        *total_pnl = equity_after - dec!(200000);
+        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+    };
+    state.circuit_breaker.update_equity(equity_after);
 
     let cycle = {
         let mut step = state.sim_step_counter.write();
@@ -1289,38 +1304,67 @@ pub async fn execute_spatial_arbitrage_impl(
     };
 
     match res {
-        ArbitrageExecutionResult::Success { realized_profit, .. } => {
-            let profit_f = realized_profit.to_string().parse::<f64>().unwrap_or(0.0);
-            let total_f = {
-                let mut total_pnl = state.total_realized_profit.write();
-                *total_pnl += realized_profit;
-                total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-            };
+        ArbitrageExecutionResult::Success {
+            leg_a,
+            leg_b,
+            realized_profit: _,
+        } => {
+            let fees_dec = leg_a.fee + leg_b.fee;
+            let fee_f = fees_dec.to_string().parse::<f64>().unwrap_or(0.0);
+            let buy_px_f = leg_a
+                .avg_fill_price
+                .unwrap_or(buy_vwap)
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            let sell_px_f = leg_b
+                .avg_fill_price
+                .unwrap_or(sell_vwap)
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            let expected_capture_f = expected_net.to_string().parse::<f64>().unwrap_or(0.0);
 
-            let eff_spread = trigger_spread_bps.unwrap_or(12.5);
-            let log_entry = ExecutionLogEntry {
+            let cycle_id = format!("paper-spatial-{}", cycle);
+            state.virtual_ledger.write().open_cycle(
+                cycle_id,
+                "spatial_spread".to_string(),
+                symbol.to_string(),
+                buy_venue.to_string(),
+                sell_venue.to_string(),
+                net_bps_f,
+                order_qty,
+                buy_px_f,
+                order_qty,
+                sell_px_f,
+                fee_f,
+            );
+
+            state.execution_logs.write().push(ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
                 symbol: symbol.to_string(),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
+                leg_a_status: format!("{:?}", leg_a.status),
+                leg_b_status: format!("{:?}", leg_b.status),
                 success: true,
-                gross_profit: profit_f * 1.05,
-                fees: profit_f * 0.05,
-                net_profit: profit_f,
-                latency_us: 110,
-                note: format!("Atomically routed Buy on {} -> Sell on {}", buy_venue, sell_venue),
+                gross_profit: 0.0,
+                fees: fee_f,
+                net_profit: attempt_pnl_f,
+                latency_us,
+                note: format!(
+                    "Paper position opened; expected convergence capture ${:.2} is unrealized",
+                    expected_capture_f
+                ),
                 direction: direction.clone().or_else(|| Some("Divergence Entry".into())),
-                trigger_spread_bps: Some(eff_spread),
+                trigger_spread_bps: Some(net_bps_f),
                 baseline_mean_spread_bps,
                 position_step: position_step.or(Some(1)),
                 max_units: max_units.or(Some(3)),
                 nominal_hurdle_bps,
-            };
-            state.execution_logs.write().push(log_entry);
+            });
 
             Ok(SimStepResultDto {
                 cycle,
@@ -1330,37 +1374,90 @@ pub async fn execute_spatial_arbitrage_impl(
                 direction: direction.unwrap_or_else(|| "BuyASellB".into()),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
-                spread_bps: eff_spread,
-                realized_profit_usd: profit_f,
+                spread_bps: net_bps_f,
+                realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
-                message: format!("Atomically executed trade! Profit: +${:.2}", profit_f),
+                message: format!(
+                    "Paper position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
+                    buy_venue, sell_venue, attempt_pnl_f, expected_capture_f
+                ),
             })
         }
-        other => {
-            let total_f = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-            let log_entry = ExecutionLogEntry {
+        ArbitrageExecutionResult::UnresolvedExposure {
+            leg_a_fill,
+            leg_b_fill,
+            error_a,
+            error_b,
+        } => {
+            if !state.circuit_breaker.is_tripped() {
+                state
+                    .circuit_breaker
+                    .trip("Unresolved exposure after failed unwind");
+            }
+            let describe = |f: &Option<arbitrager_core::order::OrderResponse>| {
+                f.as_ref()
+                    .map(|r| format!("{:?} filled {}/{}", r.status, r.filled_qty, r.original_qty))
+                    .unwrap_or_else(|| "no fill".to_string())
+            };
+            state.execution_logs.write().push(ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
                 symbol: symbol.to_string(),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
-                leg_a_status: "UNWOUND".into(),
-                leg_b_status: "REJECTED".into(),
+                leg_a_status: describe(&leg_a_fill),
+                leg_b_status: describe(&leg_b_fill),
                 success: false,
                 gross_profit: 0.0,
-                fees: 1.5,
-                net_profit: -1.5,
-                latency_us: 140,
-                note: format!("Atomic trade failed: {:?}", other),
+                fees: 0.0,
+                net_profit: attempt_pnl_f,
+                latency_us,
+                note: format!(
+                    "UNRESOLVED EXPOSURE: leg A [{}]; leg B [{}]; realized P&L to date ${:.2}; open exposure not marked",
+                    error_a, error_b, attempt_pnl_f
+                ),
                 direction: direction.clone().or_else(|| Some("Divergence Entry".into())),
-                trigger_spread_bps,
+                trigger_spread_bps: Some(net_bps_f),
                 baseline_mean_spread_bps,
                 position_step: position_step.or(Some(1)),
                 max_units: max_units.or(Some(3)),
                 nominal_hurdle_bps,
+            });
+            Err(format!(
+                "UNRESOLVED EXPOSURE: leg A [{}]; leg B [{}]",
+                error_a, error_b
+            ))
+        }
+        other => {
+            let (status_a, status_b) = match &other {
+                ArbitrageExecutionResult::LegBFailedUnwound { .. } => ("UNWOUND", "REJECTED"),
+                ArbitrageExecutionResult::LegAFailedUnwound { .. } => ("REJECTED", "UNWOUND"),
+                ArbitrageExecutionResult::HaltedByRisk(_) => ("HALTED", "HALTED"),
+                _ => ("REJECTED", "REJECTED"),
             };
-            state.execution_logs.write().push(log_entry);
+            state.execution_logs.write().push(ExecutionLogEntry {
+                id: format!("exec-spatial-{}", cycle),
+                timestamp: Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                symbol: symbol.to_string(),
+                venue_a: buy_venue.to_string(),
+                venue_b: sell_venue.to_string(),
+                leg_a_status: status_a.into(),
+                leg_b_status: status_b.into(),
+                success: false,
+                gross_profit: 0.0,
+                fees: 0.0,
+                net_profit: attempt_pnl_f,
+                latency_us,
+                note: format!("Atomic trade failed: {:?}", other),
+                direction: direction.clone().or_else(|| Some("Divergence Entry".into())),
+                trigger_spread_bps: Some(net_bps_f),
+                baseline_mean_spread_bps,
+                position_step: position_step.or(Some(1)),
+                max_units: max_units.or(Some(3)),
+                nominal_hurdle_bps,
+            });
 
             Ok(SimStepResultDto {
                 cycle,
@@ -1370,8 +1467,8 @@ pub async fn execute_spatial_arbitrage_impl(
                 direction: direction.unwrap_or_else(|| "BuyASellB".into()),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
-                spread_bps: 0.0,
-                realized_profit_usd: -1.5,
+                spread_bps: net_bps_f,
+                realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!("Execution failed/unwound: {:?}", other),
             })
@@ -1394,205 +1491,8 @@ pub async fn execute_cross_ticker_arbitrage_impl(
     if *state.is_paused.read() {
         return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
     }
-    state.ensure_market(long_symbol);
-    state.ensure_market(short_symbol);
-
-    let buy_adapter = state.get_adapter(long_venue).ok_or_else(|| format!("Buy venue '{}' not found", long_venue))?;
-    let sell_adapter = state.get_adapter(short_venue).ok_or_else(|| format!("Sell venue '{}' not found", short_venue))?;
-
-    let buy_vid = buy_adapter.venue_id();
-    let sell_vid = sell_adapter.venue_id();
-
-    let book_buy_opt = state.market_data_hub.get_valid_orderbook(&buy_vid, long_symbol, Some(std::time::Duration::from_secs(60)));
-    let book_sell_opt = state.market_data_hub.get_valid_orderbook(&sell_vid, short_symbol, Some(std::time::Duration::from_secs(60)));
-
-    let ref_buy = if let Some(ref b) = book_buy_opt {
-        b.best_ask_price().unwrap_or(dec!(0))
-    } else if let Ok(t) = buy_adapter.fetch_ticker(long_symbol).await {
-        t.ask
-    } else {
-        dec!(0)
-    };
-
-    let ref_sell = if let Some(ref b) = book_sell_opt {
-        b.best_bid_price().unwrap_or(dec!(0))
-    } else if let Ok(t) = sell_adapter.fetch_ticker(short_symbol).await {
-        t.bid
-    } else {
-        dec!(0)
-    };
-
-    if ref_buy <= dec!(0) || ref_sell <= dec!(0) {
-        return Err(format!("Invalid market quotes: Long {} Ask={}, Short {} Bid={}", long_symbol, ref_buy, short_symbol, ref_sell));
-    }
-
-    let qty_dec = Decimal::from_f64_retain(order_qty).unwrap_or(dec!(0.5));
-    let notional = ref_buy * qty_dec;
-    let qty_short = if ref_sell > dec!(0) { notional / ref_sell } else { qty_dec };
-
-    let order_buy = state.coordinator.router().build_ioc_order(
-        buy_adapter.venue_id(),
-        long_symbol,
-        Side::Buy,
-        ref_buy,
-        qty_dec,
-    );
-    let order_sell = state.coordinator.router().build_ioc_order(
-        sell_adapter.venue_id(),
-        short_symbol,
-        Side::Sell,
-        ref_sell,
-        qty_short,
-    );
-
-    let is_live = *state.is_live_mode.read();
-    let res = if is_live {
-        state.coordinator.execute_two_leg(&buy_adapter, order_buy, &sell_adapter, order_sell).await
-    } else {
-        let notional_f = (ref_buy * qty_dec).to_string().parse::<f64>().unwrap_or(1500.0);
-        let spread_val = net_spread_bps.unwrap_or(16.5);
-        let stat_spread_profit = ((spread_val / 10000.0) * notional_f).max(1.5);
-        let eff_profit = Decimal::from_f64_retain(stat_spread_profit).unwrap_or(dec!(1.5));
-
-        let cycle_id = format!("paper-cross-{}", state.sim_step_counter.read());
-        ArbitrageExecutionResult::Success {
-            leg_a: arbitrager_core::order::OrderResponse {
-                order_id: format!("paper-a-{}", cycle_id),
-                client_order_id: format!("paper-client-a-{}", cycle_id),
-                venue: buy_adapter.venue_id(),
-                symbol: long_symbol.to_string(),
-                status: arbitrager_core::types::OrderStatus::Filled,
-                original_qty: qty_dec,
-                filled_qty: qty_dec,
-                remaining_qty: dec!(0),
-                avg_fill_price: Some(ref_buy),
-                fee: ref_buy * qty_dec * dec!(0.00025),
-                fee_currency: "USDC".to_string(),
-                raw_response: None,
-                timestamp: Utc::now(),
-            },
-            leg_b: arbitrager_core::order::OrderResponse {
-                order_id: format!("paper-b-{}", cycle_id),
-                client_order_id: format!("paper-client-b-{}", cycle_id),
-                venue: sell_adapter.venue_id(),
-                symbol: short_symbol.to_string(),
-                status: arbitrager_core::types::OrderStatus::Filled,
-                original_qty: qty_short,
-                filled_qty: qty_short,
-                remaining_qty: dec!(0),
-                avg_fill_price: Some(ref_sell),
-                fee: ref_sell * qty_short * dec!(0.00025),
-                fee_currency: "USDC".to_string(),
-                raw_response: None,
-                timestamp: Utc::now(),
-            },
-            realized_profit: eff_profit,
-        }
-    };
-
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
-
-    match res {
-        ArbitrageExecutionResult::Success { realized_profit, .. } => {
-            let profit_parsed = realized_profit.to_string().parse::<f64>().unwrap_or(0.0);
-            let notional_f = (ref_buy * qty_dec).to_string().parse::<f64>().unwrap_or(1500.0);
-            let spread_val = net_spread_bps.unwrap_or(16.5);
-            let stat_spread_profit = (spread_val / 10000.0) * notional_f;
-            let profit_f = if profit_parsed > 0.0 {
-                profit_parsed
-            } else {
-                stat_spread_profit.max(1.5)
-            };
-            let profit_dec = Decimal::from_f64_retain(profit_f).unwrap_or(dec!(15.4));
-            let total_f = {
-                let mut total_pnl = state.total_realized_profit.write();
-                *total_pnl += profit_dec;
-                total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-            };
-
-            let log_entry = ExecutionLogEntry {
-                id: format!("exec-cross-ticker-{}", cycle),
-                timestamp: Utc::now().to_rfc3339(),
-                trade_type: "PairStatArb".into(),
-                symbol: format!("{}/{}", long_symbol, short_symbol),
-                venue_a: format!("{} ({})", long_symbol, long_venue),
-                venue_b: format!("{} ({})", short_symbol, short_venue),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: profit_f * 1.05,
-                fees: profit_f * 0.05,
-                net_profit: profit_f,
-                latency_us: 112,
-                note: format!("Cross-ticker relative arb: Buy {} ({}) / Sell {} ({})", long_symbol, long_venue, short_symbol, short_venue),
-                direction: Some(format!("Long {} / Short {}", long_symbol, short_symbol)),
-                trigger_spread_bps: Some(spread_val),
-                baseline_mean_spread_bps: None,
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: None,
-            };
-            state.execution_logs.write().push(log_entry);
-
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: true,
-                trade_type: "Cross-Ticker Arb".into(),
-                direction: format!("Long {} / Short {}", long_symbol, short_symbol),
-                venue_a: format!("{} ({})", long_symbol, long_venue),
-                venue_b: format!("{} ({})", short_symbol, short_venue),
-                spread_bps: spread_val,
-                realized_profit_usd: profit_f,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Atomically executed cross-ticker pair! Realized profit: +${:.2}", profit_f),
-            })
-        }
-        other => {
-            let total_f = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-            let log_entry = ExecutionLogEntry {
-                id: format!("exec-cross-ticker-{}", cycle),
-                timestamp: Utc::now().to_rfc3339(),
-                trade_type: "PairStatArb".into(),
-                symbol: format!("{}/{}", long_symbol, short_symbol),
-                venue_a: format!("{} ({})", long_symbol, long_venue),
-                venue_b: format!("{} ({})", short_symbol, short_venue),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "REJECTED".into(),
-                success: false,
-                gross_profit: 0.0,
-                fees: 1.0,
-                net_profit: -1.0,
-                latency_us: 135,
-                note: format!("Cross-ticker trade safety unwind: {:?}", other),
-                direction: Some(format!("Long {} / Short {}", long_symbol, short_symbol)),
-                trigger_spread_bps: net_spread_bps,
-                baseline_mean_spread_bps: None,
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: None,
-            };
-            state.execution_logs.write().push(log_entry);
-
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: false,
-                trade_type: "Cross-Ticker Arb".into(),
-                direction: format!("Long {} / Short {}", long_symbol, short_symbol),
-                venue_a: format!("{} ({})", long_symbol, long_venue),
-                venue_b: format!("{} ({})", short_symbol, short_venue),
-                spread_bps: 0.0,
-                realized_profit_usd: -1.0,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Execution prevented/unwound: {:?}", other),
-            })
-        }
-    }
+    let _ = (long_symbol, short_symbol, long_venue, short_venue, order_qty, net_spread_bps);
+    Err("Native 'cross-ticker' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
 pub async fn execute_funding_carry_impl(
@@ -1608,96 +1508,8 @@ pub async fn execute_funding_carry_impl(
     if *state.is_paused.read() {
         return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
     }
-    state.ensure_market(symbol);
-
-    let long_adapter = state.get_adapter(long_venue).ok_or_else(|| format!("Long venue '{}' not found", long_venue))?;
-    let short_adapter = state.get_adapter(short_venue).ok_or_else(|| format!("Short venue '{}' not found", short_venue))?;
-
-    let strat = FundingRateArbStrategy::new(
-        symbol,
-        long_adapter,
-        short_adapter,
-        dec!(0.0001),
-        dec!(48.0),
-        Decimal::from_f64_retain(trade_size_usd).unwrap_or(dec!(25000.0)),
-        dec!(3.5),
-    );
-
-    let maybe_opp = strat.scan_opportunity().await.map_err(|e| e.to_string())?;
-    let opp = maybe_opp.ok_or_else(|| "No viable funding carry opportunity between venues".to_string())?;
-
-    let res = strat.execute_open_carry(&opp, &state.coordinator).await.map_err(|e| e.to_string())?;
-
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
-
-    match res {
-        ArbitrageExecutionResult::Success { realized_profit, .. } => {
-            let profit_f = realized_profit.to_string().parse::<f64>().unwrap_or(0.0);
-            let total_f = {
-                let mut total_pnl = state.total_realized_profit.write();
-                *total_pnl += realized_profit;
-                total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-            };
-
-            let log_entry = ExecutionLogEntry {
-                id: format!("exec-carry-{}", cycle),
-                timestamp: Utc::now().to_rfc3339(),
-                trade_type: "Funding".into(),
-                symbol: symbol.to_string(),
-                venue_a: long_venue.to_string(),
-                venue_b: short_venue.to_string(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: profit_f + 2.0,
-                fees: 2.0,
-                net_profit: profit_f,
-                latency_us: 125,
-                note: format!("Opened Delta-Neutral Carry: Long {} & Short {}", long_venue, short_venue),
-                direction: Some("Carry Open".into()),
-                trigger_spread_bps: Some((opp.net_rate_8h * dec!(10000.0)).to_string().parse::<f64>().unwrap_or(0.0)),
-                baseline_mean_spread_bps: None,
-                position_step: Some(1),
-                max_units: Some(3),
-                nominal_hurdle_bps: None,
-            };
-            state.execution_logs.write().push(log_entry);
-
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: true,
-                trade_type: "Funding Carry".into(),
-                direction: "LongShortCarry".into(),
-                venue_a: long_venue.to_string(),
-                venue_b: short_venue.to_string(),
-                spread_bps: (opp.net_rate_8h * dec!(10000.0)).to_string().parse::<f64>().unwrap_or(0.0),
-                realized_profit_usd: profit_f,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Carry trade opened successfully (Net 8h: {:.4}%)", opp.net_rate_8h * dec!(100)),
-            })
-        }
-        other => {
-            let total_f = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: false,
-                trade_type: "Funding Carry".into(),
-                direction: "LongShortCarry".into(),
-                venue_a: long_venue.to_string(),
-                venue_b: short_venue.to_string(),
-                spread_bps: 0.0,
-                realized_profit_usd: -2.0,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Carry execution failed: {:?}", other),
-            })
-        }
-    }
+    let _ = (symbol, long_venue, short_venue, trade_size_usd);
+    Err("Native 'funding' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
 pub async fn execute_prediction_arbitrage_impl(
@@ -1713,152 +1525,42 @@ pub async fn execute_prediction_arbitrage_impl(
     if *state.is_paused.read() {
         return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
     }
-
-    let poly = state.get_adapter(buy_yes_venue).or_else(|| state.get_adapter("polymarket")).unwrap();
-    let kalshi = state.get_adapter(buy_no_venue).or_else(|| state.get_adapter("kalshi")).unwrap();
-
-    let strat = PredictionMarketArbStrategy::new(
-        poly,
-        kalshi,
-        market_title,
-        market_title,
-        dec!(5.0),
-        Decimal::from_f64_retain(quantity).unwrap_or(dec!(100.0)),
-    );
-
-    let maybe_opp = strat.check_opportunity().await.map_err(|e| e.to_string())?;
-    let opp = maybe_opp.ok_or_else(|| "No synthetic prediction parity arbitrage found".to_string())?;
-
-    let res = strat.execute(&opp, &state.coordinator).await;
-
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
-
-    match res {
-        ArbitrageExecutionResult::Success { realized_profit, .. } => {
-            let profit_f = realized_profit.to_string().parse::<f64>().unwrap_or(4.5);
-            let total_f = {
-                let mut total_pnl = state.total_realized_profit.write();
-                *total_pnl += Decimal::from_f64_retain(profit_f).unwrap_or(dec!(4.5));
-                total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-            };
-
-            let log_entry = ExecutionLogEntry {
-                id: format!("exec-pred-{}", cycle),
-                timestamp: Utc::now().to_rfc3339(),
-                trade_type: "Prediction".into(),
-                symbol: market_title.to_string(),
-                venue_a: buy_yes_venue.to_string(),
-                venue_b: buy_no_venue.to_string(),
-                leg_a_status: "FILLED".into(),
-                leg_b_status: "FILLED".into(),
-                success: true,
-                gross_profit: profit_f + 0.5,
-                fees: 0.5,
-                net_profit: profit_f,
-                latency_us: 145,
-                note: format!("Synthetic Parity Executed: Buy YES on {} + Buy NO on {}", buy_yes_venue, buy_no_venue),
-                direction: Some("Parity Arbitrage".into()),
-                trigger_spread_bps: Some(opp.net_return_pct.to_string().parse::<f64>().unwrap_or(0.0) * 100.0),
-                baseline_mean_spread_bps: None,
-                position_step: Some(1),
-                max_units: Some(1),
-                nominal_hurdle_bps: None,
-            };
-            state.execution_logs.write().push(log_entry);
-
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: true,
-                trade_type: "Prediction Parity".into(),
-                direction: "ArrowDebreu".into(),
-                venue_a: buy_yes_venue.to_string(),
-                venue_b: buy_no_venue.to_string(),
-                spread_bps: opp.net_return_pct.to_string().parse::<f64>().unwrap_or(0.0) * 100.0,
-                realized_profit_usd: profit_f,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Synthetic parity captured: +${:.2} (ROI: {:.2}%)", profit_f, opp.net_return_pct),
-            })
-        }
-        other => {
-            let total_f = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-            Ok(SimStepResultDto {
-                cycle,
-                opportunity_found: true,
-                execution_success: false,
-                trade_type: "Prediction Parity".into(),
-                direction: "ArrowDebreu".into(),
-                venue_a: buy_yes_venue.to_string(),
-                venue_b: buy_no_venue.to_string(),
-                spread_bps: 0.0,
-                realized_profit_usd: 0.0,
-                total_cumulative_pnl_usd: total_f,
-                message: format!("Prediction parity execution skipped/failed: {:?}", other),
-            })
-        }
-    }
+    let _ = (market_title, buy_yes_venue, buy_no_venue, quantity);
+    Err("Native 'prediction' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
 pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOverviewDto, String> {
     let cb = &state.circuit_breaker;
+    let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+    // Paper exchange accounts are the source of truth for risk telemetry;
+    // live execution is unavailable, so no venue adapters are queried here.
+    let mut accounts = Vec::new();
+    for (vid, paper) in state.paper_exchanges() {
+        let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+        acc.venue = vid.into();
+        accounts.push(acc);
+    }
+
+    let total_equity_dec: Decimal = accounts.iter().map(|a| a.equity).sum();
+    let total_free_margin_dec: Decimal = accounts.iter().map(|a| a.free_margin).sum();
+    let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
+    let all_positions: Vec<_> = accounts
+        .iter()
+        .flat_map(|a| a.positions.clone())
+        .collect();
+
+    // Feed observed equity into the breaker, then re-read its state so a
+    // drawdown trip is reflected in this same snapshot.
+    cb.update_equity(total_equity_dec);
     let is_halted = cb.is_tripped();
     let cb_str = match cb.trip_reason() {
         Some(reason) => format!("TRIPPED: {}", reason),
         None => if is_halted { "TRIPPED: Manual halt".into() } else { "ACTIVE".into() },
     };
 
-    let is_live = *state.is_live_mode.read();
-    let mut all_positions = Vec::new();
-    if is_live {
-        for (_vid, _vname, adapter) in state.get_venues() {
-            if let Ok(acc) = adapter.fetch_account().await {
-                all_positions.extend(acc.positions);
-            }
-        }
-    } else {
-        let ledger = state.virtual_ledger.read();
-        for lot in ledger.lots.values() {
-            if lot.status == arbitrager_execution::virtual_ledger::CycleStatus::Open {
-                all_positions.push(arbitrager_core::position::Position {
-                    venue: arbitrager_core::types::VenueId::from(lot.venue_long.as_str()),
-                    symbol: lot.symbol.clone(),
-                    side: arbitrager_core::types::Side::Buy,
-                    quantity: Decimal::from_f64_retain(lot.long_qty).unwrap_or(Decimal::ZERO),
-                    entry_price: Decimal::from_f64_retain(lot.long_entry_price).unwrap_or(Decimal::ZERO),
-                    mark_price: Decimal::from_f64_retain(lot.long_entry_price).unwrap_or(Decimal::ZERO),
-                    unrealized_pnl: Decimal::ZERO,
-                    realized_pnl: Decimal::ZERO,
-                    liquidation_price: None,
-                    leverage: Decimal::ONE,
-                    initial_margin: Decimal::ZERO,
-                    maintenance_margin: Decimal::ZERO,
-                    updated_at: Utc::now(),
-                });
-                all_positions.push(arbitrager_core::position::Position {
-                    venue: arbitrager_core::types::VenueId::from(lot.venue_short.as_str()),
-                    symbol: lot.symbol.clone(),
-                    side: arbitrager_core::types::Side::Sell,
-                    quantity: Decimal::from_f64_retain(lot.short_qty).unwrap_or(Decimal::ZERO),
-                    entry_price: Decimal::from_f64_retain(lot.short_entry_price).unwrap_or(Decimal::ZERO),
-                    mark_price: Decimal::from_f64_retain(lot.short_entry_price).unwrap_or(Decimal::ZERO),
-                    unrealized_pnl: Decimal::ZERO,
-                    realized_pnl: Decimal::ZERO,
-                    liquidation_price: None,
-                    leverage: Decimal::ONE,
-                    initial_margin: Decimal::ZERO,
-                    maintenance_margin: Decimal::ZERO,
-                    updated_at: Utc::now(),
-                });
-            }
-        }
-    }
-
     let delta_limit = state.delta_guard.read().max_unhedged_usd_per_asset();
-    let delta_limit_f = delta_limit.to_string().parse::<f64>().unwrap_or(2500.0);
+    let delta_limit_f = delta_limit.to_string().parse::<f64>().unwrap_or(0.0);
 
     let net_deltas_map = {
         let delta_guard = state.delta_guard.read();
@@ -1874,28 +1576,68 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             net_quantity: qty_f,
             net_exposure_usd: usd_f,
             delta_limit_usd: delta_limit_f,
-            is_neutral: usd_f.abs() < 500.0,
+            is_neutral: usd.abs() <= delta_limit,
         });
     }
+    deltas_dto.sort_by(|a, b| a.asset.cmp(&b.asset));
 
-    // If no positions exist, list monitored assets with true flat zero quantities
-    if deltas_dto.is_empty() {
-        for asset in &["BTC", "ETH", "SOL"] {
-            deltas_dto.push(NetDeltaDto {
-                asset: (*asset).into(),
-                net_quantity: 0.0,
-                net_exposure_usd: 0.0,
-                delta_limit_usd: delta_limit_f,
-                is_neutral: true,
+    let total_equity = total_equity_dec.to_string().parse::<f64>().unwrap_or(0.0);
+    let total_free_margin = total_free_margin_dec.to_string().parse::<f64>().unwrap_or(0.0);
+    let total_mm = total_mm_dec.to_string().parse::<f64>().unwrap_or(0.0);
+    let current_drawdown = cb.current_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
+    let max_drawdown_limit = cb.max_daily_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
+    let day_start = cb.day_start_equity().to_string().parse::<f64>().unwrap_or(0.0);
+    let drawdown_pct = if day_start > 0.0 { (current_drawdown / day_start) * 100.0 } else { 0.0 };
+
+    let severity = |s: MarginHealthStatus| match s {
+        MarginHealthStatus::Healthy => 0,
+        MarginHealthStatus::Warning => 1,
+        MarginHealthStatus::Critical => 2,
+        MarginHealthStatus::Breached => 3,
+    };
+    let mut worst = MarginHealthStatus::Healthy;
+    for acc in &accounts {
+        let s = monitor.evaluate_account(acc);
+        if severity(s) > severity(worst) {
+            worst = s;
+        }
+    }
+    let mut min_liq_dist_pct: Option<f64> = None;
+    for pos in &all_positions {
+        let s = monitor.evaluate_position(pos);
+        if severity(s) > severity(worst) {
+            worst = s;
+        }
+        if let Some(dist) = pos.liquidation_distance_pct() {
+            let pct = (dist * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0);
+            min_liq_dist_pct = Some(match min_liq_dist_pct {
+                Some(cur) => cur.min(pct),
+                None => pct,
             });
         }
     }
 
-    let realized_pnl = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-    let total_equity = 400000.0 + realized_pnl;
-    let current_drawdown = cb.current_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
-    let max_drawdown_limit = cb.max_daily_drawdown_usd().to_string().parse::<f64>().unwrap_or(25000.0);
-    let drawdown_pct = if total_equity > 0.0 { (current_drawdown / total_equity) * 100.0 } else { 0.0 };
+    // Liquidation safety cannot be claimed without actual liquidation prices;
+    // open positions with no liquidation data report UNKNOWN_LIQUIDATION
+    // unless a margin severity already demands a stronger state.
+    let margin_status = if is_halted {
+        "HALTED"
+    } else if all_positions.is_empty() {
+        "FLAT"
+    } else {
+        match worst {
+            MarginHealthStatus::Breached => "BREACHED",
+            MarginHealthStatus::Critical => "CRITICAL",
+            MarginHealthStatus::Warning => "WARNING",
+            MarginHealthStatus::Healthy => {
+                if min_liq_dist_pct.is_none() {
+                    "UNKNOWN_LIQUIDATION"
+                } else {
+                    "SAFE"
+                }
+            }
+        }
+    };
 
     Ok(RiskOverviewDto {
         circuit_breaker_state: cb_str,
@@ -1908,11 +1650,15 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         total_portfolio_value_usd: total_equity,
         net_deltas: deltas_dto,
         margin_health: MarginHealthDto {
-            maintenance_margin_req_usd: 12500.0,
-            margin_balance_usd: (total_equity - 12500.0).max(0.0),
-            margin_ratio_pct: (12500.0 / total_equity.max(1.0)) * 100.0,
-            liquidation_distance_pct: 78.5,
-            status: if is_halted { "HALTED".into() } else { "HEALTHY".into() },
+            maintenance_margin_req_usd: total_mm,
+            margin_balance_usd: total_free_margin,
+            margin_ratio_pct: if total_equity > 0.0 { (total_mm / total_equity) * 100.0 } else { 0.0 },
+            liquidation_distance_pct: if all_positions.is_empty() {
+                0.0
+            } else {
+                min_liq_dist_pct.unwrap_or(0.0)
+            },
+            status: margin_status.into(),
         },
     })
 }
@@ -1932,9 +1678,11 @@ pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLo
 }
 
 pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool, String> {
-    let mut mode = state.is_live_mode.write();
-    *mode = enabled;
-    Ok(*mode)
+    *state.is_live_mode.write() = false;
+    if enabled {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+    Ok(false)
 }
 
 pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bool, String> {
@@ -1944,21 +1692,89 @@ pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bo
 }
 
 pub fn get_engine_settings_impl(state: &AppEngineState) -> Result<EngineSettingsDto, String> {
-    Ok(state.settings.read().clone())
+    let mut sanitized = state.settings.read().clone();
+    sanitized.clear_credential_material();
+    sanitized.configured_venues = state.vault.write().configured_venues().unwrap_or_default();
+    Ok(sanitized)
 }
 
 pub fn save_engine_settings_impl(
     settings: EngineSettingsDto,
     state: &AppEngineState,
 ) -> Result<String, String> {
-    if settings.max_slippage_bps <= 0.0 || settings.max_slippage_bps > 500.0 {
+    if !settings.trading_mode.eq_ignore_ascii_case("paper") {
+        return Err("trading_mode must be 'paper'; live execution is unavailable".into());
+    }
+    if !settings.max_slippage_bps.is_finite()
+        || settings.max_slippage_bps < 0.1
+        || settings.max_slippage_bps > 500.0
+    {
         return Err("Max slippage tolerance must be between 0.1 and 500 BPS".into());
     }
-    if settings.min_depth_ratio < 1.0 {
+    if !settings.min_depth_ratio.is_finite() || settings.min_depth_ratio < 1.0 {
         return Err("Min depth ratio must be at least 1.0".into());
     }
-    *state.settings.write() = settings;
-    Ok("Configuration successfully applied and persistent in runtime engine".into())
+    if !settings.venue_rebalance_threshold_usd.is_finite()
+        || settings.venue_rebalance_threshold_usd < 0.0
+    {
+        return Err("Venue rebalance threshold must be finite and nonnegative".into());
+    }
+    if settings.engine_rpc_port == 0
+        || settings.engine_ws_port == 0
+        || settings.engine_rpc_port == settings.engine_ws_port
+    {
+        return Err("Engine ports must be nonzero and distinct".into());
+    }
+    match settings.bind_address.parse::<std::net::IpAddr>() {
+        Ok(ip) if ip.is_loopback() => {}
+        _ => return Err("bind_address must be a loopback IP address".into()),
+    }
+    let submitted = settings.submitted_credentials();
+    if !submitted.is_empty() {
+        state
+            .vault
+            .write()
+            .upsert_credentials(submitted)
+            .map_err(|e| e.to_string())?;
+    }
+    // Toggle-only saves must still update enabled metadata on existing vault
+    // records; a locked vault skips this silently since no secrets changed.
+    let enablement: Vec<(String, bool)> = vec![
+        ("remote_hsm".into(), true),
+        (
+            "hyperliquid".into(),
+            settings.hyperliquid_enabled || settings.hyperliquid_spot_enabled,
+        ),
+        (
+            "lighter".into(),
+            settings.lighter_enabled || settings.lighter_spot_enabled,
+        ),
+        ("vanta".into(), settings.vanta_enabled),
+        ("robinhood".into(), settings.robinhood_enabled),
+        ("arcus".into(), settings.arcus_enabled),
+        ("popdex".into(), settings.popdex_enabled),
+        (
+            "kraken_spot".into(),
+            settings.kraken_enabled && settings.kraken_spot_enabled,
+        ),
+        (
+            "kraken_futures".into(),
+            settings.kraken_enabled && settings.kraken_futures_enabled,
+        ),
+        ("polymarket".into(), settings.polymarket_enabled),
+        ("kalshi".into(), settings.kalshi_enabled),
+    ];
+    {
+        let mut vault = state.vault.write();
+        if vault.is_unlocked() {
+            vault.update_enabled(&enablement).map_err(|e| e.to_string())?;
+        }
+    }
+    let mut sanitized = settings;
+    sanitized.clear_credential_material();
+    sanitized.configured_venues = state.vault.write().configured_venues().unwrap_or_default();
+    *state.settings.write() = sanitized;
+    Ok("Configuration applied to the current session".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -2044,6 +1860,7 @@ pub async fn fit_ou_process(prices: Vec<f64>, dt: f64) -> Result<OuFitDto, Strin
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_spatial_arbitrage(
     symbol: String,
     buy_venue: String,
@@ -2163,21 +1980,28 @@ pub fn get_ticker_strategy_config_impl(symbol: &str, state: &AppEngineState) -> 
     if let Some(cfg) = configs.get(symbol) {
         Ok(cfg.clone())
     } else {
-        let mut def = TickerStrategyConfigDto::default();
-        def.symbol = symbol.to_string();
-        Ok(def)
+        Ok(TickerStrategyConfigDto {
+            symbol: symbol.to_string(),
+            ..TickerStrategyConfigDto::default()
+        })
     }
 }
 
 pub fn save_ticker_strategy_config_impl(config: TickerStrategyConfigDto, state: &AppEngineState) -> Result<(), String> {
-    if config.target_profit_bps <= 0.0 {
-        return Err("target_profit_bps must be positive".into());
+    if !config.target_profit_bps.is_finite() || config.target_profit_bps <= 0.0 {
+        return Err("target_profit_bps must be finite and positive".into());
     }
     if config.window_percentile < 50 {
         return Err("window_percentile must be at least 50%".into());
     }
     if config.max_accumulated_units < 1 {
         return Err("max_accumulated_units must be at least 1".into());
+    }
+    if !(1..=5).contains(&config.user_target_leverage) {
+        return Err("user_target_leverage must be between 1 and 5".into());
+    }
+    if !config.unit_size.is_finite() || config.unit_size <= 0.0 {
+        return Err("unit_size must be finite and positive".into());
     }
     let mut configs = state.strategy_configs.write();
     configs.insert(config.symbol.clone(), config);
@@ -2235,75 +2059,86 @@ pub fn lock_vault_impl(state: &AppEngineState) -> VaultStatus {
     vault.get_status()
 }
 
-pub fn get_exchange_credentials_impl(state: &AppEngineState) -> Result<Vec<ExchangeCredentials>, String> {
-    let mut vault = state.vault.write();
-    let data = vault.get_data().map_err(|e| e.to_string())?;
-    Ok(data.credentials.clone())
-}
+const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
+    "remote_hsm",
+    "hyperliquid",
+    "lighter",
+    "vanta",
+    "robinhood",
+    "arcus",
+    "popdex",
+    "kraken_spot",
+    "kraken_futures",
+    "polymarket",
+    "kalshi",
+];
 
-pub fn save_exchange_credentials_impl(
-    password: &str,
-    credentials: Vec<ExchangeCredentials>,
+pub fn delete_exchange_credentials_impl(
+    venue: &str,
     state: &AppEngineState,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let normalized = venue.trim().to_lowercase();
+    if !DELETABLE_CREDENTIAL_VENUES.contains(&normalized.as_str()) {
+        return Err(format!(
+            "Credential deletion is not supported for venue '{}'",
+            venue
+        ));
+    }
     let mut vault = state.vault.write();
-    let updated = crate::vault::VaultData {
-        credentials,
-        updated_at: Utc::now(),
-    };
-    vault.save_data(&updated, password).map_err(|e| e.to_string())
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before removing credentials.".into());
+    }
+    vault
+        .delete_credentials(&normalized)
+        .map_err(|e| e.to_string())
 }
 
 pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<VenueBalanceInfo>, String> {
-    let venues = state.get_venues();
+    if *state.is_live_mode.read() {
+        return Ok(Vec::new());
+    }
     let threshold = state.settings.read().venue_rebalance_threshold_usd;
+    let monitor = MarginMonitor::new(MarginMonitorConfig::default());
     let mut results = Vec::new();
 
-    let is_live = *state.is_live_mode.read();
-    for (vid, name, adapter) in venues {
-        let account = if is_live {
-            adapter.fetch_account().await.unwrap_or_else(|_| arbitrager_core::position::AccountSnapshot {
-                venue: vid.into(),
-                equity: dec!(0.0),
-                free_margin: dec!(0.0),
-                maintenance_margin: dec!(0.0),
-                margin_usage_pct: dec!(0.0),
-                balances: vec![],
-                positions: vec![],
-                timestamp: Utc::now(),
-            })
-        } else {
-            arbitrager_core::position::AccountSnapshot {
-                venue: vid.into(),
-                equity: dec!(100000.0),
-                free_margin: dec!(95000.0),
-                maintenance_margin: dec!(5000.0),
-                margin_usage_pct: dec!(5.0),
-                balances: vec![],
-                positions: vec![],
-                timestamp: Utc::now(),
-            }
+    // Only venues currently admitted for paper execution report balances;
+    // figures come from the real simulated account snapshots.
+    for (vid, name, _adapter) in state.get_venues() {
+        let Some(paper) = state.get_paper_exchange(vid) else {
+            continue;
         };
+        let account = paper.fetch_account().await.map_err(|e| e.to_string())?;
 
-        let balance_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(95000.0);
-        let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(100000.0);
-        let available_margin_usd = balance_usd;
-        let margin_rate_pct = account.margin_usage_pct.to_string().parse::<f64>().unwrap_or(5.0);
+        let balance_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
+        let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
+        let margin_rate_pct = account.margin_usage_pct.to_string().parse::<f64>().unwrap_or(0.0);
 
+        let (mut status, mut action) = match monitor.evaluate_account(&account) {
+            MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
+            MarginHealthStatus::Warning => (
+                "LOW_MARGIN".to_string(),
+                Some(format!("Warning: {} margin utilization elevated.", name)),
+            ),
+            MarginHealthStatus::Critical | MarginHealthStatus::Breached => (
+                "DEPLETED".to_string(),
+                Some(format!("Critical: {} margin utilization breached. Execution halted on this leg.", name)),
+            ),
+        };
+        // Threshold check can only worsen the reported status
+        if balance_usd < threshold * 0.2 && status != "DEPLETED" {
+            status = "DEPLETED".to_string();
+            action = Some(format!("Critical: {} free margin below ${:.0}. Execution halted on this leg.", name, threshold * 0.2));
+        } else if balance_usd < threshold && status == "HEALTHY" {
+            status = "LOW_MARGIN".to_string();
+            action = Some(format!("Warning: {} free margin below ${:.0}. Please deposit funds.", name, threshold));
+        }
         let needs_rebalance = balance_usd < threshold;
-        let (status, action) = if balance_usd < threshold * 0.2 {
-            ("DEPLETED".to_string(), Some(format!("Critical: {} margin below ${:.0}. Execution halted on this leg.", name, threshold * 0.2)))
-        } else if balance_usd < threshold {
-            ("LOW_MARGIN".to_string(), Some(format!("Warning: {} free margin below ${:.0}. Please deposit funds.", name, threshold)))
-        } else {
-            ("HEALTHY".to_string(), None)
-        };
 
         results.push(VenueBalanceInfo {
             venue: vid.to_string(),
             balance_usd,
             equity_usd,
-            available_margin_usd,
+            available_margin_usd: balance_usd,
             margin_rate_pct,
             min_required_usd: threshold,
             needs_rebalance,
@@ -2339,36 +2174,10 @@ pub fn get_strategy_performance_impl(
 }
 
 pub async fn run_wfo_calibration_impl(
-    symbol: &str,
-    state: &AppEngineState,
+    _symbol: &str,
+    _state: &AppEngineState,
 ) -> Result<WfoOptimizationResult, String> {
-    let base_price = crate::commands::symbol_base_price(symbol);
-    let config = state
-        .strategy_configs
-        .read()
-        .get(symbol)
-        .cloned()
-        .unwrap_or_else(|| TickerStrategyConfigDto {
-            symbol: symbol.to_string(),
-            ..TickerStrategyConfigDto::default()
-        });
-
-    let target_profit = config.target_profit_bps;
-    let friction = 4.0;
-
-    let mut history = Vec::with_capacity(120);
-    for i in 0..120 {
-        let cycle = (i as f64 * 0.15).sin() * 6.0;
-        let noise = ((i * 17) % 11) as f64 * 0.5;
-        let cur_spread = (10.0 + cycle + noise).max(2.0);
-        let base_f64 = base_price.to_string().parse::<f64>().unwrap_or(60000.0);
-        let depth = (base_f64 * 1.5).max(50000.0);
-        history.push(QuoteObservation::new(i as u64 * 1000, cur_spread, depth));
-    }
-
-    let candidate_windows = vec![10, 20, 30, 50];
-    let result = run_walk_forward_optimization(&history, &candidate_windows, target_profit, friction);
-    Ok(result)
+    Err("WFO calibration is unavailable until sufficient recorded quote history exists".into())
 }
 
 #[tauri::command]
@@ -2402,19 +2211,11 @@ pub async fn lock_vault(
 }
 
 #[tauri::command]
-pub async fn get_exchange_credentials(
+pub async fn delete_exchange_credentials(
+    venue: String,
     state: State<'_, Arc<AppEngineState>>,
-) -> Result<Vec<ExchangeCredentials>, String> {
-    get_exchange_credentials_impl(&state)
-}
-
-#[tauri::command]
-pub async fn save_exchange_credentials(
-    password: String,
-    credentials: Vec<ExchangeCredentials>,
-    state: State<'_, Arc<AppEngineState>>,
-) -> Result<(), String> {
-    save_exchange_credentials_impl(&password, credentials, &state)
+) -> Result<bool, String> {
+    delete_exchange_credentials_impl(&venue, &state)
 }
 
 #[tauri::command]
@@ -2458,14 +2259,18 @@ mod tests {
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
             s.popdex_enabled = true;
-            s.hyperliquid_wallet = "0x1111".into();
-            s.lighter_api_key = "lgt_key".into();
-            s.vanta_orderly_key = "vnt_key".into();
-            s.robinhood_wallet = "0x2222".into();
-            s.arcus_api_key = "arc_key".into();
-            s.popdex_api_key = "pop_key".into();
         }
         state
+    }
+
+    fn test_state_with_vault(tag: &str) -> (AppEngineState, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "arbitrager_cmd_vault_{}_{}",
+            tag,
+            rand::random::<u64>()
+        ));
+        let state = AppEngineState::new_with_vault_path(dir.join("vault.enc"));
+        (state, dir)
     }
 
     fn seed_test_book(state: &AppEngineState, venue_id: &str, symbol: &str, bid: Decimal, ask: Decimal) {
@@ -2497,7 +2302,7 @@ mod tests {
     async fn test_pause_and_continue_trading_state() {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60020.0), dec!(60025.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
 
         assert!(!*state.is_paused.read());
 
@@ -2643,7 +2448,7 @@ mod tests {
     async fn test_execute_spatial_arbitrage() {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64220.0), dec!(64225.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
             "BTC-USDC",
@@ -2662,16 +2467,40 @@ mod tests {
         .expect("exec spatial");
         assert_eq!(res.trade_type, "Spatial Arb");
         assert_eq!(res.direction, "Divergence Entry");
-        assert_eq!(res.spread_bps, 18.5);
+        // Caller-supplied trigger spread is not trusted; the returned spread is
+        // the calculated net BPS (~20.6) which must clear the 15 BPS hurdle
+        assert!(res.spread_bps > 15.0);
+        assert!(res.spread_bps < 30.0);
+        // Opening a paper position realizes only fee outflow
+        assert!(res.realized_profit_usd < 0.0);
 
         let logs = get_execution_logs_impl(&state).expect("logs");
         let last = logs.last().expect("last log");
         assert_eq!(last.direction.as_deref(), Some("Divergence Entry"));
-        assert_eq!(last.trigger_spread_bps, Some(18.5));
+        assert_eq!(last.trigger_spread_bps, Some(res.spread_bps));
         assert_eq!(last.baseline_mean_spread_bps, Some(12.0));
         assert_eq!(last.position_step, Some(1));
         assert_eq!(last.max_units, Some(3));
         assert_eq!(last.nominal_hurdle_bps, Some(15.0));
+        assert!(last.net_profit < 0.0);
+
+        // Simulated paper accounts must hold the opposite positions
+        let acc_hl = state
+            .get_paper_exchange("hyperliquid")
+            .expect("hl paper")
+            .fetch_account()
+            .await
+            .expect("hl account");
+        let acc_lgt = state
+            .get_paper_exchange("lighter")
+            .expect("lgt paper")
+            .fetch_account()
+            .await
+            .expect("lgt account");
+        let pos_hl = acc_hl.positions.iter().find(|p| p.symbol == "BTC-USDC").expect("hl position");
+        let pos_lgt = acc_lgt.positions.iter().find(|p| p.symbol == "BTC-USDC").expect("lgt position");
+        assert_eq!(pos_hl.side, Side::Buy);
+        assert_eq!(pos_lgt.side, Side::Sell);
     }
 
     #[tokio::test]
@@ -2681,14 +2510,14 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        assert_eq!(risk.total_portfolio_value_usd, 400000.0);
+        // Two admitted paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 200000.0);
 
-        // Verify clean flat delta (no fabricated fake positions)
-        for d in &risk.net_deltas {
-            assert_eq!(d.net_quantity, 0.0);
-            assert_eq!(d.net_exposure_usd, 0.0);
-            assert!(d.is_neutral);
-        }
+        // Flat book: no observed positions means no delta entries at all
+        assert!(risk.net_deltas.is_empty());
+        assert_eq!(risk.margin_health.status, "FLAT");
+        assert_eq!(risk.margin_health.liquidation_distance_pct, 0.0);
+        assert_eq!(risk.margin_health.maintenance_margin_req_usd, 0.0);
 
         // Trigger killswitch
         let halt_msg = trigger_emergency_killswitch_impl(&state).expect("killswitch");
@@ -2714,29 +2543,14 @@ mod tests {
 
         let new_settings = EngineSettingsDto {
             hsm_url: "http://hsm.internal:9000".into(),
-            hmac_token: "test_token".into(),
             max_slippage_bps: 20.0,
             min_depth_ratio: 4.0,
-            hyperliquid_wallet: "0x1234567890abcdef1234567890abcdef12345678".into(),
-            hyperliquid_private_key: "0xhlsecret".into(),
             hyperliquid_url: "https://api.hyperliquid.xyz".into(),
-            lighter_account_index: "42".into(),
-            lighter_api_key: "0xlgtkey".into(),
             lighter_url: "https://mainnet.zklighter.elliot.ai".into(),
-            vanta_account_id: "acc_vanta_99".into(),
-            vanta_orderly_key: "ed25519_key".into(),
-            vanta_orderly_secret: "vanta_secret".into(),
             vanta_url: "https://api-evm.orderly.org".into(),
-            robinhood_wallet: "0xrhwallet".into(),
-            robinhood_private_key: "0xrhkey".into(),
             robinhood_rpc_url: "https://rpc.robinhood.network".into(),
             robinhood_router: "0x1111".into(),
-            polymarket_api_key: "poly_key".into(),
-            polymarket_secret: "poly_secret".into(),
-            polymarket_passphrase: "poly_phrase".into(),
             polymarket_url: "https://clob.polymarket.com".into(),
-            kalshi_api_key_id: "kalshi_id".into(),
-            kalshi_private_key: "kalshi_key".into(),
             kalshi_url: "https://trading-api.kalshi.com".into(),
             ..EngineSettingsDto::default()
         };
@@ -2746,12 +2560,149 @@ mod tests {
         assert_eq!(updated.max_slippage_bps, 20.0);
         assert_eq!(updated.min_depth_ratio, 4.0);
         assert_eq!(updated.hsm_url, "http://hsm.internal:9000");
-        assert_eq!(updated.hyperliquid_wallet, "0x1234567890abcdef1234567890abcdef12345678");
-        assert_eq!(updated.lighter_account_index, "42");
-        assert_eq!(updated.vanta_account_id, "acc_vanta_99");
         assert_eq!(updated.robinhood_router, "0x1111");
-        assert_eq!(updated.polymarket_api_key, "poly_key");
-        assert_eq!(updated.kalshi_api_key_id, "kalshi_id");
+        assert!(updated.configured_venues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_credential_settings_rejected_while_vault_locked() {
+        let (state, dir) = test_state_with_vault("locked");
+        let before = get_engine_settings_impl(&state).expect("settings before");
+
+        let mut settings = before.clone();
+        settings.hyperliquid_private_key = "SENTINEL_HL_KEY".into();
+        settings.hyperliquid_wallet = "SENTINEL_HL_WALLET".into();
+        let res = save_engine_settings_impl(settings, &state);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("locked"));
+
+        let after = get_engine_settings_impl(&state).expect("settings after");
+        assert_eq!(after.max_slippage_bps, before.max_slippage_bps);
+        assert!(after.configured_venues.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_credential_save_is_vault_only_and_sanitized() {
+        let (state, dir) = test_state_with_vault("creds");
+        initialize_vault_impl("test master password", &state).expect("init vault");
+
+        let settings = EngineSettingsDto {
+            hyperliquid_enabled: true,
+            hyperliquid_wallet: "SENTINEL_WALLET_0x".into(),
+            hyperliquid_private_key: "SENTINEL_PRIV_9f2".into(),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save credential settings");
+
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        let hl = stored
+            .credentials
+            .iter()
+            .find(|c| c.venue == "hyperliquid")
+            .expect("hyperliquid credentials in vault");
+        assert_eq!(hl.api_secret, "SENTINEL_PRIV_9f2");
+        assert_eq!(hl.wallet_address.as_deref(), Some("SENTINEL_WALLET_0x"));
+        assert!(hl.enabled);
+
+        let runtime = state.settings.read().clone();
+        let returned = get_engine_settings_impl(&state).expect("sanitized settings");
+        let returned_json = serde_json::to_string(&returned).expect("serialize");
+        let runtime_json = serde_json::to_string(&runtime).expect("serialize runtime");
+        for sentinel in ["SENTINEL_WALLET_0x", "SENTINEL_PRIV_9f2"] {
+            assert!(
+                runtime.hyperliquid_private_key.is_empty()
+                    || !runtime.hyperliquid_private_key.contains(sentinel)
+            );
+            assert!(
+                !runtime_json.contains(sentinel),
+                "runtime settings JSON leaked {}",
+                sentinel
+            );
+            assert!(
+                !returned_json.contains(sentinel),
+                "settings JSON leaked {}",
+                sentinel
+            );
+        }
+        assert_eq!(returned.configured_venues, vec!["hyperliquid".to_string()]);
+
+        lock_vault_impl(&state);
+        let locked = get_engine_settings_impl(&state).expect("locked settings");
+        assert!(locked.configured_venues.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_delete_exchange_credentials_allowlist_and_lifecycle() {
+        let (state, dir) = test_state_with_vault("delete_creds");
+
+        let err = delete_exchange_credentials_impl("hyperliquid", &state).unwrap_err();
+        assert!(err.contains("locked"), "err: {}", err);
+
+        initialize_vault_impl("test master password", &state).expect("init vault");
+
+        let settings = EngineSettingsDto {
+            hyperliquid_enabled: true,
+            hyperliquid_private_key: "SENTINEL_PRIV_del".into(),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save credentials");
+
+        for bad in ["unknown_venue", "hyperliquid;rm", "*", "hyperliquid wallet"] {
+            assert!(
+                delete_exchange_credentials_impl(bad, &state).is_err(),
+                "deletion accepted non-allowlisted venue {:?}",
+                bad
+            );
+        }
+
+        assert!(!delete_exchange_credentials_impl("kalshi", &state).unwrap());
+        assert!(delete_exchange_credentials_impl(" HyperLiquid ", &state).unwrap());
+
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert!(stored.credentials.is_empty());
+        let sanitized = get_engine_settings_impl(&state).expect("sanitized");
+        assert!(sanitized.configured_venues.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_no_credential_read_ipc_registered() {
+        let main_src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("read main.rs");
+        for cmd in [
+            "get_exchange_credentials",
+            "get_credentials",
+            "read_credentials",
+            "export_credentials",
+            "export_vault",
+            "get_vault_data",
+        ] {
+            assert!(
+                !main_src.contains(cmd),
+                "secret-read IPC registered in main.rs: {}",
+                cmd
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_nonsecret_settings_save_while_vault_locked() {
+        let (state, dir) = test_state_with_vault("nonsecret");
+        let settings = EngineSettingsDto {
+            max_slippage_bps: 25.0,
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save nonsecret settings");
+        let updated = get_engine_settings_impl(&state).expect("get settings");
+        assert_eq!(updated.max_slippage_bps, 25.0);
+        assert!(updated.configured_venues.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2801,7 +2752,7 @@ mod tests {
     async fn test_initial_execution_logs_presence() {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64220.0), dec!(64225.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let logs = get_execution_logs_impl(&state).expect("execution logs");
         assert!(logs.is_empty());
@@ -2834,8 +2785,259 @@ mod tests {
         seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.40), dec!(4.42));
         seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.45), dec!(4.47));
 
-        let exec_res = execute_spatial_arbitrage_impl("DOT-USDC", "Hyperliquid", "Lighter", 50.0, None, None, None, None, None, None, &state).await.expect("spatial exec on dot");
+        let exec_res = execute_spatial_arbitrage_impl("DOT-USDC", "Hyperliquid", "Lighter", 0.5, None, None, None, None, None, None, &state).await.expect("spatial exec on dot");
         assert!(exec_res.execution_success);
+        assert!(exec_res.realized_profit_usd < 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_unsafe_inputs() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        // Same venue, zero qty, NaN qty
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "Hyperliquid", 0.1, None, None, None, None, None, None, &state,
+        ).await;
+        assert!(res.unwrap_err().contains("distinct"));
+        // Same canonical venue through different aliases must also reject
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "hl", 0.1, None, None, None, None, None, None, &state,
+        ).await;
+        assert!(res.unwrap_err().contains("distinct"));
+        // Malformed symbol
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC'; DROP", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        ).await;
+        assert!(res.unwrap_err().contains("Invalid market symbol"));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.0, None, None, None, None, None, None, &state,
+        ).await;
+        assert!(res.unwrap_err().contains("positive"));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", f64::NAN, None, None, None, None, None, None, &state,
+        ).await;
+        assert!(res.unwrap_err().contains("finite"));
+        // Negative hurdle
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, Some(-1.0), &state,
+        ).await;
+        assert!(res.unwrap_err().contains("hurdle"));
+
+        // Nothing may have mutated state
+        assert!(state.virtual_ledger.read().lots.is_empty());
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_bad_books() {
+        let state = setup_test_state_with_venues();
+
+        // Crossed book on the buy side (bid > ask)
+        let mut crossed = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new("hyperliquid"),
+            "BTC-USDC".to_string(),
+        );
+        crossed.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64300.0), dec!(10.0)));
+        crossed.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64200.0), dec!(10.0)));
+        crossed.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(crossed);
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await;
+        let err = res.expect_err("crossed book must be rejected");
+        assert!(err.contains("order book rejected"), "unexpected err: {}", err);
+        assert!(state.virtual_ledger.read().lots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_depth_slippage_and_economics() {
+        let state = setup_test_state_with_venues();
+
+        // Depth ratio: 11 units of within-limit ask depth fills the order but
+        // cannot satisfy 11 * 3 = 33 required ratio; out-of-limit depth at
+        // 64500 must not count toward the requirement
+        {
+            let mut book = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC".to_string(),
+            );
+            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(11.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64500.0), dec!(50.0)));
+            book.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(book);
+
+            let mut deep = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("lighter"),
+                "BTC-USDC".to_string(),
+            );
+            deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
+            deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+            deep.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(deep);
+        }
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 11.0, None, None, None, None, None, None, &state,
+        )
+        .await;
+        assert!(res.expect_err("depth ratio must reject").contains("depth"), "expected depth error");
+
+        // Slippage: qty 5 walks deep into a second level 300+ bps above top
+        {
+            let mut book = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC".to_string(),
+            );
+            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(66200.0), dec!(50.0)));
+            book.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(book);
+        }
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 5.0, None, None, None, None, None, None, &state,
+        )
+        .await;
+        assert!(res.expect_err("slippage must reject").contains("slippage"), "expected slippage error");
+
+        // Non-profitable spread: sell VWAP below buy VWAP
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64330.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64200.0), dec!(64210.0));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await;
+        assert!(res.expect_err("negative spread must reject").contains("not profitable"));
+
+        // Profitable but below the caller's nominal hurdle
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64260.0), dec!(64265.0));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, Some(50.0), &state,
+        )
+        .await;
+        assert!(res.expect_err("hurdle must reject").contains("hurdle"));
+
+        assert!(state.virtual_ledger.read().lots.is_empty());
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_equal_qty_wide_spread_passes_delta() {
+        let state = setup_test_state_with_venues();
+        // Equal 3 BTC legs at materially different marks are delta-neutral
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(61000.0), dec!(61005.0));
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 3.0, None, None, None, None, None, None, &state,
+        )
+        .await;
+        let res = res.expect("wide-spread equal-quantity pair must pass all guards");
+        assert!(res.execution_success);
+        assert_eq!(state.virtual_ledger.read().lots.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_critical_margin() {
+        let state = setup_test_state_with_venues();
+        let hl_paper = state.get_paper_exchange("hyperliquid").expect("hl paper");
+
+        // Drive the paper account into critical margin utilization directly:
+        // open 1.5 BTC at 5x (IM 18000), then drop leverage to 1x so the
+        // position's initial margin becomes 90000 against 100k equity (90%)
+        let mut big_book = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new("hyperliquid"),
+            "BTC-USDC".to_string(),
+        );
+        big_book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(59900.0), dec!(500.0)));
+        big_book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(60000.0), dec!(500.0)));
+        big_book.timestamp = Utc::now();
+        hl_paper.replace_orderbook(big_book).expect("seed big book");
+        let resp = hl_paper
+            .place_order(arbitrager_core::order::OrderRequest::new_ioc(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC",
+                Side::Buy,
+                dec!(60000.0),
+                dec!(1.5),
+            ))
+            .await
+            .expect("direct paper order");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Filled);
+        hl_paper
+            .set_leverage("BTC-USDC", 1)
+            .await
+            .expect("lower leverage");
+        let acc = hl_paper.fetch_account().await.expect("account");
+        assert!(acc.margin_usage_pct >= dec!(85.0), "usage {} must be critical", acc.margin_usage_pct);
+
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await;
+        let err = res.expect_err("critical margin must reject");
+        assert!(err.contains("margin"), "unexpected err: {}", err);
+        assert!(state.virtual_ledger.read().lots.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_toggle_off_keeps_stored_venue_discoverable_and_deletable() {
+        let (state, dir) = test_state_with_vault("toggle");
+        initialize_vault_impl("test master password", &state).expect("init vault");
+
+        let settings = EngineSettingsDto {
+            hyperliquid_enabled: true,
+            hyperliquid_wallet: "SENTINEL_WALLET_toggle".into(),
+            hyperliquid_private_key: "SENTINEL_PRIV_toggle".into(),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save creds");
+        assert_eq!(
+            get_engine_settings_impl(&state).expect("settings").configured_venues,
+            vec!["hyperliquid".to_string()]
+        );
+
+        // Toggle the venue off without resubmitting any secrets: the stored
+        // record stays discoverable because configured_venues means
+        // "credentials exist", not "venue active"
+        let mut off = EngineSettingsDto::default();
+        off.hyperliquid_enabled = false;
+        off.hyperliquid_spot_enabled = false;
+        save_engine_settings_impl(off, &state).expect("save toggle off");
+        assert_eq!(
+            get_engine_settings_impl(&state).expect("settings").configured_venues,
+            vec!["hyperliquid".to_string()]
+        );
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        let hl = stored
+            .credentials
+            .iter()
+            .find(|c| c.venue == "hyperliquid")
+            .expect("secret must remain stored");
+        assert_eq!(hl.api_secret, "SENTINEL_PRIV_toggle");
+        assert!(!hl.enabled);
+
+        // Disabled records remain deletable
+        assert!(delete_exchange_credentials_impl("hyperliquid", &state).expect("delete disabled creds"));
+        assert!(
+            get_engine_settings_impl(&state)
+                .expect("settings")
+                .configured_venues
+                .is_empty()
+        );
+        assert!(state.vault.write().get_data().expect("vault data").credentials.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -2844,6 +3046,7 @@ mod tests {
         seed_test_book(&state, "hyperliquid", "SOL-USDC", dec!(152.0), dec!(152.2));
         seed_test_book(&state, "lighter", "AVAX-USDC", dec!(28.5), dec!(28.7));
 
+        let pnl_before = *state.total_realized_profit.read();
         let res = execute_cross_ticker_arbitrage_impl(
             "SOL-USDC",
             "AVAX-USDC",
@@ -2853,20 +3056,74 @@ mod tests {
             Some(18.5),
             &state,
         )
-        .await
-        .expect("cross ticker execution");
+        .await;
 
-        assert!(res.execution_success);
-        assert_eq!(res.trade_type, "Cross-Ticker Arb");
-        assert_eq!(res.spread_bps, 18.5);
-        assert!(res.realized_profit_usd > 0.0);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("cross-ticker"));
+        assert_eq!(*state.total_realized_profit.read(), pnl_before);
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert!(state.virtual_ledger.read().lots.is_empty());
+    }
 
-        let logs = get_execution_logs_impl(&state).expect("logs");
-        let pair_log = logs.iter().find(|l| l.trade_type == "PairStatArb");
-        assert!(pair_log.is_some());
-        let l = pair_log.unwrap();
-        assert_eq!(l.symbol, "SOL-USDC/AVAX-USDC");
-        assert!(l.success);
+    #[tokio::test]
+    async fn test_live_mode_enable_rejected() {
+        let state = AppEngineState::new();
+        let res = set_live_mode_impl(true, &state);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("Live execution is disabled"));
+        assert!(!*state.is_live_mode.read());
+
+        let res_off = set_live_mode_impl(false, &state).expect("disable live mode");
+        assert!(!res_off);
+        assert!(!*state.is_live_mode.read());
+    }
+
+    #[tokio::test]
+    async fn test_real_trading_mode_rejected() {
+        let state = AppEngineState::new();
+        let settings = EngineSettingsDto {
+            trading_mode: "real".into(),
+            ..EngineSettingsDto::default()
+        };
+        let res = save_engine_settings_impl(settings, &state);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("paper"));
+        assert_eq!(get_engine_settings_impl(&state).expect("settings").trading_mode, "paper");
+    }
+
+    #[tokio::test]
+    async fn test_unsupported_native_executions_fail_closed() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60020.0), dec!(60025.0));
+
+        let pnl_before = *state.total_realized_profit.read();
+
+        let spot = execute_spot_arbitrage_impl(
+            SpotExecutionParams {
+                symbol: "BTC-USDC".into(),
+                buy_venue: "hyperliquid".into(),
+                sell_venue: "lighter".into(),
+                trade_size_usd: 5000.0,
+                max_slippage_bps: 15.0,
+                net_spread_bps: Some(12.0),
+            },
+            &state,
+        ).await;
+        assert!(spot.is_err());
+        assert!(spot.unwrap_err().contains("spot"));
+
+        let funding = execute_funding_carry_impl("BTC-USDC", "hyperliquid", "lighter", 25000.0, &state).await;
+        assert!(funding.is_err());
+        assert!(funding.unwrap_err().contains("funding"));
+
+        let pred = execute_prediction_arbitrage_impl("FED DECISION", "polymarket", "kalshi", 100.0, &state).await;
+        assert!(pred.is_err());
+        assert!(pred.unwrap_err().contains("prediction"));
+
+        assert_eq!(*state.total_realized_profit.read(), pnl_before);
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert!(state.virtual_ledger.read().lots.is_empty());
     }
 
     #[tokio::test]
@@ -2912,6 +3169,28 @@ mod tests {
         };
         assert!(save_ticker_strategy_config_impl(invalid_percentile, &state).is_err());
 
+        // Leverage above the hard cap and nonpositive unit sizes are rejected
+        let bad_leverage = TickerStrategyConfigDto {
+            user_target_leverage: 6,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(bad_leverage, &state).is_err());
+        let zero_leverage = TickerStrategyConfigDto {
+            user_target_leverage: 0,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(zero_leverage, &state).is_err());
+        let bad_unit = TickerStrategyConfigDto {
+            unit_size: 0.0,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(bad_unit, &state).is_err());
+        let nan_unit = TickerStrategyConfigDto {
+            unit_size: f64::NAN,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(nan_unit, &state).is_err());
+
         // 3. Save valid updated config
         let updated = TickerStrategyConfigDto {
             symbol: "BTC-USDC".into(),
@@ -2921,7 +3200,7 @@ mod tests {
             current_accumulated_units: 1,
             execution_mode: "DOUBLE_WAY".into(),
             unit_size: 0.01,
-            user_target_leverage: 15,
+            user_target_leverage: 5,
             sliding_window: "5m".into(),
         };
         assert!(save_ticker_strategy_config_impl(updated.clone(), &state).is_ok());
@@ -2944,7 +3223,7 @@ mod tests {
     async fn test_venue_balances_and_asymmetric_rebalance() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
-        assert_eq!(balances.len(), 6);
+        assert_eq!(balances.len(), 2);
         for b in &balances {
             assert!(b.balance_usd > 0.0);
             assert_eq!(b.min_required_usd, 500.0);
@@ -2967,14 +3246,467 @@ mod tests {
     #[tokio::test]
     async fn test_wfo_calibration_command() {
         let state = AppEngineState::new();
-        let res = run_wfo_calibration_impl("BTC-USDC", &state).await.expect("wfo");
-        assert!([
-            arbitrager_math::calibration::BaselineEstimatorType::VWMA,
-            arbitrager_math::calibration::BaselineEstimatorType::EMA,
-            arbitrager_math::calibration::BaselineEstimatorType::SMA,
-            arbitrager_math::calibration::BaselineEstimatorType::WMA,
-            arbitrager_math::calibration::BaselineEstimatorType::SMMA,
-        ].contains(&res.optimal_estimator));
-        assert!(res.optimal_window_size >= 10);
+        let configs_before = state.strategy_configs.read().len();
+        let logs_before = state.execution_logs.read().len();
+
+        let res = run_wfo_calibration_impl("BTC-USDC", &state).await;
+        let err = res.expect_err("WFO must fail closed without recorded history");
+        assert!(err.contains("unavailable"), "unexpected err: {}", err);
+
+        assert_eq!(state.strategy_configs.read().len(), configs_before);
+        assert_eq!(state.execution_logs.read().len(), logs_before);
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_scans_fail_closed_even_when_fully_configured() {
+        let (state, dir) = test_state_with_vault("scans");
+        initialize_vault_impl("test master password", &state).expect("init vault");
+
+        let settings = EngineSettingsDto {
+            hyperliquid_enabled: true,
+            lighter_enabled: true,
+            vanta_enabled: true,
+            robinhood_enabled: true,
+            arcus_enabled: true,
+            popdex_enabled: true,
+            kraken_enabled: true,
+            kraken_spot_enabled: true,
+            kraken_futures_enabled: true,
+            polymarket_enabled: true,
+            kalshi_enabled: true,
+            hyperliquid_wallet: "WALLET_x".into(),
+            hyperliquid_private_key: "PRIV_x".into(),
+            lighter_api_key: "LGT_KEY".into(),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save configured settings");
+
+        let spot = scan_spot_opportunities_impl("BTC", &state).await.expect("spot scan");
+        assert!(spot.is_empty());
+        let pred = scan_prediction_opportunities_impl("FED", &state).await.expect("pred scan");
+        assert!(pred.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_repeated_open() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let first = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect("first execution");
+        assert!(first.execution_success);
+
+        let logs_before = state.execution_logs.read().len();
+        let pnl_before = *state.total_realized_profit.read();
+        let lots_before = state.virtual_ledger.read().lots.len();
+
+        let second = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await;
+        let err = second.expect_err("second open must reject");
+        assert!(err.contains("already exists"), "unexpected err: {}", err);
+
+        assert_eq!(state.execution_logs.read().len(), logs_before);
+        assert_eq!(*state.total_realized_profit.read(), pnl_before);
+        assert_eq!(state.virtual_ledger.read().lots.len(), lots_before);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_rejects_insufficient_ioc_bounded_depth() {
+        let state = setup_test_state_with_venues();
+        // Unbounded slippage for 2.0 would pass (VWAP ~8 bps), but only 1.0
+        // ask sits inside the 15 BPS IOC limit; the remainder is unreachable.
+        {
+            let mut book = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC".to_string(),
+            );
+            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64310.0), dec!(50.0)));
+            book.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(book);
+
+            let mut deep = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("lighter"),
+                "BTC-USDC".to_string(),
+            );
+            deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
+            deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+            deep.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(deep);
+        }
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 2.0, None, None, None, None, None, None, &state,
+        )
+        .await;
+        assert!(res.expect_err("must reject before dispatch").contains("slippage"));
+        assert!(state.virtual_ledger.read().lots.is_empty());
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_symbol_and_numeric_input_validation() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+
+        let oversized_symbol = "A".repeat(65);
+        for bad in [
+            "",
+            "  ",
+            "BTC -USDC",
+            "../etc/passwd",
+            "BTC-USDC?x=1",
+            "BTC-USDC;rm",
+            "BTC-\u{0001}USDC",
+            "-USDC",
+            "BTC-",
+            oversized_symbol.as_str(),
+        ] {
+            assert!(
+                fetch_orderbooks_impl(bad, &state).await.is_err(),
+                "symbol {:?} must be rejected",
+                bad
+            );
+        }
+
+        let oversized: Vec<String> = (0..101).map(|i| format!("S{}", i)).collect();
+        assert!(fetch_multi_market_quotes_impl(oversized, &state).await.is_err());
+        assert!(
+            fetch_multi_market_quotes_impl(vec!["BTC-USDC?bad".into()], &state)
+                .await
+                .is_err()
+        );
+
+        assert!(
+            scan_spatial_opportunities_impl("BTC-USDC", 5.0, f64::NAN, &state)
+                .await
+                .is_err()
+        );
+        assert!(
+            scan_spatial_opportunities_impl("BTC-USDC", 5.0, -1.0, &state)
+                .await
+                .is_err()
+        );
+        assert!(
+            scan_spatial_opportunities_impl("BTC-USDC", f64::NAN, 0.1, &state)
+                .await
+                .is_err()
+        );
+        assert!(
+            scan_funding_opportunities_impl("BTC-USDC", -5.0, &state)
+                .await
+                .is_err()
+        );
+        assert!(
+            scan_funding_opportunities_impl("BTC-USDC", f64::INFINITY, &state)
+                .await
+                .is_err()
+        );
+
+        assert!(run_stat_arb_step_impl(0, f64::NAN, 100.0, &state).is_err());
+        assert!(run_stat_arb_step_impl(0, 100.0, -1.0, &state).is_err());
+        assert!(fit_ou_process_impl(&[100.0; 12], f64::NAN).is_err());
+        assert!(fit_ou_process_impl(&[f64::INFINITY; 12], 1.0).is_err());
+        assert!(compute_optimal_thresholds_impl(f64::NAN, 0.0, 1.0, 0.1).is_err());
+        assert!(compute_optimal_thresholds_impl(1.0, 0.0, f64::INFINITY, 0.1).is_err());
+        assert!(compute_optimal_thresholds_impl(1.0, 0.0, 1.0, f64::NAN).is_err());
+
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_engine_settings_rejects_invalid_inputs() {
+        let state = AppEngineState::new();
+        let base = EngineSettingsDto::default();
+
+        let bad = EngineSettingsDto { max_slippage_bps: f64::NAN, ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { max_slippage_bps: 0.0, ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { min_depth_ratio: f64::NAN, ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { venue_rebalance_threshold_usd: -1.0, ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { trading_mode: "simulation".into(), ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { bind_address: "0.0.0.0".into(), ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            engine_rpc_port: 9000,
+            engine_ws_port: 9000,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto { engine_rpc_port: 0, ..base.clone() };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+
+        let ok = save_engine_settings_impl(base, &state);
+        assert!(ok.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_risk_overview_open_position_free_margin_and_unknown_liquidation() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let before = get_risk_overview_impl(&state).await.expect("risk before");
+        assert_eq!(before.total_portfolio_value_usd, 200000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 200000.0);
+        assert_eq!(before.margin_health.status, "FLAT");
+
+        execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect("execution");
+
+        let after = get_risk_overview_impl(&state).await.expect("risk after");
+        assert!(
+            after.margin_health.margin_balance_usd < 200000.0,
+            "free margin must decrease after open: {}",
+            after.margin_health.margin_balance_usd
+        );
+        assert_eq!(
+            after.margin_health.status, "UNKNOWN_LIQUIDATION",
+            "open positions without liquidation prices must not report SAFE"
+        );
+        let btc = after
+            .net_deltas
+            .iter()
+            .find(|d| d.asset == "BTC")
+            .expect("BTC delta entry");
+        assert_eq!(btc.net_quantity, 0.0);
+        assert_eq!(btc.net_exposure_usd, 0.0);
+        assert!(btc.is_neutral);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_pnl_synced_from_paper_equity() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect("execution");
+        assert!(res.execution_success);
+
+        let mut equity_sum = dec!(0);
+        for (_, paper) in state.paper_exchanges() {
+            equity_sum += paper.fetch_account().await.expect("account").equity;
+        }
+        assert_eq!(
+            *state.total_realized_profit.read(),
+            equity_sum - dec!(200000)
+        );
+        // Fees are real outflow; the position open is not marked as profit
+        assert!(*state.total_realized_profit.read() < dec!(0));
+
+        let metrics = state
+            .virtual_ledger
+            .read()
+            .compute_strategy_metrics("spatial_spread");
+        assert_eq!(metrics.total_cycles_initiated, 1);
+
+        let perfs = get_strategy_performance_impl(None, &state).expect("performance");
+        let spatial = perfs
+            .iter()
+            .find(|p| p.strategy_id == "spatial_spread")
+            .expect("spatial_spread metrics");
+        assert_eq!(spatial.total_cycles_completed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_queued_call_reevaluates_breaker() {
+        let state = Arc::new(setup_test_state_with_venues());
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let guard = state.execution_lock.lock().await;
+        let st = state.clone();
+        let task = tokio::spawn(async move {
+            execute_spatial_arbitrage_impl(
+                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &st,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        state.circuit_breaker.trip("killswitch while execution queued");
+        drop(guard);
+
+        let res = task.await.expect("join");
+        let err = res.expect_err("queued execution must observe the tripped breaker");
+        assert!(err.contains("Circuit Breaker"), "unexpected err: {}", err);
+        assert!(state.virtual_ledger.read().lots.is_empty());
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+        for (_, paper) in state.paper_exchanges() {
+            let acc = paper.fetch_account().await.expect("account");
+            assert!(acc.positions.is_empty());
+            assert_eq!(acc.equity, dec!(100000.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_spatial_concurrent_same_symbol_only_one_opens() {
+        let state = Arc::new(setup_test_state_with_venues());
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let (r1, r2) = tokio::join!(
+            execute_spatial_arbitrage_impl(
+                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            ),
+            execute_spatial_arbitrage_impl(
+                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            ),
+        );
+        let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(oks, 1, "exactly one execution may open: {:?} {:?}", r1, r2);
+        let errs: Vec<String> = [r1, r2].into_iter().filter_map(|r| r.err()).collect();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("already exists"), "unexpected err: {}", errs[0]);
+        assert_eq!(state.virtual_ledger.read().lots.len(), 1);
+        assert_eq!(state.execution_logs.read().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_validate_adapter_book_helper() {
+        let venue = arbitrager_core::types::VenueId::new("hyperliquid");
+        let mut book = OrderBook::new(venue.clone(), "BTC-USDC".to_string());
+        book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64000.0), dec!(1.0)));
+        book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64001.0), dec!(1.0)));
+
+        assert!(validate_adapter_book(&book, &venue, "BTC-USDC").is_ok());
+
+        let other_venue = arbitrager_core::types::VenueId::new("lighter");
+        let err = validate_adapter_book(&book, &other_venue, "BTC-USDC").unwrap_err();
+        assert!(err.contains("venue"), "unexpected err: {}", err);
+
+        let err = validate_adapter_book(&book, &venue, "ETH-USDC").unwrap_err();
+        assert!(err.contains("symbol"), "unexpected err: {}", err);
+
+        let mut crossed = book.clone();
+        crossed.bids[0].price = dec!(65000.0);
+        let err = validate_adapter_book(&crossed, &venue, "BTC-USDC").unwrap_err();
+        assert!(err.contains("crossed"), "unexpected err: {}", err);
+    }
+
+    #[tokio::test]
+    async fn test_read_only_paths_skip_malformed_cached_book() {
+        let state = setup_test_state_with_venues();
+        let mut crossed = OrderBook::new(
+            arbitrager_core::types::VenueId::new("hyperliquid"),
+            "BTC-USDC".to_string(),
+        );
+        crossed.bids.push(arbitrager_core::quote::BookLevel::new(dec!(65000.0), dec!(10.0)));
+        crossed.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64000.0), dec!(10.0)));
+        crossed.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(crossed);
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
+        assert_eq!(books.len(), 1);
+        assert_eq!(books[0].venue_id, "lighter");
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state).await.expect("scan");
+        assert!(opps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_decimal_conversion_overflow_rejects() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None,
+            Some(f64::MAX), &state,
+        )
+        .await;
+        let err = res.expect_err("f64::MAX hurdle must reject");
+        assert!(err.contains("decimal range"), "unexpected err: {}", err);
+
+        let res = scan_spatial_opportunities_impl("BTC-USDC", 5.0, f64::MAX, &state).await;
+        let err = res.expect_err("f64::MAX order_qty must reject");
+        assert!(err.contains("decimal range"), "unexpected err: {}", err);
+
+        let res = scan_funding_opportunities_impl("BTC-USDC", f64::MAX, &state).await;
+        let err = res.expect_err("f64::MAX trade size must reject");
+        assert!(err.contains("decimal range"), "unexpected err: {}", err);
+
+        assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+        assert!(state.virtual_ledger.read().lots.is_empty());
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_scan_is_executable_respects_bounded_depth() {
+        let state = setup_test_state_with_venues();
+        let mut thin = OrderBook::new(
+            arbitrager_core::types::VenueId::new("hyperliquid"),
+            "BTC-USDC".to_string(),
+        );
+        thin.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
+        thin.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
+        thin.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64310.0), dec!(50.0)));
+        thin.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(thin);
+
+        let mut deep = OrderBook::new(
+            arbitrager_core::types::VenueId::new("lighter"),
+            "BTC-USDC".to_string(),
+        );
+        deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
+        deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+        deep.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(deep);
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 2.0, &state).await.expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue.contains("Hyperliquid"))
+            .expect("hl->lgt opportunity row");
+        assert!(!opp.is_executable, "out-of-limit depth must mark non-executable");
+
+        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3400.0), dec!(3401.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3410.0), dec!(3411.0));
+        let opps = scan_spatial_opportunities_impl("ETH-USDC", 5.0, 0.1, &state).await.expect("scan eth");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue.contains("Hyperliquid"))
+            .expect("hl->lgt eth row");
+        assert!(opp.is_executable, "deep profitable pair must be executable");
+    }
+
+    #[tokio::test]
+    async fn test_risk_overview_drawdown_pct_uses_day_start() {
+        let state = setup_test_state_with_venues();
+        state.circuit_breaker.update_equity(dec!(400000.0));
+        state.circuit_breaker.reset();
+        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(400000.0));
+
+        let risk = get_risk_overview_impl(&state).await.expect("risk");
+        assert_eq!(risk.current_drawdown_usd, 200000.0);
+        assert_eq!(risk.drawdown_pct, 50.0);
+
+        state.circuit_breaker.update_equity(dec!(0.0));
+        state.circuit_breaker.reset();
+        let risk = get_risk_overview_impl(&state).await.expect("risk zero start");
+        assert_eq!(risk.drawdown_pct, 0.0);
     }
 }

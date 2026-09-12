@@ -203,32 +203,33 @@ test("buildCrossTickerMatrix produces 2D matrix with relative value quant calcul
   assert.ok(cell01.netSpreadBps < cell01.grossSpreadBps);
 });
 
-test("RollingSpreadTracker pre-seeds baseline across all 5 sliding windows", () => {
+test("RollingSpreadTracker has no synthetic history and only real records affect stats", () => {
   const tracker = new RollingSpreadTracker();
   const pairKey = "pair:ETH:SOL";
   const now = 1_700_000_000_000;
 
-  // Pre-seed
-  tracker.seedIfEmpty(pairKey, 12.0, 16.0, now);
+  // Before any observation, every window reports the neutral first-sample stats
+  for (const windowSeconds of [10, 30, 60, 300, 900]) {
+    const stats = tracker.getStats(pairKey, 15.0, windowSeconds, 50, now);
+    assert.equal(stats.sampleCount, 1);
+    assert.equal(stats.deltaBps, 0.0);
+    assert.equal(stats.meanNetBps, 15.0);
+  }
 
-  // Check stats for each predefined window
-  const stats10s = tracker.getStats(pairKey, 15.0, 10, now);
-  assert.ok(stats10s.sampleCount >= 2, "10s window must have baseline samples");
-  assert.ok(stats10s.meanNetBps > 10.0 && stats10s.meanNetBps < 14.0);
-  assert.ok(stats10s.deltaBps !== 0.0);
+  // The first actual observation is a single sample with zero delta
+  tracker.record(pairKey, 12.0, 16.0, now);
+  const first = tracker.getStats(pairKey, 12.0, 10, 50, now);
+  assert.equal(first.sampleCount, 1);
+  assert.equal(first.deltaBps, 0.0);
 
-  const stats30s = tracker.getStats(pairKey, 15.0, 30, now);
-  assert.ok(stats30s.sampleCount >= 5, "30s window must have baseline samples");
-  assert.ok(stats30s.meanNetBps > 10.0 && stats30s.meanNetBps < 14.0);
-
-  const stats1m = tracker.getStats(pairKey, 15.0, 60, now);
-  assert.ok(stats1m.sampleCount >= 8, "1m window must have baseline samples");
-
-  const stats5m = tracker.getStats(pairKey, 15.0, 300, now);
-  assert.ok(stats5m.sampleCount >= 12, "5m window must have baseline samples");
-
-  const stats15m = tracker.getStats(pairKey, 15.0, 900, now);
-  assert.ok(stats15m.sampleCount >= 15, "15m window must have baseline samples");
+  // Only real records move the baseline: after two more observations the
+  // 10s-window mean reflects just the recorded samples
+  tracker.record(pairKey, 14.0, 18.0, now + 1000);
+  tracker.record(pairKey, 16.0, 20.0, now + 2000);
+  const stats = tracker.getStats(pairKey, 20.0, 10, 50, now + 3000);
+  assert.ok(stats.sampleCount >= 2 && stats.sampleCount <= 3);
+  assert.ok(stats.meanNetBps >= 12.0 && stats.meanNetBps <= 16.0);
+  assert.ok(stats.deltaBps > 0.0);
 });
 
 test("RollingSpreadTracker throttles rapid render loops to prevent sample inflation", () => {

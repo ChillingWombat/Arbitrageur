@@ -26,17 +26,6 @@ impl BaselineEstimatorType {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_uppercase().as_str() {
-            "SMA" => Some(Self::SMA),
-            "EMA" => Some(Self::EMA),
-            "WMA" => Some(Self::WMA),
-            "VWMA" => Some(Self::VWMA),
-            "SMMA" => Some(Self::SMMA),
-            _ => None,
-        }
-    }
-
     pub fn all() -> &'static [BaselineEstimatorType] {
         &[
             Self::SMA,
@@ -45,6 +34,21 @@ impl BaselineEstimatorType {
             Self::VWMA,
             Self::SMMA,
         ]
+    }
+}
+
+impl std::str::FromStr for BaselineEstimatorType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "SMA" => Ok(Self::SMA),
+            "EMA" => Ok(Self::EMA),
+            "WMA" => Ok(Self::WMA),
+            "VWMA" => Ok(Self::VWMA),
+            "SMMA" => Ok(Self::SMMA),
+            _ => Err(format!("Unknown baseline estimator: {}", s)),
+        }
     }
 }
 
@@ -392,6 +396,21 @@ mod tests {
                 QuoteObservation::new((i * 1000) as u64, base_spread + noise, depth)
             })
             .collect()
+    }
+
+    #[test]
+    fn test_baseline_estimator_from_str() {
+        assert_eq!("SMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::SMA);
+        assert_eq!("ema".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::EMA);
+        assert_eq!("Vwma".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::VWMA);
+        assert_eq!("WMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::WMA);
+        assert_eq!("SMMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::SMMA);
+    }
+
+    #[test]
+    fn test_baseline_estimator_from_str_invalid() {
+        let err = "bogus".parse::<BaselineEstimatorType>().unwrap_err();
+        assert_eq!(err, "Unknown baseline estimator: bogus");
     }
 
     #[test]

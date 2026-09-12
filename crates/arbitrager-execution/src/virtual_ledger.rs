@@ -62,6 +62,7 @@ impl VirtualStrategyLedger {
     }
 
     /// Open a new arbitrage cycle lot attributed to a specific strategy
+    #[allow(clippy::too_many_arguments)]
     pub fn open_cycle(
         &mut self,
         id: String,

@@ -139,7 +139,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             Quantitative Analytics & Statistical Arbitrage Lab
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            2D Online Kalman Filter dynamic hedge ratio estimation, Ornstein-Uhlenbeck MLE fitting, and Bertram analytic threshold solver.
+            2D Online Kalman Filter dynamic hedge ratio estimation, Ornstein-Uhlenbeck MLE fitting, and Bertram-style numerical threshold search.
           </p>
         </div>
 
@@ -431,7 +431,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             </div>
           ) : (
             <div className="text-center py-6 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-lg">
-              Click "Solve Optimal" to calculate Bertram analytic levels.
+              Click "Solve Optimal" to calculate Bertram-style threshold levels.
             </div>
           )}
 

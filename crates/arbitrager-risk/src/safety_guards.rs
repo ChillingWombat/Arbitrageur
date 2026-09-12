@@ -75,9 +75,30 @@ pub fn verify_pre_execution_slippage(
         });
     }
 
-    let effective_vwap = match side {
-        Side::Buy => book.buy_execution_vwap(requested_qty).map(|(v, _, _)| v).unwrap_or(top_price),
-        Side::Sell => book.sell_execution_vwap(requested_qty).map(|(v, _, _)| v).unwrap_or(top_price),
+    // Insufficient depth must fail: never substitute the top price for a VWAP
+    // that could not fill the full requested quantity.
+    let exec = match side {
+        Side::Buy => book.buy_execution_vwap(requested_qty),
+        Side::Sell => book.sell_execution_vwap(requested_qty),
+    };
+    let effective_vwap = match exec {
+        Some((vwap, remaining, _)) if remaining <= dec!(0) => vwap,
+        Some((vwap, _, _)) => {
+            return Err(SlippageViolation {
+                top_price,
+                effective_vwap: vwap,
+                slippage_bps: dec!(9999),
+                max_allowed_bps: max_slippage_bps,
+            });
+        }
+        None => {
+            return Err(SlippageViolation {
+                top_price,
+                effective_vwap: dec!(0),
+                slippage_bps: dec!(9999),
+                max_allowed_bps: max_slippage_bps,
+            });
+        }
     };
 
     let slip_ratio = match side {
@@ -266,6 +287,24 @@ mod tests {
         assert!(res_large.is_err());
         let violation = res_large.unwrap_err();
         assert!(violation.slippage_bps > dec!(5.0));
+    }
+
+    #[test]
+    fn test_pre_execution_slippage_insufficient_depth() {
+        use arbitrager_core::types::VenueId;
+
+        let mut book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        book.bids.push(BookLevel::new(dec!(64000.0), dec!(1.0)));
+        book.asks.push(BookLevel::new(dec!(64200.0), dec!(1.0)));
+
+        // Total ask depth 1.0 cannot fill 2.0 -> violation even with a huge limit
+        let res = verify_pre_execution_slippage(&book, Side::Buy, dec!(2.0), dec!(100000.0));
+        let violation = res.expect_err("insufficient depth must violate");
+        assert_eq!(violation.slippage_bps, dec!(9999));
+        assert_eq!(violation.effective_vwap, dec!(64200.0));
+
+        let res = verify_pre_execution_slippage(&book, Side::Sell, dec!(2.0), dec!(100000.0));
+        assert!(res.is_err());
     }
 
     #[test]

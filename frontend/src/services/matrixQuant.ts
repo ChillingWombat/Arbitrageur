@@ -41,38 +41,6 @@ export class RollingSpreadTracker {
   }
 
   /**
-   * Pre-seeds initial realistic baseline samples across all sliding window scales
-   * (10s, 30s, 1m, 5m, 15m) so the user immediately sees non-zero baseline stats on launch.
-   */
-  public seedIfEmpty(pairKey: string, initialNetBps: number, initialGrossBps: number, now = Date.now()): void {
-    if (this.history.has(pairKey) && (this.history.get(pairKey)?.length ?? 0) > 0) {
-      return;
-    }
-
-    const samples: SpreadSample[] = [];
-    // Key historical offsets covering 10s, 30s, 1m, 5m, and 15m windows
-    const offsetsMs = [
-      840_000, 720_000, 600_000, 480_000, 360_000, // 6m-14m
-      240_000, 180_000, 120_000, 90_000,           // 1.5m-4m
-      55_000, 45_000, 35_000,                      // 30s-1m
-      25_000, 20_000, 14_000,                      // 10s-30s
-      8_000, 5_000, 2_000,                         // < 10s
-    ];
-
-    for (let i = 0; i < offsetsMs.length; i++) {
-      const offset = offsetsMs[i];
-      const t = now - offset;
-      samples.push({
-        timestamp: t,
-        netBps: initialNetBps,
-        grossBps: initialGrossBps,
-      });
-    }
-
-    this.history.set(pairKey, samples);
-  }
-
-  /**
    * Records a new instantaneous spread observation for a pair.
    * Includes throttling to prevent render loops from flooding duplicate timestamps.
    */
@@ -349,7 +317,6 @@ export function buildCrossVenueMatrix(
 
       // Record observation and compute sliding window baseline stats with percentile filter (min 50%)
       const pairKey = `venue:${symbol}:${rowId}:${colId}`;
-      tracker.seedIfEmpty(pairKey, netSpreadBps, grossSpreadBps, now);
       tracker.record(pairKey, netSpreadBps, grossSpreadBps, now);
       const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, percentile, now);
 
@@ -546,7 +513,6 @@ export function buildCrossTickerMatrix(
 
       // Record observation and compute sliding window stats with percentile filter (min 50%)
       const pairKey = `ticker:${rowId}:${colId}`;
-      tracker.seedIfEmpty(pairKey, netSpreadBps, grossSpreadBps, now);
       tracker.record(pairKey, netSpreadBps, grossSpreadBps, now);
       const stats = tracker.getStats(pairKey, netSpreadBps, windowSeconds, percentile, now);
 

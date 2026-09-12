@@ -30,8 +30,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (password.length < 6) {
-      setError("Master password must be at least 6 characters long.");
+    if (password.length < 12) {
+      setError("Master password must be at least 12 characters long.");
       return;
     }
 
@@ -128,7 +128,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
           <div className="p-3 rounded-xl bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-[11px] text-slate-600">
             <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
             <span>
-              All API keys are encrypted at rest locally (AES-256-GCM with PBKDF2 key derivation). Decrypted strictly in-memory during active sessions.
+              All API keys are encrypted at rest locally (AES-256-GCM with Argon2id key derivation). Decrypted strictly in-memory during active sessions.
             </span>
           </div>
 

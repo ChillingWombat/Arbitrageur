@@ -300,7 +300,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
 
             <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-2xs">
-              <div className="text-[10px] font-mono text-slate-500 uppercase">Net Realized PnL</div>
+              <div className="text-[10px] font-mono text-slate-500 uppercase">Projected Net Carry</div>
               {(() => {
                 const net = ((tradeSize * 0.00021 * 3) * holdingDays) - (tradeSize * 0.00035 * 2);
                 return (

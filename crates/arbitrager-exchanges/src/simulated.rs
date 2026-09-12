@@ -20,6 +20,7 @@ pub struct SimulatedExchange {
     fee_bps: Decimal,
     books: DashMap<String, Arc<RwLock<OrderBook>>>,
     funding_rates: DashMap<String, FundingRate>,
+    leverages: DashMap<String, u32>,
     account: Arc<RwLock<AccountSnapshot>>,
 }
 
@@ -58,6 +59,7 @@ impl SimulatedExchange {
             fee_bps,
             books: DashMap::new(),
             funding_rates: DashMap::new(),
+            leverages: DashMap::new(),
             account: Arc::new(RwLock::new(account)),
         }
     }
@@ -94,9 +96,43 @@ impl SimulatedExchange {
         );
     }
 
+    /// Recompute account-level margin aggregates from open positions.
+    fn recompute_account_margins(acc: &mut AccountSnapshot) {
+        let total_im: Decimal = acc.positions.iter().map(|p| p.initial_margin).sum();
+        let total_mm: Decimal = acc.positions.iter().map(|p| p.maintenance_margin).sum();
+        acc.maintenance_margin = total_mm;
+        acc.free_margin = (acc.equity - total_im).max(dec!(0));
+        acc.margin_usage_pct = if acc.equity > dec!(0) {
+            (total_im / acc.equity) * dec!(100)
+        } else {
+            dec!(0)
+        };
+        let eq = acc.equity;
+        let free = acc.free_margin;
+        if let Some(bal) = acc.balances.first_mut() {
+            bal.total = eq;
+            bal.free = free;
+            bal.locked = (eq - free).max(dec!(0));
+        }
+    }
+
     /// Check if a symbol market has been seeded.
     pub fn has_market(&self, symbol: &str) -> bool {
         self.books.contains_key(symbol)
+    }
+
+    /// Replace a symbol's book with an externally sourced, execution-validated book.
+    pub fn replace_orderbook(&self, book: OrderBook) -> anyhow::Result<()> {
+        if book.venue != self.venue_id {
+            anyhow::bail!(
+                "[{}] Refusing order book attributed to venue '{}'",
+                self.name,
+                book.venue
+            );
+        }
+        book.validate_for_execution().map_err(anyhow::Error::msg)?;
+        self.books.insert(book.symbol.clone(), Arc::new(RwLock::new(book)));
+        Ok(())
     }
 }
 
@@ -157,7 +193,7 @@ impl ExchangeAdapter for SimulatedExchange {
             bid,
             ask,
             last,
-            volume_24h: dec!(1000000),
+            volume_24h: dec!(0),
             timestamp: Utc::now(),
         })
     }
@@ -166,15 +202,7 @@ impl ExchangeAdapter for SimulatedExchange {
         if let Some(rate) = self.funding_rates.get(symbol) {
             Ok(rate.clone())
         } else {
-            Ok(FundingRate {
-                venue: self.venue_id.clone(),
-                symbol: symbol.to_string(),
-                rate: dec!(0.0001),
-                predicted_rate: None,
-                interval_hours: 8,
-                next_funding_time: Utc::now(),
-                timestamp: Utc::now(),
-            })
+            anyhow::bail!("[{}] No seeded funding rate for {}", self.name, symbol)
         }
     }
 
@@ -191,64 +219,138 @@ impl ExchangeAdapter for SimulatedExchange {
             sleep(self.latency).await;
         }
 
-        let book_lock = self.books.get(&order.symbol).ok_or_else(|| {
-            anyhow::anyhow!("[{}] Market {} not found for order placement", self.name, order.symbol)
-        })?;
-
-        let (fill_px, filled_qty) = {
-            let mut book = book_lock.write();
-            match order.side {
-                Side::Buy => {
-                    let (vwap, unfilled, _) = book.buy_execution_vwap(order.quantity).ok_or_else(|| {
-                        anyhow::anyhow!("[{}] Insufficient ask liquidity for buy order", self.name)
-                    })?;
-                    let filled = order.quantity - unfilled;
-                    // Realistically consume ask levels
-                    let mut to_consume = filled;
-                    book.asks.retain_mut(|level| {
-                        if to_consume <= dec!(0) {
-                            true
-                        } else if level.size <= to_consume {
-                            to_consume -= level.size;
-                            false
-                        } else {
-                            level.size -= to_consume;
-                            to_consume = dec!(0);
-                            true
-                        }
-                    });
-                    (vwap, filled)
-                }
-                Side::Sell => {
-                    let (vwap, unfilled, _) = book.sell_execution_vwap(order.quantity).ok_or_else(|| {
-                        anyhow::anyhow!("[{}] Insufficient bid liquidity for sell order", self.name)
-                    })?;
-                    let filled = order.quantity - unfilled;
-                    // Realistically consume bid levels
-                    let mut to_consume = filled;
-                    book.bids.retain_mut(|level| {
-                        if to_consume <= dec!(0) {
-                            true
-                        } else if level.size <= to_consume {
-                            to_consume -= level.size;
-                            false
-                        } else {
-                            level.size -= to_consume;
-                            to_consume = dec!(0);
-                            true
-                        }
-                    });
-                    (vwap, filled)
-                }
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("[{}] Order quantity must be positive", self.name);
+        }
+        if let Some(limit) = order.price {
+            if limit <= dec!(0) {
+                anyhow::bail!("[{}] Order limit price must be positive", self.name);
             }
+        }
+
+        let book_lock = self
+            .books
+            .get(&order.symbol)
+            .map(|r| Arc::clone(r.value()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "[{}] Market {} not found for order placement",
+                    self.name,
+                    order.symbol
+                )
+            })?;
+
+        // Walk only price levels acceptable to the order: a limit buy consumes
+        // asks <= limit, a limit sell consumes bids >= limit, market orders
+        // consume everything available. Levels are sorted, so the first
+        // unacceptable price ends the walk.
+        let acceptable = |price: Decimal| match (order.side, order.price) {
+            (Side::Buy, Some(limit)) => price <= limit,
+            (Side::Sell, Some(limit)) => price >= limit,
+            _ => true,
         };
 
+        let mut book = book_lock.write();
+        let levels = match order.side {
+            Side::Buy => &book.asks,
+            Side::Sell => &book.bids,
+        };
+
+        let mut filled_qty = dec!(0);
+        let mut cost = dec!(0);
+        for level in levels.iter() {
+            if !acceptable(level.price) {
+                break;
+            }
+            let take = (order.quantity - filled_qty).min(level.size);
+            filled_qty += take;
+            cost += take * level.price;
+            if filled_qty >= order.quantity {
+                break;
+            }
+        }
+        let fill_px_opt = if filled_qty > dec!(0) {
+            Some(cost / filled_qty)
+        } else {
+            None
+        };
+
+        let remaining_qty = order.quantity - filled_qty;
+        if filled_qty <= dec!(0) {
+            return Ok(OrderResponse {
+                order_id: format!("sim-{}", uuid::Uuid::new_v4()),
+                client_order_id: order.client_order_id,
+                venue: self.venue_id.clone(),
+                symbol: order.symbol,
+                status: OrderStatus::Rejected,
+                original_qty: order.quantity,
+                filled_qty,
+                remaining_qty,
+                avg_fill_price: None,
+                fee: dec!(0),
+                fee_currency: "USDC".to_string(),
+                raw_response: None,
+                timestamp: Utc::now(),
+            });
+        }
+
+        let fill_px = fill_px_opt.unwrap_or(dec!(0));
         let notional = filled_qty * fill_px;
         let fee = notional * (self.fee_bps / dec!(10000));
+        let leverage_dec = Decimal::from(
+            self.leverages.get(&order.symbol).map(|v| *v).unwrap_or(5),
+        );
+
+        // Opening additional exposure requires incremental initial margin;
+        // reducing or flipping a position only needs margin on the new side's
+        // residual quantity. Reject before consuming any book liquidity.
+        let mut acc = self.account.write();
+        let existing_qty = acc
+            .positions
+            .iter()
+            .find(|p| p.symbol == order.symbol && p.side != order.side)
+            .map(|p| p.quantity);
+        let opening_qty = match existing_qty {
+            Some(pos_qty) => (filled_qty - pos_qty).max(dec!(0)),
+            None => filled_qty,
+        };
+        let required_im = opening_qty * fill_px / leverage_dec;
+        if required_im > acc.free_margin {
+            anyhow::bail!(
+                "[{}] Insufficient free margin: required {} > available {}",
+                self.name,
+                required_im,
+                acc.free_margin
+            );
+        }
+
+        let levels = match order.side {
+            Side::Buy => &mut book.asks,
+            Side::Sell => &mut book.bids,
+        };
+        let mut to_consume = filled_qty;
+        let mut consumed = dec!(0);
+        levels.retain_mut(|level| {
+            if to_consume <= dec!(0) || !acceptable(level.price) {
+                return true;
+            }
+            let take = to_consume.min(level.size);
+            to_consume -= take;
+            consumed += take;
+            level.size -= take;
+            level.size > dec!(0)
+        });
+        if consumed != filled_qty {
+            anyhow::bail!(
+                "[{}] Internal fill accounting mismatch: consumed {} of previewed {}",
+                self.name,
+                consumed,
+                filled_qty
+            );
+        }
 
         // Update position and equity with realized PnL in simulated account
         {
-            let mut acc = self.account.write();
             let mut realized_pnl = dec!(0);
 
             let pos_opt = acc.positions.iter_mut().find(|p| p.symbol == order.symbol);
@@ -283,6 +385,7 @@ impl ExchangeAdapter for SimulatedExchange {
                         pos.entry_price = fill_px;
                         pos.mark_price = fill_px;
                         pos.realized_pnl += realized_pnl;
+                        pos.leverage = leverage_dec;
                         pos.initial_margin = (remaining_new_qty * fill_px) / pos.leverage;
                         pos.maintenance_margin = (remaining_new_qty * fill_px) / (pos.leverage * dec!(2));
                     }
@@ -298,9 +401,9 @@ impl ExchangeAdapter for SimulatedExchange {
                     unrealized_pnl: dec!(0),
                     realized_pnl: dec!(0),
                     liquidation_price: None,
-                    leverage: dec!(5),
-                    initial_margin: notional / dec!(5),
-                    maintenance_margin: notional / dec!(10),
+                    leverage: leverage_dec,
+                    initial_margin: notional / leverage_dec,
+                    maintenance_margin: notional / (leverage_dec * dec!(2)),
                     updated_at: Utc::now(),
                 });
             }
@@ -309,30 +412,27 @@ impl ExchangeAdapter for SimulatedExchange {
             acc.positions.retain(|p| p.quantity > dec!(0));
 
             acc.equity += realized_pnl - fee;
-            let total_mm: Decimal = acc.positions.iter().map(|p| p.maintenance_margin).sum();
-            acc.maintenance_margin = total_mm;
-            acc.free_margin = (acc.equity - total_mm).max(dec!(0));
-            acc.margin_usage_pct = if acc.equity > dec!(0) { (total_mm / acc.equity) * dec!(100) } else { dec!(0) };
-
-            let eq = acc.equity;
-            let free = acc.free_margin;
-            if let Some(bal) = acc.balances.first_mut() {
-                bal.total = eq;
-                bal.free = free;
-                bal.locked = (eq - free).max(dec!(0));
-            }
+            Self::recompute_account_margins(&mut acc);
         }
+
+        let status = if filled_qty == order.quantity && remaining_qty == dec!(0) {
+            OrderStatus::Filled
+        } else if filled_qty > dec!(0) {
+            OrderStatus::PartiallyFilled
+        } else {
+            OrderStatus::Rejected
+        };
 
         Ok(OrderResponse {
             order_id: format!("sim-{}", uuid::Uuid::new_v4()),
             client_order_id: order.client_order_id,
             venue: self.venue_id.clone(),
             symbol: order.symbol,
-            status: OrderStatus::Filled,
+            status,
             original_qty: order.quantity,
             filled_qty,
-            remaining_qty: order.quantity - filled_qty,
-            avg_fill_price: Some(fill_px),
+            remaining_qty,
+            avg_fill_price: fill_px_opt,
             fee,
             fee_currency: "USDC".to_string(),
             raw_response: None,
@@ -345,12 +445,23 @@ impl ExchangeAdapter for SimulatedExchange {
     }
 
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        if symbol.trim().is_empty() {
+            anyhow::bail!("[{}] Symbol must be nonempty for leverage update", self.name);
+        }
+        if !(1..=5).contains(&leverage) {
+            anyhow::bail!("[{}] Leverage {} out of range; must be 1..=5", self.name, leverage);
+        }
+        self.leverages.insert(symbol.to_string(), leverage);
         let mut acc = self.account.write();
+        let leverage_dec = Decimal::from(leverage);
         for pos in &mut acc.positions {
             if pos.symbol == symbol {
-                pos.leverage = Decimal::from(leverage);
+                pos.leverage = leverage_dec;
+                pos.initial_margin = (pos.quantity * pos.mark_price) / leverage_dec;
+                pos.maintenance_margin = (pos.quantity * pos.mark_price) / (leverage_dec * dec!(2));
             }
         }
+        Self::recompute_account_margins(&mut acc);
         Ok(())
     }
 }

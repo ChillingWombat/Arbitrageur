@@ -63,7 +63,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             Prediction Markets Synthetic Arrow-Debreu Parity
           </h2>
           <p className="text-xs text-slate-500 mt-1">
-            Risk-free synthetic arbitrage between Polymarket CTF CLOB and Kalshi CFTC-regulated binary contracts.
+            Cross-venue parity research between Polymarket CTF CLOB and Kalshi CFTC-regulated binary contracts.
           </p>
         </div>
 
@@ -104,9 +104,9 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
       {/* Synthetic Formula Explanation Card */}
       <div className="bg-surface-raised border border-surface-border rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4 font-mono text-xs shadow-2xs">
         <div>
-          <div className="font-semibold text-slate-900">Arrow-Debreu Risk-Free Equilibrium Condition</div>
+          <div className="font-semibold text-slate-900">Arrow-Debreu Equilibrium Condition</div>
           <div className="text-[11px] text-slate-500">
-            Condition: Cost = Price(YES) + Price(NO) + Fees &lt; $1.00 Payout
+            Condition: Cost = Price(YES) + Price(NO) + Fees &lt; conditional $1.00 payout — valid only when contracts have identical settlement terms
           </div>
         </div>
 
@@ -115,7 +115,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           <span className="text-slate-300">/</span>
           <span className="text-slate-500">Kalshi: 1.00% fee</span>
           <span className="text-slate-300">/</span>
-          <span className="text-profit font-semibold">Payout: $1.00 Guaranteed</span>
+          <span className="text-profit font-semibold">Payout: conditional $1.00 (identical settlement terms required)</span>
         </div>
       </div>
 
@@ -141,7 +141,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                     {opp.market_title}
                   </span>
                   <span className="font-mono text-xs font-bold text-profit">
-                    +{opp.roi_pct.toFixed(2)}% Guaranteed ROI
+                    +{opp.roi_pct.toFixed(2)}% Indicative ROI
                   </span>
                 </div>
 

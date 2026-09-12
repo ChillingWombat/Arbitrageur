@@ -9,8 +9,7 @@ license = "MIT OR Apache-2.0"
 tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
-tauri = { version = "2.1", features = ["devtools"] }
-tauri-plugin-opener = "2.2"
+tauri = { version = "2.1", features = [] }
 arbitrager-core = { path = "../../crates/arbitrager-core" }
 arbitrager-math = { path = "../../crates/arbitrager-math" }
 arbitrager-exchanges = { path = "../../crates/arbitrager-exchanges" }
@@ -18,7 +17,6 @@ arbitrager-risk = { path = "../../crates/arbitrager-risk" }
 arbitrager-execution = { path = "../../crates/arbitrager-execution" }
 arbitrager-strategy = { path = "../../crates/arbitrager-strategy" }
 tokio = { workspace = true }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }
@@ -33,3 +31,5 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }

@@ -14,41 +14,53 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes requires API credentials in paper mode (no synthetic data)", () => {
+test("getEnabledConnectedVenueCodes returns only enabled HL/LGT in paper mode", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
-    hyperliquid_wallet: "0x1234567890abcdef",
     lighter_enabled: true,
-    lighter_api_key: "", // missing credentials
-    vanta_enabled: true,
-    vanta_orderly_key: "ed25519:validkey",
-    robinhood_enabled: false,
-    arcus_enabled: false,
-    popdex_enabled: false,
-    kraken_enabled: false,
-  };
-  const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "VNT"]);
-});
-
-test("getEnabledConnectedVenueCodes requires credentials in live mode", () => {
-  const settings: VenueSettingsFilter = {
-    trading_mode: "real",
-    hyperliquid_enabled: true,
-    hyperliquid_wallet: "0x1234567890abcdef",
-    lighter_enabled: true,
-    lighter_api_key: "", // missing credentials
+    lighter_api_key: "", // connectivity is never inferred from key strings
     vanta_enabled: true,
     vanta_orderly_key: "ed25519:validkey",
     robinhood_enabled: true,
-    robinhood_wallet: "", // missing credentials
+    arcus_enabled: true,
+    popdex_enabled: true,
+    kraken_enabled: true,
+    polymarket_enabled: true,
+    kalshi_enabled: true,
   };
-  const codes = getEnabledConnectedVenueCodes(settings, true);
-  assert.ok(codes.has("HL"));
-  assert.ok(!codes.has("LGT"));
-  assert.ok(codes.has("VNT"));
-  assert.ok(!codes.has("RH"));
+  const codes = getEnabledConnectedVenueCodes(settings, false);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT"]);
+});
+
+test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {
+  const settings: VenueSettingsFilter = {
+    trading_mode: "paper",
+    hyperliquid_enabled: false,
+    hyperliquid_private_key: "0xdeadbeef",
+    lighter_enabled: false,
+    lighter_api_key: "some-key",
+    configured_venues: ["hyperliquid", "lighter"],
+  };
+  const codes = getEnabledConnectedVenueCodes(settings, false);
+  assert.strictEqual(codes.size, 0);
+});
+
+test("getEnabledConnectedVenueCodes returns no venues in live mode", () => {
+  const settings: VenueSettingsFilter = {
+    trading_mode: "real",
+    hyperliquid_enabled: true,
+    lighter_enabled: true,
+  };
+  assert.strictEqual(getEnabledConnectedVenueCodes(settings, true).size, 0);
+  assert.strictEqual(getEnabledConnectedVenueCodes(settings, false).size, 0);
+
+  const paperSettings: VenueSettingsFilter = {
+    trading_mode: "paper",
+    hyperliquid_enabled: true,
+    lighter_enabled: true,
+  };
+  assert.strictEqual(getEnabledConnectedVenueCodes(paperSettings, true).size, 0);
 });
 
 test("filterAvailableTickers retains only tickers with at least 2 active venues", () => {

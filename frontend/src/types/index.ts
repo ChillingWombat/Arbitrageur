@@ -361,6 +361,9 @@ export interface EngineSettingsDto {
   vanta_subaccount_index?: number;
   robinhood_subaccount_index?: number;
 
+  // Vault-derived credential configuration state (venue IDs only, no secrets)
+  configured_venues: string[];
+
   // Referrals, About & Sponsor Links
   referral_lighter: string;
   referral_robinhood: string;
@@ -373,16 +376,6 @@ export interface VaultStatus {
   is_initialized: boolean;
   is_unlocked: boolean;
   unlocked_until?: string | null;
-}
-
-export interface ExchangeCredentials {
-  venue: string;
-  api_key: string;
-  api_secret: string;
-  passphrase?: string | null;
-  account_index?: number | null;
-  subaccount_index?: number | null;
-  enabled: boolean;
 }
 
 export interface VenueBalanceInfo {
