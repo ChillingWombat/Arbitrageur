@@ -38,8 +38,30 @@ export default {
         xs: "2px"
       },
       fontFamily: {
-        mono: ["JetBrains Mono", "ui-monospace", "SFMono-Regular", "Menlo", "Monaco", "Consolas", "monospace"],
-        sans: ["Inter", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "Roboto", "sans-serif"]
+        mono: [
+          '"JetBrainsMono Nerd Font"',
+          '"JetBrainsMono NF"',
+          '"JetBrains Mono Nerd"',
+          '"JetBrains Mono"',
+          "ui-monospace",
+          "SFMono-Regular",
+          "Menlo",
+          "Monaco",
+          "Consolas",
+          "monospace"
+        ],
+        sans: [
+          '"JetBrainsMono Nerd Font"',
+          '"JetBrainsMono NF"',
+          '"JetBrains Mono Nerd"',
+          '"JetBrains Mono"',
+          "Inter",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "Segoe UI",
+          "Roboto",
+          "sans-serif"
+        ]
       }
     },
   },

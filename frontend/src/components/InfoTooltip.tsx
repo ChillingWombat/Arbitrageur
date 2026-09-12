@@ -1,12 +1,17 @@
 import React, { useState } from "react";
 import { HelpCircle } from "lucide-react";
 
-interface InfoTooltipProps {
+export interface InfoTooltipProps {
   text: string;
   className?: string;
+  position?: "top" | "bottom";
 }
 
-export const InfoTooltip: React.FC<InfoTooltipProps> = ({ text, className = "" }) => {
+export const InfoTooltip: React.FC<InfoTooltipProps> = ({
+  text,
+  className = "",
+  position = "bottom",
+}) => {
   const [isOpen, setIsOpen] = useState(false);
 
   return (
@@ -21,9 +26,21 @@ export const InfoTooltip: React.FC<InfoTooltipProps> = ({ text, className = "" }
     >
       <HelpCircle className="w-3.5 h-3.5 text-slate-400 hover:text-accent transition-colors cursor-help shrink-0" />
       {isOpen && (
-        <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 w-64 max-w-xs p-2.5 bg-slate-900/95 text-white text-[11px] font-sans font-normal rounded-lg shadow-xl border border-slate-700/80 pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs">
+        <span
+          className={`absolute z-50 w-64 max-w-xs p-2.5 bg-slate-900/95 text-white text-[11px] font-sans font-normal rounded-lg shadow-xl border border-slate-700/80 pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs ${
+            position === "top"
+              ? "bottom-full left-1/2 -translate-x-1/2 mb-2"
+              : "top-full left-1/2 -translate-x-1/2 mt-2"
+          }`}
+        >
           {text}
-          <span className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-900/95" />
+          <span
+            className={`absolute left-1/2 -translate-x-1/2 border-4 border-transparent ${
+              position === "top"
+                ? "top-full border-t-slate-900/95"
+                : "bottom-full border-b-slate-900/95"
+            }`}
+          />
         </span>
       )}
     </span>

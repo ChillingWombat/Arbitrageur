@@ -9,6 +9,8 @@ import {
   Percent,
   Target,
   FlaskConical,
+  Coins,
+  Triangle,
   Sliders,
   CheckCircle2,
 } from "lucide-react";
@@ -95,6 +97,12 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
         return <Layers className="w-4 h-4 text-blue-600" />;
       case "funding_rate":
         return <Percent className="w-4 h-4 text-emerald-600" />;
+      case "spot_trade":
+      case "spot_arb":
+        return <Coins className="w-4 h-4 text-amber-600" />;
+      case "triangular_arb":
+      case "triangle":
+        return <Triangle className="w-4 h-4 text-teal-600" />;
       case "prediction_parity":
         return <Target className="w-4 h-4 text-purple-600" />;
       case "stat_arb":
@@ -107,13 +115,19 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   const formatStrategyName = (id: string) => {
     switch (id) {
       case "spatial_spread":
-        return "Futures Convergence Dislocation";
-      case "stat_arb":
-        return "Statistical Cointegration Spread (OU/Kalman)";
+        return "Spread Range";
       case "funding_rate":
-        return "Perpetual Funding Rate Carry & Basis";
+        return "Funding Rate";
+      case "spot_trade":
+      case "spot_arb":
+        return "Spot Trade";
+      case "triangular_arb":
+      case "triangle":
+        return "Triangle";
       case "prediction_parity":
-        return "Binary Outcome Parity (Polymarket / Kalshi)";
+        return "Prediction Market";
+      case "stat_arb":
+        return "Statistical";
       default:
         return id;
     }

@@ -3,9 +3,10 @@ import {
   TrendingUp,
   TrendingDown,
   Zap,
-  SlidersHorizontal,
   History,
   Terminal,
+  SlidersHorizontal,
+  ShieldCheck,
 } from "lucide-react";
 import type {
   VenueOrderBookDto,
@@ -29,12 +30,12 @@ import {
   getMatrixCellVisuals,
   globalSpreadTracker,
 } from "../services/matrixQuant";
-import { getMinCompatibleSize } from "../services/contractSpecs";
-import { TickerStrategyBar } from "./TickerStrategyBar";
+import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
 import { InfoTooltip } from "./InfoTooltip";
 import { SwitchToggle } from "./SwitchToggle";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
+import { TickerConfigModal } from "./TickerConfigModal";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
@@ -89,12 +90,12 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   }, [rawTicker, activeVenues]);
 
   // State
-  const [windowOption, setWindowOption] = useState<SlidingWindowOption>("1m");
   const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
   const [minBps, setMinBps] = useState(5.0);
   const [selectedPair, setSelectedPair] = useState<{ rowId: string; colId: string } | null>(null);
   const [executing, setExecuting] = useState(false);
   const [autoExecute, setAutoExecute] = useState(false);
+  const [internalConfigModalOpen, setInternalConfigModalOpen] = useState(false);
   const lastAutoExecTimeRef = React.useRef<number>(0);
 
   const handleToggleAutoExecute = (enabled: boolean) => {
@@ -121,8 +122,33 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       executionMode: "SINGLE_WAY",
       unitSize: minLot,
       userTargetLeverage: 5,
+      slidingWindow: "1m",
     };
   }, [symbol, strategyConfigs, activeTicker.venues, activeTicker.basePrice, minBps]);
+
+  // Rolling Sliding Window is driven by strategy config
+  const windowOption: SlidingWindowOption = useMemo(() => {
+    return (currentStrategyConfig.slidingWindow || currentStrategyConfig.sliding_window || "1m") as SlidingWindowOption;
+  }, [currentStrategyConfig]);
+
+  // Safe leverage calculation across venues
+  const safeLeverage = useMemo(() => {
+    return computeSafeLeverage(
+      activeTicker.symbol,
+      activeTicker.venues,
+      activeTicker.basePrice,
+      currentStrategyConfig.unitSize,
+      currentStrategyConfig.userTargetLeverage
+    );
+  }, [activeTicker, currentStrategyConfig.unitSize, currentStrategyConfig.userTargetLeverage]);
+
+  const handleOpenConfig = () => {
+    if (onOpenTickerConfig) {
+      onOpenTickerConfig(symbol, "futures");
+    } else {
+      setInternalConfigModalOpen(true);
+    }
+  };
 
   const handleUpdateStrategyConfig = (newCfg: TickerStrategyConfigDto) => {
     setStrategyConfigs((prev) => {
@@ -351,9 +377,9 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
   return (
     <div className="p-3.5 space-y-3 overflow-y-auto h-full text-slate-900 font-sans">
-      {/* 1. WeBull Ticker & Control Ribbon */}
+      {/* 1. Unified Ticker & Strategy Header Ribbon */}
       <div className="bg-surface rounded-xl border border-surface-border p-2.5 shadow-2xs flex flex-wrap items-center justify-between gap-2.5 text-xs font-mono select-none">
-        {/* Left: Ticker identity, top price, max dislocation, and strategy chips */}
+        {/* Left: Ticker identity, top price, max dislocation, executions & PnL, strategy parameters */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Symbol Pill */}
           <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border">
@@ -405,7 +431,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           )}
 
           {/* Ticker Stats: Executions & Net PnL */}
-          <div className="hidden lg:flex items-center space-x-1.5 text-[11px] font-mono">
+          <div className="flex items-center space-x-1.5 text-[11px] font-mono">
             <span
               className="px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border text-slate-600"
               title={`${tickerStats.count} executions for ${symbol}`}
@@ -424,47 +450,59 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             >
               {formatCurrencyPnl(tickerStats.pnl)}
             </span>
+          </div>
+
+          {/* Unified Strategy Parameters (Single Non-Duplicate Hurdle) */}
+          <div className="hidden md:flex items-center space-x-1.5 text-[11px] font-mono">
             <span
-              className="px-1.5 py-0.5 rounded bg-surface-raised border border-surface-border text-slate-700 font-medium"
-              title={`Nominal Hurdle: ${nominalHurdleBps.toFixed(1)} BPS`}
+              className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-200/60 font-semibold"
+              title="Target profit locked in per round-trip after fees and friction"
             >
-              Hurdle: {nominalHurdleBps.toFixed(1)} bps
+              TP {currentStrategyConfig.targetProfitBps.toFixed(1)} bps
+            </span>
+
+            <span
+              className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+              title={`Nominal Hurdle: ${nominalHurdleBps.toFixed(1)} bps`}
+            >
+              Hurdle <strong className="text-slate-900 font-semibold">{nominalHurdleBps.toFixed(1)} bps</strong>
+            </span>
+
+            <span
+              className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+              title={`Rolling ${windowOption} window percentile trigger (P${currentStrategyConfig.windowPercentile}%)`}
+            >
+              Window {windowOption} (P{currentStrategyConfig.windowPercentile}%)
+            </span>
+
+            <span
+              className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+              title="Execution Mode"
+            >
+              {currentStrategyConfig.executionMode === "DOUBLE_WAY" ? "Double-Way" : "Single-Way"}
+            </span>
+
+            <span
+              className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border"
+              title="Grid unit sizing and current accumulated units"
+            >
+              Grid <strong className="text-slate-900">{currentStrategyConfig.currentAccumulatedUnits}/{currentStrategyConfig.maxAccumulatedUnits}u</strong> ({currentStrategyConfig.unitSize} {activeTicker.base})
+            </span>
+
+            <span
+              className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded border border-surface-border flex items-center space-x-1"
+              title={`Effective Safe Leverage: ${safeLeverage.effectiveLeverage}x | Margin: $${safeLeverage.totalMarginRequiredUsd.toFixed(2)} USD/unit | Buffer: ${safeLeverage.liquidationBufferPct.toFixed(1)}%`}
+            >
+              <ShieldCheck className="w-3 h-3 text-emerald-600" />
+              <span>Lev {safeLeverage.effectiveLeverage}x</span>
+              <span className="text-slate-300">|</span>
+              <span className="text-slate-600">${safeLeverage.totalMarginRequiredUsd.toFixed(0)}/u</span>
             </span>
           </div>
-
-          {/* Quick Config Button */}
-          {onOpenTickerConfig && (
-            <button
-              onClick={() => onOpenTickerConfig(symbol, "futures")}
-              className="flex items-center space-x-1 px-2 py-1 bg-surface hover:bg-surface-raised text-slate-700 font-medium rounded-md border border-surface-border text-xs transition"
-              title="Configure strategy parameters"
-            >
-              <SlidersHorizontal className="w-3 h-3 text-slate-500" />
-              <span className="text-[11px]">Config</span>
-            </button>
-          )}
         </div>
 
-        {/* Right: Controls (Sliding Window, Auto-Bot) */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Sliding Window */}
-          <div className="flex items-center space-x-0.5 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-xs">
-            {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
-              <button
-                key={w}
-                onClick={() => setWindowOption(w)}
-                className={`px-1.5 py-0.5 rounded text-[11px] font-mono transition ${
-                  windowOption === w
-                    ? "bg-accent text-white font-bold shadow-2xs"
-                    : "text-slate-600 hover:text-slate-900"
-                }`}
-                title={`Rolling ${w} window`}
-              >
-                {w}
-              </button>
-            ))}
-          </div>
-
+        {/* Right: Auto-Bot and Configure Strategy Button */}
+        <div className="flex items-center space-x-2.5 shrink-0">
           {/* Auto-Bot Switch Toggle (Green for ON, White for OFF) */}
           <div className="flex items-center space-x-1.5 px-2 py-0.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
             <span className="text-xs font-mono font-medium text-slate-700">Auto Bot</span>
@@ -475,17 +513,19 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               showStatusText={true}
             />
           </div>
+
+          {/* Configure Strategy Button */}
+          <button
+            type="button"
+            onClick={handleOpenConfig}
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-lg border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer"
+            title={`Configure ${symbol} quantitative parameters in modal`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configure Strategy</span>
+          </button>
         </div>
       </div>
-
-      {/* 2. Strategy Parameters Ribbon */}
-      <TickerStrategyBar
-        ticker={activeTicker}
-        venues={activeTicker.venues}
-        config={currentStrategyConfig}
-        onChangeConfig={handleUpdateStrategyConfig}
-        onOpenConfigModal={onOpenTickerConfig ? () => onOpenTickerConfig(symbol, "futures") : undefined}
-      />
 
       {/* 3. Main Stage: Dual-Split Layout (Left: 2D Matrix Grid, Right: Consolidated Quotes + Instant Dock) */}
       <div className="grid grid-cols-12 gap-3 items-start">
@@ -739,50 +779,96 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
       {/* 4. Bottom Docked Tabbed Panel: Ranked Opportunities vs Execution History vs Log Monitor */}
       <div className="bg-surface rounded-xl border border-surface-border shadow-2xs overflow-hidden">
-        {/* Tab Switcher */}
-        <div className="flex items-center space-x-1 border-b border-surface-border px-4 pt-2 bg-surface-raised">
-          <button
-            onClick={() => setBottomTab("opportunities")}
-            className={`flex items-center space-x-1.5 px-3 py-2 text-xs font-mono font-semibold border-b-2 transition ${
-              bottomTab === "opportunities"
-                ? "border-accent text-accent bg-surface"
-                : "border-transparent text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5" />
-            <span>Ranked Opportunities</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-blue-50 text-accent border border-blue-200">
-              {opportunities.length}
-            </span>
-          </button>
-          <button
-            onClick={() => setBottomTab("history")}
-            className={`flex items-center space-x-1.5 px-3 py-2 text-xs font-mono font-semibold border-b-2 transition ${
-              bottomTab === "history"
-                ? "border-accent text-accent bg-surface"
-                : "border-transparent text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            <History className="w-3.5 h-3.5" />
-            <span>Execution History & Telemetry</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-surface-raised text-slate-600 border border-surface-border">
-              {executionLogs?.length || 0}
-            </span>
-          </button>
-          <button
-            onClick={() => setBottomTab("logs")}
-            className={`flex items-center space-x-1.5 px-3 py-2 text-xs font-mono font-semibold border-b-2 transition ${
-              bottomTab === "logs"
-                ? "border-accent text-accent bg-surface"
-                : "border-transparent text-slate-500 hover:text-slate-900"
-            }`}
-          >
-            <Terminal className="w-3.5 h-3.5" />
-            <span>Log Monitor</span>
-            <span className="px-1.5 py-0.2 text-[10px] rounded-full bg-surface-raised text-slate-600 border border-surface-border">
-              {tickerLogsCount}
-            </span>
-          </button>
+        {/* Tab Switcher with dividers */}
+        <div className="flex items-stretch justify-between border-b border-surface-border bg-slate-50/80 select-none">
+          <div className="flex items-stretch divide-x divide-surface-border border-r border-surface-border">
+            <button
+              type="button"
+              onClick={() => setBottomTab("opportunities")}
+              className={`relative h-10 flex items-center space-x-2 px-4 text-xs font-mono transition select-none group cursor-pointer ${
+                bottomTab === "opportunities"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <Zap
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  bottomTab === "opportunities" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                }`}
+              />
+              <span>Ranked Opportunities</span>
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  bottomTab === "opportunities"
+                    ? "bg-accent text-white shadow-2xs"
+                    : "bg-accent-dim text-accent border border-accent-line/60"
+                }`}
+              >
+                {opportunities.length}
+              </span>
+              {bottomTab === "opportunities" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setBottomTab("history")}
+              className={`relative h-10 flex items-center space-x-2 px-4 text-xs font-mono transition select-none group cursor-pointer ${
+                bottomTab === "history"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <History
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  bottomTab === "history" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                }`}
+              />
+              <span>Execution History & Telemetry</span>
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  bottomTab === "history"
+                    ? "bg-accent text-white shadow-2xs"
+                    : "bg-slate-200/80 text-slate-600"
+                }`}
+              >
+                {executionLogs?.length || 0}
+              </span>
+              {bottomTab === "history" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setBottomTab("logs")}
+              className={`relative h-10 flex items-center space-x-2 px-4 text-xs font-mono transition select-none group cursor-pointer ${
+                bottomTab === "logs"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <Terminal
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  bottomTab === "logs" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                }`}
+              />
+              <span>Log Monitor</span>
+              <span
+                className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  bottomTab === "logs"
+                    ? "bg-accent text-white shadow-2xs"
+                    : "bg-slate-200/80 text-slate-600"
+                }`}
+              >
+                {tickerLogsCount}
+              </span>
+              {bottomTab === "logs" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+          </div>
         </div>
 
         {/* Tab Content */}
@@ -894,7 +980,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             <div className="overflow-y-auto">
               <TickerLogMonitor
                 symbol={symbol}
-                strategyName="Futures Convergence"
+                strategyName="Spread Range"
                 config={currentStrategyConfig}
                 executionLogs={executionLogs || []}
                 orderbooks={orderbooks}
@@ -905,6 +991,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           )}
         </div>
       </div>
+
+      {/* Fallback Internal Config Modal */}
+      {!onOpenTickerConfig && (
+        <TickerConfigModal
+          isOpen={internalConfigModalOpen}
+          onClose={() => setInternalConfigModalOpen(false)}
+          tickerSymbol={symbol}
+          strategyConfig={currentStrategyConfig}
+          onSaveConfig={handleUpdateStrategyConfig}
+          initialStrategy="futures"
+        />
+      )}
     </div>
   );
 };

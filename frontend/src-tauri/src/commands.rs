@@ -684,8 +684,28 @@ pub async fn scan_spatial_opportunities_impl(
 
 pub async fn scan_spot_opportunities_impl(
     symbol_filter: &str,
-    _state: &AppEngineState,
+    state: &AppEngineState,
 ) -> Result<Vec<SpotOpportunityDto>, String> {
+    let spot_venues_count = {
+        let s = state.settings.read();
+        let mut count = 0;
+        if s.kraken_enabled && s.kraken_spot_enabled && !s.kraken_spot_api_key.trim().is_empty() {
+            count += 1;
+        }
+        if s.arcus_enabled && !s.arcus_api_key.trim().is_empty() {
+            count += 1;
+        }
+        if s.robinhood_enabled && (!s.robinhood_wallet.trim().is_empty() || !s.robinhood_private_key.trim().is_empty()) {
+            count += 1;
+        }
+        count
+    };
+
+    // Fail-closed: Zero synthetic data without at least 2 real configured spot venues
+    if spot_venues_count < 2 {
+        return Ok(Vec::new());
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(3000))
         .build()
@@ -780,7 +800,7 @@ pub async fn scan_spot_opportunities_impl(
                 let gross_bps = (gross_spread / buy_price) * 10000.0;
                 let transfer_cost = buy_transfer + sell_transfer;
                 let trade_size = 1000.0;
-                let fee_usd = (buy_price * trade_size * buy_fee / 10000.0) + (sell_price * trade_size * sell_fee / 10000.0);
+                let fee_usd = (trade_size * buy_fee / 10000.0) + (trade_size * sell_fee / 10000.0);
                 let gross_profit = gross_spread * (trade_size / buy_price);
                 let net_profit_usd = gross_profit - fee_usd - transfer_cost;
                 let net_bps = (net_profit_usd / trade_size) * 10000.0;
@@ -800,7 +820,7 @@ pub async fn scan_spot_opportunities_impl(
                     net_profit_usd: (net_profit_usd * 100.0).round() / 100.0,
                     available_depth_usd: depth,
                     estimated_latency_ms: latency,
-                    is_executable: net_bps > 0.0,
+                    is_executable: net_bps > 0.0 && net_profit_usd > 0.0,
                 });
             }
         }
@@ -945,7 +965,22 @@ pub async fn scan_funding_opportunities_impl(
     Ok(opps)
 }
 
-pub async fn scan_prediction_opportunities_impl(market: &str) -> Result<Vec<PredictionOpportunityDto>, String> {
+pub async fn scan_prediction_opportunities_impl(
+    market: &str,
+    state: &AppEngineState,
+) -> Result<Vec<PredictionOpportunityDto>, String> {
+    let (poly_ok, kalshi_ok) = {
+        let s = state.settings.read();
+        let p_ok = s.polymarket_enabled && (!s.polymarket_api_key.trim().is_empty() || !s.polymarket_secret.trim().is_empty());
+        let k_ok = s.kalshi_enabled && (!s.kalshi_api_key_id.trim().is_empty() || !s.kalshi_private_key.trim().is_empty());
+        (p_ok, k_ok)
+    };
+
+    // Fail-closed: Zero synthetic data without configured Polymarket and Kalshi credentials
+    if !poly_ok || !kalshi_ok {
+        return Ok(Vec::new());
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(2500))
         .build()
@@ -988,8 +1023,8 @@ pub async fn scan_prediction_opportunities_impl(market: &str) -> Result<Vec<Pred
 
                     let a_yes_dec = Decimal::from_f64_retain(yes_px).unwrap_or(dec!(0.50));
                     let a_no_dec = Decimal::from_f64_retain(no_px).unwrap_or(dec!(0.50));
-                    let b_yes_dec = (dec!(1.0) - a_no_dec + dec!(0.02)).min(dec!(0.99)).max(dec!(0.01));
-                    let b_no_dec = (dec!(1.0) - a_yes_dec + dec!(0.02)).min(dec!(0.99)).max(dec!(0.01));
+                    let b_yes_dec = (dec!(1.0) - a_no_dec).min(dec!(0.99)).max(dec!(0.01));
+                    let b_no_dec = (dec!(1.0) - a_yes_dec).min(dec!(0.99)).max(dec!(0.01));
                     let fee_dec = dec!(5.0);
 
                     if let Some(opp) = evaluate_prediction_cross_venue("Polymarket", a_yes_dec, a_no_dec, "Kalshi", b_yes_dec, b_no_dec, fee_dec) {
@@ -1013,48 +1048,6 @@ pub async fn scan_prediction_opportunities_impl(market: &str) -> Result<Vec<Pred
                             has_arbitrage: profit_cents > 0.0,
                         });
                     }
-                }
-            }
-        }
-    }
-
-    if results.is_empty() {
-        let pairs = vec![
-            ("FED-RATE-CUT-DECISION", "Polymarket", 0.44, 0.58, "Kalshi", 0.48, 0.54, 5.0),
-            ("BTC-OVER-80K-EOM", "Polymarket", 0.62, 0.40, "Kalshi", 0.58, 0.44, 8.0),
-            ("US-PRESIDENTIAL-POLICY", "Polymarket", 0.51, 0.51, "Kalshi", 0.47, 0.55, 6.0),
-            ("ETH-ETF-NET-INFLOWS", "Polymarket", 0.35, 0.67, "Kalshi", 0.39, 0.63, 4.0),
-        ];
-
-        for (m_key, va_name, a_yes, a_no, vb_name, b_yes, b_no, fee) in pairs {
-            let a_yes_dec = Decimal::from_f64_retain(a_yes).unwrap();
-            let a_no_dec = Decimal::from_f64_retain(a_no).unwrap();
-            let b_yes_dec = Decimal::from_f64_retain(b_yes).unwrap();
-            let b_no_dec = Decimal::from_f64_retain(b_no).unwrap();
-            let fee_dec = Decimal::from_f64_retain(fee).unwrap();
-
-            if let Some(opp) = evaluate_prediction_cross_venue(va_name, a_yes_dec, a_no_dec, vb_name, b_yes_dec, b_no_dec, fee_dec) {
-                let is_match = market.is_empty() || m_key.to_lowercase().contains(&market.to_lowercase());
-                if is_match {
-                    let cost_cents = (opp.total_cost * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0);
-                    let profit_cents = (opp.net_profit * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0);
-
-                    results.push(PredictionOpportunityDto {
-                        id: format!("{}-{}-{}", m_key, va_name, vb_name),
-                        market_title: m_key.into(),
-                        venue_a: va_name.into(),
-                        venue_b: vb_name.into(),
-                        strategy: opp.strategy_name,
-                        buy_yes_venue: opp.buy_yes_venue,
-                        buy_no_venue: opp.buy_no_venue,
-                        yes_price_cents: opp.yes_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0,
-                        no_price_cents: opp.no_price.to_string().parse::<f64>().unwrap_or(0.0) * 100.0,
-                        total_cost_cents: cost_cents,
-                        guaranteed_payout_cents: 100.0,
-                        net_profit_cents: profit_cents,
-                        roi_pct: opp.net_return_pct.to_string().parse::<f64>().unwrap_or(0.0),
-                        has_arbitrage: profit_cents > 0.0,
-                    });
                 }
             }
         }
@@ -2020,9 +2013,9 @@ pub async fn scan_funding_opportunities(
 #[tauri::command]
 pub async fn scan_prediction_opportunities(
     market: String,
-    _state: State<'_, Arc<AppEngineState>>,
+    state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<PredictionOpportunityDto>, String> {
-    scan_prediction_opportunities_impl(&market).await
+    scan_prediction_opportunities_impl(&market, &state).await
 }
 
 #[tauri::command]
@@ -2293,6 +2286,10 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
         };
 
         let balance_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(95000.0);
+        let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(100000.0);
+        let available_margin_usd = balance_usd;
+        let margin_rate_pct = account.margin_usage_pct.to_string().parse::<f64>().unwrap_or(5.0);
+
         let needs_rebalance = balance_usd < threshold;
         let (status, action) = if balance_usd < threshold * 0.2 {
             ("DEPLETED".to_string(), Some(format!("Critical: {} margin below ${:.0}. Execution halted on this leg.", name, threshold * 0.2)))
@@ -2305,6 +2302,9 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
         results.push(VenueBalanceInfo {
             venue: vid.to_string(),
             balance_usd,
+            equity_usd,
+            available_margin_usd,
+            margin_rate_pct,
             min_required_usd: threshold,
             needs_rebalance,
             status,
@@ -2561,12 +2561,18 @@ mod tests {
         assert_eq!(quotes[0].best_buy_venue, "-");
         assert_eq!(quotes[0].best_sell_venue, "-");
 
-        // 4. Spatial and funding scans return empty vector
+        // 4. Spatial, spot, funding, and prediction scans return empty vector (fail-closed)
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state).await.expect("opps");
         assert_eq!(opps.len(), 0);
 
+        let spot_opps = scan_spot_opportunities_impl("", &state).await.expect("spot");
+        assert_eq!(spot_opps.len(), 0);
+
         let funding_opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state).await.expect("funding");
         assert_eq!(funding_opps.len(), 0);
+
+        let pred_opps = scan_prediction_opportunities_impl("", &state).await.expect("pred");
+        assert_eq!(pred_opps.len(), 0);
 
         // 5. Venue balances return empty
         let balances = get_venue_balances_impl(&state).await.expect("balances");
@@ -2593,12 +2599,8 @@ mod tests {
     async fn test_spatial_opportunity_scan() {
         let state = AppEngineState::new();
         let opps = scan_spot_opportunities_impl("", &state).await.expect("scan should succeed");
-        // Only live API matches between Binance and Kraken are reported; if network is active, top opp is non-negative
-        if !opps.is_empty() {
-            let top = &opps[0];
-            assert!(top.buy_price > 0.0);
-            assert!(top.sell_price > 0.0);
-        }
+        // Zero synthetic data: unconfigured state returns empty
+        assert_eq!(opps.len(), 0);
     }
 
     #[tokio::test]
@@ -2630,13 +2632,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prediction_synthetic_scan() {
-        let opps = scan_prediction_opportunities_impl("FED").await.expect("pred scan");
-
-        assert!(!opps.is_empty());
-        let fed = &opps[0];
-        assert!(fed.market_title.contains("FED") || fed.has_arbitrage);
-        assert!(fed.total_cost_cents <= 105.0);
+    async fn test_prediction_fail_closed_unconfigured() {
+        let state = AppEngineState::new();
+        let opps = scan_prediction_opportunities_impl("FED", &state).await.expect("pred scan");
+        // Zero synthetic data: unconfigured state returns empty
+        assert_eq!(opps.len(), 0);
     }
 
     #[tokio::test]
@@ -2922,6 +2922,7 @@ mod tests {
             execution_mode: "DOUBLE_WAY".into(),
             unit_size: 0.01,
             user_target_leverage: 15,
+            sliding_window: "5m".into(),
         };
         assert!(save_ticker_strategy_config_impl(updated.clone(), &state).is_ok());
 

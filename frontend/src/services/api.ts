@@ -4,6 +4,8 @@ import type {
   SpatialOpportunityDto,
   SpotOpportunityDto,
   SpotExecutionParams,
+  TriangleOpportunityDto,
+  TriangleExecutionParams,
   FundingOpportunityDto,
   PredictionOpportunityDto,
   StatArbStepResultDto,
@@ -23,7 +25,7 @@ import type {
   WfoOptimizationResult,
 } from "../types/index.ts";
 
-import { PERP_TICKERS, getEnabledConnectedVenueCodes } from "../types/tickers.ts";
+import { PERP_TICKERS, getEnabledConnectedVenueCodes, getEnabledSpotVenueCodes } from "../types/tickers.ts";
 
 // Check if running inside Tauri IPC environment
 function isTauriEnvironment(): boolean {
@@ -385,8 +387,8 @@ class BrowserMockEngine {
   }
 
   async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {
-    const mids = await getLiveHyperliquidMids();
-    const binanceTickers = await getLiveBinanceBookTickers();
+    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
+    const mids = activeVenueCodes.has("HL") ? await getLiveHyperliquidMids() : {};
     const results: TickerMarketQuoteDto[] = [];
 
     for (const sym of symbols) {
@@ -395,19 +397,13 @@ class BrowserMockEngine {
       const benchmark = ticker ? ticker.basePrice : 100.0;
 
       const hlMid = mids[baseCoin];
-      const bTicker = binanceTickers.get(`${baseCoin}USDT`) || binanceTickers.get(`${baseCoin}USDC`);
 
       let bestBid = 0;
       let bestAsk = 0;
       let bestBidVenue = "-";
       let bestAskVenue = "-";
 
-      if (bTicker && bTicker.bid > 0 && bTicker.ask > 0) {
-        bestBid = bTicker.bid;
-        bestAsk = bTicker.ask;
-        bestBidVenue = "Binance";
-        bestAskVenue = "Binance";
-      } else if (hlMid && hlMid > 0) {
+      if (hlMid && hlMid > 0) {
         bestBid = hlMid;
         bestAsk = hlMid;
         bestBidVenue = "Hyperliquid";
@@ -475,6 +471,12 @@ class BrowserMockEngine {
   }
 
   async scanSpotOpportunities(symbolFilter?: string): Promise<SpotOpportunityDto[]> {
+    const activeSpotCodes = getEnabledSpotVenueCodes(this.settings, this.isLive);
+    // Fail-closed: zero synthetic data without at least 2 real configured spot venues
+    if (activeSpotCodes.size < 2) {
+      return [];
+    }
+
     const spotSymbols = ["BTC", "ETH", "SOL", "BNB", "AVAX", "LINK", "NEAR"];
     const binanceTickers = await getLiveBinanceBookTickers();
 
@@ -543,7 +545,7 @@ class BrowserMockEngine {
           const grossBps = (grossSpread / buyPrice) * 10000;
           const transferCost = buy.transferCost + sell.transferCost;
           const tradeSize = 1000;
-          const feeUsd = (buyPrice * tradeSize * buy.feeBps / 10000) + (sellPrice * tradeSize * sell.feeBps / 10000);
+          const feeUsd = (tradeSize * buy.feeBps / 10000) + (tradeSize * sell.feeBps / 10000);
           const grossProfit = (sellPrice - buyPrice) * (tradeSize / buyPrice);
           const netProfitUsd = grossProfit - feeUsd - transferCost;
           const netBps = (netProfitUsd / tradeSize) * 10000;
@@ -563,7 +565,7 @@ class BrowserMockEngine {
             net_profit_usd: Math.round(netProfitUsd * 100) / 100,
             available_depth_usd: 150000,
             estimated_latency_ms: 12,
-            is_executable: netBps > 2.0,
+            is_executable: netBps > 2.0 && netProfitUsd > 0,
           });
         }
       }
@@ -620,6 +622,224 @@ class BrowserMockEngine {
     };
   }
 
+  async scanTriangleOpportunities(filterAsset?: string): Promise<TriangleOpportunityDto[]> {
+    const activeSpotCodes = getEnabledSpotVenueCodes(this.settings, this.isLive);
+    // Fail-closed: zero synthetic data without configured spot venues
+    if (activeSpotCodes.size < 2 || !activeSpotCodes.has("KRK")) {
+      return [];
+    }
+
+    const binanceTickers = await getLiveBinanceBookTickers();
+    if (binanceTickers.size === 0) {
+      return [];
+    }
+
+    const cycles = [
+      {
+        path: "USDT → BTC → ETH → USDT",
+        base: "USDT",
+        a: "BTC",
+        b: "ETH",
+        leg1Symbol: "BTCUSDT",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "ETHBTC",
+        leg2Action: "BUY" as const,
+        leg3Symbol: "ETHUSDT",
+        leg3Action: "SELL" as const,
+      },
+      {
+        path: "USDT → ETH → BTC → USDT",
+        base: "USDT",
+        a: "ETH",
+        b: "BTC",
+        leg1Symbol: "ETHUSDT",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "ETHBTC",
+        leg2Action: "SELL" as const,
+        leg3Symbol: "BTCUSDT",
+        leg3Action: "SELL" as const,
+      },
+      {
+        path: "USDC → BTC → ETH → USDC",
+        base: "USDC",
+        a: "BTC",
+        b: "ETH",
+        leg1Symbol: "BTCUSDC",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "ETHBTC",
+        leg2Action: "BUY" as const,
+        leg3Symbol: "ETHUSDC",
+        leg3Action: "SELL" as const,
+      },
+      {
+        path: "USDT → SOL → ETH → USDT",
+        base: "USDT",
+        a: "SOL",
+        b: "ETH",
+        leg1Symbol: "SOLUSDT",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "SOLETH",
+        leg2Action: "BUY" as const,
+        leg3Symbol: "ETHUSDT",
+        leg3Action: "SELL" as const,
+      },
+      {
+        path: "USDT → BNB → BTC → USDT",
+        base: "USDT",
+        a: "BNB",
+        b: "BTC",
+        leg1Symbol: "BNBUSDT",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "BNBBTC",
+        leg2Action: "SELL" as const,
+        leg3Symbol: "BTCUSDT",
+        leg3Action: "SELL" as const,
+      },
+      {
+        path: "USDT → XRP → BTC → USDT",
+        base: "USDT",
+        a: "XRP",
+        b: "BTC",
+        leg1Symbol: "XRPUSDT",
+        leg1Action: "BUY" as const,
+        leg2Symbol: "XRPBTC",
+        leg2Action: "SELL" as const,
+        leg3Symbol: "BTCUSDT",
+        leg3Action: "SELL" as const,
+      },
+    ];
+
+    const opps: TriangleOpportunityDto[] = [];
+    const feePerLegBps = 7.5;
+    const totalFeeBps = feePerLegBps * 3;
+
+    for (const c of cycles) {
+      if (filterAsset && filterAsset !== "ALL" && !c.path.includes(filterAsset)) {
+        continue;
+      }
+
+      const t1 = binanceTickers.get(c.leg1Symbol);
+      const t2 = binanceTickers.get(c.leg2Symbol);
+      const t3 = binanceTickers.get(c.leg3Symbol);
+
+      if (!t1 || !t2 || !t3 || t1.ask <= 0 || t2.ask <= 0 || t3.bid <= 0) {
+        continue;
+      }
+
+      let amount = 1.0;
+      const leg1Px = c.leg1Action === "BUY" ? t1.ask : t1.bid;
+      if (c.leg1Action === "BUY") {
+        amount = amount / leg1Px;
+      } else {
+        amount = amount * leg1Px;
+      }
+
+      const leg2Px = c.leg2Action === "BUY" ? t2.ask : t2.bid;
+      if (c.leg2Action === "BUY") {
+        amount = amount / leg2Px;
+      } else {
+        amount = amount * leg2Px;
+      }
+
+      const leg3Px = c.leg3Action === "SELL" ? t3.bid : t3.ask;
+      if (c.leg3Action === "SELL") {
+        amount = amount * leg3Px;
+      } else {
+        amount = amount / leg3Px;
+      }
+
+      const grossRatio = amount;
+      const grossSpreadBps = (grossRatio - 1.0) * 10000;
+      const netSpreadBps = grossSpreadBps - totalFeeBps;
+      const tradeSizeUsd = 10000;
+      const netProfitUsd = (netSpreadBps / 10000) * tradeSizeUsd;
+
+      opps.push({
+        id: `tri-${c.path.replace(/\s+/g, "").replace(/→/g, "-")}`,
+        venue: "Binance Spot CLOB",
+        path: c.path,
+        base_asset: c.base,
+        intermediate_a: c.a,
+        intermediate_b: c.b,
+        leg1: {
+          symbol: c.leg1Symbol,
+          action: c.leg1Action,
+          price: leg1Px,
+          fee_bps: feePerLegBps,
+        },
+        leg2: {
+          symbol: c.leg2Symbol,
+          action: c.leg2Action,
+          price: leg2Px,
+          fee_bps: feePerLegBps,
+        },
+        leg3: {
+          symbol: c.leg3Symbol,
+          action: c.leg3Action,
+          price: leg3Px,
+          fee_bps: feePerLegBps,
+        },
+        gross_spread_bps: Math.round(grossSpreadBps * 10) / 10,
+        total_fee_bps: totalFeeBps,
+        net_spread_bps: Math.round(netSpreadBps * 10) / 10,
+        net_profit_usd: Math.round(netProfitUsd * 100) / 100,
+        trade_size_usd: tradeSizeUsd,
+        estimated_latency_ms: 18,
+        is_executable: netSpreadBps > 1.5,
+      });
+    }
+
+    return opps.sort((a, b) => b.net_spread_bps - a.net_spread_bps);
+  }
+
+  executeTriangleArbitrage(params: TriangleExecutionParams): SimStepResultDto {
+    if (this.isPaused) {
+      throw new Error("Trading engine is PAUSED. Positions are preserved, but executions are suspended.");
+    }
+    this.simCycle += 1;
+    const profit = Math.max(params.trade_size_usd * 0.00065, 6.5);
+    this.pnl += profit;
+
+    const logEntry: ExecutionLogEntry = {
+      id: `exec-tri-${Date.now()}`,
+      timestamp: new Date().toISOString(),
+      trade_type: "Triangular Cycle Arbitrage",
+      symbol: params.path,
+      venue_a: params.venue,
+      venue_b: params.venue,
+      leg_a_status: "FILLED",
+      leg_b_status: "FILLED",
+      success: true,
+      gross_profit: Math.round((profit + 3.0) * 100) / 100,
+      fees: 3.0,
+      net_profit: Math.round(profit * 100) / 100,
+      latency_us: 18400,
+      note: `Triangular 3-leg cycle executed: ${params.path} on ${params.venue}`,
+      direction: "Triangular Arb",
+      trigger_spread_bps: params.net_spread_bps ?? 6.5,
+      baseline_mean_spread_bps: 2.0,
+      position_step: 1,
+      max_units: 1,
+      nominal_hurdle_bps: 4.0,
+    };
+    this.logs.unshift(logEntry);
+    if (this.logs.length > 100) this.logs.pop();
+
+    return {
+      cycle: this.simCycle,
+      opportunity_found: true,
+      execution_success: true,
+      trade_type: "Triangular Cycle Arbitrage",
+      direction: "Triangular Arb",
+      venue_a: params.venue,
+      venue_b: params.venue,
+      spread_bps: params.net_spread_bps ?? 6.5,
+      realized_profit_usd: Math.round(profit * 100) / 100,
+      total_cumulative_pnl_usd: Math.round(this.pnl * 100) / 100,
+      message: `Triangular Cycle execution confirmed: +$${profit.toFixed(2)} USD`,
+    };
+  }
+
   async scanFundingOpportunities(symbol: string, _tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
     const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
     if (activeVenueCodes.size < 2) {
@@ -640,6 +860,11 @@ class BrowserMockEngine {
   }
 
   async scanPredictionOpportunities(market: string): Promise<PredictionOpportunityDto[]> {
+    const activeVenueCodes = getEnabledConnectedVenueCodes(this.settings, this.isLive);
+    if (!activeVenueCodes.has("POLY") || !activeVenueCodes.has("KALSHI")) {
+      return [];
+    }
+
     const opps: PredictionOpportunityDto[] = [];
     try {
       const resp = await fetch("https://gamma-api.polymarket.com/events?closed=false&limit=15");
@@ -669,7 +894,7 @@ class BrowserMockEngine {
                   market_title: title,
                   venue_a: "Polymarket",
                   venue_b: "Kalshi",
-                  strategy: "Synthetic Binary Parity",
+                  strategy: "Binary Parity",
                   buy_yes_venue: "Polymarket",
                   buy_no_venue: "Kalshi",
                   yes_price_cents: yesCents,
@@ -686,45 +911,7 @@ class BrowserMockEngine {
         }
       }
     } catch {
-      // network fallback
-    }
-
-    if (opps.length === 0) {
-      const fallbackList: PredictionOpportunityDto[] = [
-        {
-          id: "FED-RATE-CUT-MAY-Poly-Kalshi",
-          market_title: "FED-RATE-CUT-MAY",
-          venue_a: "Polymarket",
-          venue_b: "Kalshi",
-          strategy: "Synthetic Binary Parity",
-          buy_yes_venue: "Polymarket",
-          buy_no_venue: "Kalshi",
-          yes_price_cents: 44.0,
-          no_price_cents: 51.0,
-          total_cost_cents: 95.0,
-          guaranteed_payout_cents: 100.0,
-          net_profit_cents: 5.0,
-          roi_pct: 5.26,
-          has_arbitrage: true,
-        },
-        {
-          id: "BTC-OVER-70K-Q2-Poly-Kalshi",
-          market_title: "BTC-OVER-70K-Q2",
-          venue_a: "Polymarket",
-          venue_b: "Kalshi",
-          strategy: "Synthetic Binary Parity",
-          buy_yes_venue: "Kalshi",
-          buy_no_venue: "Polymarket",
-          yes_price_cents: 58.0,
-          no_price_cents: 38.0,
-          total_cost_cents: 96.0,
-          guaranteed_payout_cents: 100.0,
-          net_profit_cents: 4.0,
-          roi_pct: 4.17,
-          has_arbitrage: true,
-        },
-      ];
-      return market ? fallbackList.filter((p) => p.market_title.toLowerCase().includes(market.toLowerCase())) : fallbackList;
+      // network failure - fail closed
     }
 
     return opps;
@@ -1139,12 +1326,15 @@ class BrowserMockEngine {
 
   getVenueBalances(): VenueBalanceInfo[] {
     return [
-      { venue: "hyperliquid", balance_usd: 84250.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "lighter", balance_usd: 62100.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "vanta", balance_usd: 48900.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "arcus", balance_usd: 52000.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "popdex", balance_usd: 41000.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
-      { venue: "robinhood", balance_usd: 35400.0, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "arcus", balance_usd: 52000.0, equity_usd: 54200.0, available_margin_usd: 52000.0, margin_rate_pct: 4.1, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "hyperliquid", balance_usd: 84250.0, equity_usd: 88500.0, available_margin_usd: 84250.0, margin_rate_pct: 4.8, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "kalshi", balance_usd: 24800.0, equity_usd: 25500.0, available_margin_usd: 24800.0, margin_rate_pct: 2.7, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "kraken", balance_usd: 58300.0, equity_usd: 61000.0, available_margin_usd: 58300.0, margin_rate_pct: 4.4, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "lighter", balance_usd: 62100.0, equity_usd: 65000.0, available_margin_usd: 62100.0, margin_rate_pct: 4.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "polymarket", balance_usd: 29500.0, equity_usd: 30200.0, available_margin_usd: 29500.0, margin_rate_pct: 2.3, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "popdex", balance_usd: 41000.0, equity_usd: 42500.0, available_margin_usd: 41000.0, margin_rate_pct: 3.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "robinhood", balance_usd: 35400.0, equity_usd: 37000.0, available_margin_usd: 35400.0, margin_rate_pct: 4.3, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
+      { venue: "vanta", balance_usd: 48900.0, equity_usd: 51200.0, available_margin_usd: 48900.0, margin_rate_pct: 4.5, min_required_usd: 500.0, needs_rebalance: false, status: "HEALTHY" },
     ];
   }
 
@@ -1333,6 +1523,30 @@ export const api = {
       }
     }
     return mockEngine.executeSpotArbitrage(params);
+  },
+
+  async scanTriangleOpportunities(filterAsset?: string): Promise<TriangleOpportunityDto[]> {
+    const tauri = await getTauriCore();
+    if (tauri) {
+      try {
+        return await tauri.invoke<TriangleOpportunityDto[]>("scan_triangle_opportunities", { filterAsset });
+      } catch {
+        // fallback to engine
+      }
+    }
+    return mockEngine.scanTriangleOpportunities(filterAsset);
+  },
+
+  async executeTriangleArbitrage(params: TriangleExecutionParams): Promise<SimStepResultDto> {
+    const tauri = await getTauriCore();
+    if (tauri) {
+      try {
+        return await tauri.invoke<SimStepResultDto>("execute_triangle_arbitrage", { params });
+      } catch (e) {
+        console.warn("Tauri invoke execute_triangle_arbitrage error:", e);
+      }
+    }
+    return mockEngine.executeTriangleArbitrage(params);
   },
 
   async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {

@@ -81,6 +81,8 @@ export interface TickerStrategyConfigDto {
   unit_size?: number;
   userTargetLeverage: number; // User target leverage ratio (e.g. 10)
   user_target_leverage?: number;
+  slidingWindow?: SlidingWindowOption; // Rolling sliding window (e.g. 1m)
+  sliding_window?: string;
 }
 
 export interface MatrixCellDto {
@@ -386,6 +388,9 @@ export interface ExchangeCredentials {
 export interface VenueBalanceInfo {
   venue: string;
   balance_usd: number;
+  equity_usd?: number;
+  available_margin_usd?: number;
+  margin_rate_pct?: number;
   min_required_usd: number;
   needs_rebalance: boolean;
   status: "HEALTHY" | "LOW_MARGIN" | "DEPLETED" | string;
@@ -452,6 +457,49 @@ export interface SpotExecutionParams {
   sell_venue: string;
   trade_size_usd: number;
   max_slippage_bps: number;
+  net_spread_bps?: number;
+}
+
+export interface TriangleOpportunityDto {
+  id: string;
+  venue: string;
+  path: string; // e.g. "USDC → BTC → ETH → USDC"
+  base_asset: string;
+  intermediate_a: string;
+  intermediate_b: string;
+  leg1: {
+    symbol: string;
+    action: "BUY" | "SELL";
+    price: number;
+    fee_bps: number;
+  };
+  leg2: {
+    symbol: string;
+    action: "BUY" | "SELL";
+    price: number;
+    fee_bps: number;
+  };
+  leg3: {
+    symbol: string;
+    action: "BUY" | "SELL";
+    price: number;
+    fee_bps: number;
+  };
+  gross_spread_bps: number;
+  total_fee_bps: number;
+  net_spread_bps: number;
+  net_profit_usd: number;
+  trade_size_usd: number;
+  estimated_latency_ms: number;
+  is_executable: boolean;
+}
+
+export interface TriangleExecutionParams {
+  id: string;
+  venue: string;
+  path: string;
+  trade_size_usd: number;
+  min_profit_bps: number;
   net_spread_bps?: number;
 }
 

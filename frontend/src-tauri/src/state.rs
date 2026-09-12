@@ -58,6 +58,12 @@ pub struct TickerStrategyConfigDto {
     pub execution_mode: String, // "SINGLE_WAY" or "DOUBLE_WAY"
     pub unit_size: f64,
     pub user_target_leverage: u32,
+    #[serde(default = "default_sliding_window")]
+    pub sliding_window: String,
+}
+
+fn default_sliding_window() -> String {
+    "1m".into()
 }
 
 impl Default for TickerStrategyConfigDto {
@@ -71,6 +77,7 @@ impl Default for TickerStrategyConfigDto {
             execution_mode: "SINGLE_WAY".into(),
             unit_size: 0.005,
             user_target_leverage: 5,
+            sliding_window: "1m".into(),
         }
     }
 }
@@ -109,6 +116,12 @@ fn default_popdex_account_index() -> String { "0".into() }
 pub struct VenueBalanceInfo {
     pub venue: String,
     pub balance_usd: f64,
+    #[serde(default)]
+    pub equity_usd: f64,
+    #[serde(default)]
+    pub available_margin_usd: f64,
+    #[serde(default)]
+    pub margin_rate_pct: f64,
     pub min_required_usd: f64,
     pub needs_rebalance: bool,
     pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED"

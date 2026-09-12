@@ -40,14 +40,16 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
       if (!isManual) {
         try {
-          const resp = await fetch('https://api.binance.com/api/v3/ticker/bookTicker?symbols=%5B%22BTCUSDT%22,%22ETHUSDT%22%5D');
+          const resp = await fetch("https://api.hyperliquid.xyz/info", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ type: "allMids" }),
+          });
           if (resp.ok) {
-            const data = await resp.json();
-            const btc = data.find((d: any) => d.symbol === "BTCUSDT");
-            const eth = data.find((d: any) => d.symbol === "ETHUSDT");
-            if (btc && eth) {
-              py = (parseFloat(btc.bidPrice) + parseFloat(btc.askPrice)) / 2;
-              px = (parseFloat(eth.bidPrice) + parseFloat(eth.askPrice)) / 2;
+            const mids = await resp.json();
+            if (mids && mids.BTC && mids.ETH) {
+              py = parseFloat(mids.BTC);
+              px = parseFloat(mids.ETH);
               setPriceX(px);
               setPriceY(py);
             }
@@ -110,11 +112,12 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           }
         }
       } catch {
-        // network fallback
+        // network error
       }
 
       if (series.length === 0) {
-        series = [mu - sigma, mu - sigma * 0.5, mu, mu + sigma * 0.5, mu + sigma, mu + sigma * 0.3, mu - sigma * 0.2, mu];
+        setErrorMsg("Unable to retrieve live market klines for OU calibration. Check network connection or configure data feed. Zero synthetic series is fabricated.");
+        return;
       }
 
       const res = await onFitOu(series, 0.1);

@@ -180,7 +180,9 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
         <div className="bg-surface p-3 rounded-xl border border-surface-border">
           <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Scanned Discrepancies</div>
           <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">{opportunities.length} Pairs</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Across 6 Spot Venues</div>
+          <div className="text-[10px] text-slate-500 mt-0.5">
+            {opportunities.length > 0 ? "Live Orderbook Depth" : "Zero synthetic pairs"}
+          </div>
         </div>
 
         <div className="bg-surface p-3 rounded-xl border border-surface-border">
@@ -189,14 +191,18 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
             {bestOpp ? `+${bestOpp.net_spread_bps.toFixed(1)} BPS` : "—"}
           </div>
           <div className="text-[10px] text-slate-500 mt-0.5">
-            {bestOpp ? `${bestOpp.symbol} (${bestOpp.buy_venue} ➔ ${bestOpp.sell_venue})` : "Scanning..."}
+            {bestOpp ? `${bestOpp.symbol} (${bestOpp.buy_venue} ➔ ${bestOpp.sell_venue})` : (loading ? "Scanning..." : "Requires configured spot venues")}
           </div>
         </div>
 
         <div className="bg-surface p-3 rounded-xl border border-surface-border">
           <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Target Bot Latency</div>
-          <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">~14.2 ms</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">Concurrent Atomic Dispatch</div>
+          <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">
+            {opportunities.length > 0 ? "~14.2 ms" : "—"}
+          </div>
+          <div className="text-[10px] text-slate-500 mt-0.5">
+            {opportunities.length > 0 ? "Concurrent Atomic Dispatch" : "Idle (No active pairs)"}
+          </div>
         </div>
 
         <div className="bg-surface p-3 rounded-xl border border-surface-border">
@@ -254,7 +260,13 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 {opportunities.length === 0 ? (
                   <tr>
                     <td colSpan={8} className="py-12 text-center text-slate-400 font-sans">
-                      {loading ? "Scanning spot orderbooks..." : "No spot arbitrage discrepancies found for this asset."}
+                      <div className="flex flex-col items-center justify-center space-y-2">
+                        <Coins className="w-8 h-8 text-slate-300" />
+                        <p className="font-medium text-slate-600">No Spot Arbitrage Discrepancies Detected</p>
+                        <p className="text-xs text-slate-400 max-w-md">
+                          Requires at least 2 enabled and connected spot venues with configured API credentials in System Settings (e.g. Kraken Spot, Arcus, Robinhood).
+                        </p>
+                      </div>
                     </td>
                   </tr>
                 ) : (

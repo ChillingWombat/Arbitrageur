@@ -108,10 +108,16 @@ export interface VenueSettingsFilter {
   kraken_futures_enabled?: boolean;
   kraken_spot_api_key?: string;
   kraken_futures_api_key?: string;
+  polymarket_enabled?: boolean;
+  polymarket_api_key?: string;
+  polymarket_secret?: string;
+  kalshi_enabled?: boolean;
+  kalshi_api_key?: string;
+  kalshi_email?: string;
 }
 
 /**
- * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "ARC", "POP", "KRK") based on engine settings.
+ * Determines the set of active venue codes ("HL", "LGT", "VNT", "RH", "ARC", "POP", "KRK", "POLY", "KALSHI") based on engine settings.
  * Strictly requires configured API credentials/keys for venues in BOTH paper and live trading.
  * No synthetic venue connectivity is permitted without real configured API access.
  */
@@ -175,7 +181,42 @@ export function getEnabledConnectedVenueCodes(
     }
   }
 
+  // 8. Polymarket CTF: requires API key
+  if (settings.polymarket_enabled === true) {
+    if (Boolean(settings.polymarket_api_key?.trim() || settings.polymarket_secret?.trim())) {
+      active.add("POLY");
+    }
+  }
+
+  // 9. Kalshi CFTC: requires API key
+  if (settings.kalshi_enabled === true) {
+    if (Boolean(settings.kalshi_api_key?.trim() || settings.kalshi_email?.trim())) {
+      active.add("KALSHI");
+    }
+  }
+
   return active;
+}
+
+/**
+ * Returns the set of active venue codes that support spot trading (e.g. Kraken Spot, Arcus, Robinhood).
+ */
+export function getEnabledSpotVenueCodes(
+  settings?: VenueSettingsFilter | null,
+  isLiveMode?: boolean
+): Set<string> {
+  const allActive = getEnabledConnectedVenueCodes(settings, isLiveMode);
+  const spotCodes = new Set<string>();
+  if (allActive.has("KRK") && settings?.kraken_spot_enabled && settings?.kraken_spot_api_key?.trim()) {
+    spotCodes.add("KRK");
+  }
+  if (allActive.has("ARC")) {
+    spotCodes.add("ARC");
+  }
+  if (allActive.has("RH")) {
+    spotCodes.add("RH");
+  }
+  return spotCodes;
 }
 
 /**

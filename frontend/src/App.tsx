@@ -9,6 +9,7 @@ import { StatArbLab } from "./components/StatArbLab";
 import { PortfolioMonitor } from "./components/PortfolioMonitor";
 import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
+import { TriangularArbitrage } from "./components/TriangularArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
 import { api } from "./services/api";
 import type {
@@ -16,6 +17,7 @@ import type {
   VenueOrderBookDto,
   SpatialOpportunityDto,
   SpotOpportunityDto,
+  TriangleOpportunityDto,
   FundingOpportunityDto,
   PredictionOpportunityDto,
   RiskOverviewDto,
@@ -39,6 +41,7 @@ export const App: React.FC = () => {
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
   const [spotOpps, setSpotOpps] = useState<SpotOpportunityDto[]>([]);
+  const [triangleOpps, setTriangleOpps] = useState<TriangleOpportunityDto[]>([]);
   const [fundingOpps, setFundingOpps] = useState<FundingOpportunityDto[]>([]);
   const [predictionOpps, setPredictionOpps] = useState<PredictionOpportunityDto[]>([]);
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
@@ -80,6 +83,32 @@ export const App: React.FC = () => {
     strategy: "futures",
   });
 
+  // Auto-lock vault 1 minute after exiting the settings modal, and when the program exits
+  useEffect(() => {
+    let timer: NodeJS.Timeout | null = null;
+    if (!isSettingsOpen) {
+      // Exited settings modal: start 60-second auto-lock timer
+      timer = setTimeout(() => {
+        api.lockVault().catch((err) => {
+          console.warn("Auto-lock vault failed:", err);
+        });
+      }, 60000);
+    }
+    return () => {
+      if (timer) clearTimeout(timer);
+    };
+  }, [isSettingsOpen]);
+
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      api.lockVault().catch(() => {});
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
   // Calculate enabled & connected venues and dynamically available tickers
   const activeVenueCodes = useMemo(() => {
     return getEnabledConnectedVenueCodes(engineSettings, systemStatus?.is_live_mode);
@@ -107,7 +136,7 @@ export const App: React.FC = () => {
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
-      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot, triangle] = await Promise.all([
         api.getSystemStatus(),
         api.getEngineSettings(),
         api.fetchOrderbooks(selectedSymbol),
@@ -118,6 +147,7 @@ export const App: React.FC = () => {
         api.getExecutionLogs(),
         api.getAllTickerStrategyConfigs(),
         api.scanSpotOpportunities(),
+        api.scanTriangleOpportunities(),
       ]);
 
       setSystemStatus(status);
@@ -132,6 +162,7 @@ export const App: React.FC = () => {
       setRiskData(risk);
       setExecutionLogs(logs);
       setSpotOpps(spot);
+      setTriangleOpps(triangle);
 
       if (configs && configs.length > 0) {
         setStrategyConfigs((prev) => {
@@ -242,8 +273,9 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         onSelectTab={setActiveTab}
         spatialCount={spatialOpps.filter((o) => o.is_executable).length}
-        spotCount={spotOpps.filter((o) => o.is_executable).length}
         fundingCount={fundingOpps.length}
+        spotCount={spotOpps.filter((o) => o.is_executable).length}
+        triangleCount={triangleOpps.filter((t) => t.is_executable).length}
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
 
@@ -290,15 +322,6 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "spot_arb" && (
-            <SpotArbitrageBot
-              executionLogs={executionLogs}
-              onRefreshAll={refreshAllData}
-              onOpenConfig={handleOpenTickerConfig}
-              isPaused={isPaused}
-            />
-          )}
-
           {activeTab === "funding" && (
             <FundingRadar
               opportunities={fundingOpps}
@@ -308,6 +331,24 @@ export const App: React.FC = () => {
               onExecuteCarry={handleExecuteCarry}
               loading={refreshing}
               executionLogs={executionLogs}
+              onOpenConfig={handleOpenTickerConfig}
+              isPaused={isPaused}
+            />
+          )}
+
+          {activeTab === "spot_arb" && (
+            <SpotArbitrageBot
+              executionLogs={executionLogs}
+              onRefreshAll={refreshAllData}
+              onOpenConfig={handleOpenTickerConfig}
+              isPaused={isPaused}
+            />
+          )}
+
+          {activeTab === "triangle" && (
+            <TriangularArbitrage
+              executionLogs={executionLogs}
+              onRefreshAll={refreshAllData}
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
             />

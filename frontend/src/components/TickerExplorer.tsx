@@ -386,7 +386,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Column Subheader */}
       <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[10px] font-mono text-slate-600 font-semibold uppercase tracking-wider">
         <span>Symbol</span>
-        <span className="text-right">Net PnL (USD / BPS)</span>
+        <span className="text-right">Net PnL</span>
       </div>
 
       {/* Scrollable Ticker List */}

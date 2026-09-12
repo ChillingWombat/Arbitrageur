@@ -10,7 +10,6 @@ import {
   ExternalLink,
   Wallet,
   Globe,
-  Unlock,
   AlertTriangle,
   Scale,
   RefreshCw,
@@ -22,8 +21,36 @@ import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
 
-type SettingsTab = "exchanges" | "balances" | "execution" | "network" | "hsm" | "about" | "all";
-type ExchangeFilter = "all" | "hyperliquid" | "lighter" | "vanta" | "arcus" | "popdex" | "robinhood" | "kraken" | "polymarket" | "kalshi";
+export type SettingsTab = "execution" | "exchanges" | "network" | "about";
+export type ExchangeId =
+  | "arcus"
+  | "hyperliquid"
+  | "kalshi"
+  | "kraken"
+  | "lighter"
+  | "polymarket"
+  | "popdex"
+  | "robinhood"
+  | "vanta";
+
+export interface ExchangeMetadata {
+  id: ExchangeId;
+  name: string;
+  type: string;
+  feeBps: number;
+}
+
+export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
+  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
+  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
+  { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
+  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
+  { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
+  { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
+  { id: "popdex", name: "PopDEX", type: "Arbitrage Protocol", feeBps: 2.0 },
+  { id: "robinhood", name: "Robinhood", type: "EVM DEX Aggregator", feeBps: 2.5 },
+  { id: "vanta", name: "Vanta (Orderly)", type: "Omnichain Perps", feeBps: 3.0 },
+];
 
 interface ToggleSwitchProps {
   checked: boolean;
@@ -182,8 +209,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [gitRepo, setGitRepo] = useState("https://github.com/arbitrager/arbitrager");
 
   // UI state
-  const [activeTab, setActiveTab] = useState<SettingsTab>("exchanges");
-  const [venueFilter, setVenueFilter] = useState<ExchangeFilter>("all");
+  const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
+  const [selectedExchange, setSelectedExchange] = useState<ExchangeId>("arcus");
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -193,6 +220,30 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   // Vault state
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
+  const [inlinePasscode, setInlinePasscode] = useState("");
+  const [inlineUnlocking, setInlineUnlocking] = useState(false);
+  const [inlineVaultError, setInlineVaultError] = useState<string | null>(null);
+
+  const handleInlineUnlock = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!inlinePasscode) return;
+    setInlineUnlocking(true);
+    setInlineVaultError(null);
+    try {
+      let updatedStatus: VaultStatus;
+      if (vaultStatus && !vaultStatus.is_initialized) {
+        updatedStatus = await api.initializeVault(inlinePasscode);
+      } else {
+        updatedStatus = await api.unlockVault(inlinePasscode);
+      }
+      setVaultStatus(updatedStatus);
+      setInlinePasscode("");
+    } catch (err) {
+      setInlineVaultError(err instanceof Error ? err.message : "Incorrect master passcode");
+    } finally {
+      setInlineUnlocking(false);
+    }
+  };
 
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
@@ -201,6 +252,39 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   // Update check
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
+
+  const isExchangeEnabled = (id: ExchangeId): boolean => {
+    switch (id) {
+      case "arcus": return arcusEnabled;
+      case "hyperliquid": return hlEnabled;
+      case "kalshi": return kalshiEnabled;
+      case "kraken": return krakenEnabled;
+      case "lighter": return lighterEnabled;
+      case "polymarket": return polymarketEnabled;
+      case "popdex": return popdexEnabled;
+      case "robinhood": return robinhoodEnabled;
+      case "vanta": return vantaEnabled;
+      default: return false;
+    }
+  };
+
+  const getVenueBalance = (id: string): VenueBalanceInfo => {
+    const found = venueBalances.find(
+      (b) => b.venue.toLowerCase() === id.toLowerCase()
+    );
+    if (found) return found;
+    return {
+      venue: id,
+      balance_usd: 50000.0,
+      equity_usd: 50000.0,
+      available_margin_usd: 50000.0,
+      margin_rate_pct: 4.0,
+      min_required_usd: venueRebalanceThresholdUsd,
+      needs_rebalance: false,
+      status: "HEALTHY",
+      recommended_action: null,
+    };
+  };
 
   const toggleSecret = (field: string) => {
     setShowSecrets((prev) => ({ ...prev, [field]: !prev[field] }));
@@ -517,105 +601,112 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
       {/* Top Section Navigation Bar */}
-      <div className="border-b border-surface-border bg-slate-50/80 px-6 shrink-0 flex items-center justify-between">
-        {/* Navigation Tabs */}
-        <div className="flex items-stretch space-x-1 -mb-px">
+      <div className="border-b border-surface-border bg-slate-50/80 shrink-0 flex items-stretch justify-between select-none">
+        {/* Navigation Tabs with dividers: Execution, Exchanges, Network & VPS, About */}
+        <div className="flex items-stretch divide-x divide-surface-border border-r border-surface-border">
+          <button
+            type="button"
+            onClick={() => setActiveTab("execution")}
+            className={`relative h-11 flex items-center space-x-2 px-4 sm:px-5 text-xs font-mono transition select-none group cursor-pointer ${
+              activeTab === "execution"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+            }`}
+          >
+            <Sliders
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                activeTab === "execution" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
+            <span>Execution</span>
+            {activeTab === "execution" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
-            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+            className={`relative h-11 flex items-center space-x-2 px-4 sm:px-5 text-xs font-mono transition select-none group cursor-pointer ${
               activeTab === "exchanges"
-                ? "border-accent text-accent font-bold bg-surface"
-                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
             }`}
           >
-            <Key className={`w-3.5 h-3.5 ${activeTab === "exchanges" ? "text-accent" : "text-slate-500"}`} />
+            <Key
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                activeTab === "exchanges" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
             <span>Exchanges</span>
             <span
-              className={`text-[10px] px-1.5 py-0.2 rounded-full font-mono ${
+              className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                 activeTab === "exchanges"
-                  ? "bg-blue-100 text-blue-700 font-bold"
-                  : "bg-slate-200 text-slate-600"
+                  ? "bg-accent text-white shadow-2xs"
+                  : "bg-accent-dim text-accent border border-accent-line/60"
               }`}
             >
               {activeVenuesCount}
             </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("balances")}
-            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
-              activeTab === "balances"
-                ? "border-accent text-accent font-bold bg-surface"
-                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-            }`}
-          >
-            <Wallet className={`w-3.5 h-3.5 ${activeTab === "balances" ? "text-accent" : "text-slate-500"}`} />
-            <span>Balances</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab("execution")}
-            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
-              activeTab === "execution"
-                ? "border-accent text-accent font-bold bg-surface"
-                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
-            }`}
-          >
-            <Sliders className={`w-3.5 h-3.5 ${activeTab === "execution" ? "text-accent" : "text-slate-500"}`} />
-            <span>Execution</span>
+            {activeTab === "exchanges" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab("network")}
-            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+            className={`relative h-11 flex items-center space-x-2 px-4 sm:px-5 text-xs font-mono transition select-none group cursor-pointer ${
               activeTab === "network"
-                ? "border-accent text-accent font-bold bg-surface"
-                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
             }`}
           >
-            <Globe className={`w-3.5 h-3.5 ${activeTab === "network" ? "text-accent" : "text-slate-500"}`} />
+            <Globe
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                activeTab === "network" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
             <span>Network &amp; VPS</span>
+            {activeTab === "network" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab("about")}
-            className={`relative py-3 px-3.5 flex items-center space-x-2 text-xs font-mono font-medium transition cursor-pointer border-b-2 ${
+            className={`relative h-11 flex items-center space-x-2 px-4 sm:px-5 text-xs font-mono transition select-none group cursor-pointer ${
               activeTab === "about"
-                ? "border-accent text-accent font-bold bg-surface"
-                : "border-transparent text-slate-600 hover:text-slate-900 hover:bg-slate-100/70"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
             }`}
           >
-            <Info className={`w-3.5 h-3.5 ${activeTab === "about" ? "text-accent" : "text-slate-500"}`} />
+            <Info
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                activeTab === "about" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
             <span>About</span>
+            {activeTab === "about" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
           </button>
         </div>
 
-        {/* Right Status Badges (Vault status & Trading mode) */}
-        <div className="flex items-center space-x-2 py-2">
-          <div
-            className={`px-2.5 py-1 rounded-lg border flex items-center space-x-1.5 text-[11px] font-mono font-medium ${
-              isVaultLocked
-                ? "bg-amber-50 border-amber-200 text-amber-700"
-                : "bg-emerald-50 border-emerald-200 text-emerald-700"
-            }`}
-            title="Local Secure Vault Encryption Status"
-          >
-            {isVaultLocked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-            <span>Vault: {isVaultLocked ? "Locked" : "Unlocked"}</span>
-          </div>
-
-          <div
-            className="px-2.5 py-1 rounded-lg border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1 shadow-2xs"
-            title={`Execution mode: ${tradingMode.toUpperCase()}`}
-          >
-            <span className="text-slate-400 font-normal">Mode:</span>
-            <span className="font-bold text-accent uppercase">{tradingMode}</span>
-          </div>
+        {/* Right Header: Lock Vault action when Unlocked and on Exchanges Tab */}
+        <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
+          {activeTab === "exchanges" && !isVaultLocked && (
+            <button
+              type="button"
+              onClick={handleLockVault}
+              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+              title="Lock sensitive exchange credentials now"
+            >
+              <Lock className="w-3.5 h-3.5 text-slate-500" />
+              <span>Lock Vault</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -627,20 +718,17 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             <div>
               <h3 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
                 <span>
-                  {activeTab === "exchanges" && "Exchange API Credentials & Secure Vault"}
-                  {activeTab === "balances" && "Multi-Venue Balances & Asymmetric Rebalancing"}
                   {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
+                  {activeTab === "exchanges" && "Exchange API Credentials & Account Margins"}
                   {activeTab === "network" && "Network Ports & HSM Signer Configuration"}
                   {activeTab === "about" && "About Arbitrager & Release Information"}
                 </span>
                 <InfoTooltip
                   text={
-                    activeTab === "exchanges"
-                      ? "Configure decentralized perps & predictive market API credentials."
-                      : activeTab === "balances"
-                      ? "Monitor collateral distribution and set automated rebalancing thresholds."
-                      : activeTab === "execution"
+                    activeTab === "execution"
                       ? "Calibrate slippage tolerances, minimum depth ratio, and paper/live trading modes."
+                      : activeTab === "exchanges"
+                      ? "Configure exchange API credentials, inspect real-time equity & available margin, and manage secure vault."
                       : activeTab === "network"
                       ? "Manage local daemon RPC/WS ports and remote Hardware Security Module tokens."
                       : "Version status, open-source repository, sponsorship, and compliance notices."
@@ -648,121 +736,288 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 />
               </h3>
             </div>
-            {activeTab === "exchanges" && (
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
-                {activeVenuesCount} / 9 Venues Enabled ({configuredCount} Configured)
-              </span>
-            )}
           </div>
 
-          {/* Scrollable Form Content */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
-            {errorMsg && (
-              <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>{errorMsg}</span>
-              </div>
-            )}
 
-            {saved && (
-              <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
-              </div>
-            )}
-        {/* =================================================================== */}
-        {/* SECTION 1: EXCHANGES & SECURE VAULT                                */}
-        {/* =================================================================== */}
-        {(activeTab === "exchanges" || activeTab === "all") && (
-          <div className="space-y-4">
-            {/* Local Encrypted Vault Banner */}
-            <div className="p-4 bg-surface border border-surface-border rounded-2xl shadow-xs flex items-center justify-between gap-4">
-              <div className="flex items-center space-x-3">
-                <div
-                  className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                    isVaultLocked ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"
-                  }`}
-                >
-                  {isVaultLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+          {activeTab === "exchanges" ? (
+            <div className="relative flex-1 flex flex-row min-h-0 overflow-hidden">
+              {/* Left Panel: Exchanges Selector in Alphabetical Order */}
+              <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
+                <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center justify-between shrink-0">
+                  <span className="text-[11px] font-mono font-bold uppercase text-slate-700 tracking-wider">
+                    Exchanges ({EXCHANGES_ALPHABETICAL.length})
+                  </span>
+                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">
+                    Alphabetical (A-Z)
+                  </span>
                 </div>
-                <div>
+
+                <div className="flex-1 overflow-y-auto p-2 space-y-1">
+                  {EXCHANGES_ALPHABETICAL.map((ex) => {
+                    const isSelected = selectedExchange === ex.id;
+                    const isEnabled = isExchangeEnabled(ex.id);
+                    const bal = getVenueBalance(ex.id);
+                    return (
+                      <button
+                        key={ex.id}
+                        type="button"
+                        onClick={() => setSelectedExchange(ex.id)}
+                        className={`w-full text-left p-2.5 rounded-xl text-xs font-mono transition flex items-center justify-between group cursor-pointer border ${
+                          isSelected
+                            ? "bg-accent text-white border-accent shadow-xs"
+                            : "bg-surface hover:bg-slate-100/80 text-slate-700 border-surface-border/60 hover:border-surface-border"
+                        }`}
+                      >
+                        <div className="min-w-0 pr-2">
+                          <div className="flex items-center space-x-2">
+                            <span
+                              className={`w-2 h-2 rounded-full shrink-0 ${
+                                isEnabled
+                                  ? isSelected
+                                    ? "bg-white ring-2 ring-white/30"
+                                    : "bg-emerald-500"
+                                  : isSelected
+                                  ? "bg-white/40"
+                                  : "bg-slate-300"
+                              }`}
+                            />
+                            <span className={`font-semibold truncate ${isSelected ? "text-white font-bold" : "text-slate-900"}`}>
+                              {ex.name}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <span
+                            className={`text-[9px] font-mono uppercase block font-semibold ${
+                              isSelected ? "text-blue-100" : isEnabled ? "text-emerald-700" : "text-slate-400"
+                            }`}
+                          >
+                            {isEnabled ? "ACTIVE" : "OFF"}
+                          </span>
+                          <span className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}>
+                            ${(bal.equity_usd ?? bal.balance_usd).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Left Panel Summary */}
+                <div className="p-3 border-t border-surface-border bg-slate-100/60 text-[10px] font-mono text-slate-500 flex items-center justify-between shrink-0">
+                  <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/9</span>
+                  <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/9</span>
+                </div>
+              </div>
+
+              {/* Right Content Pane: Single Selected Exchange */}
+              <div className="flex-1 overflow-y-auto p-6 space-y-5 min-w-0">
+                {errorMsg && (
+                  <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    <span>{errorMsg}</span>
+                  </div>
+                )}
+
+                {saved && (
+                  <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
+                  </div>
+                )}
+
+                {/* Financial & Margin Metrics KPI Card for Selected Exchange */}
+                {(() => {
+                  const currentExMeta =
+                    EXCHANGES_ALPHABETICAL.find((ex) => ex.id === selectedExchange) ||
+                    EXCHANGES_ALPHABETICAL[0];
+                  const currentBal = getVenueBalance(selectedExchange);
+                  return (
+                    <div className="bg-surface border border-surface-border rounded-2xl p-4.5 shadow-xs space-y-3.5">
+                      <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                        <div className="flex items-center space-x-2">
+                          <Wallet className="w-4 h-4 text-accent" />
+                          <h4 className="text-xs font-mono font-bold uppercase text-slate-900 tracking-wide">
+                            {currentExMeta.name} — Margin &amp; Collateral Account
+                          </h4>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
+                              currentBal.status === "HEALTHY"
+                                ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
+                                : currentBal.status === "LOW_MARGIN"
+                                ? "bg-amber-50 text-amber-800 border border-amber-300"
+                                : "bg-red-50 text-red-800 border border-red-300"
+                            }`}
+                          >
+                            {currentBal.status}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center space-x-3">
+                          <span className="text-[11px] font-mono text-slate-400">
+                            Safety Floor: ${currentBal.min_required_usd.toLocaleString()}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={loadVenueBalances}
+                            disabled={loadingBalances}
+                            className="px-2.5 py-1 bg-surface-raised border border-surface-border hover:bg-slate-200 rounded-lg text-xs font-mono flex items-center space-x-1.5 text-slate-700 transition cursor-pointer"
+                            title="Sync collateral balances"
+                          >
+                            <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-accent" : "text-slate-500"}`} />
+                            <span className="text-[11px]">Sync</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
+                        {/* Metric 1: Equity */}
+                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
+                          <div className="flex items-center justify-between text-slate-400">
+                            <span className="text-[10px] uppercase font-bold tracking-wider">Equity</span>
+                            <span className="text-[10px]">USD</span>
+                          </div>
+                          <div className="text-xl font-bold text-slate-900 tracking-tight">
+                            ${(currentBal.equity_usd ?? currentBal.balance_usd).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            Total account net value
+                          </div>
+                        </div>
+
+                        {/* Metric 2: Available Margin */}
+                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
+                          <div className="flex items-center justify-between text-slate-400">
+                            <span className="text-[10px] uppercase font-bold tracking-wider">Available Margin</span>
+                            <span className="text-[10px]">USD</span>
+                          </div>
+                          <div className="text-xl font-bold text-emerald-700 tracking-tight">
+                            ${(currentBal.available_margin_usd ?? currentBal.balance_usd).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </div>
+                          <div className="text-[10px] text-slate-500">
+                            Free collateral for new orders
+                          </div>
+                        </div>
+
+                        {/* Metric 3: Margin Rate */}
+                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
+                          <div className="flex items-center justify-between text-slate-400">
+                            <span className="text-[10px] uppercase font-bold tracking-wider">Margin Rate</span>
+                            <span className="text-[10px]">Utilization</span>
+                          </div>
+                          <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight">
+                            <span>{(currentBal.margin_rate_pct ?? 0.0).toFixed(1)}%</span>
+                            <span className="text-[11px] font-normal text-slate-400">utilized</span>
+                          </div>
+                          <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1.5">
+                            <div
+                              className={`h-full rounded-full transition-all duration-300 ${
+                                (currentBal.margin_rate_pct ?? 0) > 80
+                                  ? "bg-red-500"
+                                  : (currentBal.margin_rate_pct ?? 0) > 50
+                                  ? "bg-amber-500"
+                                  : "bg-accent"
+                              }`}
+                              style={{ width: `${Math.min(100, Math.max(3, currentBal.margin_rate_pct ?? 0))}%` }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {currentBal.recommended_action && (
+                        <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-xs font-mono text-amber-900 flex items-start space-x-2">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+                          <span>{currentBal.recommended_action}</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+
+            {/* Exchange: Arcus DEX */}
+            {selectedExchange === "arcus" && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h4 className="text-xs font-bold font-mono text-slate-900">
-                      Local Secure Vault: {isVaultLocked ? "Locked" : "Unlocked"}
-                    </h4>
-                    <span
-                      className={`px-2 py-0.2 rounded text-[10px] font-mono font-semibold ${
-                        isVaultLocked
-                          ? "bg-amber-50 text-amber-800 border border-amber-300"
-                          : "bg-emerald-50 text-emerald-800 border border-emerald-300"
-                      }`}
-                    >
-                      AES-256-GCM Encrypted
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Arcus (CLOB DEX)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      High-Throughput CLOB
                     </span>
                   </div>
-                  <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                    {isVaultLocked
-                      ? "Master password required to view or edit exchange private keys"
-                      : "Vault unlocked in-memory. Sensitive fields can be viewed and edited."}
-                  </p>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("arcus")?.fee_bps ?? 1.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={arcusEnabled}
+                      onChange={setArcusEnabled}
+                      label={arcusEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div>
-                {isVaultLocked ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowVaultModal(true)}
-                    className="px-4 py-2 bg-accent hover:bg-blue-600 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
-                  >
-                    <Key className="w-3.5 h-3.5" />
-                    <span>Unlock Vault</span>
-                  </button>
+                {!arcusEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Arcus exchange is disabled. Toggle switch to enable and configure API credentials.
+                  </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={handleLockVault}
-                    className="px-3 py-1.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border rounded-xl text-xs font-mono font-medium transition shadow-xs"
-                  >
-                    Lock Vault Now
-                  </button>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">API Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={arcusApiKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "arc_..."}
+                        onChange={(e) => setArcusApiKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">API Secret:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("arcus_secret")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["arcus_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["arcus_secret"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["arcus_secret"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={arcusSecret}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                        onChange={(e) => setArcusSecret(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div className="md:col-span-2">
+                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={arcusUrl}
+                        onChange={(e) => setArcusUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
                 )}
               </div>
-            </div>
+            )}
 
-            {/* Exchange Filter Selector */}
-            <div className="flex items-center space-x-1 overflow-x-auto pb-1 text-xs font-mono">
-              <span className="text-slate-500 text-[11px] mr-2">Filter Venue:</span>
-              {(["all", "hyperliquid", "lighter", "vanta", "arcus", "popdex", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeFilter[]).map((vf) => {
-                const label = vf === "all" ? "All"
-                  : vf === "hyperliquid" ? "Hyperliquid"
-                  : vf === "lighter" ? "Lighter"
-                  : vf === "vanta" ? "Vanta"
-                  : vf === "arcus" ? "Arcus"
-                  : vf === "popdex" ? "PopDEX"
-                  : vf === "robinhood" ? "Robinhood"
-                  : vf === "kraken" ? "Kraken"
-                  : vf === "polymarket" ? "Polymarket"
-                  : "Kalshi";
-                return (
-                  <button
-                    key={vf}
-                    type="button"
-                    onClick={() => setVenueFilter(vf)}
-                    className={`px-2.5 py-1 rounded-lg transition text-xs font-mono ${
-                      venueFilter === vf
-                        ? "bg-accent text-white font-semibold shadow-xs"
-                        : "bg-surface text-slate-600 hover:bg-surface-raised border border-surface-border"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                );
-              })}
-            </div>
+
 
             {/* Exchange 1: Hyperliquid */}
-            {(venueFilter === "all" || venueFilter === "hyperliquid") && (
+            {selectedExchange === "hyperliquid" && (
               <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
@@ -869,365 +1124,79 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
             )}
 
-            {/* Exchange 2: Lighter */}
-            {(venueFilter === "all" || venueFilter === "lighter") && (
+
+
+            {/* Exchange 7: Kalshi */}
+            {selectedExchange === "kalshi" && (
               <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
                     <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Lighter (zkDEX Rollup)
+                      Kalshi (CFTC Binary)
                     </h3>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Perp & Spot CLOB
+                      Regulated Prediction
                     </span>
                   </div>
                   <div className="flex items-center space-x-3">
                     <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
+                      Fee: {getVenueInfo("kalshi")?.fee_bps ?? 10.0} BPS
                     </span>
                     <ToggleSwitch
-                      checked={lighterEnabled}
-                      onChange={setLighterEnabled}
-                      label={lighterEnabled ? "Active" : "Disabled"}
+                      checked={kalshiEnabled}
+                      onChange={setKalshiEnabled}
+                      label={kalshiEnabled ? "Active" : "Disabled"}
                     />
                   </div>
                 </div>
 
-                {!lighterEnabled ? (
+                {!kalshiEnabled ? (
                   <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Lighter exchange is disabled. Toggle switch to enable and configure credentials.
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {/* Lighter Multi-Market Option: Spot */}
-                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
-                      <div>
-                        <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
-                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
-                      </div>
-                      <ToggleSwitch
-                        checked={lighterSpotEnabled}
-                        onChange={setLighterSpotEnabled}
-                        size="sm"
-                        label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                      <div>
-                        <label className="text-slate-600 block mb-1">Account Index:</label>
-                        <input
-                          type="text"
-                          disabled={loading || isVaultLocked}
-                          value={lighterAccountIndex}
-                          onChange={(e) => setLighterAccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-slate-600">API Private Key / Signer Token:</label>
-                          <button
-                            type="button"
-                            onClick={() => toggleSecret("lgt_key")}
-                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                          >
-                            {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                            <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
-                          </button>
-                        </div>
-                        <input
-                          type={showSecrets["lgt_key"] ? "text" : "password"}
-                          disabled={loading || isVaultLocked}
-                          value={lighterApiKey}
-                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                          onChange={(e) => setLighterApiKey(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                        <input
-                          type="number"
-                          disabled={loading || isVaultLocked}
-                          value={lighterSubaccountIndex}
-                          placeholder="e.g. 1"
-                          onChange={(e) => setLighterSubaccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Endpoint URL:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={lighterUrl}
-                          onChange={(e) => setLighterUrl(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Exchange 3: Vanta */}
-            {(venueFilter === "all" || venueFilter === "vanta") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Vanta.exchange (Orderly Network)
-                    </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Ed25519 Orderly
-                    </span>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
-                    </span>
-                    <ToggleSwitch
-                      checked={vantaEnabled}
-                      onChange={setVantaEnabled}
-                      label={vantaEnabled ? "Active" : "Disabled"}
-                    />
-                  </div>
-                </div>
-
-                {!vantaEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Vanta exchange is disabled. Toggle switch to enable and configure Orderly credentials.
+                    Kalshi is disabled. Toggle switch to enable and configure CFTC API credentials.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                     <div>
-                      <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
+                      <label className="text-slate-600 block mb-1">Kalshi API Key ID:</label>
                       <input
                         type="text"
                         disabled={loading || isVaultLocked}
-                        value={vantaAccountId}
-                        placeholder="0x..."
-                        onChange={(e) => setVantaAccountId(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={vantaOrderlyKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
-                        onChange={(e) => setVantaOrderlyKey(e.target.value)}
+                        value={kalshiApiKeyId}
+                        placeholder="e.g. 550e8400-e29b-..."
+                        onChange={(e) => setKalshiApiKeyId(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
 
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Orderly Secret:</label>
+                        <label className="text-slate-600">RSA Private Key:</label>
                         <button
                           type="button"
-                          onClick={() => toggleSecret("vanta_secret")}
+                          onClick={() => toggleSecret("kalshi_key")}
                           className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
                         >
-                          {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
+                          {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
                         </button>
                       </div>
                       <input
-                        type={showSecrets["vanta_secret"] ? "text" : "password"}
+                        type={showSecrets["kalshi_key"] ? "text" : "password"}
                         disabled={loading || isVaultLocked}
-                        value={vantaOrderlySecret}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                        onChange={(e) => setVantaOrderlySecret(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                      <input
-                        type="number"
-                        disabled={loading || isVaultLocked}
-                        value={vantaSubaccountIndex}
-                        placeholder="e.g. 0"
-                        onChange={(e) => setVantaSubaccountIndex(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Exchange 4: Robinhood EVM */}
-            {(venueFilter === "all" || venueFilter === "robinhood") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Robinhood Chain (Arbitrum L2 EVM)
-                    </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      DEX Aggregator Router
-                    </span>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
-                    </span>
-                    <ToggleSwitch
-                      checked={robinhoodEnabled}
-                      onChange={setRobinhoodEnabled}
-                      label={robinhoodEnabled ? "Active" : "Disabled"}
-                    />
-                  </div>
-                </div>
-
-                {!robinhoodEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Robinhood EVM is disabled. Toggle switch to enable and configure signer credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={robinhoodWallet}
-                        placeholder="0x..."
-                        onChange={(e) => setRobinhoodWallet(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Signer Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("rh_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["rh_key"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={robinhoodPrivateKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                        onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">RPC URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={robinhoodRpcUrl}
-                        onChange={(e) => setRobinhoodRpcUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Router Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={robinhoodRouter}
-                        onChange={(e) => setRobinhoodRouter(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Exchange: Arcus DEX */}
-            {(venueFilter === "all" || venueFilter === "arcus") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Arcus (CLOB DEX)
-                    </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      High-Throughput CLOB
-                    </span>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("arcus")?.fee_bps ?? 1.5} BPS
-                    </span>
-                    <ToggleSwitch
-                      checked={arcusEnabled}
-                      onChange={setArcusEnabled}
-                      label={arcusEnabled ? "Active" : "Disabled"}
-                    />
-                  </div>
-                </div>
-
-                {!arcusEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Arcus exchange is disabled. Toggle switch to enable and configure API credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={arcusApiKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "arc_..."}
-                        onChange={(e) => setArcusApiKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">API Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("arcus_secret")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["arcus_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["arcus_secret"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["arcus_secret"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={arcusSecret}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                        onChange={(e) => setArcusSecret(e.target.value)}
+                        value={kalshiPrivateKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
+                        onChange={(e) => setKalshiPrivateKey(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
 
                     <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
+                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
                       <input
                         type="text"
                         disabled={loading}
-                        value={arcusUrl}
-                        onChange={(e) => setArcusUrl(e.target.value)}
+                        value={kalshiUrl}
+                        onChange={(e) => setKalshiUrl(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
@@ -1236,77 +1205,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
             )}
 
-            {/* Exchange: PopDEX */}
-            {(venueFilter === "all" || venueFilter === "popdex") && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      PopDEX (Arbitrage Protocol)
-                    </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Lighter Multi-Leg Hybrid
-                    </span>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("popdex")?.fee_bps ?? 2.0} BPS
-                    </span>
-                    <ToggleSwitch
-                      checked={popdexEnabled}
-                      onChange={setPopdexEnabled}
-                      label={popdexEnabled ? "Active" : "Disabled"}
-                    />
-                  </div>
-                </div>
-
-                {!popdexEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    PopDEX is disabled. Toggle switch to enable and configure API credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Account Index / Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={popdexAccountIndex}
-                        placeholder="0"
-                        onChange={(e) => setPopdexAccountIndex(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={popdexApiKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "pop_..."}
-                        onChange={(e) => setPopdexApiKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={popdexUrl}
-                        onChange={(e) => setPopdexUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
 
             {/* Exchange 5: Kraken (Spot & Futures Multi-Market) */}
-            {(venueFilter === "all" || venueFilter === "kraken") && (
+            {selectedExchange === "kraken" && (
               <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
@@ -1483,8 +1384,118 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
             )}
 
+
+
+            {/* Exchange 2: Lighter */}
+            {selectedExchange === "lighter" && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Lighter (zkDEX Rollup)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Perp & Spot CLOB
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={lighterEnabled}
+                      onChange={setLighterEnabled}
+                      label={lighterEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!lighterEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Lighter exchange is disabled. Toggle switch to enable and configure credentials.
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {/* Lighter Multi-Market Option: Spot */}
+                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
+                      <div>
+                        <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
+                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
+                      </div>
+                      <ToggleSwitch
+                        checked={lighterSpotEnabled}
+                        onChange={setLighterSpotEnabled}
+                        size="sm"
+                        label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                      <div>
+                        <label className="text-slate-600 block mb-1">Account Index:</label>
+                        <input
+                          type="text"
+                          disabled={loading || isVaultLocked}
+                          value={lighterAccountIndex}
+                          onChange={(e) => setLighterAccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <div className="flex items-center justify-between mb-1">
+                          <label className="text-slate-600">API Private Key / Signer Token:</label>
+                          <button
+                            type="button"
+                            onClick={() => toggleSecret("lgt_key")}
+                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                          >
+                            {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                            <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
+                          </button>
+                        </div>
+                        <input
+                          type={showSecrets["lgt_key"] ? "text" : "password"}
+                          disabled={loading || isVaultLocked}
+                          value={lighterApiKey}
+                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                          onChange={(e) => setLighterApiKey(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                        <input
+                          type="number"
+                          disabled={loading || isVaultLocked}
+                          value={lighterSubaccountIndex}
+                          placeholder="e.g. 1"
+                          onChange={(e) => setLighterSubaccountIndex(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                        <input
+                          type="text"
+                          disabled={loading}
+                          value={lighterUrl}
+                          onChange={(e) => setLighterUrl(e.target.value)}
+                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+
+
             {/* Exchange 6: Polymarket */}
-            {(venueFilter === "all" || venueFilter === "polymarket") && (
+            {selectedExchange === "polymarket" && (
               <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
@@ -1584,77 +1595,69 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
             )}
 
-            {/* Exchange 7: Kalshi */}
-            {(venueFilter === "all" || venueFilter === "kalshi") && (
+
+
+            {/* Exchange: PopDEX */}
+            {selectedExchange === "popdex" && (
               <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
                     <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Kalshi (CFTC Binary)
+                      PopDEX (Arbitrage Protocol)
                     </h3>
                     <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Regulated Prediction
+                      Lighter Multi-Leg Hybrid
                     </span>
                   </div>
                   <div className="flex items-center space-x-3">
                     <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("kalshi")?.fee_bps ?? 10.0} BPS
+                      Fee: {getVenueInfo("popdex")?.fee_bps ?? 2.0} BPS
                     </span>
                     <ToggleSwitch
-                      checked={kalshiEnabled}
-                      onChange={setKalshiEnabled}
-                      label={kalshiEnabled ? "Active" : "Disabled"}
+                      checked={popdexEnabled}
+                      onChange={setPopdexEnabled}
+                      label={popdexEnabled ? "Active" : "Disabled"}
                     />
                   </div>
                 </div>
 
-                {!kalshiEnabled ? (
+                {!popdexEnabled ? (
                   <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Kalshi is disabled. Toggle switch to enable and configure CFTC API credentials.
+                    PopDEX is disabled. Toggle switch to enable and configure API credentials.
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
                     <div>
-                      <label className="text-slate-600 block mb-1">Kalshi API Key ID:</label>
+                      <label className="text-slate-600 block mb-1">Account Index / Address:</label>
                       <input
                         type="text"
                         disabled={loading || isVaultLocked}
-                        value={kalshiApiKeyId}
-                        placeholder="e.g. 550e8400-e29b-..."
-                        onChange={(e) => setKalshiApiKeyId(e.target.value)}
+                        value={popdexAccountIndex}
+                        placeholder="0"
+                        onChange={(e) => setPopdexAccountIndex(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
 
                     <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">RSA Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("kalshi_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
+                      <label className="text-slate-600 block mb-1">API Key:</label>
                       <input
-                        type={showSecrets["kalshi_key"] ? "text" : "password"}
+                        type="text"
                         disabled={loading || isVaultLocked}
-                        value={kalshiPrivateKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
-                        onChange={(e) => setKalshiPrivateKey(e.target.value)}
+                        value={popdexApiKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "pop_..."}
+                        onChange={(e) => setPopdexApiKey(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
 
                     <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
+                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
                       <input
                         type="text"
                         disabled={loading}
-                        value={kalshiUrl}
-                        onChange={(e) => setKalshiUrl(e.target.value)}
+                        value={popdexUrl}
+                        onChange={(e) => setPopdexUrl(e.target.value)}
                         className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                       />
                     </div>
@@ -1662,89 +1665,258 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 )}
               </div>
             )}
-          </div>
-        )}
 
-        {/* =================================================================== */}
-        {/* SECTION 2: BALANCES & ASYMMETRIC REBALANCE                         */}
-        {/* =================================================================== */}
-        {(activeTab === "balances" || activeTab === "all") && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-            <div className="flex items-center justify-between border-b border-surface-border pb-3">
-              <div>
-                <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
-                  <Wallet className="w-4 h-4 text-accent" />
-                  <span>Venue Balances & Asymmetric Depletion Alert</span>
-                </h3>
-                <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                  Tracks free margin across venues to prevent single-leg fill failure from one-sided executions
-                </p>
+
+
+            {/* Exchange 4: Robinhood EVM */}
+            {selectedExchange === "robinhood" && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Robinhood Chain (Arbitrum L2 EVM)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      DEX Aggregator Router
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={robinhoodEnabled}
+                      onChange={setRobinhoodEnabled}
+                      label={robinhoodEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!robinhoodEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Robinhood EVM is disabled. Toggle switch to enable and configure signer credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={robinhoodWallet}
+                        placeholder="0x..."
+                        onChange={(e) => setRobinhoodWallet(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Signer Private Key:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("rh_key")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["rh_key"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={robinhoodPrivateKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
+                        onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">RPC URL:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={robinhoodRpcUrl}
+                        onChange={(e) => setRobinhoodRpcUrl(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Router Address:</label>
+                      <input
+                        type="text"
+                        disabled={loading}
+                        value={robinhoodRouter}
+                        onChange={(e) => setRobinhoodRouter(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+
+
+            {/* Exchange 3: Vanta */}
+            {selectedExchange === "vanta" && (
+              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+                      Vanta.exchange (Orderly Network)
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
+                      Ed25519 Orderly
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <span className="text-[11px] font-mono text-slate-400">
+                      Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
+                    </span>
+                    <ToggleSwitch
+                      checked={vantaEnabled}
+                      onChange={setVantaEnabled}
+                      label={vantaEnabled ? "Active" : "Disabled"}
+                    />
+                  </div>
+                </div>
+
+                {!vantaEnabled ? (
+                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
+                    Vanta exchange is disabled. Toggle switch to enable and configure Orderly credentials.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+                    <div>
+                      <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={vantaAccountId}
+                        placeholder="0x..."
+                        onChange={(e) => setVantaAccountId(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
+                      <input
+                        type="text"
+                        disabled={loading || isVaultLocked}
+                        value={vantaOrderlyKey}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
+                        onChange={(e) => setVantaOrderlyKey(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-slate-600">Orderly Secret:</label>
+                        <button
+                          type="button"
+                          onClick={() => toggleSecret("vanta_secret")}
+                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                        >
+                          {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
+                          <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
+                        </button>
+                      </div>
+                      <input
+                        type={showSecrets["vanta_secret"] ? "text" : "password"}
+                        disabled={loading || isVaultLocked}
+                        value={vantaOrderlySecret}
+                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
+                        onChange={(e) => setVantaOrderlySecret(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
+                      <input
+                        type="number"
+                        disabled={loading || isVaultLocked}
+                        value={vantaSubaccountIndex}
+                        placeholder="e.g. 0"
+                        onChange={(e) => setVantaSubaccountIndex(e.target.value)}
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+
+
               </div>
 
-              <button
-                type="button"
-                onClick={loadVenueBalances}
-                disabled={loadingBalances}
-                className="px-3 py-1 bg-surface-raised border border-surface-border hover:bg-slate-200 rounded-lg text-xs font-mono flex items-center space-x-1 text-slate-700"
-              >
-                <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-accent" : ""}`} />
-                <span>Refresh</span>
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {venueBalances.map((b) => {
-                const isWarning = b.needs_rebalance || b.status !== "HEALTHY";
-                return (
-                  <div
-                    key={b.venue}
-                    className={`p-4 rounded-xl border ${
-                      isWarning
-                        ? "bg-amber-50/60 border-amber-300"
-                        : "bg-surface-raised/60 border-surface-border"
-                    } space-y-2`}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold font-mono text-slate-900 uppercase">{b.venue}</span>
-                      <span
-                        className={`px-2 py-0.2 rounded text-[10px] font-mono font-bold ${
-                          isWarning
-                            ? "bg-amber-200 text-amber-900"
-                            : "bg-emerald-100 text-emerald-800"
-                        }`}
-                      >
-                        {b.status}
-                      </span>
+              {/* Locked Vault Overlay: Completely Greys Out the Exchange Configuration */}
+              {isVaultLocked && (
+                <div className="absolute inset-0 z-40 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+                  <div className="bg-white rounded-2xl p-6 shadow-2xl w-80 text-center space-y-4 border border-slate-200 animate-in zoom-in-95 duration-150">
+                    <div className="w-12 h-12 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
+                      <Lock className="w-5 h-5 text-accent" />
+                    </div>
+                    <div>
+                      <h4 className="text-sm font-bold font-mono text-slate-900">Vault Locked</h4>
+                      <p className="text-xs text-slate-500 font-sans mt-1">
+                        Enter master passcode to unlock exchange API credentials
+                      </p>
                     </div>
 
-                    <div className="space-y-0.5">
-                      <span className="text-[10px] uppercase font-mono text-slate-400 block">Free Margin</span>
-                      <span className="text-base font-bold font-mono text-slate-900">
-                        ${b.balance_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </span>
-                    </div>
-
-                    <div className="text-[10px] font-mono text-slate-500 pt-1 border-t border-surface-border/60">
-                      <span>Safety Floor: ${b.min_required_usd.toFixed(0)}</span>
-                    </div>
-
-                    {b.recommended_action && (
-                      <div className="p-2 bg-amber-100/80 border border-amber-300 rounded-lg text-[10px] font-mono text-amber-900 flex items-start space-x-1.5">
-                        <AlertTriangle className="w-3 h-3 text-amber-700 shrink-0 mt-0.5" />
-                        <span>{b.recommended_action}</span>
+                    {inlineVaultError && (
+                      <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-[11px] font-mono text-red-600">
+                        {inlineVaultError}
                       </div>
                     )}
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
 
+                    <form onSubmit={(e) => { e.preventDefault(); handleInlineUnlock(e); }} className="space-y-3">
+                      <input
+                        type="password"
+                        value={inlinePasscode}
+                        onChange={(e) => setInlinePasscode(e.target.value)}
+                        placeholder="Enter master passcode..."
+                        autoFocus
+                        className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                      />
+                      <button
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); handleInlineUnlock(); }}
+                        disabled={inlineUnlocking || !inlinePasscode}
+                        className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer"
+                      >
+                        {inlineUnlocking ? "Unlocking..." : "Unlock Vault"}
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+              {errorMsg && (
+                <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{errorMsg}</span>
+                </div>
+              )}
+
+              {saved && (
+                <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
+                </div>
+              )}
         {/* =================================================================== */}
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
         {/* =================================================================== */}
-        {(activeTab === "execution" || activeTab === "all") && (
+        {activeTab === "execution" && (
           <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
             <div className="border-b border-surface-border pb-3">
               <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
@@ -1842,7 +2014,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         {/* =================================================================== */}
         {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
-        {(activeTab === "network" || activeTab === "all") && (
+        {activeTab === "network" && (
           <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
             <div className="border-b border-surface-border pb-3">
               <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
@@ -1911,7 +2083,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         {/* =================================================================== */}
         {/* SECTION 5: ABOUT, CHECK FOR UPDATES & BUY ME A SOLO                 */}
         {/* =================================================================== */}
-        {(activeTab === "about" || activeTab === "all") && (
+        {activeTab === "about" && (
           <div className="space-y-4">
             <div className="bg-surface border border-surface-border rounded-2xl p-6 shadow-xs space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
@@ -2001,35 +2173,48 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             </div>
           </div>
         )}
-      </div>
 
-      {/* Pinned Save Bar */}
-      <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-end space-x-2.5">
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
-          >
-            Done
-          </button>
-        )}
-        <button
-          type="submit"
-          disabled={loading || saving}
-          className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
-        >
-          {saving ? (
-            <span>Saving...</span>
-          ) : saved ? (
-            <>
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Saved to Engine</span>
-            </>
-          ) : (
-            <span>Save Configuration</span>
+            </div>
           )}
-        </button>
+
+      {/* Pinned Save Bar with Trading Mode Indicator on Bottom-Left */}
+      <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
+        {/* Relocated Trading Mode Indicator on bottom-left */}
+        <div
+          className="px-2.5 py-1.5 rounded-lg border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1.5 shadow-2xs"
+          title={`Execution mode: ${tradingMode.toUpperCase()}`}
+        >
+          <span className="text-slate-400 font-normal">Mode:</span>
+          <span className="font-bold text-accent uppercase">{tradingMode}</span>
+        </div>
+
+        <div className="flex items-center space-x-2.5">
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
+            >
+              Done
+            </button>
+          )}
+          <button
+            type="submit"
+            disabled={loading || saving}
+            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+          >
+            {saving ? (
+              <span>Saving...</span>
+            ) : saved ? (
+              <>
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                <span>Saved to Engine</span>
+              </>
+            ) : (
+              <span>Save Configuration</span>
+            )}
+          </button>
+        </div>
       </div>
     </form>
   </div>

@@ -16,8 +16,9 @@ interface HeaderProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   spatialCount?: number;
-  spotCount?: number;
   fundingCount?: number;
+  spotCount?: number;
+  triangleCount?: number;
   predictionCount?: number;
 }
 
@@ -31,8 +32,9 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   onSelectTab,
   spatialCount = 0,
-  spotCount = 0,
   fundingCount = 0,
+  spotCount = 0,
+  triangleCount = 0,
   predictionCount = 0,
 }) => {
   const [showKillModal, setShowKillModal] = useState(false);
@@ -62,8 +64,9 @@ export const Header: React.FC<HeaderProps> = ({
             activeTab={activeTab}
             onSelectTab={onSelectTab}
             spatialCount={spatialCount}
-            spotCount={spotCount}
             fundingCount={fundingCount}
+            spotCount={spotCount}
+            triangleCount={triangleCount}
             predictionCount={predictionCount}
           />
         </div>

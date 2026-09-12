@@ -11,7 +11,7 @@ import {
   Layers,
   Sparkles,
 } from "lucide-react";
-import type { TickerStrategyConfigDto, ArbitrageExecutionMode } from "../types";
+import type { TickerStrategyConfigDto, ArbitrageExecutionMode, SlidingWindowOption } from "../types";
 import {
   PERP_TICKERS,
   formatCurrencyPrice,
@@ -84,6 +84,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // Form State for Futures Basis Strategy
   const [targetProfitBps, setTargetProfitBps] = useState<number>(5.0);
   const [windowPercentile, setWindowPercentile] = useState<number>(50);
+  const [slidingWindow, setSlidingWindow] = useState<SlidingWindowOption>("1m");
   const [maxAccumulatedUnits, setMaxAccumulatedUnits] = useState<number>(3);
   const [currentAccumulatedUnits, setCurrentAccumulatedUnits] = useState<number>(0);
   const [executionMode, setExecutionMode] = useState<ArbitrageExecutionMode>("SINGLE_WAY");
@@ -111,6 +112,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     if (strategyConfig) {
       setTargetProfitBps(Number(strategyConfig.targetProfitBps ?? 5.0));
       setWindowPercentile(Number(strategyConfig.windowPercentile ?? 50));
+      setSlidingWindow(((strategyConfig.slidingWindow || strategyConfig.sliding_window || "1m") as SlidingWindowOption));
       setMaxAccumulatedUnits(Number(strategyConfig.maxAccumulatedUnits ?? 3));
       setCurrentAccumulatedUnits(Number(strategyConfig.currentAccumulatedUnits ?? 0));
       setExecutionMode(strategyConfig.executionMode || "SINGLE_WAY");
@@ -124,6 +126,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           if (cfg) {
             setTargetProfitBps(Number(cfg.targetProfitBps ?? 5.0));
             setWindowPercentile(Number(cfg.windowPercentile ?? 50));
+            setSlidingWindow(((cfg.slidingWindow || cfg.sliding_window || "1m") as SlidingWindowOption));
             setMaxAccumulatedUnits(Number(cfg.maxAccumulatedUnits ?? 3));
             setCurrentAccumulatedUnits(Number(cfg.currentAccumulatedUnits ?? 0));
             setExecutionMode(cfg.executionMode || "SINGLE_WAY");
@@ -180,18 +183,21 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     if (type === "conservative") {
       setTargetProfitBps(8.0);
       setWindowPercentile(80);
+      setSlidingWindow("5m");
       setMaxAccumulatedUnits(2);
       setUserTargetLeverage(5);
       setExecutionMode("DOUBLE_WAY");
     } else if (type === "balanced") {
       setTargetProfitBps(5.0);
       setWindowPercentile(60);
+      setSlidingWindow("1m");
       setMaxAccumulatedUnits(3);
       setUserTargetLeverage(5);
       setExecutionMode("DOUBLE_WAY");
     } else if (type === "aggressive") {
       setTargetProfitBps(2.5);
       setWindowPercentile(50);
+      setSlidingWindow("30s");
       setMaxAccumulatedUnits(5);
       setUserTargetLeverage(15);
       setExecutionMode("SINGLE_WAY");
@@ -201,6 +207,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const handleResetDefaults = () => {
     setTargetProfitBps(5.0);
     setWindowPercentile(50);
+    setSlidingWindow("1m");
     setMaxAccumulatedUnits(3);
     setCurrentAccumulatedUnits(0);
     setExecutionMode("SINGLE_WAY");
@@ -222,6 +229,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       symbol: ticker.symbol,
       targetProfitBps,
       windowPercentile,
+      slidingWindow,
+      sliding_window: slidingWindow,
       maxAccumulatedUnits,
       currentAccumulatedUnits,
       executionMode,
@@ -436,7 +445,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   </h3>
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {/* Target Profit Input */}
                   <div className="space-y-1.5">
                     <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
@@ -454,9 +463,36 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         max="100"
                         value={targetProfitBps}
                         onChange={(e) => setTargetProfitBps(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
                       />
                       <span className="text-xs text-slate-500 font-semibold">bps</span>
+                    </div>
+                  </div>
+
+                  {/* Rolling Sliding Window */}
+                  <div className="space-y-1.5">
+                    <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
+                      <span className="flex items-center">
+                        Sliding Window
+                        <InfoTooltip text="Time duration for calculating historical mean spread baseline and statistical percentile thresholds." />
+                      </span>
+                      <span className="text-[10px] text-slate-400">Baseline</span>
+                    </label>
+                    <div className="grid grid-cols-5 gap-1 bg-surface-raised p-1 rounded-lg border border-surface-border h-[38px] items-center">
+                      {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
+                        <button
+                          key={w}
+                          type="button"
+                          onClick={() => setSlidingWindow(w)}
+                          className={`h-7 rounded text-[11px] font-mono transition cursor-pointer flex items-center justify-center ${
+                            slidingWindow === w
+                              ? "bg-accent text-white font-bold shadow-2xs"
+                              : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
+                          }`}
+                        >
+                          {w}
+                        </button>
+                      ))}
                     </div>
                   </div>
 
@@ -464,7 +500,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <div className="space-y-1.5">
                     <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
                       <span className="flex items-center">
-                        Historical Window Percentile
+                        Window Percentile
                         <InfoTooltip text="Strictly filters entries to spreads at or above this percentile of the rolling sliding window." />
                       </span>
                       <span className="text-[10px] text-slate-400">Min 50%</span>
@@ -472,7 +508,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <select
                       value={windowPercentile}
                       onChange={(e) => setWindowPercentile(Math.max(50, parseInt(e.target.value, 10)))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
                     >
                       {PERCENTILE_OPTIONS.map((opt) => (
                         <option key={opt.value} value={opt.value}>
