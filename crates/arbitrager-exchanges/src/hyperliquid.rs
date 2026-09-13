@@ -245,19 +245,49 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     if szi != dec!(0) {
                         let side = if szi > dec!(0) { Side::Buy } else { Side::Sell };
                         let qty = szi.abs();
+                        let parse_str = |key: &str| {
+                            pos_obj
+                                .get(key)
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| Decimal::from_str(s).ok())
+                        };
+                        let position_value = parse_str("positionValue").unwrap_or(dec!(0));
+                        // Mark-implied price from real notional; entry as last-known real price.
+                        let mark_px = if position_value > dec!(0) {
+                            position_value / qty
+                        } else {
+                            entry_px
+                        };
+                        let margin_used = parse_str("marginUsed").unwrap_or(dec!(0));
+                        let max_leverage = pos_obj
+                            .get("maxLeverage")
+                            .and_then(|v| v.as_f64())
+                            .and_then(Decimal::from_f64_retain)
+                            .unwrap_or(dec!(0));
+                        // HL maintenance margin = half the initial margin at max leverage.
+                        let maintenance = if max_leverage > dec!(0) {
+                            position_value / (dec!(2) * max_leverage)
+                        } else {
+                            margin_used
+                        };
                         positions.push(Position {
                             venue: self.venue_id.clone(),
                             symbol: format!("{}-USDC", coin),
                             side,
                             quantity: qty,
                             entry_price: entry_px,
-                            mark_price: entry_px,
-                            unrealized_pnl: dec!(0),
+                            mark_price: mark_px,
+                            unrealized_pnl: parse_str("unrealizedPnl").unwrap_or(dec!(0)),
                             realized_pnl: dec!(0),
-                            liquidation_price: None,
-                            leverage: dec!(5),
-                            initial_margin: (qty * entry_px) / dec!(5),
-                            maintenance_margin: (qty * entry_px) / dec!(10),
+                            liquidation_price: parse_str("liquidationPx").filter(|p| *p > dec!(0)),
+                            leverage: pos_obj
+                                .get("leverage")
+                                .and_then(|l| l.get("value"))
+                                .and_then(|v| v.as_f64())
+                                .and_then(Decimal::from_f64_retain)
+                                .unwrap_or(dec!(0)),
+                            initial_margin: margin_used,
+                            maintenance_margin: maintenance,
                             updated_at: Utc::now(),
                         });
                     }

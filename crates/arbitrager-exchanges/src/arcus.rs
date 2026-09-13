@@ -4,7 +4,7 @@ use reqwest::Client;
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrager_core::position::{AccountSnapshot, Balance};
+use arbitrager_core::position::AccountSnapshot;
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrager_core::types::{dec, Decimal, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
@@ -181,25 +181,7 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let equity = dec!(50000.0);
-        let free = dec!(45000.0);
-        let used = equity - free;
-        Ok(AccountSnapshot {
-            venue: self.venue_id.clone(),
-            equity,
-            free_margin: free,
-            maintenance_margin: used,
-            margin_usage_pct: (used / equity) * dec!(100),
-            balances: vec![Balance {
-                venue: self.venue_id.clone(),
-                currency: "USDC".to_string(),
-                total: equity,
-                free,
-                locked: used,
-            }],
-            positions: Vec::new(),
-            timestamp: Utc::now(),
-        })
+        anyhow::bail!("Live account fetch is not implemented for {}; refusing to fabricate an account snapshot", self.name())
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {

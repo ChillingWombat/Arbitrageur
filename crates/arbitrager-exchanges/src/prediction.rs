@@ -4,7 +4,7 @@ use reqwest::Client;
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrager_core::position::{AccountSnapshot, Balance};
+use arbitrager_core::position::AccountSnapshot;
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrager_core::types::{dec, VenueId};
 
@@ -88,23 +88,7 @@ impl ExchangeAdapter for PolymarketAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let equity = dec!(5000.0);
-        Ok(AccountSnapshot {
-            venue: self.venue_id.clone(),
-            equity,
-            free_margin: equity,
-            maintenance_margin: dec!(0),
-            margin_usage_pct: dec!(0),
-            balances: vec![Balance {
-                venue: self.venue_id.clone(),
-                currency: "USDC".to_string(),
-                total: equity,
-                free: equity,
-                locked: dec!(0),
-            }],
-            positions: Vec::new(),
-            timestamp: Utc::now(),
-        })
+        anyhow::bail!("Live account fetch is not implemented for {}; refusing to fabricate an account snapshot", self.name())
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -196,23 +180,7 @@ impl ExchangeAdapter for KalshiAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let equity = dec!(5000.0);
-        Ok(AccountSnapshot {
-            venue: self.venue_id.clone(),
-            equity,
-            free_margin: equity,
-            maintenance_margin: dec!(0),
-            margin_usage_pct: dec!(0),
-            balances: vec![Balance {
-                venue: self.venue_id.clone(),
-                currency: "USD".to_string(),
-                total: equity,
-                free: equity,
-                locked: dec!(0),
-            }],
-            positions: Vec::new(),
-            timestamp: Utc::now(),
-        })
+        anyhow::bail!("Live account fetch is not implemented for {}; refusing to fabricate an account snapshot", self.name())
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {

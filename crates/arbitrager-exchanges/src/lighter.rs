@@ -280,26 +280,44 @@ impl ExchangeAdapter for LighterAdapter {
             if let Some(pos_list) = acc.get("positions").and_then(|p| p.as_array()) {
                 for p in pos_list {
                     let sym = p.get("symbol").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
+                    // Lighter `position` is unsigned; direction comes from `sign` (1/-1).
                     let sz_str = p.get("position").and_then(|s| s.as_str()).unwrap_or("0");
                     let sz = Decimal::from_str(sz_str).unwrap_or(dec!(0));
-                    let entry_str = p.get("entry_price").and_then(|e| e.as_str()).unwrap_or("0");
-                    let entry_px = Decimal::from_str(entry_str).unwrap_or(dec!(0));
+                    let sign = p.get("sign").and_then(|s| s.as_i64()).unwrap_or(1);
+                    let parse_str = |key: &str| {
+                        p.get(key)
+                            .and_then(|v| v.as_str())
+                            .and_then(|s| Decimal::from_str(s).ok())
+                    };
+                    let entry_px = parse_str("avg_entry_price").unwrap_or(dec!(0));
+                    let position_value = parse_str("position_value").unwrap_or(dec!(0));
+                    let allocated = parse_str("allocated_margin").unwrap_or(dec!(0));
 
                     if sz != dec!(0) {
-                        let side = if sz > dec!(0) { Side::Buy } else { Side::Sell };
+                        let qty = sz.abs();
                         positions.push(Position {
                             venue: self.venue_id.clone(),
                             symbol: sym.to_string(),
-                            side,
-                            quantity: sz.abs(),
+                            side: if sign < 0 { Side::Sell } else { Side::Buy },
+                            quantity: qty,
                             entry_price: entry_px,
-                            mark_price: entry_px,
-                            unrealized_pnl: dec!(0),
-                            realized_pnl: dec!(0),
-                            liquidation_price: None,
-                            leverage: dec!(5),
-                            initial_margin: (sz.abs() * entry_px) / dec!(5),
-                            maintenance_margin: (sz.abs() * entry_px) / dec!(10),
+                            mark_price: if position_value > dec!(0) {
+                                position_value / qty
+                            } else {
+                                entry_px
+                            },
+                            unrealized_pnl: parse_str("unrealized_pnl").unwrap_or(dec!(0)),
+                            realized_pnl: parse_str("realized_pnl").unwrap_or(dec!(0)),
+                            liquidation_price: parse_str("liquidation_price").filter(|p| *p > dec!(0)),
+                            leverage: if allocated > dec!(0) {
+                                position_value / allocated
+                            } else {
+                                dec!(0)
+                            },
+                            initial_margin: allocated,
+                            // Lighter does not expose maintenance margin; using allocated
+                            // (initial) margin overstates it toward earlier risk warnings.
+                            maintenance_margin: allocated,
                             updated_at: Utc::now(),
                         });
                     }
