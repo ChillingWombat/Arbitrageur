@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,11 @@ use arbitrager_execution::coordinator::ArbitrageExecutionResult;
 use arbitrager_execution::smart_routing::SmartOrderRouter;
 use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use crate::state::{AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto, VenueBalanceInfo};
-use crate::vault::VaultStatus;
+use crate::state_store::{AccountProfile, StrategyAccountRoute};
+use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
 use arbitrager_execution::virtual_ledger::StrategyMetrics;
 use arbitrager_math::calibration::WfoOptimizationResult;
+use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
 
 const LIVE_EXECUTION_DISABLED: &str = "Live execution is disabled until an authenticated adapter can sign, submit, and reconcile orders";
 
@@ -42,6 +45,15 @@ pub struct VenueStatusDto {
     pub status: String,
     pub latency_ms: u64,
     pub fee_bps: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct VenueVolumesDto {
+    pub venue_id: String,
+    /// 24h notional volume in quote currency (~USD), keyed by the venue's
+    /// raw asset name (e.g. "BTC", "kPEPE"). Only assets the venue actually
+    /// reports are included.
+    pub volumes: HashMap<String, f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -436,6 +448,7 @@ pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Resu
     state.ensure_market(symbol);
     let venues = state.get_venues();
     let mut result = Vec::new();
+    let mut sample_entries = Vec::new();
 
     for (vid, vname, adapter) in venues {
         let venue_id = adapter.venue_id();
@@ -510,6 +523,35 @@ pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Resu
             bids: bids_dto,
             asks: asks_dto,
         });
+        if mid > 0.0 {
+            sample_entries.push(crate::state_store::VenueSampleEntry {
+                venue_id: vid.into(),
+                mid,
+                best_bid,
+                best_ask,
+            });
+        }
+    }
+
+    // Durable signal history: persist this poll's venue mids so the
+    // dislocation series can be sliced over arbitrary windows. Best-effort —
+    // a store failure must never break the market-data path.
+    let now_ms = Utc::now().timestamp_millis();
+    let _ = state
+        .state_store
+        .record_spread_samples(symbol, now_ms, &sample_entries);
+
+    // Hourly retention pass: keep 30 days of samples, hard-capped globally.
+    let current_hour = now_ms / 3_600_000;
+    {
+        let mut last_hour = state.sample_prune_at.lock();
+        if current_hour > *last_hour {
+            *last_hour = current_hour;
+            let retain_after = now_ms - 30 * 86_400_000;
+            let _ = state
+                .state_store
+                .prune_spread_samples(retain_after, 4_000_000);
+        }
     }
 
     Ok(result)
@@ -941,6 +983,141 @@ pub fn fit_ou_process_impl(prices: &[f64], dt: f64) -> Result<OuFitDto, String> 
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Resolve account attribution for a two-leg signal. An explicit strategy
+/// route wins; otherwise the first enabled route covering the venue pair is
+/// used, falling back to each venue's default account. Accounts may be absent
+/// on venues that have no configured profiles.
+/// Accounts attributed to a signal's legs, resolved from an explicit or
+/// eligible strategy route, else each venue's default account.
+struct SignalAccounts {
+    route_id: Option<String>,
+    long: Option<String>,
+    short: Option<String>,
+}
+
+fn resolve_signal_accounts(
+    state: &AppEngineState,
+    strategy_id: &str,
+    venue_a: &str,
+    venue_b: &str,
+    route_id: Option<&str>,
+) -> Result<SignalAccounts, String> {
+    if let Some(rid) = route_id {
+        let route = state
+            .state_store
+            .list_strategy_routes(None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|r| r.id == rid)
+            .ok_or_else(|| format!("strategy route {rid} does not exist"))?;
+        if !route.enabled {
+            return Err(format!("strategy route {rid} is disabled"));
+        }
+        if !route.strategy_id.eq_ignore_ascii_case(strategy_id) {
+            return Err(format!(
+                "route {rid} belongs to strategy {}, not {strategy_id}",
+                route.strategy_id
+            ));
+        }
+        let covers = (route.account_a_venue.eq_ignore_ascii_case(venue_a)
+            && route.account_b_venue.eq_ignore_ascii_case(venue_b))
+            || (route.account_a_venue.eq_ignore_ascii_case(venue_b)
+                && route.account_b_venue.eq_ignore_ascii_case(venue_a));
+        if !covers {
+            return Err(format!(
+                "route {rid} does not cover venues {venue_a}/{venue_b}"
+            ));
+        }
+        let (long, short) = if route.account_a_venue.eq_ignore_ascii_case(venue_a) {
+            (route.account_a_id, route.account_b_id)
+        } else {
+            (route.account_b_id, route.account_a_id)
+        };
+        return Ok(SignalAccounts {
+            route_id: Some(route.id),
+            long: Some(long),
+            short: Some(short),
+        });
+    }
+    if let Ok(routes) = state
+        .state_store
+        .eligible_strategy_routes(strategy_id, venue_a, venue_b)
+    {
+        if let Some(r) = routes.into_iter().next() {
+            let (long, short) = if r.account_a_venue.eq_ignore_ascii_case(venue_a) {
+                (r.account_a_id, r.account_b_id)
+            } else {
+                (r.account_b_id, r.account_a_id)
+            };
+            return Ok(SignalAccounts {
+                route_id: Some(r.id),
+                long: Some(long),
+                short: Some(short),
+            });
+        }
+    }
+    Ok(SignalAccounts {
+        route_id: None,
+        long: state
+            .state_store
+            .default_account(venue_a)
+            .ok()
+            .flatten()
+            .map(|a| a.id),
+        short: state
+            .state_store
+            .default_account(venue_b)
+            .ok()
+            .flatten()
+            .map(|a| a.id),
+    })
+}
+
+/// Persist actual leg fills and derive the per-signal balance status.
+/// A signal is `Balanced` only when its own legs net to zero delta — aggregate
+/// netting across unrelated signals can never mark it balanced.
+fn reconcile_signal_legs(
+    state: &AppEngineState,
+    signal_id: &str,
+    fills: [(crate::state_store::LegSide, &arbitrager_core::order::OrderResponse); 2],
+) -> Result<crate::state_store::SignalStatus, String> {
+    use crate::state_store::SignalStatus;
+    for (side, leg) in fills {
+        let filled = leg
+            .filled_qty
+            .to_string()
+            .parse::<f64>()
+            .map_err(|_| "unparseable filled quantity".to_string())?;
+        let fee = leg
+            .fee
+            .to_string()
+            .parse::<f64>()
+            .map_err(|_| "unparseable fee".to_string())?;
+        if filled > 0.0 {
+            let px = leg
+                .avg_fill_price
+                .and_then(|p| p.to_string().parse::<f64>().ok())
+                .filter(|p| *p > 0.0)
+                .ok_or_else(|| format!("leg {side:?} filled but reports no positive price"))?;
+            state
+                .state_store
+                .apply_leg_fill(signal_id, side, filled, px, fee, Some(leg.order_id.as_str()))
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let delta = state
+        .state_store
+        .signal_delta(signal_id)
+        .map_err(|e| e.to_string())?;
+    let eps = 1e-6;
+    Ok(if delta.is_finite() && delta.abs() <= eps {
+        SignalStatus::Balanced
+    } else {
+        SignalStatus::Imbalanced
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_spatial_arbitrage_impl(
     symbol: &str,
     buy_venue: &str,
@@ -952,6 +1129,38 @@ pub async fn execute_spatial_arbitrage_impl(
     position_step: Option<u32>,
     max_units: Option<u32>,
     nominal_hurdle_bps: Option<f64>,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
+    execute_spatial_arbitrage_inner(
+        symbol,
+        buy_venue,
+        sell_venue,
+        order_qty,
+        direction,
+        trigger_spread_bps,
+        baseline_mean_spread_bps,
+        position_step,
+        max_units,
+        nominal_hurdle_bps,
+        None,
+        state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_spatial_arbitrage_inner(
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    order_qty: f64,
+    direction: Option<String>,
+    trigger_spread_bps: Option<f64>,
+    baseline_mean_spread_bps: Option<f64>,
+    position_step: Option<u32>,
+    max_units: Option<u32>,
+    nominal_hurdle_bps: Option<f64>,
+    route_id: Option<&str>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if !order_qty.is_finite() || order_qty <= 0.0 {
@@ -987,6 +1196,25 @@ pub async fn execute_spatial_arbitrage_impl(
         return Err(LIVE_EXECUTION_DISABLED.into());
     }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
+
+    // Durable per-ticker gate: an in-flight, imbalanced, or unresolved signal
+    // for this symbol blocks any further order until its own legs reconcile
+    // as delta-neutral. Survives restarts via the SQLite store.
+    if let Some(blocker) = state
+        .state_store
+        .blocking_signals(symbol)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+    {
+        return Err(format!(
+            "Symbol {} is blocked by signal {} (status {}): awaiting leg reconciliation/delta-neutral confirmation",
+            symbol,
+            blocker.id,
+            blocker.status.as_str()
+        ));
+    }
+
     state.ensure_market(symbol);
 
     let buy_adapter = state
@@ -1269,6 +1497,47 @@ pub async fn execute_spatial_arbitrage_impl(
             .equity;
     }
 
+    // Persist the selected candidate as in_flight BEFORE dispatch: if the
+    // process dies mid-execution the symbol stays blocked on restart until
+    // the signal's own legs reconcile.
+    let accounts = resolve_signal_accounts(
+        state,
+        "futures",
+        buy_vid.as_str(),
+        sell_vid.as_str(),
+        route_id,
+    )?;
+    let signal_id = format!(
+        "sig-{}-{:08x}",
+        Utc::now().timestamp_millis(),
+        rand::random::<u32>()
+    );
+    state
+        .state_store
+        .record_signal_execution(&crate::state_store::NewSignalExecution {
+            id: signal_id.clone(),
+            strategy_id: "futures".into(),
+            symbol: symbol.to_string(),
+            route_id: accounts.route_id,
+            expected_net_usd: expected_net.to_string().parse::<f64>().ok(),
+            note: None,
+            legs: vec![
+                crate::state_store::NewSignalLeg {
+                    account_id: accounts.long,
+                    venue: buy_vid.to_string(),
+                    side: crate::state_store::LegSide::Long,
+                    intended_qty: order_qty,
+                },
+                crate::state_store::NewSignalLeg {
+                    account_id: accounts.short,
+                    venue: sell_vid.to_string(),
+                    side: crate::state_store::LegSide::Short,
+                    intended_qty: order_qty,
+                },
+            ],
+        })
+        .map_err(|e| format!("Failed to persist in-flight signal record: {e}"))?;
+
     let started = std::time::Instant::now();
     let res = state
         .coordinator
@@ -1340,6 +1609,21 @@ pub async fn execute_spatial_arbitrage_impl(
                 fee_f,
             );
 
+            // Persist actual leg fills, then reconcile per-signal balance:
+            // balanced only when THIS signal's own legs net to zero delta.
+            let signal_status = reconcile_signal_legs(
+                state,
+                &signal_id,
+                [
+                    (crate::state_store::LegSide::Long, &leg_a),
+                    (crate::state_store::LegSide::Short, &leg_b),
+                ],
+            )?;
+            state
+                .state_store
+                .update_signal_status(&signal_id, signal_status, None)
+                .map_err(|e| e.to_string())?;
+
             state.execution_logs.write().push(ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
@@ -1389,6 +1673,36 @@ pub async fn execute_spatial_arbitrage_impl(
             error_a,
             error_b,
         } => {
+            // Persist whatever partial fill data exists, then mark the signal
+            // unresolved — the ticker stays blocked until manual resolution.
+            for (side, fill) in [
+                (crate::state_store::LegSide::Long, &leg_a_fill),
+                (crate::state_store::LegSide::Short, &leg_b_fill),
+            ] {
+                if let Some(f) = fill {
+                    let filled = f.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                    let px = f
+                        .avg_fill_price
+                        .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let fee = f.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    if filled > 0.0 && px > 0.0 {
+                        let _ = state.state_store.apply_leg_fill(
+                            &signal_id,
+                            side,
+                            filled,
+                            px,
+                            fee,
+                            Some(f.order_id.as_str()),
+                        );
+                    }
+                }
+            }
+            let _ = state.state_store.update_signal_status(
+                &signal_id,
+                crate::state_store::SignalStatus::Unresolved,
+                Some("unresolved exposure after failed unwind"),
+            );
             if !state.circuit_breaker.is_tripped() {
                 state
                     .circuit_breaker
@@ -1436,6 +1750,13 @@ pub async fn execute_spatial_arbitrage_impl(
                 ArbitrageExecutionResult::HaltedByRisk(_) => ("HALTED", "HALTED"),
                 _ => ("REJECTED", "REJECTED"),
             };
+            // Unwound legs restored flatness → `failed` (not blocking). Any
+            // other terminal failure is also non-blocking once recorded.
+            let _ = state.state_store.update_signal_status(
+                &signal_id,
+                crate::state_store::SignalStatus::Failed,
+                Some(&format!("{other:?}")),
+            );
             state.execution_logs.write().push(ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
@@ -1474,6 +1795,172 @@ pub async fn execute_spatial_arbitrage_impl(
             })
         }
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* Same-time candidate arbitration                                      */
+/* ------------------------------------------------------------------ */
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpatialCandidateInput {
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub order_qty: f64,
+    /// Caller's estimated net USD — used only for ranking candidates in the
+    /// same batch; the executor recomputes economics before dispatch.
+    pub expected_net_usd: Option<f64>,
+    /// Explicit strategy-level route override (account A ↔ account B).
+    pub route_id: Option<String>,
+    pub direction: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CandidateOutcomeDto {
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub expected_net_usd: Option<f64>,
+    pub selected: bool,
+    pub reason: Option<String>,
+    pub result: Option<SimStepResultDto>,
+}
+
+/// Submit a synchronized batch of candidates: per symbol, at most ONE order
+/// is dispatched — the candidate with the highest expected net USD. Symbols
+/// already blocked by an in-flight/unreconciled signal reject all candidates.
+pub async fn execute_spatial_candidates_impl(
+    candidates: Vec<SpatialCandidateInput>,
+    state: &AppEngineState,
+) -> Result<Vec<CandidateOutcomeDto>, String> {
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut by_symbol: std::collections::HashMap<String, Vec<SpatialCandidateInput>> =
+        std::collections::HashMap::new();
+    for c in candidates {
+        let key = c.symbol.trim().to_lowercase();
+        by_symbol.entry(key).or_default().push(c);
+    }
+
+    let mut outcomes = Vec::new();
+    for (symbol_key, mut cands) in by_symbol {
+        let outcome_for = |c: &SpatialCandidateInput, selected: bool, reason: Option<String>, result: Option<SimStepResultDto>| CandidateOutcomeDto {
+            symbol: c.symbol.clone(),
+            buy_venue: c.buy_venue.clone(),
+            sell_venue: c.sell_venue.clone(),
+            expected_net_usd: c.expected_net_usd,
+            selected,
+            reason,
+            result,
+        };
+
+        if state
+            .state_store
+            .ticker_blocked(&symbol_key)
+            .map_err(|e| e.to_string())?
+        {
+            for c in &cands {
+                outcomes.push(outcome_for(
+                    c,
+                    false,
+                    Some("ticker blocked by in-flight/unreconciled signal".into()),
+                    None,
+                ));
+            }
+            continue;
+        }
+
+        // Highest expected net USD wins; missing estimates rank last.
+        cands.sort_by(|a, b| {
+            b.expected_net_usd
+                .unwrap_or(f64::NEG_INFINITY)
+                .total_cmp(&a.expected_net_usd.unwrap_or(f64::NEG_INFINITY))
+        });
+        let winner = cands.remove(0);
+        for loser in &cands {
+            outcomes.push(outcome_for(
+                loser,
+                false,
+                Some("not selected: lower expected net USD than winning candidate".into()),
+                None,
+            ));
+        }
+
+        let res = execute_spatial_arbitrage_inner(
+            &winner.symbol,
+            &winner.buy_venue,
+            &winner.sell_venue,
+            winner.order_qty,
+            winner.direction.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            winner.route_id.as_deref(),
+            state,
+        )
+        .await;
+        match res {
+            Ok(dto) => outcomes.push(outcome_for(&winner, true, None, Some(dto))),
+            Err(e) => outcomes.push(outcome_for(&winner, true, Some(e), None)),
+        }
+    }
+    Ok(outcomes)
+}
+
+/// Durable signal execution record for the frontend (symbol filter optional).
+#[tauri::command]
+pub async fn list_signal_executions(
+    symbol: Option<String>,
+    status: Option<String>,
+    state: tauri::State<'_, AppEngineState>,
+) -> Result<Vec<crate::state_store::SignalExecution>, String> {
+    let st = match status.as_deref() {
+        Some(s) => Some(
+            crate::state_store::SignalStatus::from_status(s)
+                .ok_or_else(|| format!("unknown signal status '{s}'"))?,
+        ),
+        None => None,
+    };
+    state
+        .state_store
+        .list_signals(symbol.as_deref(), st)
+        .map_err(|e| e.to_string())
+}
+
+/// Per-ticker execution/position state: whether the symbol is blocked, its
+/// blocking signals, and the net filled position across all signals.
+#[tauri::command]
+pub async fn get_ticker_position_state(
+    symbol: String,
+    state: tauri::State<'_, AppEngineState>,
+) -> Result<serde_json::Value, String> {
+    let blocking = state
+        .state_store
+        .blocking_signals(&symbol)
+        .map_err(|e| e.to_string())?;
+    let net = state
+        .state_store
+        .ticker_net_position(&symbol)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "symbol": symbol,
+        "blocked": !blocking.is_empty(),
+        "blockingSignalIds": blocking.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+        "netPositionQty": net,
+    }))
+}
+
+#[tauri::command]
+pub async fn execute_spatial_candidates(
+    candidates: Vec<SpatialCandidateInput>,
+    state: tauri::State<'_, AppEngineState>,
+) -> Result<Vec<CandidateOutcomeDto>, String> {
+    execute_spatial_candidates_impl(candidates, &state).await
 }
 
 pub async fn execute_cross_ticker_arbitrage_impl(
@@ -1673,6 +2160,291 @@ pub fn trigger_emergency_killswitch_impl(state: &AppEngineState) -> Result<Strin
     Ok("EMERGENCY KILLSWITCH ENGAGED. All trading operations halted immediately.".into())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlattenResultDto {
+    pub strategy_id: String,
+    pub symbol: Option<String>,
+    pub signals_processed: usize,
+    pub signals_closed: usize,
+    pub legs_closed: usize,
+    /// Open signals whose legs could not be fully closed — residual exposure
+    /// remains and those signals stay `unresolved` (ticker stays blocked).
+    pub residual_signals: usize,
+    pub notes: Vec<String>,
+}
+
+/// Place a reduce-only market order on a venue's paper exchange to close one
+/// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
+async fn flatten_leg_on_paper(
+    state: &AppEngineState,
+    venue: &str,
+    symbol: &str,
+    side: Side,
+    qty: f64,
+) -> Result<Option<(f64, f64, f64, String)>, String> {
+    let canonical = crate::state::canonical_venue_id(venue)
+        .ok_or_else(|| format!("Unknown venue '{venue}'"))?;
+    let adapter = state
+        .get_adapter(venue)
+        .ok_or_else(|| format!("Venue '{venue}' is not admitted for paper execution"))?;
+    let vid = adapter.venue_id();
+    let paper = state
+        .get_paper_exchange(canonical)
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{venue}'"))?;
+
+    let book = match state.market_data_hub.get_valid_orderbook(
+        &vid,
+        symbol,
+        Some(std::time::Duration::from_secs(2)),
+    ) {
+        Some(b) => b,
+        None => {
+            let b = adapter
+                .fetch_orderbook(symbol)
+                .await
+                .map_err(|e| format!("No fresh {venue} orderbook for {symbol}: {e}"))?;
+            validate_adapter_book(&b, &vid, symbol)
+                .map_err(|e| format!("Flatten order book rejected: {e}"))?;
+            state.market_data_hub.update_orderbook(b.clone());
+            b
+        }
+    };
+    paper.replace_orderbook(book).map_err(|e| e.to_string())?;
+
+    let qty_dec = Decimal::from_f64_retain(qty)
+        .filter(|q| *q > dec!(0))
+        .ok_or_else(|| "Invalid leg quantity".to_string())?;
+    let mut order = arbitrager_core::order::OrderRequest::new_market(
+        paper.venue_id(),
+        symbol,
+        side,
+        qty_dec,
+    );
+    order.reduce_only = true;
+
+    let resp = paper.place_order(order).await.map_err(|e| e.to_string())?;
+    let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+    if filled <= 0.0 {
+        return Ok(None);
+    }
+    let px = resp
+        .avg_fill_price
+        .and_then(|p| p.to_string().parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let fee = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+    Ok(Some((filled, px, fee, resp.order_id)))
+}
+
+/// Emergency per-strategy exit: for every open signal of `strategy_id`
+/// (optionally scoped to `symbol`), dispatch inverse reduce-only market orders
+/// on the paper venues for each filled leg, persist a closing signal with the
+/// actual fills, and mark the original `closed` only once its legs are fully
+/// neutralized. Bypasses pause/circuit-breaker because it is strictly
+/// risk-reducing; refused in live mode until authenticated venue exits exist.
+pub async fn flatten_ticker_positions_impl(
+    symbol: Option<&str>,
+    strategy_id: &str,
+    state: &AppEngineState,
+) -> Result<FlattenResultDto, String> {
+    use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+    let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+    let _execution_guard = state.execution_lock.lock().await;
+
+    let open: Vec<crate::state_store::SignalExecution> = state
+        .state_store
+        .list_signals(symbol, None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|s| s.strategy_id.eq_ignore_ascii_case(&sid) && s.status.counts_as_open())
+        .collect();
+
+    let mut out = FlattenResultDto {
+        strategy_id: sid.clone(),
+        symbol: symbol.map(|s| s.to_string()),
+        signals_processed: open.len(),
+        signals_closed: 0,
+        legs_closed: 0,
+        residual_signals: 0,
+        notes: Vec::new(),
+    };
+
+    let cycle = {
+        let mut step = state.sim_step_counter.write();
+        *step += 1;
+        *step
+    };
+
+    for sig in open {
+        let filled: Vec<&crate::state_store::SignalLeg> =
+            sig.legs.iter().filter(|l| l.filled_qty > 0.0).collect();
+
+        if filled.is_empty() {
+            state
+                .state_store
+                .update_signal_status(&sig.id, SignalStatus::Closed, Some("flatten: signal never filled"))
+                .map_err(|e| e.to_string())?;
+            out.signals_closed += 1;
+            continue;
+        }
+
+        // Closing signal mirrors each filled leg on the same venue/account,
+        // inverted — per-venue and per-signal delta nets to exactly zero.
+        let close_id = format!("flat-{}-{:04x}", sig.id, rand::random::<u16>());
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: close_id.clone(),
+                strategy_id: sig.strategy_id.clone(),
+                symbol: sig.symbol.clone(),
+                route_id: sig.route_id.clone(),
+                expected_net_usd: None,
+                note: Some(format!("emergency flatten of {}", sig.id)),
+                legs: filled
+                    .iter()
+                    .map(|l| NewSignalLeg {
+                        account_id: l.account_id.clone(),
+                        venue: l.venue.clone(),
+                        side: match l.side {
+                            LegSide::Long => LegSide::Short,
+                            LegSide::Short => LegSide::Long,
+                        },
+                        intended_qty: l.filled_qty,
+                    })
+                    .collect(),
+            })
+            .map_err(|e| format!("Failed to persist flatten signal record: {e}"))?;
+
+        let mut fully_flat = true;
+        let mut leg_desc = Vec::new();
+        for leg in &filled {
+            let close_side = match leg.side {
+                LegSide::Long => Side::Sell,
+                LegSide::Short => Side::Buy,
+            };
+            let close_leg_side = match leg.side {
+                LegSide::Long => LegSide::Short,
+                LegSide::Short => LegSide::Long,
+            };
+            match flatten_leg_on_paper(state, &leg.venue, &sig.symbol, close_side, leg.filled_qty).await {
+                Ok(Some((qty, px, fee, oid))) => {
+                    let _ = state.state_store.apply_leg_fill(
+                        &close_id,
+                        close_leg_side,
+                        qty,
+                        px,
+                        fee,
+                        Some(oid.as_str()),
+                    );
+                    out.legs_closed += 1;
+                    leg_desc.push(format!("{} {:?} {}/{}", leg.venue, leg.side, qty, leg.filled_qty));
+                    if qty + f64::EPSILON < leg.filled_qty {
+                        fully_flat = false;
+                        out.notes.push(format!(
+                            "{}: {} leg partially closed {}/{}",
+                            sig.id, leg.venue, qty, leg.filled_qty
+                        ));
+                    }
+                }
+                Ok(None) => {
+                    fully_flat = false;
+                    out.notes.push(format!(
+                        "{}: {} leg got no fill (empty book)",
+                        sig.id, leg.venue
+                    ));
+                }
+                Err(e) => {
+                    fully_flat = false;
+                    out.notes.push(format!("{}: {} leg close failed: {e}", sig.id, leg.venue));
+                }
+            }
+        }
+
+        let final_status = if fully_flat {
+            SignalStatus::Closed
+        } else {
+            // Residual exposure stays unresolved → the ticker remains blocked.
+            SignalStatus::Unresolved
+        };
+        let note = format!("emergency flatten via {close_id}");
+        let _ = state
+            .state_store
+            .update_signal_status(&close_id, final_status, Some(&note));
+        state
+            .state_store
+            .update_signal_status(&sig.id, final_status, Some(&note))
+            .map_err(|e| e.to_string())?;
+        if fully_flat {
+            out.signals_closed += 1;
+        }
+
+        let (venue_a, venue_b) = (
+            sig.legs.first().map(|l| l.venue.clone()).unwrap_or_default(),
+            sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
+        );
+        state.execution_logs.write().push(ExecutionLogEntry {
+            id: format!("exec-flatten-{}-{}", cycle, sig.id),
+            timestamp: Utc::now().to_rfc3339(),
+            trade_type: "Flatten".into(),
+            symbol: sig.symbol.clone(),
+            venue_a,
+            venue_b,
+            leg_a_status: leg_desc.first().cloned().unwrap_or_else(|| "—".into()),
+            leg_b_status: leg_desc.get(1).cloned().unwrap_or_else(|| "—".into()),
+            success: fully_flat,
+            gross_profit: 0.0,
+            fees: 0.0,
+            net_profit: 0.0,
+            latency_us: 0,
+            note: if fully_flat {
+                format!("Emergency flatten closed signal {}", sig.id)
+            } else {
+                format!("Emergency flatten PARTIAL for signal {} — residual exposure", sig.id)
+            },
+            direction: Some("Emergency Flatten".into()),
+            trigger_spread_bps: None,
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: None,
+        });
+    }
+
+    // Residual count = signals still open with recorded fills.
+    out.residual_signals = state
+        .state_store
+        .list_signals(symbol, None)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|s| {
+            s.strategy_id.eq_ignore_ascii_case(&sid)
+                && s.status.counts_as_open()
+                && s.legs.iter().any(|l| l.filled_qty > 0.0)
+        })
+        .count();
+
+    // Refresh realized P&L from paper equity (closing fills change equity).
+    let mut equity_after = dec!(0);
+    for (_, paper) in state.paper_exchanges() {
+        equity_after += paper
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+            .equity;
+    }
+    {
+        let mut total_pnl = state.total_realized_profit.write();
+        *total_pnl = equity_after - dec!(200000);
+    }
+    state.circuit_breaker.update_equity(equity_after);
+
+    Ok(out)
+}
+
 pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLogEntry>, String> {
     Ok(state.execution_logs.read().clone())
 }
@@ -1714,11 +2486,6 @@ pub fn save_engine_settings_impl(
     if !settings.min_depth_ratio.is_finite() || settings.min_depth_ratio < 1.0 {
         return Err("Min depth ratio must be at least 1.0".into());
     }
-    if !settings.venue_rebalance_threshold_usd.is_finite()
-        || settings.venue_rebalance_threshold_usd < 0.0
-    {
-        return Err("Venue rebalance threshold must be finite and nonnegative".into());
-    }
     if settings.engine_rpc_port == 0
         || settings.engine_ws_port == 0
         || settings.engine_rpc_port == settings.engine_ws_port
@@ -1731,11 +2498,24 @@ pub fn save_engine_settings_impl(
     }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
-        state
-            .vault
-            .write()
-            .upsert_credentials(submitted)
-            .map_err(|e| e.to_string())?;
+        // Bind any pre-account-model records to `{venue}-default` profiles
+        // before writing so every exchange credential lands on a profile.
+        ensure_credential_migration(state)?;
+        let mut vault = state.vault.write();
+        for cred in submitted {
+            let venue_key = cred.venue.trim().to_lowercase();
+            if venue_key == "remote_hsm" {
+                // The HSM token is not an exchange account.
+                vault
+                    .upsert_credentials(vec![cred])
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            let profile = ensure_default_profile(state, &venue_key, cred.enabled)?;
+            vault
+                .upsert_profile_credentials(&profile.id, cred)
+                .map_err(|e| e.to_string())?;
+        }
     }
     // Toggle-only saves must still update enabled metadata on existing vault
     // records; a locked vault skips this silently since no secrets changed.
@@ -1789,6 +2569,181 @@ pub async fn get_system_status(state: State<'_, Arc<AppEngineState>>) -> Result<
 #[tauri::command]
 pub async fn fetch_orderbooks(symbol: String, state: State<'_, Arc<AppEngineState>>) -> Result<Vec<VenueOrderBookDto>, String> {
     fetch_orderbooks_impl(&symbol, &state).await
+}
+
+/// Venue 24h-volume maps behind a 5-minute shared cache — volumes move
+/// slowly and both the liquidity sort and the signal-series weighting
+/// consume them. Venues that fail to report are simply absent.
+async fn cached_venue_volumes(
+    state: &AppEngineState,
+) -> HashMap<String, HashMap<String, f64>> {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    {
+        let cache = state.volume_cache.lock();
+        if let Some((t, m)) = cache.as_ref() {
+            if t.elapsed() < TTL {
+                return m.clone();
+            }
+        }
+    }
+    let mut map = HashMap::new();
+    for (vid, _vname, adapter) in state.get_venues() {
+        if let Ok(vols) = adapter.fetch_volumes_24h().await {
+            map.insert(
+                vid.to_string(),
+                vols.into_iter()
+                    .filter_map(|(k, v)| v.to_string().parse::<f64>().ok().map(|f| (k, f)))
+                    .collect(),
+            );
+        }
+    }
+    *state.volume_cache.lock() = Some((std::time::Instant::now(), map.clone()));
+    map
+}
+
+#[tauri::command]
+pub async fn get_ticker_volumes(state: State<'_, Arc<AppEngineState>>) -> Result<Vec<VenueVolumesDto>, String> {
+    let map = cached_venue_volumes(&state).await;
+    Ok(map
+        .into_iter()
+        .map(|(venue_id, volumes)| VenueVolumesDto { venue_id, volumes })
+        .collect())
+}
+
+// ---------------------------------------------------------------------------
+// Signal Trend — durable dislocation series computed by arbitrager-math
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalSeriesDto {
+    pub symbol: String,
+    /// "consensus" | "leader"
+    pub mode: String,
+    pub window_secs: u64,
+    /// Total stored venue samples in the window (history-depth indicator).
+    pub sample_count: u64,
+    /// Earliest sample ever recorded for this symbol, if any.
+    pub earliest_ts_ms: Option<i64>,
+    /// Bucket timestamps (epoch ms), ascending.
+    pub ts_ms: Vec<i64>,
+    /// Sorted venue ids; `dev_bps[i][j]` is venue `venues[j]` at `ts_ms[i]`,
+    /// or null when the venue had no observation in that bucket.
+    pub venues: Vec<String>,
+    /// venue_id -> display name for legend labels.
+    pub venue_names: HashMap<String, String>,
+    pub dev_bps: Vec<Vec<Option<f64>>>,
+    /// Max/min deviation across venues present in each bucket; their
+    /// difference is the gross pairwise spread.
+    pub band_max_bps: Vec<f64>,
+    pub band_min_bps: Vec<f64>,
+}
+
+pub async fn get_signal_series_impl(
+    symbol: &str,
+    mode: &str,
+    window_secs: u64,
+    state: &AppEngineState,
+) -> Result<SignalSeriesDto, String> {
+    validate_market_symbol(symbol)?;
+    let window_secs = window_secs.clamp(10, 7 * 86_400); // 10s..7d
+    let max_points = 500usize;
+    // Bucket granularity: ~poll cadence for short windows, coarser for
+    // hour/day horizons so long slices stay renderable.
+    let bucket_ms = ((window_secs * 1000) / max_points as u64).max(1_000) as i64;
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms - (window_secs * 1000) as i64 - bucket_ms;
+
+    let store = state.state_store.clone();
+    let sym = symbol.to_string();
+    let (raw, earliest_ts_ms) = tokio::task::spawn_blocking(move || {
+        let rows = store.spread_samples(&sym, since_ms, now_ms)?;
+        let earliest = store.earliest_spread_sample_ts(&sym)?;
+        Ok::<_, anyhow::Error>((rows, earliest))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let venue_names: HashMap<String, String> = state
+        .get_venues()
+        .into_iter()
+        .map(|(vid, vname, _)| (vid.to_string(), vname.to_string()))
+        .collect();
+
+    let mut samples = Vec::with_capacity(raw.len());
+    let mut sample_count = 0u64;
+    for row in &raw {
+        samples.push(MidSample {
+            ts_ms: row.ts_ms,
+            venue: row.venue_id.clone(),
+            mid: row.mid,
+        });
+        sample_count += 1;
+    }
+
+    // Volume weights: venue_id -> this asset's reported 24h notional USD.
+    // Asset naming differs per venue (PEPE / kPEPE / 1000PEPE).
+    let base = symbol
+        .split('-')
+        .next()
+        .unwrap_or(symbol)
+        .to_ascii_uppercase();
+    let vol_maps = cached_venue_volumes(state).await;
+    let candidates = [base.clone(), format!("K{}", base), format!("1000{}", base)];
+    let mut weights = HashMap::new();
+    for (vid, map) in &vol_maps {
+        let v = candidates
+            .iter()
+            .filter_map(|c| {
+                map.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(c))
+                    .map(|(_, v)| *v)
+            })
+            .next()
+            .unwrap_or(0.0);
+        if v > 0.0 {
+            weights.insert(vid.clone(), v);
+        }
+    }
+
+    let mode_enum = match mode {
+        "leader" => BaselineMode::Leader,
+        _ => BaselineMode::Consensus,
+    };
+    let series = compute_deviation_series(&samples, &weights, mode_enum, bucket_ms, max_points);
+    Ok(SignalSeriesDto {
+        symbol: symbol.to_string(),
+        mode: match mode_enum {
+            BaselineMode::Consensus => "consensus",
+            BaselineMode::Leader => "leader",
+        }
+        .to_string(),
+        window_secs,
+        sample_count,
+        earliest_ts_ms,
+        ts_ms: series.ts_ms,
+        venues: series.venues,
+        venue_names,
+        dev_bps: series.dev_bps,
+        band_max_bps: series.band_max_bps,
+        band_min_bps: series.band_min_bps,
+    })
+}
+
+#[tauri::command]
+pub async fn get_signal_series(
+    symbol: String,
+    mode: Option<String>,
+    window_secs: Option<u64>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SignalSeriesDto, String> {
+    get_signal_series_impl(
+        &symbol,
+        mode.as_deref().unwrap_or("consensus"),
+        window_secs.unwrap_or(60),
+        &state,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -1948,6 +2903,15 @@ pub async fn trigger_emergency_killswitch(state: State<'_, Arc<AppEngineState>>)
 }
 
 #[tauri::command]
+pub async fn flatten_ticker_positions(
+    symbol: Option<String>,
+    strategy_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<FlattenResultDto, String> {
+    flatten_ticker_positions_impl(symbol.as_deref(), &strategy_id, &state).await
+}
+
+#[tauri::command]
 pub async fn get_execution_logs(state: State<'_, Arc<AppEngineState>>) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_impl(&state)
 }
@@ -2042,15 +3006,23 @@ pub fn get_vault_status_impl(state: &AppEngineState) -> VaultStatus {
 }
 
 pub fn initialize_vault_impl(password: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
-    let mut vault = state.vault.write();
-    vault.initialize(password).map_err(|e| e.to_string())?;
-    Ok(vault.get_status())
+    let status = {
+        let mut vault = state.vault.write();
+        vault.initialize(password).map_err(|e| e.to_string())?;
+        vault.get_status()
+    };
+    ensure_credential_migration(state)?;
+    Ok(status)
 }
 
 pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
-    let mut vault = state.vault.write();
-    vault.unlock(password).map_err(|e| e.to_string())?;
-    Ok(vault.get_status())
+    let status = {
+        let mut vault = state.vault.write();
+        vault.unlock(password).map_err(|e| e.to_string())?;
+        vault.get_status()
+    };
+    ensure_credential_migration(state)?;
+    Ok(status)
 }
 
 pub fn lock_vault_impl(state: &AppEngineState) -> VaultStatus {
@@ -2093,11 +3065,594 @@ pub fn delete_exchange_credentials_impl(
         .map_err(|e| e.to_string())
 }
 
+// ---------------------------------------------------------------------------
+// Account profiles and strategy-level account routes
+// ---------------------------------------------------------------------------
+
+/// Sanitized account view for the settings UI: durable profile metadata plus
+/// credential-presence flags. Never contains secret material.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountDto {
+    pub id: String,
+    pub venue: String,
+    pub label: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    /// `None` while the vault is locked (presence is unknowable); otherwise
+    /// whether any credential material is stored for this account.
+    pub credentials_configured: Option<bool>,
+    pub has_api_key: bool,
+    pub has_api_secret: bool,
+    pub has_passphrase: bool,
+    pub has_account_id: bool,
+    pub has_wallet_address: bool,
+    pub account_index: Option<u32>,
+    pub subaccount_index: Option<u32>,
+    pub api_key_index: Option<u32>,
+    pub has_private_key: bool,
+}
+
+// Intentionally no Debug: may transiently hold credential material.
+#[derive(Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountCredentialInput {
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_secret: String,
+    #[serde(default)]
+    pub passphrase: Option<String>,
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub account_index: Option<u32>,
+    #[serde(default)]
+    pub subaccount_index: Option<u32>,
+    #[serde(default)]
+    pub api_key_index: Option<u32>,
+    #[serde(default)]
+    pub private_key: Option<String>,
+}
+
+impl AccountCredentialInput {
+    fn has_material(&self) -> bool {
+        !self.api_key.trim().is_empty()
+            || !self.api_secret.trim().is_empty()
+            || self
+                .passphrase
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+            || self
+                .account_id
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+            || self
+                .wallet_address
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+            || self.account_index.is_some()
+            || self.subaccount_index.is_some()
+            || self.api_key_index.is_some()
+            || self
+                .private_key
+                .as_ref()
+                .is_some_and(|v| !v.trim().is_empty())
+    }
+
+    fn into_record(self, venue: &str, profile_id: &str, enabled: bool) -> ExchangeCredentials {
+        let trimmed_opt =
+            |v: &Option<String>| v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        ExchangeCredentials {
+            venue: venue.to_string(),
+            profile_id: Some(profile_id.to_string()),
+            api_key: self.api_key.trim().to_string(),
+            api_secret: self.api_secret.trim().to_string(),
+            passphrase: trimmed_opt(&self.passphrase),
+            account_id: trimmed_opt(&self.account_id),
+            wallet_address: trimmed_opt(&self.wallet_address),
+            account_index: self.account_index,
+            subaccount_index: self.subaccount_index,
+            api_key_index: self.api_key_index,
+            private_key: trimmed_opt(&self.private_key),
+            enabled,
+        }
+    }
+}
+
+// Intentionally no Debug: `credentials` may hold secret material.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUpsertInput {
+    /// Existing account ID for updates; `None` creates a new account.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Venue ID. Required on create; verified immutable on update.
+    #[serde(default)]
+    pub venue: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub make_default: bool,
+    #[serde(default)]
+    pub credentials: Option<AccountCredentialInput>,
+}
+
+// Intentionally no Debug.
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyRouteUpsertInput {
+    /// Existing route ID for updates; `None` creates a new route.
+    #[serde(default)]
+    pub id: Option<String>,
+    pub strategy_id: String,
+    #[serde(default)]
+    pub label: String,
+    pub account_a_id: String,
+    pub account_b_id: String,
+    #[serde(default = "default_route_enabled")]
+    pub enabled: bool,
+}
+
+fn default_route_enabled() -> bool {
+    true
+}
+
+fn is_valid_account_id(raw: &str) -> bool {
+    let v = raw.trim();
+    !v.is_empty()
+        && v.len() <= 128
+        && v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Fetch (creating when necessary) the `{venue}-default` account profile
+/// used by the legacy flat settings credential fields. The legacy venue
+/// toggle is mirrored onto the default account's enabled switch; label and
+/// default status are preserved for existing profiles.
+fn ensure_default_profile(
+    state: &AppEngineState,
+    venue: &str,
+    enabled: bool,
+) -> Result<AccountProfile, String> {
+    let pid = format!("{venue}-default");
+    match state
+        .state_store
+        .get_account(&pid)
+        .map_err(|e| e.to_string())?
+    {
+        Some(existing) => {
+            if existing.venue != venue {
+                return Err(format!(
+                    "account ID {pid} is bound to a different venue"
+                ));
+            }
+            if existing.enabled != enabled {
+                state
+                    .state_store
+                    .upsert_account(&pid, venue, &existing.label, enabled, existing.is_default)
+                    .map_err(|e| e.to_string())
+            } else {
+                Ok(existing)
+            }
+        }
+        None => state
+            .state_store
+            .upsert_account(&pid, venue, "Default", enabled, true)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+/// Migrate legacy venue-keyed credential records onto `{venue}-default`
+/// account profiles and prune bound records whose profile no longer exists.
+/// No-op while the vault is locked. `remote_hsm` is not an exchange account
+/// and is intentionally left unbound.
+fn ensure_credential_migration(state: &AppEngineState) -> Result<(), String> {
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Ok(());
+    }
+
+    // Prune bound records whose profile was deleted (e.g. credential cleanup
+    // failed after the account row was removed).
+    let presence = vault.credential_presence().map_err(|e| e.to_string())?;
+    for p in presence.iter() {
+        if let Some(pid) = &p.profile_id {
+            let exists = state
+                .state_store
+                .get_account(pid)
+                .map_err(|e| e.to_string())?
+                .is_some();
+            if !exists {
+                vault
+                    .delete_profile_credentials(pid)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    for cred in vault.unbound_credentials().map_err(|e| e.to_string())? {
+        if cred.venue == "remote_hsm" {
+            continue;
+        }
+        let pid = format!("{}-default", cred.venue);
+        if !is_valid_account_id(&pid) {
+            tracing::warn!(
+                "skipping migration of credential record with invalid venue '{}'",
+                cred.venue
+            );
+            continue;
+        }
+        match state
+            .state_store
+            .get_account(&pid)
+            .map_err(|e| e.to_string())?
+        {
+            Some(existing) => {
+                if existing.venue != cred.venue {
+                    return Err(format!(
+                        "cannot migrate {} credentials: {pid} is bound to another venue",
+                        cred.venue
+                    ));
+                }
+            }
+            None => {
+                state
+                    .state_store
+                    .upsert_account(&pid, &cred.venue, "Default", cred.enabled, true)
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+        vault
+            .bind_profile(&cred.venue, &pid)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn account_dto(
+    profile: &AccountProfile,
+    presence: Option<&CredentialPresence>,
+    vault_locked: bool,
+) -> AccountDto {
+    let configured = presence.is_some_and(|p| {
+        p.has_api_key
+            || p.has_api_secret
+            || p.has_passphrase
+            || p.has_account_id
+            || p.has_wallet_address
+            || p.account_index.is_some()
+            || p.subaccount_index.is_some()
+            || p.api_key_index.is_some()
+            || p.has_private_key
+    });
+    AccountDto {
+        id: profile.id.clone(),
+        venue: profile.venue.clone(),
+        label: profile.label.clone(),
+        enabled: profile.enabled,
+        is_default: profile.is_default,
+        created_at: profile.created_at.clone(),
+        updated_at: profile.updated_at.clone(),
+        credentials_configured: if vault_locked { None } else { Some(configured) },
+        has_api_key: presence.is_some_and(|p| p.has_api_key),
+        has_api_secret: presence.is_some_and(|p| p.has_api_secret),
+        has_passphrase: presence.is_some_and(|p| p.has_passphrase),
+        has_account_id: presence.is_some_and(|p| p.has_account_id),
+        has_wallet_address: presence.is_some_and(|p| p.has_wallet_address),
+        has_private_key: presence.is_some_and(|p| p.has_private_key),
+        account_index: presence.and_then(|p| p.account_index),
+        subaccount_index: presence.and_then(|p| p.subaccount_index),
+        api_key_index: presence.and_then(|p| p.api_key_index),
+    }
+}
+
+/// Merge durable profiles with sanitized vault credential presence.
+fn accounts_with_presence(
+    state: &AppEngineState,
+    profiles: Vec<AccountProfile>,
+) -> Result<Vec<AccountDto>, String> {
+    let (presence, locked) = {
+        let mut vault = state.vault.write();
+        let locked = !vault.is_unlocked();
+        let presence = if locked {
+            Vec::new()
+        } else {
+            vault.credential_presence().map_err(|e| e.to_string())?
+        };
+        (presence, locked)
+    };
+    let by_profile: std::collections::HashMap<&str, &CredentialPresence> = presence
+        .iter()
+        .filter_map(|p| p.profile_id.as_deref().map(|id| (id, p)))
+        .collect();
+    Ok(profiles
+        .iter()
+        .map(|p| account_dto(p, by_profile.get(p.id.as_str()).copied(), locked))
+        .collect())
+}
+
+pub fn list_accounts_impl(
+    venue: Option<&str>,
+    state: &AppEngineState,
+) -> Result<Vec<AccountDto>, String> {
+    ensure_credential_migration(state)?;
+    let profiles = state
+        .state_store
+        .list_accounts(venue)
+        .map_err(|e| e.to_string())?;
+    accounts_with_presence(state, profiles)
+}
+
+pub fn upsert_account_impl(
+    input: AccountUpsertInput,
+    state: &AppEngineState,
+) -> Result<AccountDto, String> {
+    ensure_credential_migration(state)?;
+
+    let profile = match &input.id {
+        Some(id) => {
+            let existing = state
+                .state_store
+                .get_account(id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("account {id} does not exist"))?;
+            if !input.venue.trim().is_empty()
+                && !input.venue.trim().eq_ignore_ascii_case(&existing.venue)
+            {
+                return Err("account venue is immutable once created".into());
+            }
+            state
+                .state_store
+                .upsert_account(
+                    id,
+                    &existing.venue,
+                    &input.label,
+                    input.enabled,
+                    input.make_default,
+                )
+                .map_err(|e| e.to_string())?
+        }
+        None => {
+            let venue_lc = input.venue.trim().to_lowercase();
+            if venue_lc.is_empty() {
+                return Err("venue is required when creating an account".into());
+            }
+            let mut candidate;
+            loop {
+                candidate = format!("{}-{:08x}", venue_lc, rand::random::<u32>());
+                if state
+                    .state_store
+                    .get_account(&candidate)
+                    .map_err(|e| e.to_string())?
+                    .is_none()
+                {
+                    break;
+                }
+            }
+            state
+                .state_store
+                .upsert_account(
+                    &candidate,
+                    &venue_lc,
+                    &input.label,
+                    input.enabled,
+                    input.make_default,
+                )
+                .map_err(|e| e.to_string())?
+        }
+    };
+
+    let mut cred_error: Option<String> = None;
+    if let Some(creds) = &input.credentials {
+        if creds.has_material() {
+            let mut vault = state.vault.write();
+            if !vault.is_unlocked() {
+                cred_error = Some("vault is locked".to_string());
+            } else {
+                let record = creds
+                    .clone()
+                    .into_record(&profile.venue, &profile.id, profile.enabled);
+                if let Err(e) = vault.upsert_profile_credentials(&profile.id, record) {
+                    cred_error = Some(e.to_string());
+                }
+            }
+        }
+    }
+    // Mirror the account switch onto the stored record's metadata flag when
+    // the vault is reachable; the profile remains the authoritative switch.
+    {
+        let mut vault = state.vault.write();
+        if vault.is_unlocked() {
+            let _ = vault.update_profile_enabled(&[(profile.id.clone(), profile.enabled)]);
+        }
+    }
+
+    let dto = accounts_with_presence(state, vec![profile])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| "account disappeared after save".to_string())?;
+    if let Some(err) = cred_error {
+        return Err(format!("account saved but credentials were not stored: {err}"));
+    }
+    Ok(dto)
+}
+
+/// Delete an account profile and its bound credential record. Route
+/// references are checked before anything is removed so a foreign-key block
+/// can never destroy secrets; the vault must be unlocked so bound secrets
+/// are never orphaned.
+pub fn delete_account_impl(account_id: &str, state: &AppEngineState) -> Result<bool, String> {
+    let refs = state
+        .state_store
+        .routes_referencing(account_id)
+        .map_err(|e| e.to_string())?;
+    if !refs.is_empty() {
+        let route_list = refs
+            .iter()
+            .map(|r| format!("{}:{}", r.strategy_id, r.label))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "account {account_id} is referenced by {} strategy route(s) ({route_list}); remove or reassign them first",
+            refs.len()
+        ));
+    }
+    // Accounts that own recorded position legs keep their attribution; delete
+    // is refused so signal history never loses its account binding.
+    if state
+        .state_store
+        .account_has_signal_legs(account_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "account {account_id} has recorded signal position history; disable the account instead of deleting it"
+        ));
+    }
+    {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked. Please unlock before deleting an account.".into());
+        }
+    }
+    let deleted = state
+        .state_store
+        .delete_account(account_id)
+        .map_err(|e| e.to_string())?;
+    if deleted {
+        let mut vault = state.vault.write();
+        if let Err(e) = vault.delete_profile_credentials(account_id) {
+            // Orphaned bound records are pruned by ensure_credential_migration
+            // on the next unlock; surface in logs only.
+            tracing::warn!("account {account_id} deleted but credential cleanup failed: {e}");
+        }
+    }
+    Ok(deleted)
+}
+
+pub fn set_default_account_impl(
+    venue: &str,
+    account_id: &str,
+    state: &AppEngineState,
+) -> Result<(), String> {
+    state
+        .state_store
+        .set_default_account(venue, account_id)
+        .map_err(|e| e.to_string())
+}
+
+pub fn list_strategy_routes_impl(
+    strategy_id: Option<&str>,
+    state: &AppEngineState,
+) -> Result<Vec<StrategyAccountRoute>, String> {
+    state
+        .state_store
+        .list_strategy_routes(strategy_id)
+        .map_err(|e| e.to_string())
+}
+
+pub fn upsert_strategy_route_impl(
+    input: StrategyRouteUpsertInput,
+    state: &AppEngineState,
+) -> Result<StrategyAccountRoute, String> {
+    let id = match &input.id {
+        Some(id) => id.clone(),
+        None => {
+            let sid = input.strategy_id.trim().to_lowercase();
+            let existing: std::collections::HashSet<String> = state
+                .state_store
+                .list_strategy_routes(None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .map(|r| r.id)
+                .collect();
+            let mut candidate;
+            loop {
+                candidate = format!("{}-{:08x}", sid, rand::random::<u32>());
+                if !existing.contains(&candidate) {
+                    break;
+                }
+            }
+            candidate
+        }
+    };
+    // Labels are required by the store; an omitted label preserves the
+    // existing route's label on update, or derives a readable default.
+    let label = if input.label.trim().is_empty() {
+        let existing_label = state
+            .state_store
+            .list_strategy_routes(None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| r.label);
+        match existing_label {
+            Some(l) => l,
+            None => {
+                let name = |aid: &str| -> String {
+                    state
+                        .state_store
+                        .get_account(aid)
+                        .ok()
+                        .flatten()
+                        .map(|a| format!("{}:{}", a.venue, a.label))
+                        .unwrap_or_else(|| aid.to_string())
+                };
+                format!("{} \u{2194} {}", name(&input.account_a_id), name(&input.account_b_id))
+            }
+        }
+    } else {
+        input.label.clone()
+    };
+    state
+        .state_store
+        .upsert_strategy_route(
+            &id,
+            &input.strategy_id,
+            &label,
+            &input.account_a_id,
+            &input.account_b_id,
+            input.enabled,
+        )
+        .map_err(|e| e.to_string())
+}
+
+pub fn delete_strategy_route_impl(
+    route_id: &str,
+    state: &AppEngineState,
+) -> Result<bool, String> {
+    state
+        .state_store
+        .delete_strategy_route(route_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Eligible account routes for a strategy across a venue pair: enabled
+/// routes whose two endpoint accounts are enabled and sit on the two
+/// venues (in either order).
+pub fn eligible_strategy_routes_impl(
+    strategy_id: &str,
+    venue_a: &str,
+    venue_b: &str,
+    state: &AppEngineState,
+) -> Result<Vec<StrategyAccountRoute>, String> {
+    state
+        .state_store
+        .eligible_strategy_routes(strategy_id, venue_a, venue_b)
+        .map_err(|e| e.to_string())
+}
+
 pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<VenueBalanceInfo>, String> {
     if *state.is_live_mode.read() {
         return Ok(Vec::new());
     }
-    let threshold = state.settings.read().venue_rebalance_threshold_usd;
     let monitor = MarginMonitor::new(MarginMonitorConfig::default());
     let mut results = Vec::new();
 
@@ -2109,11 +3664,11 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
         };
         let account = paper.fetch_account().await.map_err(|e| e.to_string())?;
 
-        let balance_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
+        let free_margin_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
         let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
         let margin_rate_pct = account.margin_usage_pct.to_string().parse::<f64>().unwrap_or(0.0);
 
-        let (mut status, mut action) = match monitor.evaluate_account(&account) {
+        let (status, action) = match monitor.evaluate_account(&account) {
             MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
             MarginHealthStatus::Warning => (
                 "LOW_MARGIN".to_string(),
@@ -2124,24 +3679,12 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
                 Some(format!("Critical: {} margin utilization breached. Execution halted on this leg.", name)),
             ),
         };
-        // Threshold check can only worsen the reported status
-        if balance_usd < threshold * 0.2 && status != "DEPLETED" {
-            status = "DEPLETED".to_string();
-            action = Some(format!("Critical: {} free margin below ${:.0}. Execution halted on this leg.", name, threshold * 0.2));
-        } else if balance_usd < threshold && status == "HEALTHY" {
-            status = "LOW_MARGIN".to_string();
-            action = Some(format!("Warning: {} free margin below ${:.0}. Please deposit funds.", name, threshold));
-        }
-        let needs_rebalance = balance_usd < threshold;
 
         results.push(VenueBalanceInfo {
             venue: vid.to_string(),
-            balance_usd,
             equity_usd,
-            available_margin_usd: balance_usd,
+            available_margin_usd: free_margin_usd,
             margin_rate_pct,
-            min_required_usd: threshold,
-            needs_rebalance,
             status,
             recommended_action: action,
         });
@@ -2216,6 +3759,73 @@ pub async fn delete_exchange_credentials(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<bool, String> {
     delete_exchange_credentials_impl(&venue, &state)
+}
+
+#[tauri::command]
+pub async fn list_accounts(
+    venue: Option<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<AccountDto>, String> {
+    list_accounts_impl(venue.as_deref(), &state)
+}
+
+#[tauri::command]
+pub async fn upsert_account(
+    input: AccountUpsertInput,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<AccountDto, String> {
+    upsert_account_impl(input, &state)
+}
+
+#[tauri::command]
+pub async fn delete_account(
+    account_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
+    delete_account_impl(&account_id, &state)
+}
+
+#[tauri::command]
+pub async fn set_default_account(
+    venue: String,
+    account_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    set_default_account_impl(&venue, &account_id, &state)
+}
+
+#[tauri::command]
+pub async fn list_strategy_routes(
+    strategy_id: Option<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<StrategyAccountRoute>, String> {
+    list_strategy_routes_impl(strategy_id.as_deref(), &state)
+}
+
+#[tauri::command]
+pub async fn upsert_strategy_route(
+    input: StrategyRouteUpsertInput,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<StrategyAccountRoute, String> {
+    upsert_strategy_route_impl(input, &state)
+}
+
+#[tauri::command]
+pub async fn delete_strategy_route(
+    route_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
+    delete_strategy_route_impl(&route_id, &state)
+}
+
+#[tauri::command]
+pub async fn eligible_strategy_routes(
+    strategy_id: String,
+    venue_a: String,
+    venue_b: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<StrategyAccountRoute>, String> {
+    eligible_strategy_routes_impl(&strategy_id, &venue_a, &venue_b, &state)
 }
 
 #[tauri::command]
@@ -2586,7 +4196,7 @@ mod tests {
     #[tokio::test]
     async fn test_credential_save_is_vault_only_and_sanitized() {
         let (state, dir) = test_state_with_vault("creds");
-        initialize_vault_impl("test master password", &state).expect("init vault");
+        initialize_vault_impl("test password", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -2642,7 +4252,7 @@ mod tests {
         let err = delete_exchange_credentials_impl("hyperliquid", &state).unwrap_err();
         assert!(err.contains("locked"), "err: {}", err);
 
-        initialize_vault_impl("test master password", &state).expect("init vault");
+        initialize_vault_impl("test password", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -2666,6 +4276,358 @@ mod tests {
         assert!(stored.credentials.is_empty());
         let sanitized = get_engine_settings_impl(&state).expect("sanitized");
         assert!(sanitized.configured_venues.is_empty());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_account_crud_and_credential_binding() {
+        let (state, dir) = test_state_with_vault("accounts");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        let a1 = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_ACCT1".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a1");
+        assert!(a1.is_default, "first enabled account becomes default");
+        assert_eq!(a1.credentials_configured, Some(true));
+        assert!(a1.has_api_secret);
+        assert!(!a1.has_api_key);
+
+        let a2 = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Alt".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_ACCT2".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a2");
+        assert!(!a2.is_default);
+        assert_ne!(a1.id, a2.id);
+
+        // Regression: two accounts on one venue must not overwrite each
+        // other's secrets (the old venue-keyed upsert clobbered them).
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert_eq!(stored.credentials.len(), 2);
+        let secrets: Vec<&str> = stored
+            .credentials
+            .iter()
+            .map(|c| c.api_secret.as_str())
+            .collect();
+        assert!(secrets.contains(&"SENTINEL_ACCT1"));
+        assert!(secrets.contains(&"SENTINEL_ACCT2"));
+        assert!(stored
+            .credentials
+            .iter()
+            .all(|c| c.profile_id.is_some()));
+
+        // Sanitized DTO must never carry secret values over IPC.
+        let dto_json = serde_json::to_string(&a1).expect("dto json");
+        assert!(!dto_json.contains("SENTINEL_ACCT1"));
+
+        // Venue identity is immutable on update.
+        assert!(upsert_account_impl(
+            AccountUpsertInput {
+                id: Some(a2.id.clone()),
+                venue: "lighter".into(),
+                label: "Moved".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .is_err());
+
+        let updated = upsert_account_impl(
+            AccountUpsertInput {
+                id: Some(a2.id.clone()),
+                venue: "hyperliquid".into(),
+                label: "Alt Renamed".into(),
+                enabled: true,
+                make_default: true,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("update a2");
+        assert!(updated.is_default);
+        assert_eq!(updated.label, "Alt Renamed");
+
+        set_default_account_impl("hyperliquid", &a1.id, &state).expect("set default");
+        let listed = list_accounts_impl(Some("hyperliquid"), &state).expect("list");
+        assert!(listed.iter().find(|a| a.id == a1.id).unwrap().is_default);
+        assert!(!listed.iter().find(|a| a.id == a2.id).unwrap().is_default);
+
+        // Deleting an account removes its bound secret record as well.
+        assert!(delete_account_impl(&a2.id, &state).expect("delete a2"));
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert_eq!(stored.credentials.len(), 1);
+        assert_eq!(stored.credentials[0].api_secret, "SENTINEL_ACCT1");
+        assert_eq!(
+            stored.credentials[0].profile_id.as_deref(),
+            Some(a1.id.as_str())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_credentials_migrate_to_default_profile() {
+        let (state, dir) = test_state_with_vault("migrate");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        // Simulate a pre-account-model record: venue-keyed, unbound.
+        state
+            .vault
+            .write()
+            .upsert_credentials(vec![ExchangeCredentials {
+                venue: "hyperliquid".into(),
+                profile_id: None,
+                api_key: String::new(),
+                api_secret: "SENTINEL_LEGACY".into(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: Some("0xlegacy".into()),
+                account_index: Some(2),
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
+                enabled: true,
+            }])
+            .expect("seed legacy cred");
+        // The HSM token is not an exchange account and stays unbound.
+        state
+            .vault
+            .write()
+            .upsert_credentials(vec![ExchangeCredentials {
+                venue: "remote_hsm".into(),
+                profile_id: None,
+                api_key: String::new(),
+                api_secret: "SENTINEL_HSM".into(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
+                enabled: true,
+            }])
+            .expect("seed hsm");
+
+        lock_vault_impl(&state);
+        unlock_vault_impl("test password", &state).expect("unlock migrates");
+
+        let accounts = list_accounts_impl(Some("hyperliquid"), &state).expect("accounts");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].id, "hyperliquid-default");
+        assert_eq!(accounts[0].label, "Default");
+        assert!(accounts[0].is_default);
+        assert!(accounts[0].enabled);
+        assert_eq!(accounts[0].credentials_configured, Some(true));
+        assert!(accounts[0].has_wallet_address);
+        assert_eq!(accounts[0].account_index, Some(2));
+
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        let hl = stored
+            .credentials
+            .iter()
+            .find(|c| c.venue == "hyperliquid")
+            .expect("hl record");
+        assert_eq!(hl.profile_id.as_deref(), Some("hyperliquid-default"));
+        assert_eq!(hl.api_secret, "SENTINEL_LEGACY");
+        let hsm = stored
+            .credentials
+            .iter()
+            .find(|c| c.venue == "remote_hsm")
+            .expect("hsm record");
+        assert!(hsm.profile_id.is_none(), "remote_hsm must stay unbound");
+
+        // A flat settings save now merges into the bound default profile
+        // instead of creating a second record for the same venue.
+        let mut s = EngineSettingsDto::default();
+        s.hyperliquid_enabled = true;
+        s.hyperliquid_private_key = "SENTINEL_NEW".into();
+        save_engine_settings_impl(s, &state).expect("save");
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert_eq!(
+            stored
+                .credentials
+                .iter()
+                .filter(|c| c.venue == "hyperliquid")
+                .count(),
+            1
+        );
+        let hl = stored
+            .credentials
+            .iter()
+            .find(|c| c.venue == "hyperliquid")
+            .unwrap();
+        assert_eq!(hl.api_secret, "SENTINEL_NEW");
+        assert_eq!(hl.wallet_address.as_deref(), Some("0xlegacy"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_strategy_route_crud_and_eligibility() {
+        let (state, dir) = test_state_with_vault("routes");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        let hl = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "HL Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("hl account");
+        let lt = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "lighter".into(),
+                label: "LT Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("lt account");
+        let lt_disabled = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "lighter".into(),
+                label: "LT Off".into(),
+                enabled: false,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("lt disabled account");
+
+        let route = upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "Main Route".into(),
+                account_a_id: lt.id.clone(),
+                account_b_id: hl.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .expect("create route");
+        // Canonical ordering places hyperliquid first regardless of input order.
+        assert_eq!(route.account_a_id, hl.id);
+        assert_eq!(route.account_a_venue, "hyperliquid");
+        assert_eq!(route.account_b_id, lt.id);
+        assert_eq!(route.account_b_venue, "lighter");
+
+        let eligible =
+            eligible_strategy_routes_impl("futures", "lighter", "hyperliquid", &state)
+                .expect("eligible");
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].id, route.id);
+
+        // Disabled endpoint accounts cannot form an enabled route.
+        assert!(upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "Bad".into(),
+                account_a_id: hl.id.clone(),
+                account_b_id: lt_disabled.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .is_err());
+
+        // Duplicate account pair within a strategy is rejected (either order).
+        assert!(upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "Dup".into(),
+                account_a_id: hl.id.clone(),
+                account_b_id: lt.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .is_err());
+
+        // Referenced accounts cannot be deleted; the error names the routes.
+        let err = delete_account_impl(&hl.id, &state).unwrap_err();
+        assert!(err.contains("strategy route"), "err: {err}");
+
+        assert!(delete_strategy_route_impl(&route.id, &state).expect("delete route"));
+        assert!(delete_account_impl(&hl.id, &state).expect("delete after route removal"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_account_delete_requires_unlock_and_listing_is_lock_safe() {
+        let (state, dir) = test_state_with_vault("del_locked");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        let a = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_DEL".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create");
+
+        lock_vault_impl(&state);
+        let err = delete_account_impl(&a.id, &state).unwrap_err();
+        assert!(err.to_lowercase().contains("locked"), "err: {err}");
+
+        // Account metadata remains listable while locked; credential
+        // presence is reported as unknown rather than fabricated.
+        let listed = list_accounts_impl(None, &state).expect("list locked");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].credentials_configured, None);
+
+        // The secret survives the refused deletion.
+        unlock_vault_impl("test password", &state).expect("unlock");
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert_eq!(stored.credentials.len(), 1);
+        assert_eq!(stored.credentials[0].api_secret, "SENTINEL_DEL");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2993,7 +4955,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_off_keeps_stored_venue_discoverable_and_deletable() {
         let (state, dir) = test_state_with_vault("toggle");
-        initialize_vault_impl("test master password", &state).expect("init vault");
+        initialize_vault_impl("test password", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -3220,15 +5182,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_venue_balances_and_asymmetric_rebalance() {
+    async fn test_venue_balances_report_paper_account() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
         assert_eq!(balances.len(), 2);
         for b in &balances {
-            assert!(b.balance_usd > 0.0);
-            assert_eq!(b.min_required_usd, 500.0);
+            assert!(b.available_margin_usd > 0.0);
+            assert!(b.equity_usd > 0.0);
             assert_eq!(b.status, "HEALTHY");
-            assert!(!b.needs_rebalance);
         }
     }
 
@@ -3261,7 +5222,7 @@ mod tests {
     #[tokio::test]
     async fn test_scans_fail_closed_even_when_fully_configured() {
         let (state, dir) = test_state_with_vault("scans");
-        initialize_vault_impl("test master password", &state).expect("init vault");
+        initialize_vault_impl("test password", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -3436,8 +5397,6 @@ mod tests {
         assert!(save_engine_settings_impl(bad, &state).is_err());
         let bad = EngineSettingsDto { min_depth_ratio: f64::NAN, ..base.clone() };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { venue_rebalance_threshold_usd: -1.0, ..base.clone() };
-        assert!(save_engine_settings_impl(bad, &state).is_err());
         let bad = EngineSettingsDto { trading_mode: "simulation".into(), ..base.clone() };
         assert!(save_engine_settings_impl(bad, &state).is_err());
         let bad = EngineSettingsDto { bind_address: "0.0.0.0".into(), ..base.clone() };
@@ -3585,6 +5544,315 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_spatial_execution_persists_durable_signal() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect("execution");
+        assert!(res.execution_success);
+
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list signals");
+        assert_eq!(signals.len(), 1);
+        let sig = &signals[0];
+        assert_eq!(sig.status, crate::state_store::SignalStatus::Balanced);
+        assert_eq!(sig.legs.len(), 2);
+        for leg in &sig.legs {
+            assert!(
+                (leg.filled_qty - 0.1).abs() < 1e-9,
+                "leg must carry its own fill attribution: {:?}",
+                leg
+            );
+            assert!(leg.fill_price.unwrap_or(0.0) > 0.0);
+        }
+        let venues: std::collections::HashSet<&str> =
+            sig.legs.iter().map(|l| l.venue.as_str()).collect();
+        assert!(venues.contains("hyperliquid") && venues.contains("lighter"));
+        // Self-hedged signal: per-signal delta and ticker net are both zero.
+        assert!(state.state_store.signal_delta(&sig.id).unwrap().abs() < 1e-9);
+        assert!(
+            state
+                .state_store
+                .ticker_net_position("BTC-USDC")
+                .unwrap()
+                .abs()
+                < 1e-9
+        );
+        // Balanced signals no longer block the ticker.
+        assert!(!state.state_store.ticker_blocked("BTC-USDC").unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_blocked_by_unreconciled_signal() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+
+        // A prior signal for BTC-USDC holds residual exposure: only its long
+        // leg filled. The ticker must refuse new orders until it reconciles.
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-stuck".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: Some(5.0),
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        intended_qty: 0.1,
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        intended_qty: 0.1,
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .apply_leg_fill(
+                "sig-stuck",
+                crate::state_store::LegSide::Long,
+                0.1,
+                64205.0,
+                0.05,
+                Some("o-stuck"),
+            )
+            .expect("leg fill");
+        state
+            .state_store
+            .update_signal_status(
+                "sig-stuck",
+                crate::state_store::SignalStatus::Imbalanced,
+                Some("short leg rejected"),
+            )
+            .expect("status");
+
+        let err = execute_spatial_arbitrage_impl(
+            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect_err("blocked ticker must reject");
+        assert!(err.contains("blocked"), "unexpected err: {}", err);
+
+        // The gate is per-ticker: a different symbol still executes.
+        let other = execute_spatial_arbitrage_impl(
+            "ETH-USDC", "hyperliquid", "lighter", 0.5, None, None, None, None, None, None, &state,
+        )
+        .await
+        .expect("different ticker executes");
+        assert!(other.execution_success);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_candidates_batch_picks_highest_expected() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+
+        let outcomes = execute_spatial_candidates_impl(
+            vec![
+                SpatialCandidateInput {
+                    symbol: "BTC-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.1,
+                    expected_net_usd: Some(8.0),
+                    route_id: None,
+                    direction: None,
+                },
+                SpatialCandidateInput {
+                    symbol: "BTC-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.2,
+                    expected_net_usd: Some(15.0),
+                    route_id: None,
+                    direction: None,
+                },
+                SpatialCandidateInput {
+                    symbol: "ETH-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.5,
+                    expected_net_usd: Some(20.0),
+                    route_id: None,
+                    direction: None,
+                },
+            ],
+            &state,
+        )
+        .await
+        .expect("batch outcomes");
+        assert_eq!(outcomes.len(), 3);
+
+        let btc: Vec<_> = outcomes.iter().filter(|o| o.symbol == "BTC-USDC").collect();
+        assert_eq!(btc.len(), 2);
+        let winner = btc.iter().find(|o| o.selected).expect("one BTC winner");
+        assert_eq!(winner.expected_net_usd, Some(15.0));
+        assert!(winner.result.as_ref().unwrap().execution_success);
+        let loser = btc.iter().find(|o| !o.selected).expect("one BTC loser");
+        assert_eq!(loser.expected_net_usd, Some(8.0));
+        assert!(loser.reason.as_deref().unwrap().contains("lower expected"));
+
+        let eth = outcomes.iter().find(|o| o.symbol == "ETH-USDC").unwrap();
+        assert!(eth.selected);
+        assert!(eth.result.as_ref().unwrap().execution_success);
+
+        // Exactly one durable signal per dispatched ticker.
+        assert_eq!(
+            state
+                .state_store
+                .list_signals(Some("BTC-USDC"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            state
+                .state_store
+                .list_signals(Some("ETH-USDC"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_candidates_reject_all_when_ticker_blocked() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+
+        // In-flight signal on BTC-USDC blocks every candidate in the batch.
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-flight".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![crate::state_store::NewSignalLeg {
+                    account_id: None,
+                    venue: "hyperliquid".into(),
+                    side: crate::state_store::LegSide::Long,
+                    intended_qty: 0.1,
+                }],
+            })
+            .expect("record in-flight signal");
+
+        let outcomes = execute_spatial_candidates_impl(
+            vec![
+                SpatialCandidateInput {
+                    symbol: "BTC-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.1,
+                    expected_net_usd: Some(99.0),
+                    route_id: None,
+                    direction: None,
+                },
+                SpatialCandidateInput {
+                    symbol: "BTC-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.2,
+                    expected_net_usd: Some(50.0),
+                    route_id: None,
+                    direction: None,
+                },
+                SpatialCandidateInput {
+                    symbol: "ETH-USDC".into(),
+                    buy_venue: "hyperliquid".into(),
+                    sell_venue: "lighter".into(),
+                    order_qty: 0.5,
+                    expected_net_usd: Some(20.0),
+                    route_id: None,
+                    direction: None,
+                },
+            ],
+            &state,
+        )
+        .await
+        .expect("batch outcomes");
+
+        for o in outcomes.iter().filter(|o| o.symbol == "BTC-USDC") {
+            assert!(!o.selected, "blocked ticker rejects every candidate");
+            assert!(o.reason.as_deref().unwrap().contains("blocked"));
+            assert!(o.result.is_none());
+        }
+        let eth = outcomes.iter().find(|o| o.symbol == "ETH-USDC").unwrap();
+        assert!(eth.selected);
+        assert!(eth.result.as_ref().unwrap().execution_success);
+        // Only the in-flight seed exists for BTC — nothing new was dispatched.
+        assert_eq!(
+            state
+                .state_store
+                .list_signals(Some("BTC-USDC"), None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_account_blocked_by_signal_history() {
+        let state = setup_test_state_with_venues();
+        let account = state
+            .state_store
+            .upsert_account("hl-main", "hyperliquid", "Main", true, false)
+            .expect("account");
+
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-hist".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![crate::state_store::NewSignalLeg {
+                    account_id: Some(account.id.clone()),
+                    venue: "hyperliquid".into(),
+                    side: crate::state_store::LegSide::Long,
+                    intended_qty: 0.1,
+                }],
+            })
+            .expect("record signal");
+
+        let err = delete_account_impl(&account.id, &state).expect_err("must refuse");
+        assert!(err.contains("position history"), "unexpected err: {}", err);
+        assert!(state
+            .state_store
+            .get_account(&account.id)
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
     async fn test_validate_adapter_book_helper() {
         let venue = arbitrager_core::types::VenueId::new("hyperliquid");
         let mut book = OrderBook::new(venue.clone(), "BTC-USDC".to_string());
@@ -3708,5 +5976,115 @@ mod tests {
         state.circuit_breaker.reset();
         let risk = get_risk_overview_impl(&state).await.expect("risk zero start");
         assert_eq!(risk.drawdown_pct, 0.0);
+    }
+
+    fn seed_samples(state: &AppEngineState, symbol: &str, ts_ms: i64, mids: &[(&str, f64)]) {
+        let entries: Vec<crate::state_store::VenueSampleEntry> = mids
+            .iter()
+            .map(|(vid, mid)| crate::state_store::VenueSampleEntry {
+                venue_id: vid.to_string(),
+                mid: *mid,
+                best_bid: mid - 0.5,
+                best_ask: mid + 0.5,
+            })
+            .collect();
+        state
+            .state_store
+            .record_spread_samples(symbol, ts_ms, &entries)
+            .expect("record samples");
+    }
+
+    #[tokio::test]
+    async fn test_signal_series_empty_is_honest() {
+        // No venues enabled -> no adapter traffic; empty store must return a
+        // structured empty series, not an error or synthetic points.
+        let state = AppEngineState::new();
+        let s = get_signal_series_impl("BTC-USDC", "consensus", 300, &state)
+            .await
+            .expect("series");
+        assert_eq!(s.sample_count, 0);
+        assert_eq!(s.earliest_ts_ms, None);
+        assert!(s.ts_ms.is_empty());
+        assert!(s.dev_bps.is_empty());
+        assert_eq!(s.mode, "consensus");
+    }
+
+    #[tokio::test]
+    async fn test_signal_series_roundtrip_computes_in_rust() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        // Three buckets, two venues: A=100.0, B=101.0 -> equal-weight
+        // consensus baseline 100.5; devs -49.75/+49.75 bps; band ~99.5 bps.
+        for i in 0..3 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (2 - i) * 1_000,
+                &[("hyperliquid", 100.0), ("lighter", 101.0)],
+            );
+        }
+
+        let s = get_signal_series_impl("BTC-USDC", "consensus", 300, &state)
+            .await
+            .expect("series");
+        assert_eq!(s.sample_count, 6);
+        assert_eq!(s.venues, vec!["hyperliquid", "lighter"]);
+        assert_eq!(s.ts_ms.len(), 3);
+        assert!(s.earliest_ts_ms.unwrap() <= now - 2_000);
+        for row in &s.dev_bps {
+            let hl = row[0].unwrap();
+            let lgt = row[1].unwrap();
+            assert!((hl + lgt).abs() < 1e-6, "consensus deviations sum to ~0");
+            assert!(hl < 0.0 && lgt > 0.0);
+        }
+        let band = s.band_max_bps[2] - s.band_min_bps[2];
+        assert!((band - 99.5025).abs() < 0.01, "band height = gross spread bps");
+    }
+
+    #[tokio::test]
+    async fn test_signal_series_leader_mode_and_gap_preservation() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        seed_samples(&state, "ETH-USDC", now - 2_000, &[("hyperliquid", 3000.0), ("lighter", 3006.0)]);
+        // Second bucket: only hyperliquid -> lighter cell must be null.
+        seed_samples(&state, "ETH-USDC", now - 1_000, &[("hyperliquid", 3001.0)]);
+
+        let s = get_signal_series_impl("ETH-USDC", "leader", 300, &state)
+            .await
+            .expect("series");
+        assert_eq!(s.mode, "leader");
+        assert_eq!(s.ts_ms.len(), 2);
+        // No volumes in test state -> deterministic leader = alphabetically
+        // first venue ("hyperliquid"), pinned at 0.
+        assert_eq!(s.dev_bps[0][0], Some(0.0));
+        assert_eq!(s.dev_bps[1][1], None, "missing venue stays a gap");
+        assert_eq!(s.band_max_bps[1], s.band_min_bps[1], "single-venue band collapses");
+    }
+
+    #[tokio::test]
+    async fn test_signal_series_rejects_bad_symbol() {
+        let state = AppEngineState::new();
+        assert!(get_signal_series_impl("  ", "consensus", 60, &state).await.is_err());
+        assert!(get_signal_series_impl("BTC\u{0}", "consensus", 60, &state).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_orderbooks_persists_spread_samples() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
+
+        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
+        assert_eq!(books.len(), 2);
+
+        let rows = state
+            .state_store
+            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .expect("samples");
+        assert_eq!(rows.len(), 2, "one row per reporting venue per poll");
+        let hl = rows.iter().find(|r| r.venue_id == "hyperliquid").unwrap();
+        assert_eq!(hl.mid, 60002.5);
+        assert_eq!(hl.best_bid, 60000.0);
+        assert_eq!(hl.best_ask, 60005.0);
     }
 }

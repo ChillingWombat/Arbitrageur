@@ -103,7 +103,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             {t.badge !== undefined && (
               <span className="inline-flex items-center justify-center min-w-[16px] h-4 shrink-0">
                 <span
-                  className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                     isActive
                       ? "bg-accent text-white shadow-2xs"
                       : "bg-accent-dim text-accent border border-accent-line/60"

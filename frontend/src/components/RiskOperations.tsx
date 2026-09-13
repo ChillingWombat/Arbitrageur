@@ -26,9 +26,9 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
   return (
     <div className="p-6 space-y-6 overflow-y-auto h-full">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
+      <div className="bg-surface p-5 rounded-lg border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-slate-900">
+          <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900">
             DeltaGuard & Enterprise Risk Engine Controls
           </h2>
           <p className="text-xs text-slate-500 mt-1">
@@ -40,14 +40,14 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs"
+              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-xs"
             >
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs"
+              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-xs"
             >
               <span>Trigger Manual Trip</span>
             </button>
@@ -58,11 +58,11 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       {/* 3 Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Card 1: Circuit Breaker */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-500">Circuit Breaker</span>
+            <span className="text-xs font-mono text-slate-500">Circuit Breaker</span>
             <span
-              className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
+              className={`px-2 py-0.5 rounded-sm text-[10px] font-mono font-semibold ${
                 isTripped
                   ? "bg-loss-dim text-loss border border-loss-border"
                   : "bg-profit-dim text-profit border border-profit-border"
@@ -94,10 +94,10 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 2: Margin Monitor */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-500">Margin Proximity</span>
-            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
+            <span className="text-xs font-mono text-slate-500">Margin Proximity</span>
+            <span className="px-2 py-0.5 rounded-sm text-[10px] font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
               {margin.status}
             </span>
           </div>
@@ -124,9 +124,9 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 3: Portfolio Capital */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
-            <span className="text-xs font-mono uppercase text-slate-500">Portfolio Capital</span>
+            <span className="text-xs font-mono text-slate-500">Portfolio Capital</span>
             <span className="text-xs font-mono text-accent font-semibold">Consolidated</span>
           </div>
 
@@ -153,8 +153,8 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       </div>
 
       {/* DeltaGuard Net Exposure Table */}
-      <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-xs">
-        <h3 className="text-xs font-mono uppercase tracking-wider text-slate-500 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-lg border border-surface-border p-5 shadow-xs">
+        <h3 className="text-xs font-mono tracking-wider text-slate-500 mb-4 flex items-center justify-between">
           <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
           <span className="text-slate-400 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
         </h3>
@@ -162,7 +162,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
-              <tr className="border-b border-surface-border text-slate-500 uppercase text-[10px] tracking-wider">
+              <tr className="border-b border-surface-border text-slate-500 text-[10px] tracking-wider">
                 <th className="py-2.5 px-3">Base Asset</th>
                 <th className="py-2.5 px-3">Net Quantity</th>
                 <th className="py-2.5 px-3">USD Exposure</th>
@@ -191,11 +191,11 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
                     <td className="py-3 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString()} limit</td>
                     <td className="py-3 px-3 text-right">
                       {isNeutral ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-profit-dim text-profit border border-profit-border">
+                        <span className="px-2 py-0.5 rounded-sm text-[10px] font-semibold bg-profit-dim text-profit border border-profit-border">
                           Delta Neutral
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-warn-dim text-warn border border-warn-border">
+                        <span className="px-2 py-0.5 rounded-sm text-[10px] font-semibold bg-warn-dim text-warn border border-warn-border">
                           Exposure Skew
                         </span>
                       )}

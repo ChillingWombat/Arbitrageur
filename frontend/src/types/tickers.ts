@@ -7,7 +7,7 @@ export interface PerpTicker {
   basePrice: number;      // Reference benchmark price
 }
 
-export type TickerSortOption = "alpha" | "trades" | "pnl";
+export type TickerSortOption = "alpha" | "trades" | "pnl" | "liquidity";
 
 export interface TickerWithStats extends PerpTicker {
   tradeCount: number;
@@ -16,6 +16,8 @@ export interface TickerWithStats extends PerpTicker {
   hasIssue?: boolean;
   issueDescription?: string;
   lastTradeTime?: string;
+  /** Mean 24h notional volume (USD) across venues that report it. */
+  avgVolumeUsd?: number;
 }
 
 export function formatCurrencyPrice(price: number): string {
@@ -187,6 +189,48 @@ export function filterAvailableTickers(
     const activeVenues = getTickerActiveVenues(t, activeVenueCodes);
     return activeVenues.length >= minVenues;
   });
+}
+
+/**
+ * 24h notional volume (USD) for a base asset within one venue's volume map.
+ * Venue asset naming is normalized (case-insensitive; "K"- and "1000"-prefix
+ * variants like Hyperliquid's kPEPE map to the plain base). Returns undefined
+ * when the venue does not report the asset.
+ */
+export function getVenueAssetVolumeUsd(
+  volumes: Record<string, number>,
+  base: string
+): number | undefined {
+  const b = base.toUpperCase();
+  const candidates = [b, `K${b}`, `1000${b}`];
+  for (const wanted of candidates) {
+    const entry = Object.entries(volumes).find(
+      ([rawKey, v]) =>
+        rawKey.toUpperCase() === wanted &&
+        typeof v === "number" &&
+        Number.isFinite(v) &&
+        v > 0
+    );
+    if (entry) return entry[1];
+  }
+  return undefined;
+}
+
+/**
+ * Mean 24h notional volume (USD) for a ticker's base asset across the venues
+ * that report it. Returns undefined when no venue reports a volume for the asset.
+ */
+export function getTickerAvgVolumeUsd(
+  base: string,
+  venueVolumes: { volumes: Record<string, number> }[]
+): number | undefined {
+  const found: number[] = [];
+  for (const venue of venueVolumes) {
+    const v = getVenueAssetVolumeUsd(venue.volumes, base);
+    if (v !== undefined) found.push(v);
+  }
+  if (found.length === 0) return undefined;
+  return found.reduce((a, c) => a + c, 0) / found.length;
 }
 
 // Complete list of the union of available tickers across perp DEXes (Hyperliquid, Lighter, Vanta, Robinhood, Kraken)

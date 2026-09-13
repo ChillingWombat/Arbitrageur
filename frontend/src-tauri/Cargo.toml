@@ -33,3 +33,4 @@ hex = { workspace = true }
 rand = { workspace = true }
 argon2 = { workspace = true }
 zeroize = { workspace = true }
+rusqlite = { version = "0.40.2", features = ["bundled"] }

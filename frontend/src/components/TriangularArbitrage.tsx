@@ -14,13 +14,15 @@ import type {
   TriangleExecutionParams,
   ExecutionLogEntry,
 } from "../types";
-import { SwitchToggle } from "./SwitchToggle";
+import { BotLifecycleControls } from "./BotLifecycleControls";
+import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface TriangularArbitrageProps {
   executionLogs: ExecutionLogEntry[];
   onRefreshAll: () => Promise<void>;
   onOpenConfig?: (symbol: string, strategy?: string) => void;
   isPaused?: boolean;
+  hasApiConnectivity?: boolean;
 }
 
 export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
@@ -28,14 +30,15 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   onRefreshAll,
   onOpenConfig,
   isPaused = false,
+  hasApiConnectivity = false,
 }) => {
   const [opportunities, setOpportunities] = useState<TriangleOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
-  const [loading, setLoading] = useState(false);
   const [selectedOpp, setSelectedOpp] = useState<TriangleOpportunityDto | null>(null);
 
-  // Execution Bot Parameters
-  const [autoBotEnabled, setAutoBotEnabled] = useState(false);
+  // Bot lifecycle — triangular cycles are atomic (3 legs on one venue), so a
+  // stop never leaves residual exposure; reduce-only drains instantly.
+  const bot = useBotLifecycle({ strategyId: "triangle" });
   const lastAutoTriExecRef = useRef<number>(0);
   const [tradeSizeUsd, setTradeSizeUsd] = useState(10000);
   const [minProfitBps, setMinProfitBps] = useState(2.0);
@@ -45,7 +48,6 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   const assets = ["ALL", "BTC", "ETH", "SOL", "BNB", "XRP"];
 
   const loadTriangleOpps = async () => {
-    setLoading(true);
     try {
       const data = await api.scanTriangleOpportunities(selectedAsset === "ALL" ? "" : selectedAsset);
       setOpportunities(data);
@@ -57,8 +59,6 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       }
     } catch (err) {
       console.error("Failed to load triangular opportunities:", err);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -76,6 +76,11 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
 
   const handleDeployCycle = async () => {
     if (!selectedOpp) return;
+    if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") {
+      setBotStatus("error");
+      setBotMessage(`Entry blocked: bot is ${bot.phase.replace("_", "-")} — only exits are permitted`);
+      return;
+    }
     setBotStatus("verifying");
     setBotMessage("Validating triangular balance liquidity & price slippage tolerance...");
 
@@ -109,7 +114,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
 
   // Automated Execution Bot Loop
   useEffect(() => {
-    if (!autoBotEnabled || isPaused) return;
+    if (!bot.entriesAllowed || isPaused) return;
 
     const interval = setInterval(async () => {
       const now = Date.now();
@@ -136,92 +141,85 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [autoBotEnabled, isPaused, opportunities, minProfitBps, tradeSizeUsd]);
+  }, [bot.entriesAllowed, isPaused, opportunities, minProfitBps, tradeSizeUsd]);
 
   const activeOpp = selectedOpp || opportunities[0] || null;
 
   return (
-    <div className="w-full p-5 lg:p-6 space-y-6 overflow-y-auto h-full select-none pb-24 font-mono">
-      {/* 1. Header Control Bar */}
-      <div className="bg-surface p-5 lg:p-6 rounded-2xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
-        <div>
-          <div className="flex items-center space-x-3">
-            <div className="p-2 bg-accent/10 text-accent rounded-xl">
-              <Triangle className="w-5 h-5" />
-            </div>
-            <div>
-              <div className="flex items-center space-x-2.5">
-                <h1 className="text-base lg:text-lg font-black font-mono text-slate-900">
-                  Triangular Arbitrage
-                </h1>
-                <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-accent-dim text-accent border border-accent-line">
-                  3-Leg Cycle CLOB
-                </span>
-                {isPaused && (
-                  <span className="px-2 py-0.5 rounded text-[11px] font-bold bg-warn-dim text-warn border border-warn-border">
-                    Engine Paused
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-500 font-mono mt-0.5">
-                Cross-currency cycle parity (e.g. USDT → BTC → ETH → USDT). Atomic synthetic exchange rate arbitrage.
-              </p>
-            </div>
+    <div className="w-full p-4 space-y-4 overflow-y-auto h-full select-none pb-24 font-mono">
+      {/* 1. Strategy Ribbon — read-only params left, configurator + toggle right */}
+      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
+            Strategy Parameters
+          </span>
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            title="Notional per 3-leg cycle — edit in Cycle Guardrails"
+          >
+            <span className="text-slate-400">Trade Size</span>
+            <span className="font-bold text-slate-900">{tradeSizeUsd.toLocaleString()}</span>
+            <span className="text-slate-400">USD</span>
           </div>
+
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            title="Net profit hurdle required to fire — edit in Cycle Guardrails"
+          >
+            <span className="text-slate-400">Min Profit</span>
+            <span className="font-bold text-slate-900">{minProfitBps}</span>
+            <span className="text-slate-400">BPS</span>
+          </div>
+
+          {isPaused && (
+            <span className="px-2 py-0.5 rounded-sm text-[11px] font-bold bg-warn-dim text-warn border border-warn-border">
+              Engine Paused
+            </span>
+          )}
         </div>
 
-        {/* Right Header Controls */}
-        <div className="flex items-center space-x-3">
-          {/* Asset Filters */}
-          <div className="flex items-center bg-surface-raised p-1 rounded-xl border border-surface-border space-x-1">
-            {assets.map((asset) => (
-              <button
-                key={asset}
-                onClick={() => setSelectedAsset(asset)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-mono font-medium transition cursor-pointer ${
-                  selectedAsset === asset
-                    ? "bg-accent text-white shadow-2xs"
-                    : "text-slate-600 hover:text-slate-900"
-                }`}
-              >
-                {asset}
-              </button>
-            ))}
-          </div>
+        <div className="flex items-center space-x-3 shrink-0">
+          {/* Configure Strategy Button */}
+          {onOpenConfig && (
+            <button
+              type="button"
+              onClick={() => onOpenConfig("BTC-USDC", "triangle")}
+              className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer"
+              title="Configure strategy parameters"
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+              <span>Configure Strategy</span>
+            </button>
+          )}
 
-          {/* Auto Bot Toggle */}
-          <div className="flex items-center space-x-2 bg-surface-raised px-3 py-1.5 rounded-xl border border-surface-border">
-            <span className="text-xs font-mono font-medium text-slate-700">Auto Bot:</span>
-            <SwitchToggle
-              checked={autoBotEnabled}
-              onChange={(checked) => setAutoBotEnabled(checked)}
-              disabled={isPaused}
-            />
-          </div>
-
-          {/* Refresh Button */}
-          <button
-            onClick={loadTriangleOpps}
-            disabled={loading}
-            className="p-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-xl transition cursor-pointer shadow-xs disabled:opacity-50"
-            title="Refresh Triangular Scanner"
-          >
-            <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin text-accent" : ""}`} />
-          </button>
+          <BotLifecycleControls
+            phase={bot.phase}
+            hasOpenPositions={bot.hasOpenPositions}
+            disabled={isPaused || !hasApiConnectivity}
+            onStart={bot.start}
+            onPause={bot.pause}
+            onReduceOnly={bot.reduceOnly}
+            onStop={() => void bot.stop()}
+          />
+          {bot.lastError && (
+            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+              {bot.lastError}
+            </span>
+          )}
         </div>
       </div>
 
       {/* 2. Top Interactive Visualizer & Parameters Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left 2 Cols: 3-Leg Cycle Graph Visualizer */}
-        <div className="lg:col-span-2 bg-surface p-5 lg:p-6 rounded-2xl border border-surface-border shadow-xs space-y-4">
+        <div className="lg:col-span-2 bg-surface p-5 lg:p-6 rounded-xl border border-surface-border shadow-xs space-y-4">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center space-x-2">
+            <h2 className="text-xs font-bold tracking-wider text-slate-500 flex items-center space-x-2">
               <Triangle className="w-4 h-4 text-accent" />
               <span>3-Leg Cycle Architecture</span>
             </h2>
             {activeOpp && (
-              <span className="text-xs font-bold text-accent bg-accent-dim px-2.5 py-0.5 rounded-lg border border-accent-line">
+              <span className="text-xs font-bold text-accent bg-accent-dim px-2.5 py-0.5 rounded-md border border-accent-line">
                 {activeOpp.venue}
               </span>
             )}
@@ -232,9 +230,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               {/* Path Node Sequence */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* Leg 1 */}
-                <div className="p-4 bg-surface-raised rounded-xl border border-surface-border space-y-2">
+                <div className="p-4 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded font-bold">Leg 1</span>
+                    <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-sm font-bold">Leg 1</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg1.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg1.symbol}</div>
@@ -249,9 +247,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 </div>
 
                 {/* Leg 2 */}
-                <div className="p-4 bg-surface-raised rounded-xl border border-surface-border space-y-2">
+                <div className="p-4 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded font-bold">Leg 2</span>
+                    <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-sm font-bold">Leg 2</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg2.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg2.symbol}</div>
@@ -266,9 +264,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 </div>
 
                 {/* Leg 3 */}
-                <div className="p-4 bg-surface-raised rounded-xl border border-surface-border space-y-2">
+                <div className="p-4 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-bold">Leg 3</span>
+                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-sm font-bold">Leg 3</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg3.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg3.symbol}</div>
@@ -284,7 +282,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               </div>
 
               {/* Cycle Flow Banner */}
-              <div className="p-3 bg-accent-dim/60 rounded-xl border border-accent-line flex items-center justify-between text-xs">
+              <div className="p-3 bg-accent-dim/60 rounded-lg border border-accent-line flex items-center justify-between text-xs">
                 <div className="flex items-center space-x-2">
                   <span className="font-bold text-slate-700">Synthetic Route:</span>
                   <span className="font-bold text-accent">{activeOpp.path}</span>
@@ -301,15 +299,14 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           ) : (
             <div className="py-12 text-center text-slate-400 space-y-2">
               <p>No active triangular cycle selected.</p>
-              <p className="text-xs">Requires at least 2 connected exchange accounts to fetch live orderbook triplets.</p>
             </div>
           )}
         </div>
 
         {/* Right 1 Col: Execution Bot Settings & 1-Click Action */}
-        <div className="bg-surface p-5 lg:p-6 rounded-2xl border border-surface-border shadow-xs space-y-4">
+        <div className="bg-surface p-5 lg:p-6 rounded-xl border border-surface-border shadow-xs space-y-4">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center space-x-2">
+            <h2 className="text-xs font-bold tracking-wider text-slate-500 flex items-center space-x-2">
               <SlidersHorizontal className="w-4 h-4 text-accent" />
               <span>Cycle Guardrails</span>
             </h2>
@@ -334,7 +331,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                   onChange={(e) => setTradeSizeUsd(Number(e.target.value) || 1000)}
                   step={1000}
                   min={1000}
-                  className="w-full pl-7 pr-3 py-1.5 bg-surface-raised border border-surface-border rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full pl-7 pr-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
             </div>
@@ -347,7 +344,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 onChange={(e) => setMinProfitBps(Number(e.target.value) || 0.5)}
                 step={0.5}
                 min={0}
-                className="w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-xl text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+                className="w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </div>
 
@@ -356,7 +353,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               <button
                 onClick={handleDeployCycle}
                 disabled={!activeOpp || isPaused || botStatus === "verifying" || botStatus === "dispatching"}
-                className="w-full py-2.5 px-4 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-xl text-xs font-bold transition shadow-xs flex items-center justify-center space-x-2 cursor-pointer"
+                className="w-full py-2.5 px-4 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-lg text-xs font-bold transition shadow-xs flex items-center justify-center space-x-2 cursor-pointer"
               >
                 <Zap className="w-4 h-4 fill-current" />
                 <span>
@@ -374,7 +371,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             {/* Status Message */}
             {botMessage && (
               <div
-                className={`p-3 rounded-xl border text-xs flex items-start space-x-2 ${
+                className={`p-3 rounded-lg border text-xs flex items-start space-x-2 ${
                   botStatus === "filled"
                     ? "bg-profit-dim text-profit border-profit-border"
                     : botStatus === "error"
@@ -395,20 +392,38 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       </div>
 
       {/* 3. Real-Time Triangular Opportunities Table */}
-      <div className="bg-surface rounded-2xl border border-surface-border p-5 lg:p-6 shadow-xs space-y-4">
-        <div className="flex items-center justify-between border-b border-surface-border pb-3">
-          <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+      <div className="bg-surface rounded-xl border border-surface-border p-5 lg:p-6 shadow-xs space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border pb-3">
+          <h2 className="text-xs font-bold tracking-wider text-slate-500">
             Detected Triangular Opportunities ({opportunities.length})
           </h2>
-          <span className="text-xs text-slate-400">
-            Calculated against live orderbook quotes minus taker fee schedule
-          </span>
+          <div className="flex items-center space-x-3">
+            <span className="text-xs text-slate-400 hidden lg:inline">
+              Calculated against live orderbook quotes minus taker fee schedule
+            </span>
+            {/* Asset Filters */}
+            <div className="flex items-center bg-surface-raised p-1 rounded-md border border-surface-border space-x-1">
+              {assets.map((asset) => (
+                <button
+                  key={asset}
+                  onClick={() => setSelectedAsset(asset)}
+                  className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition cursor-pointer ${
+                    selectedAsset === asset
+                      ? "bg-accent text-white shadow-2xs"
+                      : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  {asset}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
-              <tr className="border-b border-surface-border text-slate-500 text-[11px] uppercase">
+              <tr className="border-b border-surface-border text-slate-500 text-[11px]">
                 <th className="py-2.5 px-3">Path</th>
                 <th className="py-2.5 px-3">Exchange</th>
                 <th className="py-2.5 px-3">Gross Discrepancy</th>
@@ -450,7 +465,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                       </td>
                       <td className="py-3 px-3">
                         <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          className={`px-2 py-0.5 rounded-sm text-[10px] font-bold ${
                             opp.is_executable
                               ? "bg-profit-dim text-profit border border-profit-border"
                               : "bg-surface-raised text-slate-400 border border-surface-border"
@@ -467,7 +482,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                             handleDeployCycle();
                           }}
                           disabled={isPaused}
-                          className="px-3 py-1 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-lg text-xs font-medium transition cursor-pointer"
+                          className="px-3 py-1 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-md text-xs font-medium transition cursor-pointer"
                         >
                           Fill Cycle
                         </button>
@@ -481,9 +496,6 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                     <div className="flex flex-col items-center justify-center space-y-2">
                       <ShieldAlert className="w-8 h-8 text-slate-300" />
                       <p className="font-medium text-slate-600">No Triangular Arbitrage Cycles Detected</p>
-                      <p className="text-xs text-slate-400 max-w-md">
-                        Requires at least 2 enabled & connected exchanges configured in Settings to fetch real book depth and calculate cross-rate discrepancies.
-                      </p>
                     </div>
                   </td>
                 </tr>

@@ -30,8 +30,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (password.length < 12) {
-      setError("Master password must be at least 12 characters long.");
+    if (isInitializing && Array.from(password).length < 6) {
+      setError("Password must be at least 6 characters long.");
       return;
     }
 
@@ -60,27 +60,27 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 select-none">
-      <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
+      <div className="bg-surface border border-surface-border rounded-xl p-6 max-w-md w-full shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
         <div className="flex items-start justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
+            <div className="w-10 h-10 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
               {isInitializing ? <KeyRound className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
             </div>
             <div>
-              <h3 className="text-base font-bold font-mono text-slate-900">
-                {isInitializing ? "Initialize Secure Vault" : "Unlock Secure Vault"}
+              <h3 className="text-base font-bold font-mono tracking-wider text-slate-900">
+                {isInitializing ? "Create Password" : "Unlock Secure Vault"}
               </h3>
               <p className="text-xs text-slate-500 font-mono">
                 {isInitializing
-                  ? "Set master encryption password for API credentials"
-                  : "Enter master password to access sensitive exchange keys"}
+                  ? "Create a password to encrypt API credentials"
+                  : "Enter your password to access sensitive exchange keys"}
               </p>
             </div>
           </div>
         </div>
 
         {error && (
-          <div className="p-3 bg-loss-dim border border-loss-border rounded-xl flex items-center space-x-2 text-xs font-mono text-loss">
+          <div className="p-3 bg-loss-dim border border-loss-border rounded-lg flex items-center space-x-2 text-xs font-mono text-loss">
             <AlertTriangle className="w-4 h-4 shrink-0" />
             <span>{error}</span>
           </div>
@@ -88,8 +88,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-[11px] uppercase font-mono font-semibold text-slate-600 mb-1">
-              Master Password
+            <label className="block text-[11px] font-mono font-semibold text-slate-600 mb-1">
+              Password
             </label>
             <div className="relative">
               <input
@@ -97,8 +97,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 autoFocus
-                placeholder="Enter master password..."
-                className="w-full bg-surface-raised border border-surface-border rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition pr-10"
+                placeholder={isInitializing ? "Create password..." : "Enter password..."}
+                className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition pr-10"
               />
               <button
                 type="button"
@@ -112,20 +112,23 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
           {isInitializing && (
             <div>
-              <label className="block text-[11px] uppercase font-mono font-semibold text-slate-600 mb-1">
-                Confirm Master Password
+              <label className="block text-[11px] font-mono font-semibold text-slate-600 mb-1">
+                Confirm Password
               </label>
               <input
                 type={showPassword ? "text" : "password"}
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="Confirm master password..."
-                className="w-full bg-surface-raised border border-surface-border rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
+                placeholder="Confirm password..."
+                className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
               />
+              <p className="mt-1.5 text-[10px] text-slate-500 font-mono leading-relaxed">
+                Use at least 6 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer.
+              </p>
             </div>
           )}
 
-          <div className="p-3 rounded-xl bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-[11px] text-slate-600">
+          <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-[11px] text-slate-600">
             <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
             <span>
               All API keys are encrypted at rest locally (AES-256-GCM with Argon2id key derivation). Decrypted strictly in-memory during active sessions.
@@ -136,19 +139,19 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-mono font-medium transition"
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-mono font-medium transition"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading || password.length === 0}
-              className="px-5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+              className="px-5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
             >
               {loading ? (
                 <span className="animate-pulse">Processing...</span>
               ) : (
-                <span>{isInitializing ? "Set & Unlock" : "Unlock Vault"}</span>
+                <span>{isInitializing ? "Create & Unlock Vault" : "Unlock Vault"}</span>
               )}
             </button>
           </div>

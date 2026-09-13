@@ -15,6 +15,7 @@ import { api } from "./services/api";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
+  VenueVolumesDto,
   SpatialOpportunityDto,
   SpotOpportunityDto,
   TriangleOpportunityDto,
@@ -24,6 +25,8 @@ import type {
   ExecutionLogEntry,
   TickerStrategyConfigDto,
   EngineSettingsDto,
+  SpatialCandidateInput,
+  TickerPositionState,
 } from "./types";
 
 import {
@@ -34,11 +37,32 @@ import {
   type PerpTicker,
 } from "./types/tickers";
 
+// Fixed 16:9 design canvas — the app always renders at this size and is
+// uniformly scaled to fit the window; surplus width becomes side whitespace.
+const DESIGN_WIDTH = 1920;
+const DESIGN_HEIGHT = 1080;
+
+const useFitScale = () => {
+  const [scale, setScale] = useState(() =>
+    Math.min(window.innerWidth / DESIGN_WIDTH, window.innerHeight / DESIGN_HEIGHT)
+  );
+  useEffect(() => {
+    const update = () =>
+      setScale(Math.min(window.innerWidth / DESIGN_WIDTH, window.innerHeight / DESIGN_HEIGHT));
+    update();
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+  return scale;
+};
+
 export const App: React.FC = () => {
+  const canvasScale = useFitScale();
   const [activeTab, setActiveTab] = useState<ActiveTab>("spatial");
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
   const [engineSettings, setEngineSettings] = useState<EngineSettingsDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
+  const [tickerVolumes, setTickerVolumes] = useState<VenueVolumesDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
   const [spotOpps, setSpotOpps] = useState<SpotOpportunityDto[]>([]);
   const [triangleOpps, setTriangleOpps] = useState<TriangleOpportunityDto[]>([]);
@@ -47,6 +71,7 @@ export const App: React.FC = () => {
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
   const [executionLogs, setExecutionLogs] = useState<ExecutionLogEntry[]>([]);
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(new Map());
+  const [tickerPositionState, setTickerPositionState] = useState<TickerPositionState | null>(null);
   const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => new Set());
   const [isPaused, setIsPaused] = useState(false);
 
@@ -63,14 +88,10 @@ export const App: React.FC = () => {
     });
   };
 
-  const handleToggleAllTickers = (enableAll: boolean) => {
-    setEnabledTickers(
-      enableAll ? new Set(availableTickers.map((t) => t.symbol)) : new Set()
-    );
-  };
-
   const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
+  const [fundingParams, setFundingParams] = useState({ minAprPct: 8.0, holdingDays: 14 });
+  const [spotParams, setSpotParams] = useState({ tradeSizeUsd: 1000, minNetSpreadBps: 15.0, maxSlippageBps: 5.0 });
   const [refreshing, setRefreshing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tickerConfigModal, setTickerConfigModal] = useState<{
@@ -136,7 +157,7 @@ export const App: React.FC = () => {
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
-      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot, triangle] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot, triangle, tickerPos] = await Promise.all([
         api.getSystemStatus(),
         api.getEngineSettings(),
         api.fetchOrderbooks(selectedSymbol),
@@ -148,6 +169,7 @@ export const App: React.FC = () => {
         api.getAllTickerStrategyConfigs(),
         api.scanSpotOpportunities(),
         api.scanTriangleOpportunities(),
+        api.getTickerPositionState(selectedSymbol),
       ]);
 
       setSystemStatus(status);
@@ -163,6 +185,7 @@ export const App: React.FC = () => {
       setExecutionLogs(logs);
       setSpotOpps(spot);
       setTriangleOpps(triangle);
+      setTickerPositionState(tickerPos);
 
       if (configs && configs.length > 0) {
         setStrategyConfigs((prev) => {
@@ -187,6 +210,33 @@ export const App: React.FC = () => {
     }, 3000);
     return () => clearInterval(interval);
   }, [refreshAllData]);
+
+  // 24h volume stats per venue — slow-moving data, polled on a 30s cadence
+  // and refetched whenever the connected venue set changes.
+  const venueKey = useMemo(() => [...activeVenueCodes].sort().join(","), [activeVenueCodes]);
+  useEffect(() => {
+    if (activeVenueCodes.size === 0) {
+      setTickerVolumes([]);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      api
+        .getTickerVolumes()
+        .then((v) => {
+          if (!cancelled) setTickerVolumes(v);
+        })
+        .catch(() => {
+          if (!cancelled) setTickerVolumes([]);
+        });
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [venueKey]);
 
   // Risk actions
   const handleResetCircuitBreaker = async () => {
@@ -215,18 +265,55 @@ export const App: React.FC = () => {
   };
 
   const handleExecuteTrade = async (opp: SpatialOpportunityDto) => {
-    await api.executeSpatialArbitrage(
-      opp.symbol,
-      opp.buy_venue,
-      opp.sell_venue,
-      opp.order_qty,
-      opp.direction,
-      opp.trigger_spread_bps ?? opp.net_spread_bps,
-      opp.baseline_mean_spread_bps,
-      opp.position_step,
-      opp.max_units,
-      opp.nominal_hurdle_bps
-    );
+    // Same-time arbitration: every currently-scanned executable candidate for
+    // this symbol goes into one batch; the backend dispatches only the one
+    // with the highest expected net profit and blocks the ticker until that
+    // signal's own legs reconcile as delta-neutral.
+    const candidates: SpatialCandidateInput[] = spatialOpps
+      .filter((o) => o.symbol === opp.symbol && o.is_executable)
+      .map((o) => ({
+        symbol: o.symbol,
+        buyVenue: o.buy_venue,
+        sellVenue: o.sell_venue,
+        orderQty: o.order_qty,
+        expectedNetUsd: o.estimated_profit_usd,
+        direction: o.direction ?? null,
+        routeId: null,
+      }));
+    // The clicked opportunity may come from the matrix grid rather than the
+    // scan snapshot — always include it in its ticker's batch.
+    if (
+      !candidates.some(
+        (c) =>
+          c.buyVenue === opp.buy_venue &&
+          c.sellVenue === opp.sell_venue &&
+          c.orderQty === opp.order_qty
+      )
+    ) {
+      candidates.push({
+        symbol: opp.symbol,
+        buyVenue: opp.buy_venue,
+        sellVenue: opp.sell_venue,
+        orderQty: opp.order_qty,
+        expectedNetUsd: opp.estimated_profit_usd,
+        direction: opp.direction ?? null,
+        routeId: null,
+      });
+    }
+
+    const outcomes = await api.executeSpatialCandidates(candidates);
+    const selected = outcomes.find((o) => o.selected);
+    if (selected) {
+      if (selected.reason) throw new Error(selected.reason);
+      if (selected.result && !selected.result.execution_success) {
+        throw new Error(selected.result.message);
+      }
+    } else {
+      // Nothing dispatched (e.g. ticker blocked by an unreconciled signal) —
+      // surface the arbitration reason so the click isn't silently ignored.
+      const reason = outcomes.find((o) => o.reason)?.reason;
+      if (reason) throw new Error(reason);
+    }
     await refreshAllData();
   };
 
@@ -259,7 +346,25 @@ export const App: React.FC = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-background text-slate-900 overflow-hidden font-sans">
+    <div className="w-screen h-screen overflow-hidden bg-background flex items-center justify-center">
+      <div
+        style={{
+          width: DESIGN_WIDTH * canvasScale,
+          height: DESIGN_HEIGHT * canvasScale,
+          position: "relative",
+          flexShrink: 0,
+        }}
+      >
+        <div
+          className="flex flex-col bg-background text-slate-900 overflow-hidden font-sans border border-surface-border"
+          style={{
+            width: DESIGN_WIDTH,
+            height: DESIGN_HEIGHT,
+            transform: `scale(${canvasScale})`,
+            transformOrigin: "top left",
+            position: "absolute",
+          }}
+        >
       {/* Top Header Bar with Section Switcher Navigation */}
       <Header
         status={systemStatus}
@@ -279,15 +384,6 @@ export const App: React.FC = () => {
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
 
-      {!api.isTauri && (
-        <div
-          role="status"
-          className="px-4 py-1.5 text-xs font-medium text-center bg-amber-100 text-amber-900 border-b border-amber-300"
-        >
-          Browser demo mode — execution, balances, PnL, risk, and calibration are synthetic; public quote views may use unauthenticated market data. Desktop IPC and exchange order submission are unavailable.
-        </div>
-      )}
-
       {/* Main Workspace Body */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Ticker Explorer Panel (Union of Perp DEX Tickers >= 2 Venues) */}
@@ -300,11 +396,11 @@ export const App: React.FC = () => {
           riskData={riskData}
           enabledTickers={enabledTickers}
           onToggleTicker={handleToggleTicker}
-          onToggleAllTickers={handleToggleAllTickers}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenTickerConfig={handleOpenTickerConfig}
           availableTickers={availableTickers}
           activeVenueCodes={activeVenueCodes}
+          tickerVolumes={tickerVolumes}
           isPaused={isPaused}
           onResetCircuitBreaker={handleResetCircuitBreaker}
           onOpenPortfolioMonitor={() => setActiveTab("portfolio_monitor")}
@@ -328,6 +424,7 @@ export const App: React.FC = () => {
               isTickerEnabled={enabledTickers.has(selectedSymbol)}
               onToggleTicker={handleToggleTicker}
               isPaused={isPaused}
+              positionState={tickerPositionState}
             />
           )}
 
@@ -336,12 +433,14 @@ export const App: React.FC = () => {
               opportunities={fundingOpps}
               symbol={selectedSymbol}
               tradeSize={fundingTradeSize}
-              onTradeSizeChange={setFundingTradeSize}
+              minAprPct={fundingParams.minAprPct}
+              holdingDays={fundingParams.holdingDays}
               onExecuteCarry={handleExecuteCarry}
               loading={refreshing}
               executionLogs={executionLogs}
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
+              hasApiConnectivity={activeVenueCodes.size >= 2}
             />
           )}
 
@@ -351,6 +450,8 @@ export const App: React.FC = () => {
               onRefreshAll={refreshAllData}
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
+              hasApiConnectivity={activeVenueCodes.size >= 2}
+              params={spotParams}
             />
           )}
 
@@ -360,6 +461,7 @@ export const App: React.FC = () => {
               onRefreshAll={refreshAllData}
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
+              hasApiConnectivity={activeVenueCodes.size >= 2}
             />
           )}
 
@@ -373,6 +475,7 @@ export const App: React.FC = () => {
               onExecutePrediction={handleExecutePrediction}
               loading={refreshing}
               isPaused={isPaused}
+              hasApiConnectivity={activeVenueCodes.size >= 2}
             />
           )}
 
@@ -393,7 +496,6 @@ export const App: React.FC = () => {
               status={systemStatus}
               onResetCircuitBreaker={handleResetCircuitBreaker}
               onTriggerKillswitch={handleEmergencyKillswitch}
-              onRefreshAll={refreshAllData}
             />
           )}
         </main>
@@ -420,7 +522,16 @@ export const App: React.FC = () => {
         isEnabled={enabledTickers.has(tickerConfigModal.symbol)}
         onToggleEnabled={(enabled) => handleToggleTicker(tickerConfigModal.symbol, enabled)}
         onSaveConfig={handleSaveTickerConfig}
+        spotParams={spotParams}
+        onSpotParamsChange={setSpotParams}
+        fundingParams={{ tradeSizeUsd: fundingTradeSize, ...fundingParams }}
+        onFundingParamsChange={(p) => {
+          setFundingTradeSize(p.tradeSizeUsd);
+          setFundingParams({ minAprPct: p.minAprPct, holdingDays: p.holdingDays });
+        }}
       />
+        </div>
+      </div>
     </div>
   );
 };

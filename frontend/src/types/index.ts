@@ -21,6 +21,37 @@ export interface VenueStatusDto {
   fee_bps: number;
 }
 
+export interface VenueVolumesDto {
+  venue_id: string;
+  /** 24h notional volume (USD) keyed by the venue's raw asset name. */
+  volumes: Record<string, number>;
+}
+
+/** Backend-computed dislocation series (arbitrager-math) over persisted
+ * spread samples. Deviations are per-venue bps from the selected baseline;
+ * null entries are genuine gaps, never interpolated. */
+export interface SignalSeriesDto {
+  symbol: string;
+  /** "consensus" | "leader" */
+  mode: string;
+  window_secs: number;
+  /** Total stored venue samples inside the window. */
+  sample_count: number;
+  /** Earliest sample ever recorded for this symbol (history depth). */
+  earliest_ts_ms: number | null;
+  /** Bucket timestamps (epoch ms), ascending. */
+  ts_ms: number[];
+  /** Sorted venue ids; dev_bps[i][j] is venues[j] at ts_ms[i]. */
+  venues: string[];
+  /** venue_id -> display name. */
+  venue_names: Record<string, string>;
+  dev_bps: (number | null)[][];
+  /** Max/min deviation across present venues per bucket — the dislocation
+   * band; their difference is the gross pairwise spread. */
+  band_max_bps: number[];
+  band_min_bps: number[];
+}
+
 export interface VenueOrderBookDto {
   venue_id: string;
   venue_name: string;
@@ -292,6 +323,14 @@ export interface EngineSettingsDto {
   kraken_futures_enabled?: boolean;
   polymarket_enabled?: boolean;
   kalshi_enabled?: boolean;
+  decibel_enabled?: boolean;
+  ibkr_enabled?: boolean;
+  ig_enabled?: boolean;
+  binance_enabled?: boolean;
+  okx_enabled?: boolean;
+  aster_enabled?: boolean;
+  variational_enabled?: boolean;
+  coinbase_enabled?: boolean;
 
   // Kraken Spot & Futures
   kraken_spot_api_key?: string;
@@ -352,7 +391,6 @@ export interface EngineSettingsDto {
   // Execution & Warm-up Modes
   trading_mode: "paper" | "real";
   fast_warmup_enabled: boolean;
-  venue_rebalance_threshold_usd: number;
 
   // Subaccount mappings
   hyperliquid_account_index?: number;
@@ -380,14 +418,162 @@ export interface VaultStatus {
 
 export interface VenueBalanceInfo {
   venue: string;
-  balance_usd: number;
-  equity_usd?: number;
-  available_margin_usd?: number;
-  margin_rate_pct?: number;
-  min_required_usd: number;
-  needs_rebalance: boolean;
+  equity_usd: number;
+  available_margin_usd: number;
+  margin_rate_pct: number;
   status: "HEALTHY" | "LOW_MARGIN" | "DEPLETED" | string;
   recommended_action?: string | null;
+}
+
+// Multi-account model: one durable account profile per exchange login.
+// Credential values are never returned over IPC; only presence flags.
+export interface AccountDto {
+  id: string;
+  venue: string;
+  label: string;
+  enabled: boolean;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** null while the vault is locked (presence is unknowable). */
+  credentialsConfigured: boolean | null;
+  hasApiKey: boolean;
+  hasApiSecret: boolean;
+  hasPassphrase: boolean;
+  hasAccountId: boolean;
+  hasWalletAddress: boolean;
+  hasPrivateKey: boolean;
+  accountIndex: number | null;
+  subaccountIndex: number | null;
+  apiKeyIndex: number | null;
+}
+
+export interface AccountCredentialInput {
+  apiKey?: string;
+  apiSecret?: string;
+  passphrase?: string | null;
+  accountId?: string | null;
+  walletAddress?: string | null;
+  privateKey?: string | null;
+  accountIndex?: number | null;
+  subaccountIndex?: number | null;
+  apiKeyIndex?: number | null;
+}
+
+export interface AccountUpsertInput {
+  /** Existing account ID for updates; omit to create. */
+  id?: string | null;
+  /** Venue ID; required on create, immutable on update. */
+  venue?: string;
+  label?: string;
+  enabled?: boolean;
+  makeDefault?: boolean;
+  credentials?: AccountCredentialInput | null;
+}
+
+/** Strategy-level route: maps an enabled account on one exchange to an
+ *  enabled account on another. Applies to every ticker using the strategy. */
+export interface StrategyAccountRouteDto {
+  id: string;
+  strategyId: string;
+  label: string;
+  enabled: boolean;
+  accountAId: string;
+  accountAVenue: string;
+  accountALabel: string;
+  accountBId: string;
+  accountBVenue: string;
+  accountBLabel: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StrategyRouteUpsertInput {
+  /** Existing route ID for updates; omit to create. */
+  id?: string | null;
+  strategyId: string;
+  label?: string;
+  accountAId: string;
+  accountBId: string;
+  enabled?: boolean;
+}
+
+/** One venue leg of a signal execution, with account attribution. */
+export interface SignalLegDto {
+  id: string;
+  signalId: string;
+  accountId: string | null;
+  venue: string;
+  side: "long" | "short";
+  intendedQty: number;
+  filledQty: number;
+  fillPrice: number | null;
+  feeUsd: number;
+  venueOrderId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Durable per-signal execution record. `in_flight`, `imbalanced`, and
+ *  `unresolved` block further orders on the symbol until the signal's own
+ *  legs reconcile as delta-neutral. */
+export interface SignalExecutionDto {
+  id: string;
+  strategyId: string;
+  symbol: string;
+  status: "in_flight" | "balanced" | "imbalanced" | "unresolved" | "closed" | "failed";
+  routeId: string | null;
+  accountLongId: string | null;
+  accountShortId: string | null;
+  expectedNetUsd: number | null;
+  feesUsd: number;
+  note: string | null;
+  legs: SignalLegDto[];
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}
+
+/** One candidate in a synchronized batch — per symbol only the highest
+ *  expected-profit candidate dispatches. */
+export interface SpatialCandidateInput {
+  symbol: string;
+  buyVenue: string;
+  sellVenue: string;
+  orderQty: number;
+  expectedNetUsd?: number | null;
+  /** Explicit strategy-level account route override. */
+  routeId?: string | null;
+  direction?: string | null;
+}
+
+export interface CandidateOutcomeDto {
+  symbol: string;
+  buyVenue: string;
+  sellVenue: string;
+  expectedNetUsd: number | null;
+  selected: boolean;
+  reason: string | null;
+  result: SimStepResultDto | null;
+}
+
+export interface TickerPositionState {
+  symbol: string;
+  blocked: boolean;
+  blockingSignalIds: string[];
+  netPositionQty: number;
+}
+
+/** Result of an emergency per-strategy flatten (paper venues only). */
+export interface FlattenResultDto {
+  strategyId: string;
+  symbol: string | null;
+  signalsProcessed: number;
+  signalsClosed: number;
+  legsClosed: number;
+  /** Signals still holding residual exposure — ticker remains blocked. */
+  residualSignals: number;
+  notes: string[];
 }
 
 export interface StrategyMetrics {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use arbitrager_core::hub::MarketDataHub;
 use arbitrager_core::types::{dec, Decimal};
@@ -102,7 +102,6 @@ fn default_engine_ws_port() -> u16 { 8789 }
 fn default_bind_address() -> String { "127.0.0.1".into() }
 fn default_trading_mode() -> String { "paper".into() }
 fn default_fast_warmup_enabled() -> bool { true }
-fn default_venue_rebalance_threshold_usd() -> f64 { 500.0 }
 fn default_referral_lighter() -> String { "https://app.lighter.xyz/?referral=SOLO&source=none".into() }
 fn default_referral_robinhood() -> String { "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none".into() }
 fn default_sponsor_link() -> String { "https://buymeacoffee.com/dav1d1010".into() }
@@ -118,15 +117,12 @@ fn default_popdex_account_index() -> String { "0".into() }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct VenueBalanceInfo {
     pub venue: String,
-    pub balance_usd: f64,
     #[serde(default)]
     pub equity_usd: f64,
     #[serde(default)]
     pub available_margin_usd: f64,
     #[serde(default)]
     pub margin_rate_pct: f64,
-    pub min_required_usd: f64,
-    pub needs_rebalance: bool,
     pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED"
     pub recommended_action: Option<String>,
 }
@@ -157,8 +153,6 @@ pub struct EngineSettingsDto {
     pub trading_mode: String, // "paper" or "real"
     #[serde(default = "default_fast_warmup_enabled")]
     pub fast_warmup_enabled: bool,
-    #[serde(default = "default_venue_rebalance_threshold_usd")]
-    pub venue_rebalance_threshold_usd: f64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -187,6 +181,22 @@ pub struct EngineSettingsDto {
     pub polymarket_enabled: bool,
     #[serde(default)]
     pub kalshi_enabled: bool,
+    #[serde(default)]
+    pub decibel_enabled: bool,
+    #[serde(default)]
+    pub ibkr_enabled: bool,
+    #[serde(default)]
+    pub ig_enabled: bool,
+    #[serde(default)]
+    pub binance_enabled: bool,
+    #[serde(default)]
+    pub okx_enabled: bool,
+    #[serde(default)]
+    pub aster_enabled: bool,
+    #[serde(default)]
+    pub variational_enabled: bool,
+    #[serde(default)]
+    pub coinbase_enabled: bool,
 
     // Kraken Spot & Futures
     #[serde(default)]
@@ -311,13 +321,20 @@ impl Default for EngineSettingsDto {
             bind_address: default_bind_address(),
             trading_mode: default_trading_mode(),
             fast_warmup_enabled: default_fast_warmup_enabled(),
-            venue_rebalance_threshold_usd: default_venue_rebalance_threshold_usd(),
             hyperliquid_enabled: false,
             hyperliquid_spot_enabled: false,
             lighter_enabled: false,
             lighter_spot_enabled: false,
             vanta_enabled: false,
             robinhood_enabled: false,
+            decibel_enabled: false,
+            ibkr_enabled: false,
+            ig_enabled: false,
+            binance_enabled: false,
+            okx_enabled: false,
+            aster_enabled: false,
+            variational_enabled: false,
+            coinbase_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
             kraken_futures_enabled: false,
@@ -393,6 +410,7 @@ impl EngineSettingsDto {
         if has_secret_value(&self.hmac_token) {
             out.push(ExchangeCredentials {
                 venue: "remote_hsm".into(),
+                profile_id: None,
                 api_key: String::new(),
                 api_secret: self.hmac_token.trim().to_string(),
                 passphrase: None,
@@ -400,6 +418,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: true,
             });
         }
@@ -411,6 +431,7 @@ impl EngineSettingsDto {
         if hyperliquid_supplied {
             out.push(ExchangeCredentials {
                 venue: "hyperliquid".into(),
+                profile_id: None,
                 api_key: String::new(),
                 api_secret: self.hyperliquid_private_key.trim().to_string(),
                 passphrase: None,
@@ -422,6 +443,8 @@ impl EngineSettingsDto {
                 },
                 account_index: self.hyperliquid_account_index,
                 subaccount_index: self.hyperliquid_subaccount_index,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.hyperliquid_enabled || self.hyperliquid_spot_enabled,
             });
         }
@@ -433,6 +456,7 @@ impl EngineSettingsDto {
         if lighter_supplied {
             out.push(ExchangeCredentials {
                 venue: "lighter".into(),
+                profile_id: None,
                 api_key: self.lighter_api_key.trim().to_string(),
                 api_secret: String::new(),
                 passphrase: None,
@@ -440,6 +464,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: lighter_account_index,
                 subaccount_index: self.lighter_subaccount_index,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.lighter_enabled || self.lighter_spot_enabled,
             });
         }
@@ -451,6 +477,7 @@ impl EngineSettingsDto {
         if vanta_supplied {
             out.push(ExchangeCredentials {
                 venue: "vanta".into(),
+                profile_id: None,
                 api_key: self.vanta_orderly_key.trim().to_string(),
                 api_secret: self.vanta_orderly_secret.trim().to_string(),
                 passphrase: None,
@@ -462,6 +489,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: self.vanta_subaccount_index,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.vanta_enabled,
             });
         }
@@ -472,6 +501,7 @@ impl EngineSettingsDto {
         if robinhood_supplied {
             out.push(ExchangeCredentials {
                 venue: "robinhood".into(),
+                profile_id: None,
                 api_key: String::new(),
                 api_secret: self.robinhood_private_key.trim().to_string(),
                 passphrase: None,
@@ -483,6 +513,8 @@ impl EngineSettingsDto {
                 },
                 account_index: None,
                 subaccount_index: self.robinhood_subaccount_index,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.robinhood_enabled,
             });
         }
@@ -490,6 +522,7 @@ impl EngineSettingsDto {
         if has_secret_value(&self.arcus_api_key) || has_secret_value(&self.arcus_secret) {
             out.push(ExchangeCredentials {
                 venue: "arcus".into(),
+                profile_id: None,
                 api_key: self.arcus_api_key.trim().to_string(),
                 api_secret: self.arcus_secret.trim().to_string(),
                 passphrase: None,
@@ -497,6 +530,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.arcus_enabled,
             });
         }
@@ -505,6 +540,7 @@ impl EngineSettingsDto {
         if has_secret_value(&self.popdex_api_key) || has_index_value(&self.popdex_account_index) {
             out.push(ExchangeCredentials {
                 venue: "popdex".into(),
+                profile_id: None,
                 api_key: self.popdex_api_key.trim().to_string(),
                 api_secret: String::new(),
                 passphrase: None,
@@ -512,6 +548,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: popdex_account_index,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.popdex_enabled,
             });
         }
@@ -520,6 +558,7 @@ impl EngineSettingsDto {
         {
             out.push(ExchangeCredentials {
                 venue: "kraken_spot".into(),
+                profile_id: None,
                 api_key: self.kraken_spot_api_key.trim().to_string(),
                 api_secret: self.kraken_spot_secret.trim().to_string(),
                 passphrase: None,
@@ -527,6 +566,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.kraken_enabled && self.kraken_spot_enabled,
             });
         }
@@ -536,6 +577,7 @@ impl EngineSettingsDto {
         {
             out.push(ExchangeCredentials {
                 venue: "kraken_futures".into(),
+                profile_id: None,
                 api_key: self.kraken_futures_api_key.trim().to_string(),
                 api_secret: self.kraken_futures_secret.trim().to_string(),
                 passphrase: None,
@@ -543,6 +585,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.kraken_enabled && self.kraken_futures_enabled,
             });
         }
@@ -553,6 +597,7 @@ impl EngineSettingsDto {
         if polymarket_supplied {
             out.push(ExchangeCredentials {
                 venue: "polymarket".into(),
+                profile_id: None,
                 api_key: self.polymarket_api_key.trim().to_string(),
                 api_secret: self.polymarket_secret.trim().to_string(),
                 passphrase: if has_secret_value(&self.polymarket_passphrase) {
@@ -564,6 +609,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.polymarket_enabled,
             });
         }
@@ -571,6 +618,7 @@ impl EngineSettingsDto {
         if has_secret_value(&self.kalshi_api_key_id) || has_secret_value(&self.kalshi_private_key) {
             out.push(ExchangeCredentials {
                 venue: "kalshi".into(),
+                profile_id: None,
                 api_key: self.kalshi_api_key_id.trim().to_string(),
                 api_secret: self.kalshi_private_key.trim().to_string(),
                 passphrase: None,
@@ -578,6 +626,8 @@ impl EngineSettingsDto {
                 wallet_address: None,
                 account_index: None,
                 subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
                 enabled: self.kalshi_enabled,
             });
         }
@@ -647,9 +697,19 @@ pub struct AppEngineState {
     pub settings: RwLock<EngineSettingsDto>,
     pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
+    pub state_store: Arc<crate::state_store::StateStore>,
     pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
+    /// Epoch hour of the last spread_samples prune pass.
+    pub sample_prune_at: Mutex<i64>,
+    /// 24h volume cache: venue_id -> asset -> volume USD (5-minute TTL).
+    pub volume_cache: Mutex<
+        Option<(
+            std::time::Instant,
+            std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+        )>,
+    >,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented
@@ -671,11 +731,31 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
 }
 
 impl AppEngineState {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::new_with_vault_path(crate::vault::SecureVault::default_path())
     }
 
+    pub fn new_persistent() -> anyhow::Result<Self> {
+        let state_store = Arc::new(crate::state_store::StateStore::open(
+            crate::state_store::StateStore::default_path(),
+        )?);
+        Ok(Self::new_inner(
+            crate::vault::SecureVault::default_path(),
+            state_store,
+        ))
+    }
+
+    #[cfg(test)]
     pub fn new_with_vault_path(vault_path: PathBuf) -> Self {
+        let state_store = Arc::new(
+            crate::state_store::StateStore::open_in_memory()
+                .expect("in-memory state store must open"),
+        );
+        Self::new_inner(vault_path, state_store)
+    }
+
+    fn new_inner(vault_path: PathBuf, state_store: Arc<crate::state_store::StateStore>) -> Self {
         let ex_hl = Arc::new(SimulatedExchange::new("hyperliquid", "Hyperliquid (L1)", 2, dec!(2.0), dec!(100000.0)));
         let ex_lighter = Arc::new(SimulatedExchange::new("lighter", "Lighter (zkDEX)", 5, dec!(1.5), dec!(100000.0)));
         let ex_vanta = Arc::new(SimulatedExchange::new("vanta", "Vanta.exchange", 4, dec!(3.0), dec!(100000.0)));
@@ -741,9 +821,12 @@ impl AppEngineState {
             settings,
             strategy_configs: RwLock::new(std::collections::HashMap::new()),
             vault,
+            state_store,
             virtual_ledger,
             is_paused: RwLock::new(false),
             execution_lock: tokio::sync::Mutex::new(()),
+            sample_prune_at: Mutex::new(0),
+            volume_cache: Mutex::new(None),
         }
     }
 

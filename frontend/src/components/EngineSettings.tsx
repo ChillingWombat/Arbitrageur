@@ -2,37 +2,117 @@ import React, { useState, useEffect } from "react";
 import {
   AlertCircle,
   CheckCircle2,
-  Eye,
-  EyeOff,
   Key,
   Lock,
   Sliders,
   ExternalLink,
-  Wallet,
   Globe,
   AlertTriangle,
   Scale,
   RefreshCw,
   Info,
   Trash2,
+  ArrowLeftRight,
 } from "lucide-react";
 import { api } from "../services/api";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
+import { ToggleSwitch } from "./ToggleSwitch";
+import { VenueAccountsSection, StrategyRoutingPanel, AddAccountSlot, VenueDefaultControl, AccountLabelControl } from "./ExchangeAccounts";
 
-export type SettingsTab = "execution" | "exchanges" | "network" | "about";
+/** Venue margin/metrics block rendered inside the venue's account zone. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
+const VenueBalancePanel: React.FC<{
+  bal: VenueBalanceInfo | null;
+}> = ({ bal }) => (
+  <div className="space-y-3">
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
+      {/* Metric 1: Equity */}
+      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+        <div className="flex items-center justify-between text-slate-400">
+          <span className="text-[10px] font-bold tracking-wider">Total Equity</span>
+          <span className="text-[10px]">USD</span>
+        </div>
+        <div className="text-xl font-bold text-slate-900 tracking-tight">
+          {bal
+            ? `$${bal.equity_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : "N/A"}
+        </div>
+      </div>
+
+      {/* Metric 2: Available Margin */}
+      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+        <div className="flex items-center justify-between text-slate-400">
+          <span className="text-[10px] font-bold tracking-wider">Available Margin</span>
+          <span className="text-[10px]">USD</span>
+        </div>
+        <div className={`text-xl font-bold tracking-tight ${bal ? "text-emerald-700" : "text-slate-900"}`}>
+          {bal
+            ? `$${bal.available_margin_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+            : "N/A"}
+        </div>
+      </div>
+
+      {/* Metric 3: Margin Rate */}
+      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+        <div className="flex items-center justify-between text-slate-400">
+          <span className="text-[10px] font-bold tracking-wider">Margin Rate</span>
+          <span className="text-[10px]">Utilization</span>
+        </div>
+        <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight">
+          {bal?.margin_rate_pct != null ? (
+            <>
+              <span>{bal.margin_rate_pct.toFixed(1)}%</span>
+              <span className="text-[11px] font-normal text-slate-400">utilized</span>
+            </>
+          ) : (
+            <span>N/A</span>
+          )}
+        </div>
+        <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1.5">
+          <div
+            className={`h-full rounded-full transition-all duration-300 ${
+              (bal?.margin_rate_pct ?? 0) > 80
+                ? "bg-red-500"
+                : (bal?.margin_rate_pct ?? 0) > 50
+                ? "bg-amber-500"
+                : "bg-accent"
+            }`}
+            style={{ width: `${Math.min(100, bal?.margin_rate_pct ?? 0)}%` }}
+          />
+        </div>
+      </div>
+    </div>
+
+    {bal?.recommended_action && (
+      <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg text-xs font-mono text-amber-900 flex items-start space-x-2">
+        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
+        <span>{bal.recommended_action}</span>
+      </div>
+    )}
+  </div>
+);
+
+export type SettingsTab = "execution" | "exchanges" | "strategies" | "network" | "about";
 export type ExchangeId =
   | "arcus"
+  | "aster"
+  | "binance"
+  | "coinbase"
+  | "decibel"
   | "hyperliquid"
+  | "ibkr"
+  | "ig"
   | "kalshi"
   | "kraken"
   | "lighter"
+  | "okx"
   | "polymarket"
   | "popdex"
   | "robinhood"
-  | "vanta";
+  | "vanta"
+  | "variational";
 
 export interface ExchangeMetadata {
   id: ExchangeId;
@@ -43,68 +123,23 @@ export interface ExchangeMetadata {
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
+  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 },
+  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
+  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
+  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
   { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
+  { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 },
+  { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 },
   { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
   { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
   { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
+  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
   { id: "popdex", name: "PopDEX", type: "Arbitrage Protocol", feeBps: 2.0 },
-  { id: "robinhood", name: "Robinhood", type: "EVM DEX Aggregator", feeBps: 2.5 },
-  { id: "vanta", name: "Vanta (Orderly)", type: "Omnichain Perps", feeBps: 3.0 },
+  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
+  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
+  { id: "variational", name: "Variational", type: "Perp DEX (Read-Only)", feeBps: 0.0 },
 ];
-
-interface ToggleSwitchProps {
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-  disabled?: boolean;
-  label?: string;
-  size?: "sm" | "md";
-}
-
-const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
-  checked,
-  onChange,
-  disabled = false,
-  label,
-  size = "md",
-}) => {
-  const isSm = size === "sm";
-  return (
-    <div className="inline-flex items-center space-x-2">
-      <button
-        type="button"
-        role="switch"
-        aria-checked={checked}
-        disabled={disabled}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onChange(!checked);
-        }}
-        className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
-          isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
-        } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
-          checked ? "bg-emerald-500 border border-emerald-600 shadow-xs" : "bg-white border border-slate-300 shadow-xs"
-        }`}
-      >
-        <span
-          className={`inline-block rounded-full shadow-xs transform transition-transform ${
-            checked ? "bg-white" : "bg-slate-400"
-          } ${
-            isSm
-              ? checked
-                ? "w-3.5 h-3.5 translate-x-4"
-                : "w-3.5 h-3.5 translate-x-0.5"
-              : checked
-              ? "w-4 h-4 translate-x-5"
-              : "w-4 h-4 translate-x-0.5"
-          }`}
-        />
-      </button>
-      {label && <span className="text-[11px] font-mono text-slate-700">{label}</span>}
-    </div>
-  );
-};
 
 interface EngineSettingsProps {
   systemStatus?: SystemStatusDto | null;
@@ -124,7 +159,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
   const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
-  const [venueRebalanceThresholdUsd, setVenueRebalanceThresholdUsd] = useState(500.0);
 
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
@@ -173,6 +207,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
   // Arcus CLOB DEX
   const [arcusEnabled, setArcusEnabled] = useState(false);
+  const [asterEnabled, setAsterEnabled] = useState(false);
+  const [binanceEnabled, setBinanceEnabled] = useState(false);
+  const [coinbaseEnabled, setCoinbaseEnabled] = useState(false);
+  const [decibelEnabled, setDecibelEnabled] = useState(false);
+  const [ibkrEnabled, setIbkrEnabled] = useState(false);
+  const [igEnabled, setIgEnabled] = useState(false);
+  const [okxEnabled, setOkxEnabled] = useState(false);
+  const [variationalEnabled, setVariationalEnabled] = useState(false);
   const [arcusApiKey, setArcusApiKey] = useState("");
   const [arcusSecret, setArcusSecret] = useState("");
   const [arcusUrl, setArcusUrl] = useState("https://api.arcus.exchange");
@@ -212,7 +254,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>("arcus");
-  const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -221,37 +262,60 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   // Vault state
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
-  const [inlinePasscode, setInlinePasscode] = useState("");
+  const [inlinePassword, setInlinePassword] = useState("");
+  const [inlineConfirmPassword, setInlineConfirmPassword] = useState("");
   const [inlineUnlocking, setInlineUnlocking] = useState(false);
   const [inlineVaultError, setInlineVaultError] = useState<string | null>(null);
   const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
-  const handleInlineUnlock = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!inlinePasscode) return;
-    setInlineUnlocking(true);
+  const handleInlineVaultSubmit = async () => {
+    if (inlineUnlocking) return;
     setInlineVaultError(null);
+
+    if (!vaultStatus) {
+      setInlineVaultError("Vault status is still loading. Please try again.");
+      return;
+    }
+    if (!inlinePassword) return;
+
+    const isInitializing = !vaultStatus.is_initialized;
+    if (isInitializing && Array.from(inlinePassword).length < 6) {
+      setInlineVaultError("Password must be at least 6 characters long.");
+      return;
+    }
+    if (isInitializing && inlinePassword !== inlineConfirmPassword) {
+      setInlineVaultError("Passwords do not match. Please re-enter.");
+      return;
+    }
+
+    setInlineUnlocking(true);
     try {
-      let updatedStatus: VaultStatus;
-      if (vaultStatus && !vaultStatus.is_initialized) {
-        updatedStatus = await api.initializeVault(inlinePasscode);
-      } else {
-        updatedStatus = await api.unlockVault(inlinePasscode);
-      }
+      const updatedStatus = isInitializing
+        ? await api.initializeVault(inlinePassword)
+        : await api.unlockVault(inlinePassword);
       setVaultStatus(updatedStatus);
-      setInlinePasscode("");
+      setInlinePassword("");
+      setInlineConfirmPassword("");
       const sanitized = await api.getEngineSettings();
       setConfiguredVenues(sanitized.configured_venues || []);
     } catch (err) {
-      setInlineVaultError(err instanceof Error ? err.message : "Incorrect master passcode");
+      setInlineVaultError(err instanceof Error ? err.message : "Vault operation failed");
     } finally {
       setInlineUnlocking(false);
     }
   };
 
+  const handleInlineVaultKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    e.stopPropagation();
+    void handleInlineVaultSubmit();
+  };
+
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
-  const [loadingBalances, setLoadingBalances] = useState(false);
+  const [accountsEpoch, setAccountsEpoch] = useState(0);
+
 
   // Update check
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -260,38 +324,30 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const isExchangeEnabled = (id: ExchangeId): boolean => {
     switch (id) {
       case "arcus": return arcusEnabled;
+      case "aster": return asterEnabled;
+      case "binance": return binanceEnabled;
+      case "coinbase": return coinbaseEnabled;
+      case "decibel": return decibelEnabled;
       case "hyperliquid": return hlEnabled;
+      case "ibkr": return ibkrEnabled;
+      case "ig": return igEnabled;
       case "kalshi": return kalshiEnabled;
       case "kraken": return krakenEnabled;
       case "lighter": return lighterEnabled;
+      case "okx": return okxEnabled;
       case "polymarket": return polymarketEnabled;
       case "popdex": return popdexEnabled;
       case "robinhood": return robinhoodEnabled;
       case "vanta": return vantaEnabled;
+      case "variational": return variationalEnabled;
       default: return false;
     }
   };
 
-  const getVenueBalance = (id: string): VenueBalanceInfo => {
-    const found = venueBalances.find(
-      (b) => b.venue.toLowerCase() === id.toLowerCase()
+  const getVenueBalance = (id: string): VenueBalanceInfo | null => {
+    return (
+      venueBalances.find((b) => b.venue.toLowerCase() === id.toLowerCase()) ?? null
     );
-    if (found) return found;
-    return {
-      venue: id,
-      balance_usd: 0,
-      equity_usd: 0,
-      available_margin_usd: 0,
-      margin_rate_pct: 0,
-      min_required_usd: venueRebalanceThresholdUsd,
-      needs_rebalance: false,
-      status: "UNKNOWN",
-      recommended_action: null,
-    };
-  };
-
-  const toggleSecret = (field: string) => {
-    setShowSecrets((prev) => ({ ...prev, [field]: !prev[field] }));
   };
 
   const loadVaultStatus = async () => {
@@ -304,14 +360,11 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   };
 
   const loadVenueBalances = async () => {
-    setLoadingBalances(true);
     try {
       const data = await api.getVenueBalances();
       setVenueBalances(data);
     } catch (err) {
       console.error("Failed to load balances:", err);
-    } finally {
-      setLoadingBalances(false);
     }
   };
 
@@ -331,7 +384,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
         setTradingMode(s.trading_mode === "real" ? "real" : "paper");
         setFastWarmupEnabled(s.fast_warmup_enabled ?? true);
-        setVenueRebalanceThresholdUsd(s.venue_rebalance_threshold_usd ?? 500.0);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
         setHyperliquidPrivateKey(s.hyperliquid_private_key || "");
@@ -378,6 +430,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         setKrakenFuturesEnabled(s.kraken_futures_enabled ?? false);
         setPolymarketEnabled(s.polymarket_enabled ?? false);
         setKalshiEnabled(s.kalshi_enabled ?? false);
+        setDecibelEnabled(s.decibel_enabled ?? false);
+        setIbkrEnabled(s.ibkr_enabled ?? false);
+        setIgEnabled(s.ig_enabled ?? false);
+        setBinanceEnabled(s.binance_enabled ?? false);
+        setOkxEnabled(s.okx_enabled ?? false);
+        setAsterEnabled(s.aster_enabled ?? false);
+        setVariationalEnabled(s.variational_enabled ?? false);
+        setCoinbaseEnabled(s.coinbase_enabled ?? false);
 
         setArcusApiKey(s.arcus_api_key || "");
         setArcusSecret(s.arcus_secret || "");
@@ -424,24 +484,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     }
   }, [systemStatus]);
 
-  const defaultVenues: VenueStatusDto[] = [
-    { id: "hyperliquid", name: "Hyperliquid (L1 DEX)", market_type: "Perpetual CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 2.0 },
-    { id: "lighter", name: "Lighter (zkDEX)", market_type: "zk-Rollup CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 1.5 },
-    { id: "vanta", name: "Vanta.exchange", market_type: "Omnichain Perps", status: "OFFLINE", latency_ms: 0, fee_bps: 3.0 },
-    { id: "arcus", name: "Arcus DEX", market_type: "Fast CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 1.5 },
-    { id: "popdex", name: "PopDEX", market_type: "Lighter Hybrid", status: "OFFLINE", latency_ms: 0, fee_bps: 2.0 },
-    { id: "robinhood", name: "Robinhood EVM", market_type: "EVM DEX Aggregator", status: "OFFLINE", latency_ms: 0, fee_bps: 2.5 },
-    { id: "kraken", name: "Kraken", market_type: "Spot & Futures CLOB", status: "OFFLINE", latency_ms: 0, fee_bps: 16.0 },
-    { id: "polymarket", name: "Polymarket (CTF CLOB)", market_type: "Prediction Market", status: "OFFLINE", latency_ms: 0, fee_bps: 0.0 },
-    { id: "kalshi", name: "Kalshi (CFTC)", market_type: "Prediction Market", status: "OFFLINE", latency_ms: 0, fee_bps: 10.0 },
-  ];
-  const displayVenues = liveVenues.length > 0 ? liveVenues : defaultVenues;
-
-  const getVenueInfo = (id: string) => {
-    return displayVenues.find(
-      (v) => v.id.toLowerCase() === id.toLowerCase() || v.name.toLowerCase().includes(id.toLowerCase())
-    );
-  };
+  // A venue only counts as "API connected" when enabled and backed by a
+  // working adapter (READ_ONLY). OFFLINE/UNSUPPORTED venues provide no data.
+  const hasApiConnectivity = liveVenues.some((v) => v.status === "READ_ONLY");
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -458,7 +503,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         bind_address: bindAddress,
         trading_mode: tradingMode,
         fast_warmup_enabled: fastWarmupEnabled,
-        venue_rebalance_threshold_usd: venueRebalanceThresholdUsd,
         configured_venues: configuredVenues,
         hyperliquid_enabled: hlEnabled,
         hyperliquid_spot_enabled: hlSpotEnabled,
@@ -473,6 +517,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         kraken_futures_enabled: krakenFuturesEnabled,
         polymarket_enabled: polymarketEnabled,
         kalshi_enabled: kalshiEnabled,
+        decibel_enabled: decibelEnabled,
+        ibkr_enabled: ibkrEnabled,
+        ig_enabled: igEnabled,
+        binance_enabled: binanceEnabled,
+        okx_enabled: okxEnabled,
+        aster_enabled: asterEnabled,
+        variational_enabled: variationalEnabled,
+        coinbase_enabled: coinbaseEnabled,
         arcus_api_key: arcusApiKey.trim(),
         arcus_secret: arcusSecret.trim(),
         arcus_url: arcusUrl.trim(),
@@ -568,7 +620,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     setPolymarketPassphrase("");
     setKalshiApiKeyId("");
     setKalshiPrivateKey("");
-    setInlinePasscode("");
+    setInlinePassword("");
+    setInlineConfirmPassword("");
   };
 
   const handleLockVault = async () => {
@@ -699,6 +752,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   ].filter(Boolean).length;
 
   const isVaultLocked = !api.isTauri || !vaultStatus?.is_unlocked;
+  const isVaultInitializing = vaultStatus?.is_initialized === false;
+  const isVaultStatusLoading = api.isTauri && vaultStatus === null;
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
@@ -742,7 +797,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             />
             <span>Exchanges</span>
             <span
-              className={`px-1.5 py-0.2 rounded text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+              className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                 activeTab === "exchanges"
                   ? "bg-accent text-white shadow-2xs"
                   : "bg-accent-dim text-accent border border-accent-line/60"
@@ -751,6 +806,26 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               {activeVenuesCount}
             </span>
             {activeTab === "exchanges" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("strategies")}
+            className={`relative h-11 flex items-center space-x-2 px-4 sm:px-5 text-xs font-mono transition select-none group cursor-pointer ${
+              activeTab === "strategies"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+            }`}
+          >
+            <ArrowLeftRight
+              className={`w-3.5 h-3.5 transition shrink-0 ${
+                activeTab === "strategies" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
+            <span>Strategies</span>
+            {activeTab === "strategies" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
           </button>
@@ -804,7 +879,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 <button
                   type="button"
                   onClick={handleRemoveCredentials}
-                  className="px-2.5 py-1 rounded-lg border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                  className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                   title="Permanently remove the selected venue's stored credentials from the vault"
                 >
                   <Trash2 className="w-3.5 h-3.5 text-red-500" />
@@ -814,7 +889,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <button
                 type="button"
                 onClick={handleLockVault}
-                className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Lock sensitive exchange credentials now"
               >
                 <Lock className="w-3.5 h-3.5 text-slate-500" />
@@ -828,7 +903,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
-                className="px-2.5 py-1 rounded-lg border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Permanently remove the stored HSM token from the vault"
               >
                 <Trash2 className="w-3.5 h-3.5 text-red-500" />
@@ -844,10 +919,11 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
           {/* Active Tab Subheader */}
           <div className="px-6 py-3 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
             <div>
-              <h3 className="text-xs font-bold font-mono text-slate-900 flex items-center space-x-1.5">
+              <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-1.5">
                 <span>
                   {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
-                  {activeTab === "exchanges" && "Exchange API Credentials & Account Margins"}
+                  {activeTab === "exchanges" && "Exchange Accounts, API Credentials & Margins"}
+                  {activeTab === "strategies" && "Strategy Account Routing"}
                   {activeTab === "network" && "Network Ports & HSM Signer Configuration"}
                   {activeTab === "about" && "About Arbitrager & Release Information"}
                 </span>
@@ -856,7 +932,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     activeTab === "execution"
                       ? "Calibrate slippage tolerances, minimum depth ratio, and paper/live trading modes."
                       : activeTab === "exchanges"
-                      ? "Configure exchange API credentials, inspect real-time equity & available margin, and manage secure vault."
+                      ? "Manage per-exchange accounts: credentials in the encrypted vault, enable switches, and default selection."
+                      : activeTab === "strategies"
+                      ? "Bind which account on one exchange trades against which account on another for each strategy. Applies to all tickers using the strategy."
                       : activeTab === "network"
                       ? "Manage local daemon RPC/WS ports and remote Hardware Security Module tokens."
                       : "Version status, open-source repository, sponsorship, and compliance notices."
@@ -871,12 +949,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             <div className="relative flex-1 flex flex-row min-h-0 overflow-hidden">
               {/* Left Panel: Exchanges Selector in Alphabetical Order */}
               <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
-                <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center justify-between shrink-0">
-                  <span className="text-[11px] font-mono font-bold uppercase text-slate-700 tracking-wider">
+                <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center shrink-0">
+                  <span className="text-[11px] font-mono font-bold text-slate-700 tracking-wider">
                     Exchanges ({EXCHANGES_ALPHABETICAL.length})
-                  </span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200 font-semibold">
-                    Alphabetical (A-Z)
                   </span>
                 </div>
 
@@ -890,7 +965,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                         key={ex.id}
                         type="button"
                         onClick={() => setSelectedExchange(ex.id)}
-                        className={`w-full text-left p-2.5 rounded-xl text-xs font-mono transition flex items-center justify-between group cursor-pointer border ${
+                        className={`w-full text-left p-2.5 rounded-lg text-xs font-mono transition flex items-center justify-between group cursor-pointer border ${
                           isSelected
                             ? "bg-accent text-white border-accent shadow-xs"
                             : "bg-surface hover:bg-slate-100/80 text-slate-700 border-surface-border/60 hover:border-surface-border"
@@ -916,14 +991,16 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                         </div>
                         <div className="text-right shrink-0">
                           <span
-                            className={`text-[9px] font-mono uppercase block font-semibold ${
+                            className={`text-[9px] font-mono block font-semibold ${
                               isSelected ? "text-blue-100" : isEnabled ? "text-emerald-700" : "text-slate-400"
                             }`}
                           >
                             {isEnabled ? "ACTIVE" : "OFF"}
                           </span>
                           <span className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}>
-                            ${(bal.equity_usd ?? bal.balance_usd).toLocaleString("en-US", { maximumFractionDigits: 0 })}
+                            {bal
+                              ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                              : "N/A"}
                           </span>
                         </div>
                       </button>
@@ -941,204 +1018,56 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               {/* Right Content Pane: Single Selected Exchange */}
               <div className="flex-1 overflow-y-auto p-6 space-y-5 min-w-0">
                 {errorMsg && (
-                  <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+                  <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{errorMsg}</span>
                   </div>
                 )}
 
                 {saved && (
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                  <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
                   </div>
                 )}
 
-                {/* Financial & Margin Metrics KPI Card for Selected Exchange */}
-                {(() => {
-                  const currentExMeta =
-                    EXCHANGES_ALPHABETICAL.find((ex) => ex.id === selectedExchange) ||
-                    EXCHANGES_ALPHABETICAL[0];
-                  const currentBal = getVenueBalance(selectedExchange);
-                  return (
-                    <div className="bg-surface border border-surface-border rounded-2xl p-4.5 shadow-xs space-y-3.5">
-                      <div className="flex items-center justify-between border-b border-surface-border pb-3">
-                        <div className="flex items-center space-x-2">
-                          <Wallet className="w-4 h-4 text-accent" />
-                          <h4 className="text-xs font-mono font-bold uppercase text-slate-900 tracking-wide">
-                            {currentExMeta.name} — Margin &amp; Collateral Account
-                          </h4>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold ${
-                              currentBal.status === "HEALTHY"
-                                ? "bg-emerald-50 text-emerald-800 border border-emerald-300"
-                                : currentBal.status === "LOW_MARGIN"
-                                ? "bg-amber-50 text-amber-800 border border-amber-300"
-                                : "bg-red-50 text-red-800 border border-red-300"
-                            }`}
-                          >
-                            {currentBal.status}
-                          </span>
-                        </div>
-
-                        <div className="flex items-center space-x-3">
-                          <span className="text-[11px] font-mono text-slate-400">
-                            Safety Floor: ${currentBal.min_required_usd.toLocaleString()}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={loadVenueBalances}
-                            disabled={loadingBalances}
-                            className="px-2.5 py-1 bg-surface-raised border border-surface-border hover:bg-slate-200 rounded-lg text-xs font-mono flex items-center space-x-1.5 text-slate-700 transition cursor-pointer"
-                            title="Sync collateral balances"
-                          >
-                            <RefreshCw className={`w-3 h-3 ${loadingBalances ? "animate-spin text-accent" : "text-slate-500"}`} />
-                            <span className="text-[11px]">Sync</span>
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
-                        {/* Metric 1: Equity */}
-                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
-                          <div className="flex items-center justify-between text-slate-400">
-                            <span className="text-[10px] uppercase font-bold tracking-wider">Equity</span>
-                            <span className="text-[10px]">USD</span>
-                          </div>
-                          <div className="text-xl font-bold text-slate-900 tracking-tight">
-                            ${(currentBal.equity_usd ?? currentBal.balance_usd).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                          </div>
-                          <div className="text-[10px] text-slate-500">
-                            Total account net value
-                          </div>
-                        </div>
-
-                        {/* Metric 2: Available Margin */}
-                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
-                          <div className="flex items-center justify-between text-slate-400">
-                            <span className="text-[10px] uppercase font-bold tracking-wider">Available Margin</span>
-                            <span className="text-[10px]">USD</span>
-                          </div>
-                          <div className="text-xl font-bold text-emerald-700 tracking-tight">
-                            ${(currentBal.available_margin_usd ?? currentBal.balance_usd).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                          </div>
-                          <div className="text-[10px] text-slate-500">
-                            Free collateral for new orders
-                          </div>
-                        </div>
-
-                        {/* Metric 3: Margin Rate */}
-                        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-xl space-y-1">
-                          <div className="flex items-center justify-between text-slate-400">
-                            <span className="text-[10px] uppercase font-bold tracking-wider">Margin Rate</span>
-                            <span className="text-[10px]">Utilization</span>
-                          </div>
-                          <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight">
-                            <span>{(currentBal.margin_rate_pct ?? 0.0).toFixed(1)}%</span>
-                            <span className="text-[11px] font-normal text-slate-400">utilized</span>
-                          </div>
-                          <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1.5">
-                            <div
-                              className={`h-full rounded-full transition-all duration-300 ${
-                                (currentBal.margin_rate_pct ?? 0) > 80
-                                  ? "bg-red-500"
-                                  : (currentBal.margin_rate_pct ?? 0) > 50
-                                  ? "bg-amber-500"
-                                  : "bg-accent"
-                              }`}
-                              style={{ width: `${Math.min(100, Math.max(3, currentBal.margin_rate_pct ?? 0))}%` }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      {currentBal.recommended_action && (
-                        <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-xs font-mono text-amber-900 flex items-start space-x-2">
-                          <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
-                          <span>{currentBal.recommended_action}</span>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })()}
-
 
             {/* Exchange: Arcus DEX */}
             {selectedExchange === "arcus" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Arcus (CLOB DEX)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Arcus #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      High-Throughput CLOB
-                    </span>
+                    <AccountLabelControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("arcus")?.fee_bps ?? 1.5} BPS
-                    </span>
+                    <VenueDefaultControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={arcusEnabled}
                       onChange={setArcusEnabled}
-                      label={arcusEnabled ? "Active" : "Disabled"}
+                      label={arcusEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!arcusEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Arcus exchange is disabled. Toggle switch to enable and configure API credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={arcusApiKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "arc_..."}
-                        onChange={(e) => setArcusApiKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("arcus")}
+                />                  <VenueAccountsSection
+                    venue="arcus"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+              </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">API Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("arcus_secret")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["arcus_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["arcus_secret"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["arcus_secret"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={arcusSecret}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                        onChange={(e) => setArcusSecret(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={arcusUrl}
-                        onChange={(e) => setArcusUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="arcus"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1146,109 +1075,58 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 1: Hyperliquid */}
             {selectedExchange === "hyperliquid" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Hyperliquid (L1 Perp DEX)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Hyperliquid #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Perp & Spot
-                    </span>
+                    <AccountLabelControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("hyperliquid")?.fee_bps ?? 2.0} BPS
-                    </span>
+                    <VenueDefaultControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={hlEnabled}
                       onChange={setHlEnabled}
-                      label={hlEnabled ? "Active" : "Disabled"}
+                      label={hlEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!hlEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Hyperliquid exchange is disabled. Toggle switch to enable and configure credentials.
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {/* Hyperliquid Multi-Market Option: Spot */}
-                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
-                      <div>
-                        <span className="text-xs font-bold font-mono text-slate-900 block">Hyperliquid Spot Market (HyperEVM / L1 Spot)</span>
-                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot leg routing alongside perp basis trades</span>
-                      </div>
-                      <ToggleSwitch
-                        checked={hlSpotEnabled}
-                        onChange={setHlSpotEnabled}
-                        size="sm"
-                        label={hlSpotEnabled ? "Spot Enabled" : "Spot Off"}
-                      />
+                <VenueBalancePanel
+                  bal={getVenueBalance("hyperliquid")}
+                />
+
+                <div className="space-y-3">
+                  {/* Hyperliquid Multi-Market Option: Spot */}
+                  <div className="p-3 bg-surface-raised border border-surface-border rounded-lg flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-bold font-mono text-slate-900 block">Hyperliquid Spot Market (HyperEVM / L1 Spot)</span>
+                      <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot leg routing alongside perp basis trades</span>
                     </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                      <div>
-                        <label className="text-slate-600 block mb-1">Trading EOA Wallet Address:</label>
-                        <input
-                          type="text"
-                          disabled={loading || isVaultLocked}
-                          value={hyperliquidWallet}
-                          placeholder="0x..."
-                          onChange={(e) => setHyperliquidWallet(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-slate-600">Trading Agent Private Key:</label>
-                          <button
-                            type="button"
-                            onClick={() => toggleSecret("hl_key")}
-                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                          >
-                            {showSecrets["hl_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                            <span>{showSecrets["hl_key"] ? "Hide" : "Show"}</span>
-                          </button>
-                        </div>
-                        <input
-                          type={showSecrets["hl_key"] ? "text" : "password"}
-                          disabled={loading || isVaultLocked}
-                          value={hyperliquidPrivateKey}
-                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                          onChange={(e) => setHyperliquidPrivateKey(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Account Index (Optional):</label>
-                        <input
-                          type="number"
-                          disabled={loading || isVaultLocked}
-                          value={hyperliquidAccountIndex}
-                          placeholder="Default: 0"
-                          onChange={(e) => setHyperliquidAccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                        <input
-                          type="number"
-                          disabled={loading || isVaultLocked}
-                          value={hyperliquidSubaccountIndex}
-                          placeholder="Default: None"
-                          onChange={(e) => setHyperliquidSubaccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-                    </div>
+                    <ToggleSwitch
+                      checked={hlSpotEnabled}
+                      onChange={setHlSpotEnabled}
+                      size="sm"
+                      label={hlSpotEnabled ? "Spot Enabled" : "Spot Off"}
+                    />
                   </div>
-                )}
+
+                  <VenueAccountsSection
+                    venue="hyperliquid"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+                </div>
+              </div>
+
+              <AddAccountSlot
+                venue="hyperliquid"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1256,259 +1134,139 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 7: Kalshi */}
             {selectedExchange === "kalshi" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Kalshi (CFTC Binary)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Kalshi #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Regulated Prediction
-                    </span>
+                    <AccountLabelControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("kalshi")?.fee_bps ?? 10.0} BPS
-                    </span>
+                    <VenueDefaultControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={kalshiEnabled}
                       onChange={setKalshiEnabled}
-                      label={kalshiEnabled ? "Active" : "Disabled"}
+                      label={kalshiEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!kalshiEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Kalshi is disabled. Toggle switch to enable and configure CFTC API credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Kalshi API Key ID:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={kalshiApiKeyId}
-                        placeholder="e.g. 550e8400-e29b-..."
-                        onChange={(e) => setKalshiApiKeyId(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("kalshi")}
+                />                  <VenueAccountsSection
+                    venue="kalshi"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+              </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">RSA Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("kalshi_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["kalshi_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["kalshi_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["kalshi_key"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={kalshiPrivateKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "-----BEGIN RSA PRIVATE KEY-----"}
-                        onChange={(e) => setKalshiPrivateKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={kalshiUrl}
-                        onChange={(e) => setKalshiUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="kalshi"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
 
             {/* Exchange 5: Kraken (Spot & Futures Multi-Market) */}
             {selectedExchange === "kraken" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Kraken (Spot & Futures CLOB)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Kraken #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-purple-50 text-purple-700 border border-purple-200">
-                      Multi-Market (Spot & Futures)
-                    </span>
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("kraken")?.fee_bps ?? 16.0} BPS
-                    </span>
                     <ToggleSwitch
                       checked={krakenEnabled}
                       onChange={setKrakenEnabled}
-                      label={krakenEnabled ? "Active" : "Disabled"}
+                      label={krakenEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!krakenEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Kraken exchange is disabled. Toggle switch to enable Spot & Futures API configuration.
+                <VenueBalancePanel
+                  bal={getVenueBalance("kraken")}
+                />
+
+                <div className="space-y-4">
+                  <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg text-[11px] font-mono text-slate-600">
+                    💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Toggle each option independently to enter its respective credentials.
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-xl text-[11px] font-mono text-slate-600">
-                      💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Toggle each option independently to enter its respective credentials.
+
+                  {/* Option A: Kraken Spot Market */}
+                  <div className="p-4 bg-surface-raised border border-surface-border rounded-lg space-y-3">
+                    <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
+                        <AccountLabelControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                      </div>
+                      <VenueDefaultControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                      <ToggleSwitch
+                        checked={krakenSpotEnabled}
+                        onChange={setKrakenSpotEnabled}
+                        size="sm"
+                        label={krakenSpotEnabled ? "Spot Enabled" : "Spot Disabled"}
+                      />
                     </div>
 
-                    {/* Option A: Kraken Spot Market */}
-                    <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-3">
-                      <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-200 text-slate-700">api.kraken.com</span>
-                        </div>
-                        <ToggleSwitch
-                          checked={krakenSpotEnabled}
-                          onChange={setKrakenSpotEnabled}
-                          size="sm"
-                          label={krakenSpotEnabled ? "Spot Enabled" : "Spot Disabled"}
-                        />
-                      </div>
-
-                      {!krakenSpotEnabled ? (
-                        <div className="text-[11px] text-slate-500 font-mono py-1">
-                          Spot trading disabled for Kraken. Toggle on to configure Spot API Key & Secret.
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono pt-1">
-                          <div>
-                            <label className="text-slate-600 block mb-1">Kraken Spot API Key:</label>
-                            <input
-                              type="text"
-                              disabled={loading || isVaultLocked}
-                              value={krakenSpotApiKey}
-                              placeholder="api_key_..."
-                              onChange={(e) => setKrakenSpotApiKey(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="text-slate-600">Kraken Spot Private/Secret Key:</label>
-                              <button
-                                type="button"
-                                onClick={() => toggleSecret("kraken_spot_sec")}
-                                className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                              >
-                                {showSecrets["kraken_spot_sec"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                                <span>{showSecrets["kraken_spot_sec"] ? "Hide" : "Show"}</span>
-                              </button>
-                            </div>
-                            <input
-                              type={showSecrets["kraken_spot_sec"] ? "text" : "password"}
-                              disabled={loading || isVaultLocked}
-                              value={krakenSpotSecret}
-                              placeholder={isVaultLocked ? "••••••••••••••••" : "base64_secret..."}
-                              onChange={(e) => setKrakenSpotSecret(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-
-                          <div className="md:col-span-2">
-                            <label className="text-slate-600 block mb-1">Spot API Endpoint URL:</label>
-                            <input
-                              type="text"
-                              disabled={loading}
-                              value={krakenSpotUrl}
-                              placeholder="https://api.kraken.com"
-                              onChange={(e) => setKrakenSpotUrl(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Option B: Kraken Futures Market */}
-                    <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-3">
-                      <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
-                          <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
-                        </div>
-                        <ToggleSwitch
-                          checked={krakenFuturesEnabled}
-                          onChange={setKrakenFuturesEnabled}
-                          size="sm"
-                          label={krakenFuturesEnabled ? "Futures Enabled" : "Futures Disabled"}
-                        />
-                      </div>
-
-                      {!krakenFuturesEnabled ? (
-                        <div className="text-[11px] text-slate-500 font-mono py-1">
-                          Futures trading disabled for Kraken. Toggle on to configure Futures API Key & Secret.
-                        </div>
-                      ) : (
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono pt-1">
-                          <div>
-                            <label className="text-slate-600 block mb-1">Kraken Futures API Key:</label>
-                            <input
-                              type="text"
-                              disabled={loading || isVaultLocked}
-                              value={krakenFuturesApiKey}
-                              placeholder="futures_key_..."
-                              onChange={(e) => setKrakenFuturesApiKey(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-
-                          <div>
-                            <div className="flex items-center justify-between mb-1">
-                              <label className="text-slate-600">Kraken Futures Secret Key:</label>
-                              <button
-                                type="button"
-                                onClick={() => toggleSecret("kraken_fut_sec")}
-                                className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                              >
-                                {showSecrets["kraken_fut_sec"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                                <span>{showSecrets["kraken_fut_sec"] ? "Hide" : "Show"}</span>
-                              </button>
-                            </div>
-                            <input
-                              type={showSecrets["kraken_fut_sec"] ? "text" : "password"}
-                              disabled={loading || isVaultLocked}
-                              value={krakenFuturesSecret}
-                              placeholder={isVaultLocked ? "••••••••••••••••" : "futures_secret..."}
-                              onChange={(e) => setKrakenFuturesSecret(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-
-                          <div className="md:col-span-2">
-                            <label className="text-slate-600 block mb-1">Futures API Endpoint URL:</label>
-                            <input
-                              type="text"
-                              disabled={loading}
-                              value={krakenFuturesUrl}
-                              placeholder="https://futures.kraken.com"
-                              onChange={(e) => setKrakenFuturesUrl(e.target.value)}
-                              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                            />
-                          </div>
-                        </div>
-                      )}
+                    <div className="space-y-3 pt-1">
+                      <VenueAccountsSection
+                        venue="kraken_spot"
+                        locked={isVaultLocked}
+                        refreshKey={accountsEpoch}
+                        compact
+                        onChanged={() => setAccountsEpoch((e) => e + 1)}
+                      />
                     </div>
                   </div>
-                )}
+
+                  <AddAccountSlot
+                    venue="kraken_spot"
+                    locked={isVaultLocked}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+
+                  {/* Option B: Kraken Futures Market */}
+                  <div className="p-4 bg-surface-raised border border-surface-border rounded-lg space-y-3">
+                    <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
+                      <div className="flex items-center space-x-2">
+                        <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
+                        <AccountLabelControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                      </div>
+                      <VenueDefaultControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                      <ToggleSwitch
+                        checked={krakenFuturesEnabled}
+                        onChange={setKrakenFuturesEnabled}
+                        size="sm"
+                        label={krakenFuturesEnabled ? "Futures Enabled" : "Futures Disabled"}
+                      />
+                    </div>
+
+                    <div className="space-y-3 pt-1">
+                      <VenueAccountsSection
+                        venue="kraken_futures"
+                        locked={isVaultLocked}
+                        refreshKey={accountsEpoch}
+                        compact
+                        onChanged={() => setAccountsEpoch((e) => e + 1)}
+                      />
+                    </div>
+                  </div>
+
+                  <AddAccountSlot
+                    venue="kraken_futures"
+                    locked={isVaultLocked}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+                </div>
               </div>
             )}
 
@@ -1516,107 +1274,59 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 2: Lighter */}
             {selectedExchange === "lighter" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Lighter (zkDEX Rollup)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Lighter #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Perp & Spot CLOB
-                    </span>
+                    <AccountLabelControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("lighter")?.fee_bps ?? 1.5} BPS
-                    </span>
+                    <VenueDefaultControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={lighterEnabled}
                       onChange={setLighterEnabled}
-                      label={lighterEnabled ? "Active" : "Disabled"}
+                      label={lighterEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!lighterEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Lighter exchange is disabled. Toggle switch to enable and configure credentials.
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {/* Lighter Multi-Market Option: Spot */}
-                    <div className="p-3 bg-surface-raised border border-surface-border rounded-xl flex items-center justify-between">
-                      <div>
-                        <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
-                        <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
-                      </div>
-                      <ToggleSwitch
-                        checked={lighterSpotEnabled}
-                        onChange={setLighterSpotEnabled}
-                        size="sm"
-                        label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
-                      />
+                <VenueBalancePanel
+                  bal={getVenueBalance("lighter")}
+                />
+
+                <div className="space-y-3">
+                  {/* Lighter Multi-Market Option: Spot */}
+                  <div className="p-3 bg-surface-raised border border-surface-border rounded-lg flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
+                      <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
                     </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                      <div>
-                        <label className="text-slate-600 block mb-1">Account Index:</label>
-                        <input
-                          type="text"
-                          disabled={loading || isVaultLocked}
-                          value={lighterAccountIndex}
-                          onChange={(e) => setLighterAccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <div className="flex items-center justify-between mb-1">
-                          <label className="text-slate-600">API Private Key / Signer Token:</label>
-                          <button
-                            type="button"
-                            onClick={() => toggleSecret("lgt_key")}
-                            className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                          >
-                            {showSecrets["lgt_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                            <span>{showSecrets["lgt_key"] ? "Hide" : "Show"}</span>
-                          </button>
-                        </div>
-                        <input
-                          type={showSecrets["lgt_key"] ? "text" : "password"}
-                          disabled={loading || isVaultLocked}
-                          value={lighterApiKey}
-                          placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                          onChange={(e) => setLighterApiKey(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                        <input
-                          type="number"
-                          disabled={loading || isVaultLocked}
-                          value={lighterSubaccountIndex}
-                          placeholder="e.g. 1"
-                          onChange={(e) => setLighterSubaccountIndex(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="text-slate-600 block mb-1">Endpoint URL:</label>
-                        <input
-                          type="text"
-                          disabled={loading}
-                          value={lighterUrl}
-                          onChange={(e) => setLighterUrl(e.target.value)}
-                          className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                        />
-                      </div>
-                    </div>
+                    <ToggleSwitch
+                      checked={lighterSpotEnabled}
+                      onChange={setLighterSpotEnabled}
+                      size="sm"
+                      label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
+                    />
                   </div>
-                )}
+
+                  <VenueAccountsSection
+                    venue="lighter"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+
+                </div>
+              </div>
+
+              <AddAccountSlot
+                venue="lighter"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1624,102 +1334,40 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 6: Polymarket */}
             {selectedExchange === "polymarket" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Polymarket (CTF CLOB)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Polymarket #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Prediction Market
-                    </span>
+                    <AccountLabelControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("polymarket")?.fee_bps ?? 0.0} BPS
-                    </span>
+                    <VenueDefaultControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={polymarketEnabled}
                       onChange={setPolymarketEnabled}
-                      label={polymarketEnabled ? "Active" : "Disabled"}
+                      label={polymarketEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!polymarketEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Polymarket is disabled. Toggle switch to enable and configure CTF credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Polymarket API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={polymarketApiKey}
-                        placeholder="0x..."
-                        onChange={(e) => setPolymarketApiKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("polymarket")}
+                />                  <VenueAccountsSection
+                    venue="polymarket"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+              </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Polymarket Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("pm_secret")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["pm_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["pm_secret"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["pm_secret"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={polymarketSecret}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                        onChange={(e) => setPolymarketSecret(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Polymarket Passphrase:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("pm_pass")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["pm_pass"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["pm_pass"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["pm_pass"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={polymarketPassphrase}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "passphrase"}
-                        onChange={(e) => setPolymarketPassphrase(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Endpoint URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={polymarketUrl}
-                        onChange={(e) => setPolymarketUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="polymarket"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1727,70 +1375,40 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange: PopDEX */}
             {selectedExchange === "popdex" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      PopDEX (Arbitrage Protocol)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      PopDEX #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Lighter Multi-Leg Hybrid
-                    </span>
+                    <AccountLabelControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("popdex")?.fee_bps ?? 2.0} BPS
-                    </span>
+                    <VenueDefaultControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={popdexEnabled}
                       onChange={setPopdexEnabled}
-                      label={popdexEnabled ? "Active" : "Disabled"}
+                      label={popdexEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!popdexEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    PopDEX is disabled. Toggle switch to enable and configure API credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Account Index / Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={popdexAccountIndex}
-                        placeholder="0"
-                        onChange={(e) => setPopdexAccountIndex(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("popdex")}
+                />                  <VenueAccountsSection
+                    venue="popdex"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+              </div>
 
-                    <div>
-                      <label className="text-slate-600 block mb-1">API Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={popdexApiKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "pop_..."}
-                        onChange={(e) => setPopdexApiKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div className="md:col-span-2">
-                      <label className="text-slate-600 block mb-1">REST Endpoint:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={popdexUrl}
-                        onChange={(e) => setPopdexUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="popdex"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1798,91 +1416,40 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 4: Robinhood EVM */}
             {selectedExchange === "robinhood" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Robinhood Chain (Arbitrum L2 EVM)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Robinhood Lighter #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      DEX Aggregator Router
-                    </span>
+                    <AccountLabelControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("robinhood")?.fee_bps ?? 2.5} BPS
-                    </span>
+                    <VenueDefaultControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={robinhoodEnabled}
                       onChange={setRobinhoodEnabled}
-                      label={robinhoodEnabled ? "Active" : "Disabled"}
+                      label={robinhoodEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!robinhoodEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Robinhood EVM is disabled. Toggle switch to enable and configure signer credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">EVM Signer Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={robinhoodWallet}
-                        placeholder="0x..."
-                        onChange={(e) => setRobinhoodWallet(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("robinhood")}
+                />                  <VenueAccountsSection
+                    venue="robinhood"
+                    locked={isVaultLocked}
+                    refreshKey={accountsEpoch}
+                    onChanged={() => setAccountsEpoch((e) => e + 1)}
+                  />
+              </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Signer Private Key:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("rh_key")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["rh_key"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["rh_key"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["rh_key"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={robinhoodPrivateKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "0x..."}
-                        onChange={(e) => setRobinhoodPrivateKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">RPC URL:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={robinhoodRpcUrl}
-                        onChange={(e) => setRobinhoodRpcUrl(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Router Address:</label>
-                      <input
-                        type="text"
-                        disabled={loading}
-                        value={robinhoodRouter}
-                        onChange={(e) => setRobinhoodRouter(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="robinhood"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
@@ -1890,144 +1457,456 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
             {/* Exchange 3: Vanta */}
             {selectedExchange === "vanta" && (
-              <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-3">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
-                      Vanta.exchange (Orderly Network)
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Vanta #1
                     </h3>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200">
-                      Ed25519 Orderly
-                    </span>
+                    <AccountLabelControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
-                    <span className="text-[11px] font-mono text-slate-400">
-                      Fee: {getVenueInfo("vanta")?.fee_bps ?? 3.0} BPS
-                    </span>
+                    <VenueDefaultControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                     <ToggleSwitch
                       checked={vantaEnabled}
                       onChange={setVantaEnabled}
-                      label={vantaEnabled ? "Active" : "Disabled"}
+                      label={vantaEnabled ? "Active" : undefined}
                     />
                   </div>
                 </div>
 
-                {!vantaEnabled ? (
-                  <div className="p-3.5 bg-surface-raised border border-surface-border rounded-xl text-center text-xs font-mono text-slate-500">
-                    Vanta exchange is disabled. Toggle switch to enable and configure Orderly credentials.
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-                    <div>
-                      <label className="text-slate-600 block mb-1">Orderly Account ID:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={vantaAccountId}
-                        placeholder="0x..."
-                        onChange={(e) => setVantaAccountId(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueBalancePanel
+                  bal={getVenueBalance("vanta")}
+                />
 
-                    <div>
-                      <label className="text-slate-600 block mb-1">Orderly ED25519 Key:</label>
-                      <input
-                        type="text"
-                        disabled={loading || isVaultLocked}
-                        value={vantaOrderlyKey}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "ed25519:..."}
-                        onChange={(e) => setVantaOrderlyKey(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
+                <VenueAccountsSection
+                  venue="vanta"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
 
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-slate-600">Orderly Secret:</label>
-                        <button
-                          type="button"
-                          onClick={() => toggleSecret("vanta_secret")}
-                          className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
-                        >
-                          {showSecrets["vanta_secret"] ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                          <span>{showSecrets["vanta_secret"] ? "Hide" : "Show"}</span>
-                        </button>
-                      </div>
-                      <input
-                        type={showSecrets["vanta_secret"] ? "text" : "password"}
-                        disabled={loading || isVaultLocked}
-                        value={vantaOrderlySecret}
-                        placeholder={isVaultLocked ? "••••••••••••••••" : "secret"}
-                        onChange={(e) => setVantaOrderlySecret(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="text-slate-600 block mb-1">Subaccount Index (Optional):</label>
-                      <input
-                        type="number"
-                        disabled={loading || isVaultLocked}
-                        value={vantaSubaccountIndex}
-                        placeholder="e.g. 0"
-                        onChange={(e) => setVantaSubaccountIndex(e.target.value)}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                      />
-                    </div>
-                  </div>
-                )}
+              <AddAccountSlot
+                venue="vanta"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
               </div>
             )}
 
+            {/* Exchange: Aster */}
+            {selectedExchange === "aster" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Aster #1
+                    </h3>
+                    <AccountLabelControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={asterEnabled}
+                      onChange={setAsterEnabled}
+                      label={asterEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("aster")}
+                />
+
+                <VenueAccountsSection
+                  venue="aster"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="aster"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: Binance */}
+            {selectedExchange === "binance" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Binance #1
+                    </h3>
+                    <AccountLabelControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={binanceEnabled}
+                      onChange={setBinanceEnabled}
+                      label={binanceEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("binance")}
+                />
+
+                <VenueAccountsSection
+                  venue="binance"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="binance"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: Coinbase */}
+            {selectedExchange === "coinbase" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Coinbase #1
+                    </h3>
+                    <AccountLabelControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={coinbaseEnabled}
+                      onChange={setCoinbaseEnabled}
+                      label={coinbaseEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("coinbase")}
+                />
+
+                <VenueAccountsSection
+                  venue="coinbase"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="coinbase"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: Decibel */}
+            {selectedExchange === "decibel" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Decibel #1
+                    </h3>
+                    <AccountLabelControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={decibelEnabled}
+                      onChange={setDecibelEnabled}
+                      label={decibelEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("decibel")}
+                />
+
+                <VenueAccountsSection
+                  venue="decibel"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="decibel"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: Interactive Brokers */}
+            {selectedExchange === "ibkr" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Interactive Brokers #1
+                    </h3>
+                    <AccountLabelControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={ibkrEnabled}
+                      onChange={setIbkrEnabled}
+                      label={ibkrEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("ibkr")}
+                />
+
+                <VenueAccountsSection
+                  venue="ibkr"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="ibkr"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: IG Trading */}
+            {selectedExchange === "ig" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      IG Trading #1
+                    </h3>
+                    <AccountLabelControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={igEnabled}
+                      onChange={setIgEnabled}
+                      label={igEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("ig")}
+                />
+
+                <VenueAccountsSection
+                  venue="ig"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="ig"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: OKX */}
+            {selectedExchange === "okx" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      OKX #1
+                    </h3>
+                    <AccountLabelControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={okxEnabled}
+                      onChange={setOkxEnabled}
+                      label={okxEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("okx")}
+                />
+
+                <VenueAccountsSection
+                  venue="okx"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="okx"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
+
+            {/* Exchange: Variational */}
+            {selectedExchange === "variational" && (
+              <div className="space-y-4">
+              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                      Variational #1
+                    </h3>
+                    <AccountLabelControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                  </div>
+                  <div className="flex items-center space-x-3">
+                    <VenueDefaultControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                    <ToggleSwitch
+                      checked={variationalEnabled}
+                      onChange={setVariationalEnabled}
+                      label={variationalEnabled ? "Active" : undefined}
+                    />
+                  </div>
+                </div>
+
+                <VenueBalancePanel
+                  bal={getVenueBalance("variational")}
+                />
+
+                <VenueAccountsSection
+                  venue="variational"
+                  locked={isVaultLocked}
+                  refreshKey={accountsEpoch}
+                  onChanged={() => setAccountsEpoch((e) => e + 1)}
+                />
+              </div>
+
+              <AddAccountSlot
+                venue="variational"
+                locked={isVaultLocked}
+                onChanged={() => setAccountsEpoch((e) => e + 1)}
+              />
+              </div>
+            )}
 
 
               </div>
 
               {/* Locked Vault Overlay: Completely Greys Out the Exchange Configuration */}
               {isVaultLocked && (
-                <div className="absolute inset-0 z-40 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
-                  <div className="bg-white rounded-2xl p-6 shadow-2xl w-80 text-center space-y-4 border border-slate-200 animate-in zoom-in-95 duration-150">
-                    <div className="w-12 h-12 rounded-2xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
-                      <Lock className="w-5 h-5 text-accent" />
+                <div className="absolute inset-0 z-40 bg-slate-100 flex items-center justify-center p-4 animate-in fade-in duration-150">
+                  <div className="bg-white rounded-xl p-6 shadow-2xl w-80 text-center space-y-4 border border-slate-200 animate-in zoom-in-95 duration-150">
+                    <div className="w-12 h-12 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
+                      {api.isTauri && isVaultInitializing ? (
+                        <Key className="w-5 h-5 text-accent" />
+                      ) : (
+                        <Lock className="w-5 h-5 text-accent" />
+                      )}
                     </div>
                     {api.isTauri ? (
                       <>
                         <div>
-                          <h4 className="text-sm font-bold font-mono text-slate-900">Vault Locked</h4>
+                          <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                            {isVaultStatusLoading
+                              ? "Checking Secure Vault"
+                              : isVaultInitializing
+                              ? "Create Password"
+                              : "Vault Locked"}
+                          </h4>
                           <p className="text-xs text-slate-500 font-sans mt-1">
-                            Enter master passcode to unlock exchange API credentials
+                            {isVaultStatusLoading
+                              ? "Loading local vault status..."
+                              : isVaultInitializing
+                              ? "Create a password to encrypt exchange API credentials"
+                              : "Enter your password to unlock exchange API credentials"}
                           </p>
                         </div>
 
                         {inlineVaultError && (
-                          <div className="p-2 bg-red-50 border border-red-200 rounded-lg text-[11px] font-mono text-red-600">
+                          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-[11px] font-mono text-red-600">
                             {inlineVaultError}
                           </div>
                         )}
 
-                        <form onSubmit={(e) => { e.preventDefault(); handleInlineUnlock(e); }} className="space-y-3">
-                          <input
-                            type="password"
-                            value={inlinePasscode}
-                            onChange={(e) => setInlinePasscode(e.target.value)}
-                            placeholder="Enter master passcode..."
-                            autoFocus
-                            className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
-                          />
-                          <button
-                            type="button"
-                            onClick={(e) => { e.preventDefault(); handleInlineUnlock(); }}
-                            disabled={inlineUnlocking || !inlinePasscode}
-                            className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-xl transition shadow-xs disabled:opacity-50 cursor-pointer"
-                          >
-                            {inlineUnlocking ? "Unlocking..." : "Unlock Vault"}
-                          </button>
-                        </form>
+                        {!isVaultStatusLoading && (
+                          <div className="space-y-3">
+                            <input
+                              type="password"
+                              value={inlinePassword}
+                              onChange={(e) => setInlinePassword(e.target.value)}
+                              onKeyDown={handleInlineVaultKeyDown}
+                              placeholder={isVaultInitializing ? "Create password..." : "Enter password..."}
+                              autoComplete={isVaultInitializing ? "new-password" : "current-password"}
+                              autoFocus
+                              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                            />
+                            {isVaultInitializing && (
+                              <>
+                                <input
+                                  type="password"
+                                  value={inlineConfirmPassword}
+                                  onChange={(e) => setInlineConfirmPassword(e.target.value)}
+                                  onKeyDown={handleInlineVaultKeyDown}
+                                  placeholder="Confirm password..."
+                                  autoComplete="new-password"
+                                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                                />
+                                <p className="text-[10px] text-slate-500 font-sans leading-relaxed">
+                                  Use at least 6 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer, and this password cannot be recovered.
+                                </p>
+                              </>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => void handleInlineVaultSubmit()}
+                              disabled={inlineUnlocking || !vaultStatus || !inlinePassword || (isVaultInitializing && !inlineConfirmPassword)}
+                              className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-lg transition shadow-xs disabled:opacity-50 cursor-pointer"
+                            >
+                              {inlineUnlocking
+                                ? isVaultInitializing ? "Creating Vault..." : "Unlocking..."
+                                : isVaultInitializing ? "Create & Unlock Vault" : "Unlock Vault"}
+                            </button>
+                          </div>
+                        )}
                       </>
                     ) : (
                       <div>
-                        <h4 className="text-sm font-bold font-mono text-slate-900">Browser Demo Mode</h4>
+                        <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">Desktop Application Required</h4>
                         <p className="text-xs text-slate-500 font-sans mt-1">
                           Secure credential storage is available only in the desktop application.
                         </p>
@@ -2040,113 +1919,115 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
           ) : (
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
               {errorMsg && (
-                <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-mono flex items-center space-x-2">
+                <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{errorMsg}</span>
                 </div>
               )}
 
               {saved && (
-                <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
                 </div>
               )}
         {/* =================================================================== */}
+        {/* SECTION 2B: STRATEGY ACCOUNT ROUTING                               */}
+        {/* =================================================================== */}
+        {activeTab === "strategies" && (
+          <div className="max-w-4xl mx-auto w-full">
+            <StrategyRoutingPanel />
+          </div>
+        )}
+
+        {/* =================================================================== */}
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
         {/* =================================================================== */}
         {activeTab === "execution" && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
-            <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
-                <Sliders className="w-4 h-4 text-accent" />
-                <span>Execution Modes & Cache Warm-Up Guardrails</span>
-              </h3>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                Configure live order execution vs paper simulation and orderbook persistence
+          <div className="max-w-4xl mx-auto w-full grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+            {/* Trading Mode */}
+            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
+              <label className="text-slate-800 font-bold text-xs flex items-center">
+                Trading Mode
+                <InfoTooltip
+                  position="bottom"
+                  text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts — currently disabled because authenticated order signing and submission are not implemented yet."}
+                />
+              </label>
+              <p className="text-[11px] text-slate-500">
+                {hasApiConnectivity
+                  ? "Both modes require exchange API connectivity for market data."
+                  : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
+              </p>
+
+              <div className="flex items-center space-x-3 pt-1">
+                <label
+                  className={`flex items-center space-x-2 ${hasApiConnectivity ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                  title={hasApiConnectivity ? undefined : "Requires at least one connected exchange API for market data"}
+                >
+                  <input
+                    type="radio"
+                    name="trading_mode"
+                    value="paper"
+                    checked={tradingMode === "paper"}
+                    onChange={() => setTradingMode("paper")}
+                    disabled={!hasApiConnectivity}
+                    className="text-accent focus:ring-accent"
+                  />
+                  <span className="font-semibold text-slate-800">Paper Trading</span>
+                </label>
+                <label
+                  className="flex items-center space-x-2 cursor-not-allowed opacity-60"
+                  title={
+                    hasApiConnectivity
+                      ? "Authenticated order signing and submission is not implemented yet"
+                      : "Requires at least one connected exchange API for market data"
+                  }
+                >
+                  <input
+                    type="radio"
+                    name="trading_mode"
+                    value="real"
+                    checked={tradingMode === "real"}
+                    disabled
+                    className="text-accent focus:ring-accent"
+                  />
+                  <span className="font-semibold text-slate-800">Real Trading</span>
+                </label>
+              </div>
+            </div>
+
+            {/* Orderbook Fast Warm-up */}
+            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
+              <div className="flex items-center justify-between">
+                <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
+                <ToggleSwitch
+                  checked={fastWarmupEnabled}
+                  onChange={setFastWarmupEnabled}
+                  disabled={loading}
+                />
+              </div>
+              <p className="text-[11px] text-slate-500">
+                {fastWarmupEnabled
+                  ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
+                  : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
               </p>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
-              {/* Trading Mode Radio Card */}
-              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
-                <label className="text-slate-800 font-bold block text-xs">Trading Mode</label>
-                <p className="text-[11px] text-slate-500">
-                  Switch between paper simulation and active DEX order placement:
-                </p>
-
-                <div className="flex items-center space-x-3 pt-1">
-                  <label className="flex items-center space-x-2 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="trading_mode"
-                      value="paper"
-                      checked={tradingMode === "paper"}
-                      onChange={() => setTradingMode("paper")}
-                      className="text-accent focus:ring-accent"
-                    />
-                    <span className="font-semibold text-slate-800">Paper Trading (Live Feeds)</span>
-                  </label>
-                  <label className="flex items-center space-x-2 cursor-not-allowed opacity-60">
-                    <input
-                      type="radio"
-                      name="trading_mode"
-                      value="real"
-                      checked={tradingMode === "real"}
-                      disabled
-                      className="text-amber-600 focus:ring-amber-500"
-                    />
-                    <span className="font-semibold text-amber-800">Real Trading (Unavailable — authenticated execution not implemented)</span>
-                  </label>
-                </div>
-              </div>
-
-              {/* Orderbook Fast Warm-up Toggle */}
-              <div className="p-4 bg-surface-raised border border-surface-border rounded-xl space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
-                  <input
-                    type="checkbox"
-                    checked={fastWarmupEnabled}
-                    onChange={(e) => setFastWarmupEnabled(e.target.checked)}
-                    className="w-4 h-4 text-accent rounded focus:ring-accent"
-                  />
-                </div>
-                <p className="text-[11px] text-slate-500">
-                  {fastWarmupEnabled
-                    ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
-                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
-                </p>
-              </div>
-
-              {/* Max Slippage */}
-              <div>
-                <label className="text-slate-600 block mb-1">Max Slippage Tolerance (BPS):</label>
-                <input
-                  type="number"
-                  step="1"
-                  min="1"
-                  disabled={loading}
-                  value={maxSlippageBps}
-                  onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 15)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
-
-              {/* Venue Rebalance Threshold */}
-              <div>
-                <label className="text-slate-600 block mb-1">Venue Rebalance Warning Threshold ($ USD):</label>
-                <input
-                  type="number"
-                  step="50"
-                  min="100"
-                  disabled={loading}
-                  value={venueRebalanceThresholdUsd}
-                  onChange={(e) => setVenueRebalanceThresholdUsd(parseFloat(e.target.value) || 500)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
+            {/* Max Slippage */}
+            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
+              <label className="text-slate-800 font-bold block text-xs">Max Slippage Tolerance (BPS)</label>
+              <input
+                type="number"
+                step="1"
+                min="1"
+                disabled={loading}
+                value={maxSlippageBps}
+                onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 15)}
+                className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+              />
             </div>
+
           </div>
         )}
 
@@ -2154,9 +2035,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
         {activeTab === "network" && (
-          <div className="bg-surface border border-surface-border rounded-2xl p-5 space-y-4 shadow-xs">
+          <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
             <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900 flex items-center space-x-2">
+              <h3 className="text-xs font-mono font-bold text-slate-900 flex items-center space-x-2">
                 <Globe className="w-4 h-4 text-accent" />
                 <span>Engine Ports & 24/7 VPS Background Daemon</span>
               </h3>
@@ -2173,7 +2054,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   disabled={loading}
                   value={engineRpcPort}
                   onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -2184,7 +2065,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   disabled={loading}
                   value={engineWsPort}
                   onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -2196,24 +2077,24 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   value={bindAddress}
                   placeholder="127.0.0.1 or 0.0.0.0"
                   onChange={(e) => setBindAddress(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-xl text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                 />
               </div>
             </div>
 
             {/* VPS Daemon Deployment Guide */}
-            <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-xs font-mono text-slate-700">
+            <div className="p-4 bg-slate-50 border border-surface-border rounded-lg space-y-2 text-xs font-mono text-slate-700">
               <h4 className="font-bold text-slate-900 flex items-center space-x-1.5">
                 <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
               </h4>
               <p className="text-[11px] text-slate-600">
                 To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
-              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-[11px] overflow-x-auto select-text font-mono">
+              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-md text-[11px] overflow-x-auto select-text font-mono">
                 <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787</code>
               </div>
               <p className="text-[10px] text-slate-500">
-                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded">systemctl start arbitrager</code>) to auto-restart on server reboot.
+                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-sm">systemctl start arbitrager</code>) to auto-restart on server reboot.
               </p>
             </div>
           </div>
@@ -2224,14 +2105,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         {/* =================================================================== */}
         {activeTab === "about" && (
           <div className="space-y-4">
-            <div className="bg-surface border border-surface-border rounded-2xl p-6 shadow-xs space-y-5">
+            <div className="bg-surface border border-surface-border rounded-xl p-6 shadow-xs space-y-5">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
                 <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
+                  <div className="w-10 h-10 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
                     <ArbitragerLogo size={22} className="text-accent" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold font-mono text-slate-900">
+                    <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900">
                       About Arbitrager ({version})
                     </h3>
                   </div>
@@ -2242,7 +2123,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
@@ -2252,7 +2133,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     href={gitRepo}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-xl text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
                   >
                     <span>Git Repository</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -2261,27 +2142,24 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
 
               {updateMsg && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-mono flex items-center space-x-2">
+                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg text-xs font-mono flex items-center space-x-2">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                   <span>{updateMsg}</span>
                 </div>
               )}
 
               {/* Sponsor Card: Buy me a SOLO */}
-              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
                 <div className="flex items-center space-x-4">
                   <img
                     src="/solo_can.jpg"
                     alt="Can of Australian SOLO Lemon Soda"
-                    className="w-14 h-14 object-contain rounded-xl shadow-xs border border-amber-200 bg-white"
+                    className="w-14 h-14 object-contain rounded-lg shadow-xs border border-amber-200 bg-white"
                   />
                   <div>
-                    <h4 className="text-sm font-bold font-mono text-slate-900">
-                      Enjoying the tool? Buy me a SOLO!
+                    <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                      Enjoying The Tool? Buy Me A SOLO!
                     </h4>
-                    <p className="text-xs text-slate-600 font-mono mt-0.5">
-                      Fuel the research and development of ultra-low latency quantitative arbitrage strategies.
-                    </p>
                   </div>
                 </div>
 
@@ -2289,7 +2167,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   href={sponsorLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-xl transition shadow-xs flex items-center space-x-2 shrink-0"
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-lg transition shadow-xs flex items-center space-x-2 shrink-0"
                 >
                   <span>Buy me a SOLO ($5)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -2297,8 +2175,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
 
               {/* Legal & Financial Disclaimer */}
-              <div className="p-4 bg-slate-50 border border-surface-border rounded-xl space-y-2 text-[11px] font-mono text-slate-600 leading-relaxed">
-                <div className="flex items-center space-x-1.5 font-bold text-slate-800 uppercase text-[10px]">
+              <div className="p-4 bg-slate-50 border border-surface-border rounded-lg space-y-2 text-[11px] font-mono text-slate-600 leading-relaxed">
+                <div className="flex items-center space-x-1.5 font-bold text-slate-800 text-[10px]">
                   <Scale className="w-3.5 h-3.5 text-slate-500" />
                   <span>Legal & Financial Risk Disclaimer</span>
                 </div>
@@ -2320,11 +2198,11 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
       <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
         {/* Relocated Trading Mode Indicator on bottom-left */}
         <div
-          className="px-2.5 py-1.5 rounded-lg border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1.5 shadow-2xs"
+          className="px-2.5 py-1.5 rounded-md border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1.5 shadow-2xs"
           title={`Execution mode: ${tradingMode.toUpperCase()}`}
         >
           <span className="text-slate-400 font-normal">Mode:</span>
-          <span className="font-bold text-accent uppercase">{tradingMode}</span>
+          <span className="font-bold text-accent">{tradingMode}</span>
         </div>
 
         <div className="flex items-center space-x-2.5">
@@ -2332,15 +2210,15 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-xl transition shadow-xs cursor-pointer"
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-lg transition shadow-xs cursor-pointer"
             >
-              Done
+              Cancel
             </button>
           )}
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-xl transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
           >
             {saving ? (
               <span>Saving...</span>

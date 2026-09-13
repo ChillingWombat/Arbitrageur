@@ -2,6 +2,7 @@
 
 mod commands;
 mod state;
+mod state_store;
 mod vault;
 
 use std::sync::Arc;
@@ -21,7 +22,9 @@ fn main() {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    let engine_state = Arc::new(AppEngineState::new());
+    let engine_state = Arc::new(
+        AppEngineState::new_persistent().expect("failed to initialize durable application state"),
+    );
 
     tauri::Builder::default()
         .manage(engine_state)
@@ -34,6 +37,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_system_status,
             commands::fetch_orderbooks,
+            commands::get_ticker_volumes,
+            commands::get_signal_series,
             commands::scan_spatial_opportunities,
             commands::scan_spot_opportunities,
             commands::execute_spot_arbitrage,
@@ -50,6 +55,7 @@ fn main() {
             commands::get_risk_overview,
             commands::reset_circuit_breaker,
             commands::trigger_emergency_killswitch,
+            commands::flatten_ticker_positions,
             commands::get_execution_logs,
             commands::set_live_mode,
             commands::set_engine_paused,
@@ -63,6 +69,17 @@ fn main() {
             commands::unlock_vault,
             commands::lock_vault,
             commands::delete_exchange_credentials,
+            commands::list_accounts,
+            commands::upsert_account,
+            commands::delete_account,
+            commands::set_default_account,
+            commands::list_strategy_routes,
+            commands::upsert_strategy_route,
+            commands::delete_strategy_route,
+            commands::eligible_strategy_routes,
+            commands::execute_spatial_candidates,
+            commands::list_signal_executions,
+            commands::get_ticker_position_state,
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::run_wfo_calibration,

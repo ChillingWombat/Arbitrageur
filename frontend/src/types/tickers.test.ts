@@ -4,6 +4,7 @@ import {
   PERP_TICKERS,
   getEnabledConnectedVenueCodes,
   getTickerActiveVenues,
+  getTickerAvgVolumeUsd,
   filterAvailableTickers,
   type PerpTicker,
   type VenueSettingsFilter,
@@ -99,6 +100,28 @@ test("filterAvailableTickers on full PERP_TICKERS universe returns 0 when unconf
   const configuredCodes = new Set(["HL", "LGT", "VNT", "RH", "ARC", "POP"]);
   const available = filterAvailableTickers(PERP_TICKERS, configuredCodes, 2);
   assert.strictEqual(available.length, 52);
+});
+
+test("getTickerAvgVolumeUsd averages across reporting venues and normalizes venue asset names", () => {
+  const venueVolumes: { venue_id: string; volumes: Record<string, number> }[] = [
+    { venue_id: "hyperliquid", volumes: { BTC: 3_000_000_000, kPEPE: 12_000_000, SOL: 800_000_000 } },
+    { venue_id: "lighter", volumes: { BTC: 1_000_000_000, PEPE: 8_000_000 } },
+  ];
+
+  // Mean of reporting venues
+  assert.strictEqual(getTickerAvgVolumeUsd("BTC", venueVolumes), 2_000_000_000);
+  // k-prefixed HL asset matches plain base; averaged with Lighter's plain name
+  assert.strictEqual(getTickerAvgVolumeUsd("PEPE", venueVolumes), 10_000_000);
+  // Case-insensitive base lookup
+  assert.strictEqual(getTickerAvgVolumeUsd("sol", venueVolumes), 800_000_000);
+  // No venue reports the asset -> undefined (never a fabricated zero)
+  assert.strictEqual(getTickerAvgVolumeUsd("TAO", venueVolumes), undefined);
+  // Zero/invalid venue entries are ignored rather than dragging the mean down
+  const withZero: { venue_id: string; volumes: Record<string, number> }[] = [
+    { venue_id: "hyperliquid", volumes: { BTC: 0, ETH: 5_000_000 } },
+  ];
+  assert.strictEqual(getTickerAvgVolumeUsd("BTC", withZero), undefined);
+  assert.strictEqual(getTickerAvgVolumeUsd("ETH", withZero), 5_000_000);
 });
 
 test("getTickerActiveVenues returns only active venue subset", () => {

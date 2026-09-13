@@ -1,45 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { api } from "./api.ts";
+import { api, DESKTOP_REQUIRED_ERROR } from "./api.ts";
 
-test("pause and continue switches engine pause state without clearing positions", async () => {
-  // 1. Initial state: not paused
-  const status1 = await api.getSystemStatus();
-  assert.equal(status1.is_paused ?? false, false);
+// The synthetic browser demo engine was removed: outside the desktop app
+// every engine call must fail closed rather than fabricate state.
+test("engine calls fail closed without the desktop application", async () => {
+  const expected = new RegExp(DESKTOP_REQUIRED_ERROR);
 
-  // 2. Pause trading
-  const paused = await api.setEnginePaused(true);
-  assert.equal(paused, true);
-  const status2 = await api.getSystemStatus();
-  assert.equal(status2.is_paused, true);
-
-  // 3. Trade execution rejects while paused
+  await assert.rejects(api.getSystemStatus(), expected);
+  await assert.rejects(api.setEnginePaused(true), expected);
+  await assert.rejects(api.setEnginePaused(false), expected);
   await assert.rejects(
-    async () => {
-      await api.executeSpatialArbitrage(
-        "BTC-USDC",
-        "hyperliquid",
-        "lighter",
-        0.01
-      );
-    },
-    {
-      message: /PAUSED/,
-    }
+    api.executeSpatialArbitrage("BTC-USDC", "hyperliquid", "lighter", 0.01),
+    expected,
   );
-
-  // 4. Continue trading
-  const continued = await api.setEnginePaused(false);
-  assert.equal(continued, false);
-  const status3 = await api.getSystemStatus();
-  assert.equal(status3.is_paused, false);
-
-  // 5. Trade execution succeeds when continued
-  const result = await api.executeSpatialArbitrage(
-    "BTC-USDC",
-    "hyperliquid",
-    "lighter",
-    0.01
-  );
-  assert.ok(result.execution_success);
+  await assert.rejects(api.getRiskOverview(), expected);
+  await assert.rejects(api.getExecutionLogs(), expected);
 });

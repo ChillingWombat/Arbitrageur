@@ -188,9 +188,9 @@ cd frontend/src-tauri
 cargo test --bin arbitrager-desktop
 cd ../..
 
-# 3. Run frontend unit tests (22 passing vitest tests)
+# 3. Run frontend unit tests (node:test via --experimental-strip-types; 32 passing tests)
 cd frontend
-npm test -- --run
+npm test
 cd ..
 
 # 4. Build frontend production assets
@@ -210,6 +210,10 @@ DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
 
 ## 6. Open Items & Backlog for Future Sessions
 
+0. **Adaptive Dislocation Analytics & Auto-Calibrated Parameters** *(spec published — [GitHub Issue #3](https://github.com/Dav1D1010/Arbitrager/issues/3), label `ready-for-agent`)*:
+   - Persist venue mid/dislocation samples in SQLite WAL; compute deviation series + analytics in `arbitrager-math` (not the frontend); chart windows default to the bot's trailing window and extend to days via rollups.
+   - Seasonality (hour-of-day, day-of-week), per-pair mean/half-life, regime-shift detection; parameter recommendations (hurdle, window, units, leverage) validated out-of-sample via existing WFO module; opt-in auto-tune modes; curated default presets for distribution.
+   - Data-first mandate: accumulate our own corpus and analyze patterns before offering auto-tune to external users.
 1. **WebSocket Orderbook Streaming Integration**:
    - Hyperliquid already features direct REST/WS endpoints.
    - Wire persistent WebSockets for Lighter zkDEX, Vanta (Orderly), and Robinhood EVM to achieve continuous sub-10ms quote updates.
@@ -223,4 +227,93 @@ DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
    - Package systemd service templates (`arbitrager@9100.service`, `arbitrager@9101.service`) for multi-instance deployment on remote Ubuntu VPS instances.
 
 ---
-*Security Notice: All API keys, secrets, private keys, and passcodes are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*
+
+## 7. Session Handoff — 2026-09-13 (UI Truthfulness, Lifecycle Controls, Liquidity Sort, Signal Trend)
+
+### 7.1 Theme
+Continuation of the fail-closed, zero-synthetic-data posture: purged remaining fabricated UI fallbacks, unified strategy-page ribbon/lifecycle behavior, split telemetry from execution history, automated the log stream, added a real-data liquidity sort, and shipped the Signal Trend dislocation chart — culminating in a published spec for the adaptive analytics/calibration subsystem.
+
+### 7.2 Synthetic-Data Purge (final sweep)
+- **StatArbLab**: fabricated fallbacks removed — `18.6200` hedge ratio, `$0.00` residual, `0.00 Z` now render `—`; Z-score no longer claims profit-green on a fake zero.
+- **PortfolioMonitor**: fake `+0.0%`/`100.0% safe` liquidation-buffer fallback and 100%-full green bar replaced with `—` and an empty bar; same for margin utilization. Fake `max_drawdown_limit_usd` fallback removed.
+- **Kept deliberately (not synthetic)**: FundingRadar `$25,000` = user-configured `fundingTradeSize`; PredictionHub `$1.00` payout = structural Arrow-Debreu settlement constant.
+- **TickerLogMonitor heartbeat**: hardcoded `estFees = 7.6 BPS` replaced by per-route fees derived from `EXCHANGES_ALPHABETICAL` venue metadata; unresolved routes report gross spread + "route fees unresolved".
+
+### 7.3 Bot Lifecycle Controls — Unified Gating
+- `BotLifecycleControls.tsx` shared component: Start/Pause/Reduce Only/Stop + phase badge.
+- **`disabled` gates Start only** (entry action); Pause, Reduce Only, and Stop stay available per phase/positions so risk-reducing exits are never locked out when connectivity drops mid-run.
+- Disabled buttons keep visible edges: `border-surface-border` + `bg-surface-raised/40` (was `border-transparent`).
+- All five strategy pages accept `hasApiConnectivity` (default `false`, fail-closed), wired from `App.tsx` as `activeVenueCodes.size >= 2` — same source as Spread Range.
+
+### 7.4 Log Monitor Automation
+- "Manual Scanning" removed → feed-status dot: **Live Feed** (pulsing) / **Awaiting Market Data**; PAUSED badge retained.
+- Telemetry logs generate on **every** orderbook update regardless of bot state; hurdle breaches log `TRIGGER` when running vs `EVAL` ("entries disabled, monitoring only") when idle.
+- Per-symbol persistence to `localStorage` (`ticker-log-monitor:<symbol>`, capped 500); Clear wipes the persisted stream.
+- Depth filter dropdown: Last 50/100/200/500, Last 1h, Last 24h, All.
+
+### 7.5 Telemetry/History Split & Ribbon Alignment
+- `TickerTelemetryGadget.tsx` (new): KPI grid + realized PnL + win/fill rate + trigger spread + baseline mean + dislocation Δ + tuning assistant; aggregates unfiltered by table filters.
+- `TickerTransactionHistory.tsx`: history-only (search/status/direction filters + executions table).
+- LiveMatrix dock tabs: Ranked Opportunities · **Signal Trend** · Execution History · Telemetry · Log Monitor.
+- Spread Range ribbon restructured to the standard strategy layout (`px-4 py-3`, `STRATEGY PARAMETERS` title, uniform chips, Configure → lifecycle → error ordering); no fabricated param defaults without a connected ticker.
+
+### 7.6 PortfolioMonitor
+- Removed subtitle + per-card captions + manual Refresh button (`riskData`/`status` already arrive on App's 3s poll; strategy metrics now poll on the same cadence inside the component).
+- New **Monitor:** dropdown (default **All**) scoping Realized PnL, Cycle Win Rate, Sharpe/APR, and the attribution grid to a selected strategy; account-level tiles (equity, liquidation buffer, circuit breaker) stay global.
+
+### 7.7 Liquidity Sort (real data, new backend path)
+- `ExchangeAdapter::fetch_volumes_24h()` → `HashMap<asset, Decimal>`; default returns empty (non-reporting venues contribute nothing).
+- Hyperliquid: one `metaAndAssetCtxs` call → `dayNtlVlm` per asset. Lighter: `orderBookDetails` → `daily_quote_token_volume` (fallback `daily_base_token_volume × last_trade_price`); unreported assets skipped, not zeroed.
+- New `get_ticker_volumes` command → `Vec<VenueVolumesDto>` (per-venue raw maps, attribution preserved); registered in `main.rs` + `NATIVE_COMMANDS`.
+- Frontend: `getVenueAssetVolumeUsd` normalizes venue asset names (case-insensitive; `kPEPE`/`1000X` → base); `getTickerAvgVolumeUsd` means across reporting venues; `TickerSortOption` adds `"liquidity"`; TickerExplorer sorts desc with unreported tickers last (never fabricated as 0), row sub-line shows `vol $X.XB 24h` under liquidity sort.
+- `App.tsx` polls volumes every 30s, refetches when the connected venue set changes.
+
+### 7.8 Signal Trend Gadget — durable Rust pipeline (implemented)
+The gadget is now backend-driven end to end; no frontend math.
+
+**Persistence** (`state_store.rs`, migration v3)
+- `spread_samples` table: `(symbol, venue_id, ts_ms, mid, best_bid, best_ask)` with `(symbol, ts_ms)` index; WAL mode.
+- `record_spread_samples` (batch tx, drops non-finite/non-positive mids, no-op on empty batches), `spread_samples(symbol, from, to)` range query, `earliest_spread_sample_ts`, `prune_spread_samples(retention, row_cap)`.
+- `fetch_orderbooks_impl` records every poll's per-venue top-of-book best-effort (store failures never break market data); hourly prune keeps **30 days**, capped at **4M rows** (`AppEngineState::sample_prune_at` tracks the last prune hour).
+
+**Math** (`arbitrager-math/src/dislocation.rs`)
+- `compute_deviation_series(samples, weights, mode, bucket_ms, max_points)` → bucketed per-venue bps deviations from baseline + max–min dislocation band; null-preserved gaps; endpoint-preserving stride downsample to `max_points`.
+- `BaselineMode::Consensus` = volume-weighted mean of mids (equal-weight when unreported); `BaselineMode::Leader` = highest-weight venue pinned at 0.
+- 6 unit tests cover: weighting, leader anchoring, gap preservation, endpoint-preserving downsample, invalid-mid drops.
+
+**Command** (`get_signal_series`)
+- Validates symbol; clamps window 10s–7d; bucket = `max(window*1000/500, 1000ms)`; queries samples on `spawn_blocking`; weights venues by the cached 24h-volume maps (asset-name normalized: `BASE`/`kBASE`/`1000BASE`, case-insensitive).
+- Returns `SignalSeriesDto`: `ts_ms[]`, `venues[]` (ids), `venue_names`, `dev_bps[i][j]` nullable matrix, `band_max/min_bps[]`, `sample_count`, `earliest_ts_ms`.
+- Volume fetch now shared behind `cached_venue_volumes` (5-min TTL, `AppEngineState::volume_cache`); `get_ticker_volumes` consumes the same cache.
+
+**Gadget** (`SignalTrendGadget.tsx`, rewritten)
+- Polls `api.getSignalSeries` — 3s cadence for ≤15m windows, 15s beyond.
+- **Default window = the bot's configured trailing window** (`BOT Xm` chip, `botWindowSec` prop fed by `WINDOW_SECONDS[windowOption]`); presets extend to **5m/15m/1h/4h/1d/3d/7d**.
+- Per-venue lines break across null buckets (gaps stay gaps); band renders only where ≥2 venues observed; span-aware x labels (clock → date+time for multi-day); hover crosshair; legend chips rich→cheap with BUY/SELL extremes; `Spread X / hurdle Y BPS` badge.
+- Honest states: `No recorded samples for {symbol} in this window` / `Collecting signal samples…` / `Signal series unavailable` on invoke failure; footer reports `N venue samples in window · Xh/Xd history recorded` + active baseline mode.
+
+### 7.9 Published Spec
+- **GitHub Issue #3** — *Adaptive Dislocation Analytics & Auto-Calibrated Strategy Parameters* (`ready-for-agent`): durable dislocation sampling, Rust-side series + analytics, seasonality, WFO-guarded parameter recommendations, opt-in auto-tune, curated presets. See §6 item 0.
+
+### 7.10 Working Tree State
+- All changes **uncommitted**; `git status` shows modifications across `crates/` (exchange.rs, hyperliquid.rs, lighter.rs), `src-tauri` (commands.rs, main.rs, state.rs, vault.rs, state_store.rs new), and most frontend components. New files: `SignalTrendGadget.tsx`, `TickerTelemetryGadget.tsx`, `BotLifecycleControls.tsx`, `ExchangeAccounts.tsx`.
+- Known caveat: `Ticker.volume_24h` in several adapters still returns placeholder constants — it is **not surfaced to any UI/DTO** but should be wired to real data or removed in a future pass.
+
+### 7.11 Verification (all green at handoff)
+```bash
+cargo test --workspace                  # all crates green (arbitrager-math 23, incl. 7 dislocation)
+cd frontend/src-tauri && cargo test     # 96 pass / 0 fail (3 store + 5 signal-series/recorder tests)
+cd frontend && npx tsc --noEmit         # clean
+node --experimental-strip-types --test  # 32 pass / 0 fail (node:test)
+npm run build                           # production build succeeds
+```
+
+**Edge cases audited and fixed in this pass:**
+- Leader-mode baseline was nondeterministic under tied/empty weights (HashMap iteration order) — now weight-desc/index-asc; covered by `leader_tiebreak_is_deterministic`.
+- "Spread / hurdle" badge could quote a stale bucket when recent polls are single-venue — now gated to the window head (≤2 buckets old).
+- Single-bucket venue observations drew invisible `M`-only paths — now rendered as dots.
+- Single-venue windows show `1 venue — pairwise spread needs ≥2 venues` instead of a misleading flat zero.
+- `get_ticker_volumes` and `get_signal_series` share `cached_venue_volumes` (5-min TTL) so the chart's baseline weighting doesn't add exchange traffic.
+
+---
+*Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*

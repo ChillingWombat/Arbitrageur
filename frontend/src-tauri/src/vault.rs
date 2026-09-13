@@ -20,11 +20,16 @@ type HmacSha256 = Hmac<Sha256>;
 const VAULT_MAGIC: &[u8; 8] = b"ARBVLT2\0";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const MIN_PASSWORD_CHARS: usize = 12;
+const MIN_PASSWORD_CHARS: usize = 6;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ExchangeCredentials {
     pub venue: String,
+    /// Stable binding to the `exchange_accounts.id` profile that owns this
+    /// record. `None` marks a legacy venue-keyed record awaiting migration,
+    /// or the non-account `remote_hsm` token record.
+    #[serde(default)]
+    pub profile_id: Option<String>,
     pub api_key: String,
     pub api_secret: String,
     pub passphrase: Option<String>,
@@ -34,6 +39,10 @@ pub struct ExchangeCredentials {
     pub wallet_address: Option<String>,
     pub account_index: Option<u32>,
     pub subaccount_index: Option<u32>,
+    #[serde(default)]
+    pub api_key_index: Option<u32>,
+    #[serde(default)]
+    pub private_key: Option<String>,
     pub enabled: bool,
 }
 
@@ -50,6 +59,9 @@ impl Drop for ExchangeCredentials {
         if let Some(wallet_address) = self.wallet_address.as_mut() {
             wallet_address.zeroize();
         }
+        if let Some(private_key) = self.private_key.as_mut() {
+            private_key.zeroize();
+        }
     }
 }
 
@@ -57,10 +69,12 @@ impl std::fmt::Debug for ExchangeCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ExchangeCredentials")
             .field("venue", &self.venue)
+            .field("profile_bound", &self.profile_id.is_some())
             .field("account_index", &self.account_index)
             .field("subaccount_index", &self.subaccount_index)
             .field("enabled", &self.enabled)
             .field("has_api_key", &!self.api_key.is_empty())
+            .field("has_private_key", &self.private_key.as_ref().is_some_and(|k| !k.is_empty()))
             .field("has_api_secret", &!self.api_secret.is_empty())
             .field(
                 "has_passphrase",
@@ -81,6 +95,42 @@ pub struct VaultStatus {
     pub is_initialized: bool,
     pub is_unlocked: bool,
     pub unlocked_until: Option<DateTime<Utc>>,
+}
+
+/// Sanitized view of one stored credential record. `profile_id` links the
+/// record to an `exchange_accounts` row; `None` marks a legacy venue-keyed
+/// record or the non-account `remote_hsm` token. Presence flags describe
+/// which fields are populated without exposing their values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialPresence {
+    pub venue: String,
+    pub profile_id: Option<String>,
+    pub enabled: bool,
+    pub has_api_key: bool,
+    pub has_api_secret: bool,
+    pub has_passphrase: bool,
+    pub has_account_id: bool,
+    pub has_wallet_address: bool,
+    pub has_private_key: bool,
+    pub account_index: Option<u32>,
+    pub subaccount_index: Option<u32>,
+    pub api_key_index: Option<u32>,
+}
+
+/// Account profile IDs use the same charset as the durable state store:
+/// 1-128 ASCII alphanumeric, underscore, or hyphen.
+fn normalize_profile_id(raw: &str) -> anyhow::Result<String> {
+    let v = raw.trim().to_lowercase();
+    if v.is_empty()
+        || v.len() > 128
+        || !v
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        anyhow::bail!("invalid account ID: expected 1-128 ASCII alphanumeric/underscore/hyphen");
+    }
+    Ok(v)
 }
 
 pub struct SecureVault {
@@ -281,7 +331,7 @@ impl SecureVault {
         Ok(())
     }
 
-    /// Initialize a new vault with master password
+    /// Initialize a new vault with password
     pub fn initialize(&mut self, password: &str) -> anyhow::Result<()> {
         if self.is_initialized() {
             anyhow::bail!(
@@ -289,7 +339,7 @@ impl SecureVault {
             );
         }
         if password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("Master password must be at least 12 characters long");
+            anyhow::bail!("Password must be at least 6 characters long");
         }
 
         let empty_data = VaultData {
@@ -310,18 +360,18 @@ impl SecureVault {
         Ok(())
     }
 
-    /// Unlock existing vault with master password. Legacy (unversioned PBKDF2)
+    /// Unlock existing vault with password. Legacy (unversioned PBKDF2)
     /// files are transparently migrated to the v2 format on success.
     pub fn unlock(&mut self, password: &str) -> anyhow::Result<()> {
         self.lock();
         if !self.storage_path.exists() {
-            anyhow::bail!("Vault is not initialized. Please set a master password first.");
+            anyhow::bail!("Vault is not initialized. Please set a password first.");
         }
         let file_bytes = fs::read(&self.storage_path)?;
 
         if file_bytes.starts_with(VAULT_MAGIC.as_slice()) {
             if file_bytes.len() < VAULT_MAGIC.len() + SALT_LEN + NONCE_LEN + 16 {
-                anyhow::bail!("Incorrect master password or corrupted vault");
+                anyhow::bail!("Incorrect password or corrupted vault");
             }
             let salt = &file_bytes[VAULT_MAGIC.len()..VAULT_MAGIC.len() + SALT_LEN];
             let nonce_start = VAULT_MAGIC.len() + SALT_LEN;
@@ -343,11 +393,11 @@ impl SecureVault {
                             aad: VAULT_MAGIC,
                         },
                     )
-                    .map_err(|_| anyhow::anyhow!("Incorrect master password or corrupted vault"))?,
+                    .map_err(|_| anyhow::anyhow!("Incorrect password or corrupted vault"))?,
             );
 
             let data: VaultData = serde_json::from_slice(decrypted_bytes.as_slice())
-                .map_err(|_| anyhow::anyhow!("Incorrect master password or corrupted vault"))?;
+                .map_err(|_| anyhow::anyhow!("Incorrect password or corrupted vault"))?;
 
             let mut salt_arr = [0u8; SALT_LEN];
             salt_arr.copy_from_slice(salt);
@@ -361,7 +411,7 @@ impl SecureVault {
         } else {
             // Legacy format: salt || nonce || ciphertext, no magic, no AAD
             if file_bytes.len() < SALT_LEN + NONCE_LEN + 16 {
-                anyhow::bail!("Incorrect master password or corrupted vault");
+                anyhow::bail!("Incorrect password or corrupted vault");
             }
             let salt = &file_bytes[0..SALT_LEN];
             let nonce_bytes = &file_bytes[SALT_LEN..SALT_LEN + NONCE_LEN];
@@ -375,11 +425,11 @@ impl SecureVault {
 
             let decrypted_bytes =
                 Zeroizing::new(cipher.decrypt(nonce, ciphertext).map_err(|_| {
-                    anyhow::anyhow!("Incorrect master password or corrupted vault")
+                    anyhow::anyhow!("Incorrect password or corrupted vault")
                 })?);
 
             let data: VaultData = serde_json::from_slice(decrypted_bytes.as_slice())
-                .map_err(|_| anyhow::anyhow!("Incorrect master password or corrupted vault"))?;
+                .map_err(|_| anyhow::anyhow!("Incorrect password or corrupted vault"))?;
             drop(legacy_key);
 
             // Migrate to v2: re-encrypt with Argon2id and a fresh salt
@@ -426,7 +476,7 @@ impl SecureVault {
     /// Read data from decrypted cache
     pub fn get_data(&mut self) -> anyhow::Result<&VaultData> {
         if !self.is_unlocked() {
-            anyhow::bail!("Vault is locked. Please enter master password to view credentials.");
+            anyhow::bail!("Vault is locked. Please enter password to view credentials.");
         }
         self.decrypted_cache
             .as_ref()
@@ -450,9 +500,49 @@ impl SecureVault {
         Ok(venues)
     }
 
-    /// Merge submitted credentials by exact lowercase venue ID and persist.
-    /// Nonempty submitted values replace stored ones; empty strings and `None`
-    /// preserve existing values. `enabled` and index fields always update.
+    /// Merge nonempty submitted values onto an existing record. Empty strings
+    /// and `None` preserve stored values; `enabled` and index fields always
+    /// update. `profile_id` and `venue` are never mutated by a merge.
+    fn merge_credential_fields(existing: &mut ExchangeCredentials, sub: &ExchangeCredentials) {
+        if !sub.api_key.is_empty() {
+            existing.api_key = sub.api_key.clone();
+        }
+        if !sub.api_secret.is_empty() {
+            existing.api_secret = sub.api_secret.clone();
+        }
+        if let Some(passphrase) = &sub.passphrase {
+            if !passphrase.is_empty() {
+                existing.passphrase = Some(passphrase.clone());
+            }
+        }
+        if let Some(account_id) = &sub.account_id {
+            if !account_id.is_empty() {
+                existing.account_id = Some(account_id.clone());
+            }
+        }
+        if let Some(wallet_address) = &sub.wallet_address {
+            if !wallet_address.is_empty() {
+                existing.wallet_address = Some(wallet_address.clone());
+            }
+        }
+        existing.account_index = sub.account_index;
+        existing.subaccount_index = sub.subaccount_index;
+        existing.api_key_index = sub.api_key_index;
+        if let Some(private_key) = &sub.private_key {
+            if !private_key.is_empty() {
+                existing.private_key = Some(private_key.clone());
+            }
+        }
+        existing.enabled = sub.enabled;
+    }
+
+    /// Merge submitted legacy/unbound credentials by exact lowercase venue
+    /// ID and persist. Only records with `profile_id == None` participate, so
+    /// account-bound records can never be matched or overwritten by venue.
+    /// Nonempty submitted values replace stored ones; empty strings and
+    /// `None` preserve existing values. `enabled` and index fields always
+    /// update. Used only for the non-account `remote_hsm` record and for
+    /// pre-migration writes.
     pub fn upsert_credentials(
         &mut self,
         submitted: Vec<ExchangeCredentials>,
@@ -462,38 +552,16 @@ impl SecureVault {
         }
         let mut data = self.decrypted_cache.clone().unwrap_or_default();
 
-        for sub in submitted {
+        for mut sub in submitted {
             let venue_key = sub.venue.to_lowercase();
             if let Some(existing) = data
                 .credentials
                 .iter_mut()
-                .find(|c| c.venue.to_lowercase() == venue_key)
+                .find(|c| c.profile_id.is_none() && c.venue.to_lowercase() == venue_key)
             {
-                if !sub.api_key.is_empty() {
-                    existing.api_key = sub.api_key.clone();
-                }
-                if !sub.api_secret.is_empty() {
-                    existing.api_secret = sub.api_secret.clone();
-                }
-                if let Some(passphrase) = &sub.passphrase {
-                    if !passphrase.is_empty() {
-                        existing.passphrase = Some(passphrase.clone());
-                    }
-                }
-                if let Some(account_id) = &sub.account_id {
-                    if !account_id.is_empty() {
-                        existing.account_id = Some(account_id.clone());
-                    }
-                }
-                if let Some(wallet_address) = &sub.wallet_address {
-                    if !wallet_address.is_empty() {
-                        existing.wallet_address = Some(wallet_address.clone());
-                    }
-                }
-                existing.account_index = sub.account_index;
-                existing.subaccount_index = sub.subaccount_index;
-                existing.enabled = sub.enabled;
+                Self::merge_credential_fields(existing, &sub);
             } else {
+                sub.profile_id = None;
                 data.credentials.push(sub);
             }
         }
@@ -502,10 +570,175 @@ impl SecureVault {
         self.save_data(&data)
     }
 
-    /// Update the enabled flag on existing credential records by lowercase
-    /// venue ID. Unknown venues are ignored, stored secrets are never
-    /// touched, and the vault is only rewritten when a flag changed.
-    /// Requires an unlocked vault.
+    /// Merge submitted credentials into the record bound to `profile_id`,
+    /// creating a bound record when none exists. Matching is exclusively by
+    /// `profile_id`; the venue on the record is informational. Requires an
+    /// unlocked vault.
+    pub fn upsert_profile_credentials(
+        &mut self,
+        profile_id: &str,
+        cred: ExchangeCredentials,
+    ) -> anyhow::Result<()> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before saving credentials.");
+        }
+        let pid = normalize_profile_id(profile_id)?;
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+
+        if let Some(existing) = data
+            .credentials
+            .iter_mut()
+            .find(|c| c.profile_id.as_deref() == Some(pid.as_str()))
+        {
+            Self::merge_credential_fields(existing, &cred);
+        } else {
+            let mut record = cred;
+            record.profile_id = Some(pid);
+            data.credentials.push(record);
+        }
+
+        data.updated_at = Utc::now();
+        self.save_data(&data)
+    }
+
+    /// Sanitized per-record presence metadata. `profile_id` identifies which
+    /// account profile a record is bound to (`None` = legacy venue-keyed or
+    /// `remote_hsm`). No secret values are ever returned. Requires an
+    /// unlocked vault.
+    pub fn credential_presence(&mut self) -> anyhow::Result<Vec<CredentialPresence>> {
+        let data = self.get_data()?;
+        Ok(data
+            .credentials
+            .iter()
+            .map(|c| CredentialPresence {
+                venue: c.venue.trim().to_lowercase(),
+                profile_id: c.profile_id.clone(),
+                enabled: c.enabled,
+                has_api_key: !c.api_key.is_empty(),
+                has_api_secret: !c.api_secret.is_empty(),
+                has_passphrase: c.passphrase.as_ref().is_some_and(|p| !p.is_empty()),
+                has_account_id: c.account_id.as_ref().is_some_and(|v| !v.is_empty()),
+                has_wallet_address: c
+                    .wallet_address
+                    .as_ref()
+                    .is_some_and(|v| !v.is_empty()),
+                has_private_key: c.private_key.as_ref().is_some_and(|v| !v.is_empty()),
+                account_index: c.account_index,
+                subaccount_index: c.subaccount_index,
+                api_key_index: c.api_key_index,
+            })
+            .collect())
+    }
+
+    /// Legacy venue-keyed records still lacking a `profile_id` binding.
+    pub fn unbound_credentials(&mut self) -> anyhow::Result<Vec<CredentialPresence>> {
+        Ok(self
+            .credential_presence()?
+            .into_iter()
+            .filter(|p| p.profile_id.is_none())
+            .collect())
+    }
+
+    /// Bind the single unbound record for `venue` to `profile_id`. Fails
+    /// closed when the venue has zero or multiple unbound records, or when
+    /// another record is already bound to that profile. Requires an unlocked
+    /// vault.
+    pub fn bind_profile(&mut self, venue: &str, profile_id: &str) -> anyhow::Result<()> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before migrating credentials.");
+        }
+        let venue_key = venue.trim().to_lowercase();
+        let pid = normalize_profile_id(profile_id)?;
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+
+        if data
+            .credentials
+            .iter()
+            .any(|c| c.profile_id.as_deref() == Some(pid.as_str()))
+        {
+            anyhow::bail!("account {pid} already has a bound credential record");
+        }
+        let matches: Vec<usize> = data
+            .credentials
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                c.profile_id.is_none() && c.venue.trim().to_lowercase() == venue_key
+            })
+            .map(|(i, _)| i)
+            .collect();
+        match matches.len() {
+            0 => anyhow::bail!("no unbound credential record for venue {venue_key}"),
+            1 => data.credentials[matches[0]].profile_id = Some(pid),
+            n => anyhow::bail!(
+                "corrupted vault: {n} unbound credential records for venue {venue_key}"
+            ),
+        }
+
+        data.updated_at = Utc::now();
+        self.save_data(&data)
+    }
+
+    /// Delete the credential record bound to `profile_id`. Requires an
+    /// unlocked vault. Removed records are dropped so their `Drop` impl
+    /// zeroizes secret fields.
+    pub fn delete_profile_credentials(&mut self, profile_id: &str) -> anyhow::Result<bool> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before deleting credentials.");
+        }
+        let pid = normalize_profile_id(profile_id)?;
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+        let before = data.credentials.len();
+        data.credentials
+            .retain(|c| c.profile_id.as_deref() != Some(pid.as_str()));
+        if data.credentials.len() == before {
+            return Ok(false);
+        }
+        data.updated_at = Utc::now();
+        self.save_data(&data)?;
+        Ok(true)
+    }
+
+    /// Update the enabled flag on credential records by bound profile ID.
+    /// Unknown profiles are ignored and the vault is only rewritten when a
+    /// flag changed. The account profile in the state store remains the
+    /// authoritative enablement source; this mirrors the flag for file-format
+    /// consistency. Requires an unlocked vault.
+    pub fn update_profile_enabled(
+        &mut self,
+        enablement: &[(String, bool)],
+    ) -> anyhow::Result<()> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before updating credentials.");
+        }
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+        let mut changed = false;
+
+        for (profile_id, enabled) in enablement {
+            let pid = profile_id.trim().to_lowercase();
+            if let Some(existing) = data
+                .credentials
+                .iter_mut()
+                .find(|c| c.profile_id.as_deref() == Some(pid.as_str()))
+            {
+                if existing.enabled != *enabled {
+                    existing.enabled = *enabled;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            data.updated_at = Utc::now();
+            self.save_data(&data)?;
+        }
+        Ok(())
+    }
+
+    /// Update the enabled flag on every credential record for a lowercase
+    /// venue ID (all bound accounts plus any legacy unbound record). Unknown
+    /// venues are ignored, stored secrets are never touched, and the vault is
+    /// only rewritten when a flag changed. Requires an unlocked vault.
     pub fn update_enabled(&mut self, enablement: &[(String, bool)]) -> anyhow::Result<()> {
         if !self.is_unlocked() {
             anyhow::bail!("Vault is locked. Please unlock before updating credentials.");
@@ -515,10 +748,10 @@ impl SecureVault {
 
         for (venue, enabled) in enablement {
             let venue_key = venue.to_lowercase();
-            if let Some(existing) = data
+            for existing in data
                 .credentials
                 .iter_mut()
-                .find(|c| c.venue.to_lowercase() == venue_key)
+                .filter(|c| c.venue.to_lowercase() == venue_key)
             {
                 if existing.enabled != *enabled {
                     existing.enabled = *enabled;
@@ -584,11 +817,49 @@ mod tests {
         assert!(!vault.is_initialized());
 
         let err = vault.initialize("short").unwrap_err();
-        assert!(err.to_string().contains("at least 12 characters"));
+        assert!(err.to_string().contains("at least 6 characters"));
 
-        assert!(vault.initialize("a-valid-long-password").is_ok());
+        assert!(vault.initialize("abcdef").is_ok());
         let err = vault.initialize("another-long-password").unwrap_err();
         assert!(err.to_string().contains("already initialized"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_vault_accepts_six_character_passwords_without_composition_rules() {
+        for (kind, password) in [
+            ("letters", "abcdef"),
+            ("numbers", "123456"),
+            ("symbols", "!@#$%^"),
+            ("mixed", "a1!b2@"),
+        ] {
+            let (dir, file) = temp_vault_path(kind);
+            let mut vault = SecureVault::new_with_path(file);
+            vault
+                .initialize(password)
+                .unwrap_or_else(|err| panic!("{kind} password should be accepted: {err}"));
+            let _ = fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn test_vault_initialization_persists_across_instances() {
+        let (dir, file) = temp_vault_path("persisted_init");
+        {
+            let mut vault = SecureVault::new_with_path(file.clone());
+            vault.initialize("abcdef").unwrap();
+            let status = vault.get_status();
+            assert!(status.is_initialized);
+            assert!(status.is_unlocked);
+        }
+
+        let mut reopened = SecureVault::new_with_path(file);
+        let locked_status = reopened.get_status();
+        assert!(locked_status.is_initialized);
+        assert!(!locked_status.is_unlocked);
+        reopened.unlock("abcdef").unwrap();
+        assert!(reopened.get_status().is_unlocked);
 
         let _ = fs::remove_dir_all(dir);
     }
@@ -602,13 +873,16 @@ mod tests {
         let mut data = vault.get_data().unwrap().clone();
         data.credentials.push(ExchangeCredentials {
             venue: "hyperliquid".into(),
+            profile_id: None,
             api_key: "0x123abc".into(),
             api_secret: "secret_456".into(),
             passphrase: None,
             account_id: None,
             wallet_address: Some("0xwallet".into()),
             account_index: Some(0),
-            subaccount_index: Some(1),
+            subaccount_index: Some(1),            api_key_index: None,
+            private_key: None,
+
             enabled: true,
         });
         vault.save_data(&data).unwrap();
@@ -641,7 +915,7 @@ mod tests {
         vault.initialize("correct horse battery").unwrap();
 
         let err = vault.unlock("incorrect password!!").unwrap_err();
-        assert!(err.to_string().contains("Incorrect master password"));
+        assert!(err.to_string().contains("Incorrect password"));
         assert!(!vault.is_unlocked());
         assert!(vault.decrypted_cache.is_none());
         assert!(vault.encryption_key.is_none());
@@ -674,13 +948,16 @@ mod tests {
         let legacy_data = VaultData {
             credentials: vec![ExchangeCredentials {
                 venue: "lighter".into(),
+                profile_id: None,
                 api_key: "legacy_key".into(),
                 api_secret: "legacy_secret".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: None,
                 account_index: Some(7),
-                subaccount_index: None,
+                subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                 enabled: true,
             }],
             updated_at: Utc::now(),
@@ -729,13 +1006,16 @@ mod tests {
     fn test_credentials_debug_never_leaks_secrets() {
         let creds = ExchangeCredentials {
             venue: "hyperliquid".into(),
+            profile_id: None,
             api_key: "SENTINEL_KEY_9f3".into(),
             api_secret: "SENTINEL_SECRET_2b7".into(),
             passphrase: Some("SENTINEL_PASS_c41".into()),
             account_id: Some("SENTINEL_ACCT_d88".into()),
             wallet_address: Some("SENTINEL_WALLET_e5a".into()),
             account_index: Some(3),
-            subaccount_index: Some(9),
+            subaccount_index: Some(9),            api_key_index: None,
+            private_key: None,
+
             enabled: true,
         };
         let debug = format!("{:?}", creds);
@@ -767,13 +1047,16 @@ mod tests {
         vault
             .upsert_credentials(vec![ExchangeCredentials {
                 venue: "HyperLiquid".into(),
+                profile_id: None,
                 api_key: "key_v1".into(),
                 api_secret: "secret_v1".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: Some("0xaaa".into()),
                 account_index: Some(1),
-                subaccount_index: None,
+                subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                 enabled: true,
             }])
             .unwrap();
@@ -782,13 +1065,16 @@ mod tests {
         vault
             .upsert_credentials(vec![ExchangeCredentials {
                 venue: "hyperliquid".into(),
+                profile_id: None,
                 api_key: "".into(),
                 api_secret: "secret_v2".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: None,
                 account_index: Some(2),
-                subaccount_index: Some(5),
+                subaccount_index: Some(5),            api_key_index: None,
+            private_key: None,
+
                 enabled: false,
             }])
             .unwrap();
@@ -819,13 +1105,16 @@ mod tests {
         vault
             .upsert_credentials(vec![ExchangeCredentials {
                 venue: "hyperliquid".into(),
+                profile_id: None,
                 api_key: "".into(),
                 api_secret: "SENTINEL_SECRET_keep".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: Some("0xkeep".into()),
                 account_index: Some(1),
-                subaccount_index: None,
+                subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                 enabled: true,
             }])
             .unwrap();
@@ -855,13 +1144,16 @@ mod tests {
         vault
             .upsert_credentials(vec![ExchangeCredentials {
                 venue: "hyperliquid".into(),
+                profile_id: None,
                 api_key: "".into(),
                 api_secret: "SENTINEL_SECRET_keep".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: Some("0xkeep".into()),
                 account_index: Some(1),
-                subaccount_index: None,
+                subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                 enabled: true,
             }])
             .unwrap();
@@ -893,24 +1185,30 @@ mod tests {
             .upsert_credentials(vec![
                 ExchangeCredentials {
                     venue: "hyperliquid".into(),
+                    profile_id: None,
                     api_key: "hl_key".into(),
                     api_secret: "hl_secret".into(),
                     passphrase: None,
                     account_id: None,
                     wallet_address: Some("0xhl".into()),
                     account_index: Some(1),
-                    subaccount_index: None,
+                    subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                     enabled: true,
                 },
                 ExchangeCredentials {
                     venue: "lighter".into(),
+                    profile_id: None,
                     api_key: "lgt_key".into(),
                     api_secret: "lgt_secret".into(),
                     passphrase: None,
                     account_id: None,
                     wallet_address: None,
                     account_index: None,
-                    subaccount_index: None,
+                    subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                     enabled: true,
                 },
             ])
@@ -956,13 +1254,16 @@ mod tests {
         vault
             .upsert_credentials(vec![ExchangeCredentials {
                 venue: "hyperliquid".into(),
+                profile_id: None,
                 api_key: "k".into(),
                 api_secret: "s".into(),
                 passphrase: None,
                 account_id: None,
                 wallet_address: None,
                 account_index: None,
-                subaccount_index: None,
+                subaccount_index: None,            api_key_index: None,
+            private_key: None,
+
                 enabled: true,
             }])
             .unwrap();

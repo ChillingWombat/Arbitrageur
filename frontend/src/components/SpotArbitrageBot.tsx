@@ -1,8 +1,6 @@
 import React, { useState, useEffect } from "react";
 import {
   Zap,
-  RefreshCw,
-  CheckCircle2,
   AlertCircle,
   Clock,
   Coins,
@@ -10,13 +8,17 @@ import {
 } from "lucide-react";
 import { api } from "../services/api";
 import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from "../types";
-import { SwitchToggle } from "./SwitchToggle";
+import type { SpotStrategyParams } from "./TickerConfigModal";
+import { BotLifecycleControls } from "./BotLifecycleControls";
+import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface SpotArbitrageBotProps {
   executionLogs: ExecutionLogEntry[];
   onRefreshAll: () => Promise<void>;
   onOpenConfig?: (symbol: string, strategy?: string) => void;
   isPaused?: boolean;
+  hasApiConnectivity?: boolean;
+  params: SpotStrategyParams;
 }
 
 export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
@@ -24,17 +26,20 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   onRefreshAll,
   onOpenConfig,
   isPaused = false,
+  hasApiConnectivity = false,
+  params,
 }) => {
   const [opportunities, setOpportunities] = useState<SpotOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
   const [loading, setLoading] = useState(false);
   const [selectedOpp, setSelectedOpp] = useState<SpotOpportunityDto | null>(null);
 
-  // Execution Bot Parameters (default to OFF, manually enabled by user)
-  const [autoBotEnabled, setAutoBotEnabled] = useState(false);
+  // Bot lifecycle: Start / Pause / Reduce Only / Stop (stop flattens this
+  // strategy's positions across venues until delta-neutral)
+  const bot = useBotLifecycle({ strategyId: "spot" });
   const lastAutoSpotExecRef = React.useRef<number>(0);
-  const [tradeSizeUsd, setTradeSizeUsd] = useState(1000);
-  const [maxSlippageBps, setMaxSlippageBps] = useState(5.0);
+  // Strategy params are owned by App and edited only via the Strategy Configurator
+  const { tradeSizeUsd, minNetSpreadBps, maxSlippageBps } = params;
   const [botStatus, setBotStatus] = useState<"idle" | "verifying" | "dispatching" | "filled" | "error">("idle");
   const [botMessage, setBotMessage] = useState<string>("");
 
@@ -71,6 +76,11 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
   const handleDeployBot = async () => {
     if (!selectedOpp) return;
+    if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") {
+      setBotStatus("error");
+      setBotMessage(`Entry blocked: bot is ${bot.phase.replace("_", "-")} — only exits are permitted`);
+      return;
+    }
     setBotStatus("verifying");
     setBotMessage("Verifying pre-funded inventory & orderbook depth...");
 
@@ -101,18 +111,18 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
   // Automated Execution Loop when user manually enables the Spot Bot
   useEffect(() => {
-    if (!autoBotEnabled || botStatus === "verifying" || botStatus === "dispatching" || isPaused) return;
+    if (!bot.entriesAllowed || botStatus === "verifying" || botStatus === "dispatching" || isPaused) return;
 
     const now = Date.now();
     if (now - lastAutoSpotExecRef.current < 5000) return; // 5s cooldown
 
-    const bestCandidate = opportunities.find((o) => o.net_spread_bps >= 15.0);
+    const bestCandidate = opportunities.find((o) => o.net_spread_bps >= minNetSpreadBps);
     if (bestCandidate) {
       lastAutoSpotExecRef.current = now;
       setSelectedOpp(bestCandidate);
       handleDeployBot();
     }
-  }, [autoBotEnabled, botStatus, opportunities, isPaused]);
+  }, [bot.entriesAllowed, botStatus, opportunities, isPaused, minNetSpreadBps]);
 
   const spotLogs = executionLogs.filter(
     (l) => l.trade_type.toLowerCase().includes("spot") || l.direction?.toLowerCase().includes("spot")
@@ -122,71 +132,84 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   const totalSpotPnl = spotLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto">
-      {/* Top Header Banner */}
-      <div className="border-b border-surface-border bg-surface px-6 py-4 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <div className="flex items-center space-x-2">
-            <span className="p-1.5 bg-blue-50 text-accent rounded-lg border border-blue-200">
-              <Coins className="w-5 h-5 text-accent" />
-            </span>
-            <h1 className="text-lg font-bold text-slate-900 tracking-tight font-sans">
-              Spot Cross-Exchange Bot
-            </h1>
-            <span className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
-              Cash Market Arb
-            </span>
+    <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto p-4 space-y-4">
+      {/* Strategy Ribbon — dedicated zone: parameters left, configurator + toggle right */}
+      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs">
+        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
+            Strategy Parameters
+          </span>
+          {/* Trade Size */}
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            title="Capital deployed per flash cycle — edit via Configure Strategy"
+          >
+            <span className="text-slate-400">Trade Size</span>
+            <span className="font-bold text-slate-900">{tradeSizeUsd.toLocaleString()}</span>
+            <span className="text-slate-400">USD</span>
           </div>
-          <p className="text-xs text-slate-500 font-sans mt-1">
-            Manual opportunity selection with automated high-speed bot execution. Buy spot on Exchange A and simultaneously sell on Exchange B with zero funding rate or liquidation risk.
-          </p>
+
+          {/* Minimum Net Spread required to fire */}
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            title="Net spread required to auto-execute — edit via Configure Strategy"
+          >
+            <span className="text-slate-400">Min Net</span>
+            <span className="font-bold text-slate-900">{minNetSpreadBps}</span>
+            <span className="text-slate-400">BPS</span>
+          </div>
+
+          {/* Max Slippage */}
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            title="Orderbook tolerance limit — edit via Configure Strategy"
+          >
+            <span className="text-slate-400">Max Slippage</span>
+            <span className="font-bold text-slate-900">{maxSlippageBps}</span>
+            <span className="text-slate-400">BPS</span>
+          </div>
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
-          {/* Auto Bot Switch Toggle (Green for ON, White for OFF) */}
-          <div className="flex items-center space-x-1.5 px-2.5 py-1 bg-surface border border-surface-border rounded-lg shadow-2xs">
-            <span className="text-xs font-mono font-medium text-slate-700">Auto Bot</span>
-            <SwitchToggle
-              checked={autoBotEnabled}
-              onChange={setAutoBotEnabled}
-              size="sm"
-              showStatusText={true}
-            />
-          </div>
-
           <button
             type="button"
             onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-accent-line/60 bg-surface hover:bg-slate-100 text-xs font-mono text-accent font-semibold transition shadow-xs cursor-pointer"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md border border-accent-line/60 bg-surface hover:bg-slate-100 text-xs font-mono text-accent font-semibold transition shadow-xs cursor-pointer"
             title="Configure Spot Arbitrage Parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
             <span>Configure Strategy</span>
           </button>
 
-          <button
-            onClick={loadSpotOpps}
-            disabled={loading}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-surface-border text-xs font-mono text-slate-600 hover:text-slate-900 hover:bg-surface-raised transition cursor-pointer"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
-            <span>Scan Spot</span>
-          </button>
+          <BotLifecycleControls
+            phase={bot.phase}
+            hasOpenPositions={bot.hasOpenPositions}
+            disabled={isPaused || !hasApiConnectivity}
+            onStart={bot.start}
+            onPause={bot.pause}
+            onReduceOnly={bot.reduceOnly}
+            onStop={() => void bot.stop()}
+          />
+          {bot.lastError && (
+            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+              {bot.lastError}
+            </span>
+          )}
         </div>
       </div>
 
       {/* Summary Telemetry Metrics Bar */}
-      <div className="px-6 py-3 border-b border-surface-border bg-surface-raised/40 grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="bg-surface p-3 rounded-xl border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Scanned Discrepancies</div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="bg-surface p-3 rounded-lg border border-surface-border">
+          <div className="text-[11px] font-medium text-slate-400 font-mono">Scanned Discrepancies</div>
           <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">{opportunities.length} Pairs</div>
           <div className="text-[10px] text-slate-500 mt-0.5">
             {opportunities.length > 0 ? "Live Orderbook Depth" : "Zero synthetic pairs"}
           </div>
         </div>
 
-        <div className="bg-surface p-3 rounded-xl border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Max Net Spread</div>
+        <div className="bg-surface p-3 rounded-lg border border-surface-border">
+          <div className="text-[11px] font-medium text-slate-400 font-mono">Max Net Spread</div>
           <div className="text-lg font-bold text-emerald-600 font-mono mt-0.5">
             {bestOpp ? `+${bestOpp.net_spread_bps.toFixed(1)} BPS` : "—"}
           </div>
@@ -195,37 +218,37 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           </div>
         </div>
 
-        <div className="bg-surface p-3 rounded-xl border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Target Bot Latency</div>
+        <div className="bg-surface p-3 rounded-lg border border-surface-border">
+          <div className="text-[11px] font-medium text-slate-400 font-mono">Target Bot Latency</div>
           <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">
-            {opportunities.length > 0 ? "~14.2 ms" : "—"}
+            {bestOpp ? `~${bestOpp.estimated_latency_ms.toFixed(1)} ms` : "—"}
           </div>
           <div className="text-[10px] text-slate-500 mt-0.5">
             {opportunities.length > 0 ? "Concurrent Atomic Dispatch" : "Idle (No active pairs)"}
           </div>
         </div>
 
-        <div className="bg-surface p-3 rounded-xl border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono uppercase">Realized Spot Profit</div>
+        <div className="bg-surface p-3 rounded-lg border border-surface-border">
+          <div className="text-[11px] font-medium text-slate-400 font-mono">Realized Spot Profit</div>
           <div className="text-lg font-bold text-emerald-600 font-mono mt-0.5">+${totalSpotPnl.toFixed(2)} USD</div>
           <div className="text-[10px] text-slate-500 mt-0.5">{spotLogs.length} Bot Fills</div>
         </div>
       </div>
 
       {/* Main Content Workspace */}
-      <div className="p-6 flex-1 flex flex-col xl:flex-row gap-6">
+      <div className="flex-1 flex flex-col xl:flex-row gap-4">
         {/* Left Side: Live Opportunity Table */}
-        <div className="flex-1 flex flex-col bg-surface rounded-2xl border border-surface-border shadow-2xs overflow-hidden">
+        <div className="flex-1 flex flex-col bg-surface rounded-xl border border-surface-border shadow-2xs overflow-hidden">
           {/* Filter Bar */}
           <div className="p-4 border-b border-surface-border flex flex-wrap items-center justify-between gap-3 bg-surface">
             <div className="flex items-center space-x-2">
-              <span className="text-xs font-bold text-slate-700 font-mono uppercase">Filter Asset:</span>
+              <span className="text-xs font-bold text-slate-700 font-mono">Filter Asset:</span>
               <div className="flex flex-wrap gap-1">
                 {assets.map((a) => (
                   <button
                     key={a}
                     onClick={() => setSelectedAsset(a)}
-                    className={`px-2.5 py-1 rounded-md text-xs font-mono font-medium transition ${
+                    className={`px-2.5 py-1 rounded text-xs font-mono font-medium transition ${
                       selectedAsset === a
                         ? "bg-accent text-white shadow-2xs"
                         : "bg-surface-raised text-slate-600 hover:text-slate-900 hover:bg-slate-200"
@@ -237,14 +260,14 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
               </div>
             </div>
             <div className="text-xs font-mono text-slate-400">
-              Live sorted by Net Spread BPS
+              Live Sorted By Net Spread BPS
             </div>
           </div>
 
           {/* Table */}
           <div className="flex-1 overflow-x-auto">
             <table className="w-full text-left text-xs font-mono select-none">
-              <thead className="bg-surface-raised/70 border-b border-surface-border text-slate-500 uppercase tracking-wider text-[10px]">
+              <thead className="bg-surface-raised/70 border-b border-surface-border text-slate-500 tracking-wider text-[10px]">
                 <tr>
                   <th className="py-2.5 px-4 font-semibold">Pair</th>
                   <th className="py-2.5 px-4 font-semibold">Buy Venue (Ask)</th>
@@ -302,7 +325,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                         </td>
                         <td className="py-3 px-4 text-right">
                           <span
-                            className={`px-2 py-0.5 rounded font-bold ${
+                            className={`px-2 py-0.5 rounded-sm font-bold ${
                               isProfitable
                                 ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                                 : "bg-slate-100 text-slate-600"
@@ -320,7 +343,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                               e.stopPropagation();
                               handleSelectOpp(opp);
                             }}
-                            className={`px-3 py-1 rounded-md text-[11px] font-medium transition ${
+                            className={`px-3 py-1 rounded text-[11px] font-medium transition ${
                               isSelected
                                 ? "bg-accent text-white font-semibold"
                                 : "bg-surface-raised border border-surface-border text-slate-700 hover:border-accent hover:text-accent"
@@ -340,23 +363,20 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
         {/* Right Side: Fast Execution Bot Panel */}
         <div className="w-full xl:w-96 flex flex-col space-y-4">
-          <div className="bg-surface rounded-2xl border border-surface-border p-5 shadow-2xs">
+          <div className="bg-surface rounded-xl border border-surface-border p-5 shadow-2xs">
             <div className="flex items-center justify-between pb-3 border-b border-surface-border">
               <div className="flex items-center space-x-2">
                 <Zap className="w-4 h-4 text-accent" />
-                <h2 className="text-sm font-bold text-slate-900 font-mono uppercase tracking-tight">
+                <h2 className="text-sm font-bold text-slate-900 font-mono tracking-wider">
                   Fast Execution Bot
                 </h2>
               </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-50 text-accent border border-blue-200 font-semibold">
-                High Speed Dispatch
-              </span>
             </div>
 
             {selectedOpp ? (
               <div className="mt-4 space-y-4">
                 {/* Selected Opportunity Card */}
-                <div className="p-3.5 bg-blue-50/50 rounded-xl border border-blue-200 space-y-2">
+                <div className="p-3.5 bg-blue-50/50 rounded-lg border border-blue-200 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-900 font-mono">
                       {selectedOpp.symbol} Spot Route
@@ -377,69 +397,56 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 </div>
 
                 {/* Trade Size Controls */}
-                <div>
+                <div title="Edit via Configure Strategy">
                   <div className="flex items-center justify-between text-xs font-mono text-slate-700 mb-1.5">
                     <span>Trade Size ($ USD):</span>
                     <span className="font-bold text-slate-900">${tradeSizeUsd.toLocaleString()}</span>
                   </div>
-                  <input
-                    type="range"
-                    min={200}
-                    max={10000}
-                    step={100}
-                    value={tradeSizeUsd}
-                    onChange={(e) => setTradeSizeUsd(Number(e.target.value))}
-                    className="w-full accent-accent cursor-pointer"
-                  />
-                  <div className="flex gap-1.5 mt-2">
-                    {[500, 1000, 2500, 5000].map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => setTradeSizeUsd(s)}
-                        className={`flex-1 py-1 rounded text-[11px] font-mono font-medium transition ${
-                          tradeSizeUsd === s
-                            ? "bg-accent text-white"
-                            : "bg-surface-raised text-slate-600 hover:bg-slate-200"
-                        }`}
-                      >
-                        ${s >= 1000 ? `${s / 1000}k` : s}
-                      </button>
-                    ))}
+                  <div className="relative w-full h-2 bg-slate-200 rounded-md">
+                    <div
+                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-md"
+                      style={{ width: `${Math.min(100, (tradeSizeUsd / 10000) * 100)}%` }}
+                    />
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 bg-accent rounded-full border-2 border-white shadow-2xs"
+                      style={{ left: `${Math.min(100, (tradeSizeUsd / 10000) * 100)}%` }}
+                    />
                   </div>
                 </div>
 
                 {/* Max Slippage */}
-                <div>
+                <div title="Edit via Configure Strategy">
                   <div className="flex items-center justify-between text-xs font-mono text-slate-700 mb-1">
                     <span>Max Allowed Slippage:</span>
                     <span className="font-bold text-slate-900">{maxSlippageBps.toFixed(1)} BPS</span>
                   </div>
-                  <input
-                    type="range"
-                    min={1.0}
-                    max={15.0}
-                    step={0.5}
-                    value={maxSlippageBps}
-                    onChange={(e) => setMaxSlippageBps(Number(e.target.value))}
-                    className="w-full accent-accent cursor-pointer"
-                  />
+                  <div className="relative w-full h-2 bg-slate-200 rounded-md">
+                    <div
+                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-md"
+                      style={{ width: `${Math.min(100, (maxSlippageBps / 15) * 100)}%` }}
+                    />
+                    <div
+                      className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 bg-accent rounded-full border-2 border-white shadow-2xs"
+                      style={{ left: `${Math.min(100, (maxSlippageBps / 15) * 100)}%` }}
+                    />
+                  </div>
                 </div>
 
                 {/* Pre-flight Checks */}
-                <div className="p-3 bg-surface-raised/70 rounded-xl border border-surface-border text-xs font-mono space-y-1.5 text-slate-600">
+                <div className="p-3 bg-surface-raised/70 rounded-lg border border-surface-border text-xs font-mono space-y-1.5 text-slate-600">
                   <div className="flex items-center justify-between">
                     <span className="flex items-center space-x-1.5 text-slate-700">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                      <AlertCircle className="w-3.5 h-3.5 text-slate-400" />
                       <span>Buy Venue Inventory</span>
                     </span>
-                    <span className="font-semibold text-emerald-600">Ready ($15k USDC)</span>
+                    <span className="font-semibold text-slate-400">Unverified</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="flex items-center space-x-1.5 text-slate-700">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                      <AlertCircle className="w-3.5 h-3.5 text-slate-400" />
                       <span>Sell Venue Inventory</span>
                     </span>
-                    <span className="font-semibold text-emerald-600">Ready (Asset Pre-funded)</span>
+                    <span className="font-semibold text-slate-400">Unverified</span>
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="flex items-center space-x-1.5 text-slate-700">
@@ -459,7 +466,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 {/* Bot Progress & Action */}
                 {botMessage && (
                   <div
-                    className={`p-3 rounded-xl border text-xs font-mono ${
+                    className={`p-3 rounded-lg border text-xs font-mono ${
                       botStatus === "filled"
                         ? "bg-emerald-50 text-emerald-800 border-emerald-200"
                         : botStatus === "error"
@@ -474,7 +481,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 <button
                   onClick={handleDeployBot}
                   disabled={botStatus === "verifying" || botStatus === "dispatching"}
-                  className="w-full py-3 bg-accent hover:bg-accent-hover text-white rounded-xl font-mono text-xs font-bold transition shadow-xs flex items-center justify-center space-x-2 disabled:opacity-50"
+                  className="w-full py-3 bg-accent hover:bg-accent-hover text-white rounded-lg font-mono text-xs font-bold transition shadow-xs flex items-center justify-center space-x-2 disabled:opacity-50"
                 >
                   <Zap className="w-4 h-4" />
                   <span>
@@ -493,8 +500,8 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           </div>
 
           {/* Recent Spot Bot Executions */}
-          <div className="bg-surface rounded-2xl border border-surface-border p-4 shadow-2xs">
-            <h3 className="text-xs font-bold text-slate-700 font-mono uppercase tracking-tight mb-2">
+          <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-2xs">
+            <h3 className="text-xs font-bold text-slate-700 font-mono tracking-wider mb-2">
               Recent Spot Bot Fills
             </h3>
             {spotLogs.length === 0 ? (
@@ -506,7 +513,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 {spotLogs.slice(0, 5).map((log) => (
                   <div
                     key={log.id}
-                    className="p-2 bg-surface-raised/60 rounded-lg border border-surface-border text-[11px] font-mono flex items-center justify-between"
+                    className="p-2 bg-surface-raised/60 rounded-md border border-surface-border text-[11px] font-mono flex items-center justify-between"
                   >
                     <div>
                       <div className="font-bold text-slate-800">{log.symbol}</div>

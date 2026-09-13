@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use std::collections::HashMap;
+use rust_decimal::Decimal;
 use tokio::sync::broadcast;
 use crate::market::MarketMetadata;
 use crate::order::{CancelRequest, OrderRequest, OrderResponse};
@@ -29,6 +31,13 @@ pub trait ExchangeAdapter: Send + Sync {
 
     /// Fetch consolidated account balance, equity and positions.
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot>;
+
+    /// Fetch 24h notional trading volume (quote currency, ~USD) per venue
+    /// asset name. Venues that do not expose bulk volume statistics return an
+    /// empty map and simply contribute nothing to cross-venue aggregates.
+    async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        Ok(HashMap::new())
+    }
 
     /// Submit a single order.
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse>;

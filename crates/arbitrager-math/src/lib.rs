@@ -8,6 +8,7 @@ pub mod cointegration;
 pub mod prediction_synthetic;
 pub mod risk_math;
 pub mod calibration;
+pub mod dislocation;
 
 pub use rolling_stats::*;
 pub use spatial_spread::*;
@@ -19,6 +20,7 @@ pub use cointegration::*;
 pub use prediction_synthetic::*;
 pub use risk_math::*;
 pub use calibration::*;
+pub use dislocation::*;
 
 #[cfg(test)]
 mod tests {

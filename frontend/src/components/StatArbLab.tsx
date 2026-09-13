@@ -131,11 +131,11 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
   const latest = history[history.length - 1];
 
   return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full">
+    <div className="p-4 space-y-4 overflow-y-auto h-full">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-xl border border-surface-border flex items-center justify-between shadow-xs">
+      <div className="bg-surface px-4 py-3 rounded-xl border border-surface-border flex items-center justify-between shadow-2xs">
         <div>
-          <h2 className="text-sm font-bold font-mono text-slate-900">
+          <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900">
             Quantitative Analytics & Statistical Arbitrage Lab
           </h2>
           <p className="text-xs text-slate-500 mt-1">
@@ -144,14 +144,14 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
         </div>
 
         <div className="flex items-center space-x-2 text-xs font-mono">
-          <span className="px-2.5 py-1 rounded bg-surface-raised border border-surface-border text-slate-500">
+          <span className="px-2.5 py-1 rounded-sm bg-surface-raised border border-surface-border text-slate-500">
             Latency: <span className="text-profit font-bold">19.15 ns</span> / update
           </span>
         </div>
       </div>
 
       {errorMsg && (
-        <div className="bg-loss-dim border border-loss-border text-loss px-4 py-3 rounded-xl text-xs font-mono flex items-center justify-between">
+        <div className="bg-loss-dim border border-loss-border text-loss px-4 py-3 rounded-lg text-xs font-mono flex items-center justify-between">
           <div className="flex items-center space-x-2">
             <AlertCircle className="w-4 h-4 flex-shrink-0" />
             <span>{errorMsg}</span>
@@ -166,30 +166,27 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
       )}
 
       {/* Grid: 2D Kalman Filter & Bertram Solver */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Module 1: 2D Online Kalman Filter */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-4 shadow-xs">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
             <div>
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+              <h3 className="text-xs font-mono font-bold text-slate-900">
                 2D Online Kalman Filter (BTC vs ETH)
               </h3>
-              <span className="text-[10px] text-slate-500 font-mono">
-                Recursive O(1) updates | BTC: ${priceY.toFixed(2)} vs ETH: ${priceX.toFixed(2)}
-              </span>
             </div>
 
             <div className="flex items-center space-x-2">
               <button
                 onClick={handleResetFilter}
                 title="Reset Filter History"
-                className="px-2.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg text-xs font-mono transition"
+                className="px-2.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-md text-xs font-mono transition"
               >
                 Reset
               </button>
               <button
                 onClick={handleStep}
-                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-lg transition flex items-center shadow-xs"
+                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition flex items-center shadow-xs"
               >
                 <span>Step Iteration</span>
               </button>
@@ -197,12 +194,12 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           </div>
 
           {/* Mode Switch & Manual Inputs */}
-          <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 font-mono text-xs flex items-center justify-between gap-3 shadow-2xs">
+          <div className="bg-surface-raised border border-surface-border rounded-md p-2.5 font-mono text-xs flex items-center justify-between gap-3 shadow-2xs">
             <div className="flex items-center space-x-2">
-              <span className="text-[10px] text-slate-500 uppercase">Input Mode:</span>
+              <span className="text-[10px] text-slate-500">Input Mode:</span>
               <button
                 onClick={() => setIsManual(false)}
-                className={`px-2 py-0.5 rounded text-[11px] transition ${
+                className={`px-2 py-0.5 rounded-sm text-[11px] transition ${
                   !isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
                 }`}
               >
@@ -210,7 +207,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </button>
               <button
                 onClick={() => setIsManual(true)}
-                className={`px-2 py-0.5 rounded text-[11px] transition ${
+                className={`px-2 py-0.5 rounded-sm text-[11px] transition ${
                   isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
                 }`}
               >
@@ -226,7 +223,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                     type="number"
                     value={priceY}
                     onChange={(e) => setPriceY(parseFloat(e.target.value) || 0)}
-                    className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded text-slate-900 text-[11px]"
+                    className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-[11px]"
                   />
                 </div>
                 <div className="flex items-center space-x-1">
@@ -235,7 +232,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                     type="number"
                     value={priceX}
                     onChange={(e) => setPriceX(parseFloat(e.target.value) || 0)}
-                    className="w-16 px-1.5 py-0.5 bg-surface border border-surface-border rounded text-slate-900 text-[11px]"
+                    className="w-16 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-[11px]"
                   />
                 </div>
               </div>
@@ -244,38 +241,38 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
           {/* Metrics Row */}
           <div className="grid grid-cols-3 gap-3 font-mono text-xs">
-            <div className="p-3 bg-surface-raised border border-surface-border rounded-lg shadow-2xs">
-              <span className="text-[10px] text-slate-500 uppercase">Hedge Ratio (Beta)</span>
+            <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
+              <span className="text-[10px] text-slate-500">Hedge Ratio (Beta)</span>
               <div className="text-base font-bold text-accent mt-0.5">
-                {latest ? latest.dynamic_hedge_ratio.toFixed(4) : "18.6200"}
+                {latest ? latest.dynamic_hedge_ratio.toFixed(4) : "—"}
               </div>
             </div>
 
-            <div className="p-3 bg-surface-raised border border-surface-border rounded-lg shadow-2xs">
-              <span className="text-[10px] text-slate-500 uppercase">Residual Spread</span>
+            <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
+              <span className="text-[10px] text-slate-500">Residual Spread</span>
               <div className="text-base font-bold text-slate-900 mt-0.5">
-                {latest ? `$${latest.residual_spread.toFixed(2)}` : "$0.00"}
+                {latest ? `$${latest.residual_spread.toFixed(2)}` : "—"}
               </div>
             </div>
 
-            <div className="p-3 bg-surface-raised border border-surface-border rounded-lg shadow-2xs">
-              <span className="text-[10px] text-slate-500 uppercase">Spread Z-Score</span>
+            <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
+              <span className="text-[10px] text-slate-500">Spread Z-Score</span>
               <div
                 className={`text-base font-bold mt-0.5 ${
-                  Math.abs(latest?.z_score || 0) > 2
+                  latest && Math.abs(latest.z_score) > 2
                     ? "text-loss"
-                    : Math.abs(latest?.z_score || 0) < 0.5
+                    : latest && Math.abs(latest.z_score) < 0.5
                     ? "text-profit"
-                    : "text-warn"
+                    : "text-slate-500"
                 }`}
               >
-                {latest ? latest.z_score.toFixed(2) : "0.00"} Z
+                {latest ? `${latest.z_score.toFixed(2)} Z` : "—"}
               </div>
             </div>
           </div>
 
           {/* Interactive SVG Sparkline Chart */}
-          <div className="bg-surface-raised border border-surface-border rounded-lg p-4 font-mono text-xs shadow-2xs">
+          <div className="bg-surface-raised border border-surface-border rounded-md p-4 font-mono text-xs shadow-2xs">
             <div className="flex justify-between text-[10px] text-slate-500 mb-2">
               <span>Residual Z-Score Spread Walk (Last 25 Cycles)</span>
               <span className="text-accent font-medium">Entry Threshold: +/- 2.0 Z</span>
@@ -318,10 +315,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           </div>
 
           {/* Signal Output */}
-          <div className="p-3 rounded-lg bg-surface-raised border border-surface-border flex items-center justify-between text-xs font-mono shadow-2xs">
+          <div className="p-3 rounded-md bg-surface-raised border border-surface-border flex items-center justify-between text-xs font-mono shadow-2xs">
             <span className="text-slate-500">Current Arbitrage Signal:</span>
             <span
-              className={`font-semibold px-2 py-0.5 rounded text-[11px] ${
+              className={`font-semibold px-2 py-0.5 rounded-sm text-[11px] ${
                 latest?.signal === "ENTRY_LONG_SPREAD"
                   ? "bg-profit-dim text-profit border border-profit-border"
                   : latest?.signal === "ENTRY_SHORT_SPREAD"
@@ -337,10 +334,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
         </div>
 
         {/* Module 2: Bertram Optimal Analytic Thresholds */}
-        <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-4 shadow-xs">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
             <div>
-              <h3 className="text-xs font-mono font-bold uppercase text-slate-900">
+              <h3 className="text-xs font-mono font-bold text-slate-900">
                 Bertram (2010) Optimal Thresholds
               </h3>
               <span className="text-[10px] text-slate-500 font-mono">Analytic solver maximizing return per unit time</span>
@@ -348,7 +345,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
             <button
               onClick={handleSolveBertram}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-lg transition shadow-xs"
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition shadow-xs"
             >
               Solve Optimal
             </button>
@@ -363,7 +360,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                 step="0.01"
                 value={theta}
                 onChange={(e) => setTheta(parseFloat(e.target.value) || 0.1)}
-                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded-sm text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
               />
             </div>
 
@@ -374,7 +371,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                 step="0.01"
                 value={sigma}
                 onChange={(e) => setSigma(parseFloat(e.target.value) || 0.05)}
-                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded-sm text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
               />
             </div>
 
@@ -385,7 +382,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                 step="0.01"
                 value={mu}
                 onChange={(e) => setMu(parseFloat(e.target.value) || 0.0)}
-                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded-sm text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
               />
             </div>
 
@@ -396,14 +393,14 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                 step="0.001"
                 value={cost}
                 onChange={(e) => setCost(parseFloat(e.target.value) || 0.002)}
-                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
+                className="w-full mt-1 px-2.5 py-1 bg-surface border border-surface-border rounded-sm text-slate-900 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent"
               />
             </div>
           </div>
 
           {/* Bertram Output Results */}
           {bertramResult ? (
-            <div className="bg-surface-raised border border-surface-border rounded-lg p-4 space-y-2.5 font-mono text-xs shadow-2xs">
+            <div className="bg-surface-raised border border-surface-border rounded-md p-4 space-y-2.5 font-mono text-xs shadow-2xs">
               <div className="flex justify-between">
                 <span className="text-slate-500">Optimal Entry (a):</span>
                 <span className="text-profit font-semibold">{bertramResult.entry_long.toFixed(4)}</span>
@@ -430,7 +427,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </div>
             </div>
           ) : (
-            <div className="text-center py-6 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-lg">
+            <div className="text-center py-6 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-md">
               Click "Solve Optimal" to calculate Bertram-style threshold levels.
             </div>
           )}
@@ -439,14 +436,14 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           <div className="pt-2">
             <button
               onClick={handleFitOu}
-              className="w-full py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-700 font-mono text-xs font-medium rounded-lg transition flex items-center justify-center space-x-2 shadow-xs"
+              className="w-full py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-700 font-mono text-xs font-medium rounded-md transition flex items-center justify-center space-x-2 shadow-xs"
             >
               <RefreshCw className="w-3.5 h-3.5 text-accent" />
               <span>Fit Ornstein-Uhlenbeck Parameters (AR(1) MLE)</span>
             </button>
 
             {ouFitResult && (
-              <div className="mt-2 p-2.5 rounded bg-surface-raised border border-surface-border text-[11px] font-mono text-slate-700 flex justify-between shadow-2xs">
+              <div className="mt-2 p-2.5 rounded-sm bg-surface-raised border border-surface-border text-[11px] font-mono text-slate-700 flex justify-between shadow-2xs">
                 <span>Theta: {ouFitResult.theta.toFixed(3)}</span>
                 <span>Mu: {ouFitResult.mu.toFixed(3)}</span>
                 <span>Sigma: {ouFitResult.sigma.toFixed(3)}</span>

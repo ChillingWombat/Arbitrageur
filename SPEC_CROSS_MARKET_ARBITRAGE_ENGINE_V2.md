@@ -18,7 +18,7 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 
 1. **Unified Ticker & Strategy Header Ribbon**: Merges asset identity, top-of-book quotes, top dislocation opportunity, trade count, net PnL, and quantitative strategy parameters (Target Profit, Hurdle Rate, Sliding Window, Execution Mode, Grid Units, and Safe Leverage) into a single horizontal ribbon with zero duplicate information.
 2. **Per-Ticker Strategy Configurator with Sliding Window**: Relocates the rolling sliding window selector (10s, 30s, 1m, 5m, 15m) into the per-asset strategy modal, persisting duration alongside target profit BPS, window percentiles, grid sizing, and leverage.
-3. **Full-Cover Vault Lockout & 60-Second Auto-Lock**: Replaces bulky vault banner cards with an automated security overlay. When the vault is locked, the API exchange credentials page is completely greyed out and blurred behind a backdrop, presenting a compact, centered passcode entry card. Exiting the settings modal activates an automatic 60-second lock timer, and closing or exiting the application instantly locks the in-memory AES-256-GCM vault.
+3. **Full-Cover Vault Lockout & 60-Second Auto-Lock**: Replaces bulky vault banner cards with an automated security overlay. When the vault is locked, the API exchange credentials page is completely greyed out and blurred behind a backdrop, presenting a compact, centered password entry card. Exiting the settings modal activates an automatic 60-second lock timer, and closing or exiting the application instantly locks the in-memory AES-256-GCM vault.
 4. **Fail-Closed Zero Synthetic Data Architecture**: If credentials are not configured or invalid, the venue adapter strictly reports disconnected and returns zero synthetic quotes, preventing phantom dislocations.
 5. **Ergonomic Settings Flow**: Reorders settings navigation tabs with "Execution" as the primary view, eliminates redundant tags and venue subtitles, and repositions the Trading Mode indicator to the bottom-left anchor bar.
 
@@ -52,8 +52,8 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 
 ### Security, Vault Lockout & Auto-Lock
 21. As a security-conscious trader, I want the exchange API credentials page to be completely greyed out and blurred when the vault is locked, so that sensitive keys are never visible to bystanders.
-22. As a user, I want a clean, centered white prompt card asking for the master passcode when the vault is locked, so that I can unlock it effortlessly without leaving the page.
-23. As a user, I want to press Enter in the passcode input to immediately unlock the vault, so that my workflow remains keyboard-friendly.
+22. As a user, I want a clean, centered white prompt card asking for the password when the vault is locked, so that I can unlock it effortlessly without leaving the page.
+23. As a user, I want to press Enter in the password input to immediately unlock the vault, so that my workflow remains keyboard-friendly.
 24. As an institutional operator, I want the vault to automatically re-lock 60 seconds after closing the settings modal, so that credentials do not remain exposed in memory if I step away.
 25. As a security architect, I want the vault to automatically lock upon application exit or window unload, so that no decrypted secrets persist on shutdown.
 26. As an operator, I want the top-right vault indicator removed from the settings header, so that the navigation bar remains clean and uncluttered.
@@ -121,7 +121,7 @@ pub struct TickerStrategyConfigDto {
 
 ### Vault Security & Lifecycle State Machine
 1. **Initial / Locked State**: `vaultStatus.is_unlocked == false`. The exchange credentials panel renders a full-height overlay with CSS `backdrop-blur-xs` and a centered white unlock card.
-2. **Unlock Flow**: User enters master passcode -> invokes `api.unlockVault(passcode)` -> sets in-memory encryption key -> returns `is_unlocked: true` -> overlay unmounts -> credentials render.
+2. **Unlock Flow**: User enters password -> invokes `api.unlockVault(password)` -> sets in-memory encryption key -> returns `is_unlocked: true` -> overlay unmounts -> credentials render.
 3. **Auto-Lock Timeout**: Closing the settings modal starts a 60-second countdown (`setTimeout(60000)`). If the user reopens settings before expiration, the timeout is cleared. If the timer fires, `api.lockVault()` is called, immediately purging decrypted keys from memory.
 4. **App Termination**: A `beforeunload` event handler invokes `api.lockVault()` synchronously or via fire-and-forget, guaranteeing that memory is wiped when the process ends.
 

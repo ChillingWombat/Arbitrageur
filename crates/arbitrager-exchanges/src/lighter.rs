@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -204,6 +205,38 @@ impl ExchangeAdapter for LighterAdapter {
         anyhow::bail!(
             "Lighter funding-rate ingestion is not implemented; refusing to return a baseline rate"
         )
+    }
+
+    async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let res = self.get_json("/api/v1/orderBookDetails").await?;
+        let details = res.get("order_book_details").and_then(|d| d.as_array()).ok_or_else(|| {
+            anyhow::anyhow!("Missing order_book_details in Lighter response")
+        })?;
+
+        fn as_decimal(v: &serde_json::Value) -> Option<Decimal> {
+            v.as_str()
+                .and_then(|s| Decimal::from_str(s).ok())
+                .or_else(|| v.as_f64().and_then(|f| Decimal::try_from(f).ok()))
+        }
+
+        let mut volumes = HashMap::new();
+        for item in details {
+            let symbol_str = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            if symbol_str.is_empty() {
+                continue;
+            }
+            let quote_vol = item.get("daily_quote_token_volume").and_then(as_decimal);
+            let base_vol = item.get("daily_base_token_volume").and_then(as_decimal);
+            let last_px = item.get("last_trade_price").and_then(as_decimal);
+            let vol = quote_vol.or_else(|| match (base_vol, last_px) {
+                (Some(b), Some(p)) => Some(b * p),
+                _ => None,
+            });
+            if let Some(v) = vol {
+                volumes.insert(symbol_str.to_string(), v);
+            }
+        }
+        Ok(volumes)
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {

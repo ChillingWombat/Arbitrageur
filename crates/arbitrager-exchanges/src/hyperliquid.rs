@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::Utc;
@@ -181,6 +182,35 @@ impl ExchangeAdapter for HyperliquidAdapter {
         }
 
         anyhow::bail!("Funding rate not found for coin: {}", coin)
+    }
+
+    async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let res = self.post_info(json!({"type": "metaAndAssetCtxs"})).await?;
+
+        let arr = res.as_array().ok_or_else(|| anyhow::anyhow!("Unexpected metaAndAssetCtxs response"))?;
+        if arr.len() < 2 {
+            anyhow::bail!("metaAndAssetCtxs response missing universe/contexts");
+        }
+        let universe = arr[0].get("universe").and_then(|u| u.as_array())
+            .ok_or_else(|| anyhow::anyhow!("metaAndAssetCtxs missing universe"))?;
+        let contexts = arr[1].as_array()
+            .ok_or_else(|| anyhow::anyhow!("metaAndAssetCtxs missing asset contexts"))?;
+
+        let mut volumes = HashMap::new();
+        for (i, item) in universe.iter().enumerate() {
+            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            if let Some(ctx) = contexts.get(i) {
+                if let Some(vol_str) = ctx.get("dayNtlVlm").and_then(|v| v.as_str()) {
+                    if let Ok(vol) = Decimal::from_str(vol_str) {
+                        volumes.insert(name.to_string(), vol);
+                    }
+                }
+            }
+        }
+        Ok(volumes)
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {

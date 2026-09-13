@@ -7,6 +7,7 @@ import {
   Info,
   ShieldCheck,
   TrendingUp,
+  Percent,
   Coins,
   Layers,
   Sparkles,
@@ -14,13 +15,24 @@ import {
 import type { TickerStrategyConfigDto, ArbitrageExecutionMode, SlidingWindowOption } from "../types";
 import {
   PERP_TICKERS,
-  formatCurrencyPrice,
   type PerpTicker,
 } from "../types/tickers";
 import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
 import { api } from "../services/api";
 import { InfoTooltip } from "./InfoTooltip";
 import { SwitchToggle } from "./SwitchToggle";
+
+export interface SpotStrategyParams {
+  tradeSizeUsd: number;
+  minNetSpreadBps: number;
+  maxSlippageBps: number;
+}
+
+export interface FundingStrategyParams {
+  tradeSizeUsd: number;
+  minAprPct: number;
+  holdingDays: number;
+}
 
 export interface TickerConfigModalProps {
   isOpen: boolean;
@@ -31,6 +43,10 @@ export interface TickerConfigModalProps {
   isEnabled?: boolean;
   onToggleEnabled?: (enabled: boolean) => void;
   onSaveConfig?: (newConfig: TickerStrategyConfigDto) => Promise<void> | void;
+  spotParams?: SpotStrategyParams;
+  onSpotParamsChange?: (params: SpotStrategyParams) => void;
+  fundingParams?: FundingStrategyParams;
+  onFundingParamsChange?: (params: FundingStrategyParams) => void;
 }
 
 const PERCENTILE_OPTIONS = [
@@ -54,6 +70,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   isEnabled,
   onToggleEnabled,
   onSaveConfig,
+  spotParams,
+  onSpotParamsChange,
+  fundingParams,
+  onFundingParamsChange,
 }) => {
   // Strategy Tab State
   const [activeStrategyTab, setActiveStrategyTab] = useState<"futures" | "funding" | "spot">("futures");
@@ -99,7 +119,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // Form State for Spot Flash Strategy
   const [spotTradeSizeUsd, setSpotTradeSizeUsd] = useState<number>(1000);
   const [spotMaxSlippageBps, setSpotMaxSlippageBps] = useState<number>(5.0);
-  const [spotMinNetProfitUsd, setSpotMinNetProfitUsd] = useState<number>(2.0);
+  const [spotMinNetSpreadBps, setSpotMinNetSpreadBps] = useState<number>(15.0);
 
   // UI status
   const [isSaving, setIsSaving] = useState(false);
@@ -137,6 +157,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         .catch((err) => {
           console.warn("Failed to load ticker strategy config in modal:", err);
         });
+    }
+
+    if (spotParams) {
+      setSpotTradeSizeUsd(spotParams.tradeSizeUsd);
+      setSpotMaxSlippageBps(spotParams.maxSlippageBps);
+      setSpotMinNetSpreadBps(spotParams.minNetSpreadBps);
+    }
+    if (fundingParams) {
+      setFundingTradeSizeUsd(fundingParams.tradeSizeUsd);
+      setFundingMinAprPct(fundingParams.minAprPct);
+      setFundingHoldingDays(fundingParams.holdingDays);
     }
   }, [isOpen, tickerSymbol, strategyConfig]);
 
@@ -218,7 +249,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setFundingHoldingDays(14);
     setSpotTradeSizeUsd(1000);
     setSpotMaxSlippageBps(5.0);
-    setSpotMinNetProfitUsd(2.0);
+    setSpotMinNetSpreadBps(15.0);
   };
 
   const handleSave = async () => {
@@ -243,6 +274,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       if (onSaveConfig) {
         await onSaveConfig(updatedConfig);
       }
+      onSpotParamsChange?.({
+        tradeSizeUsd: spotTradeSizeUsd,
+        minNetSpreadBps: spotMinNetSpreadBps,
+        maxSlippageBps: spotMaxSlippageBps,
+      });
+      onFundingParamsChange?.({
+        tradeSizeUsd: fundingTradeSizeUsd,
+        minAprPct: fundingMinAprPct,
+        holdingDays: fundingHoldingDays,
+      });
       setSaveSuccess(true);
       setTimeout(() => {
         setSaveSuccess(false);
@@ -264,27 +305,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         }
       }}
     >
-      <div className="bg-surface border border-surface-border rounded-2xl w-[960px] h-[680px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+      <div className="bg-surface border border-surface-border rounded-xl w-[960px] h-[680px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-xs">
               <SlidersHorizontal className="w-4 h-4" />
             </div>
             <div>
-              <div className="flex items-center space-x-2">
-                <h2 className="text-sm font-bold font-mono text-slate-900 leading-tight">
-                  {ticker.symbol} Strategy Configurator
-                </h2>
-                <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-raised text-slate-600 border border-surface-border font-medium">
-                  {ticker.name}
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center space-x-2">
-                <span>Base Price: {formatCurrencyPrice(ticker.basePrice)}</span>
-                <span>•</span>
-                <span>Venues: {ticker.venues.join(", ")}</span>
-              </p>
+              <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900 leading-tight">
+                {ticker.symbol} Strategy Configurator
+              </h2>
             </div>
           </div>
 
@@ -303,7 +334,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition border border-transparent hover:border-surface-border cursor-pointer"
+              className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Configurator (ESC)"
             >
               <X className="w-4 h-4" />
@@ -317,11 +348,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
             <div className="space-y-3">
               <div className="px-2 pt-1 flex items-center justify-between">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                <span className="text-[10px] font-mono font-bold tracking-wider text-slate-400">
                   Strategies
-                </span>
-                <span className="text-[10px] font-mono text-accent font-semibold">
-                  {ticker.symbol}
                 </span>
               </div>
 
@@ -329,15 +357,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setActiveStrategyTab("futures")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer text-left ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
                     activeStrategyTab === "futures"
                       ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                   }`}
                 >
-                  <TrendingUp className={`w-4 h-4 shrink-0 ${activeStrategyTab === "futures" ? "text-blue-600" : "text-slate-400"}`} />
+                  <Layers className={`w-4 h-4 shrink-0 ${activeStrategyTab === "futures" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">Futures Convergence</div>
+                    <div className="truncate">Spread Range</div>
                     <div className="text-[10px] font-normal text-slate-400 truncate">Basis & Dislocation</div>
                   </div>
                 </button>
@@ -345,15 +373,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setActiveStrategyTab("funding")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer text-left ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
                     activeStrategyTab === "funding"
                       ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                   }`}
                 >
-                  <Coins className={`w-4 h-4 shrink-0 ${activeStrategyTab === "funding" ? "text-blue-600" : "text-slate-400"}`} />
+                  <Percent className={`w-4 h-4 shrink-0 ${activeStrategyTab === "funding" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">Funding Carry</div>
+                    <div className="truncate">Funding Rate</div>
                     <div className="text-[10px] font-normal text-slate-400 truncate">Rate Arbitrage</div>
                   </div>
                 </button>
@@ -361,15 +389,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setActiveStrategyTab("spot")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-xl font-mono text-xs transition cursor-pointer text-left ${
+                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
                     activeStrategyTab === "spot"
                       ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/50 border border-transparent"
+                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                   }`}
                 >
-                  <Layers className={`w-4 h-4 shrink-0 ${activeStrategyTab === "spot" ? "text-blue-600" : "text-slate-400"}`} />
+                  <Coins className={`w-4 h-4 shrink-0 ${activeStrategyTab === "spot" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">Spot Arbitrage</div>
+                    <div className="truncate">Spot Trade</div>
                     <div className="text-[10px] font-normal text-slate-400 truncate">Atomic Flash</div>
                   </div>
                 </button>
@@ -377,8 +405,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             </div>
 
             {/* Left Sidebar Bottom Ticker Quick Telemetry Card */}
-            <div className="p-2.5 bg-surface border border-surface-border rounded-xl space-y-1.5 font-mono text-[11px]">
-              <div className="flex items-center justify-between text-slate-500 text-[10px] uppercase font-bold">
+            <div className="p-2.5 bg-surface border border-surface-border rounded-lg space-y-1.5 font-mono text-[11px]">
+              <div className="flex items-center justify-between text-slate-500 text-[10px] font-bold">
                 <span>Asset Telemetry</span>
                 <span className="text-accent">{safeLeverage.effectiveLeverage}x Lev</span>
               </div>
@@ -403,7 +431,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             {activeStrategyTab === "futures" && (
               <div className="space-y-5">
                 {/* Presets Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-raised rounded-xl border border-surface-border">
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-raised rounded-lg border border-surface-border">
                   <div className="flex items-center space-x-1.5 text-xs text-slate-600">
                     <Sparkles className="w-3.5 h-3.5 text-accent" />
                     <span className="font-semibold text-slate-800">Quick Configuration Presets:</span>
@@ -412,7 +440,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <button
                       type="button"
                       onClick={() => applyPreset("conservative")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-lg border border-surface-border transition cursor-pointer shadow-2xs"
+                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
                       title="Conservative: TP 8 bps, 80% percentile, 2 units, 5x lev"
                     >
                       Conservative
@@ -420,7 +448,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <button
                       type="button"
                       onClick={() => applyPreset("balanced")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-lg border border-surface-border transition cursor-pointer shadow-2xs"
+                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
                       title="Balanced: TP 5 bps, 60% percentile, 3 units, 5x lev"
                     >
                       Balanced
@@ -428,7 +456,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <button
                       type="button"
                       onClick={() => applyPreset("aggressive")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-lg border border-surface-border transition cursor-pointer shadow-2xs"
+                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
                       title="Aggressive: TP 2.5 bps, 50% percentile, 5 units, 5x lev"
                     >
                       Aggressive
@@ -436,9 +464,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   </div>
                 </div>
               {/* Section: Profit Hurdle & Dislocation Filters */}
-              <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-3.5 shadow-xs">
+              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <TrendingUp className="w-3.5 h-3.5 text-accent" />
                     <span>Hurdle Rate & Dislocation Triggers</span>
                     <InfoTooltip text="Calculates minimum statistical spread needed for atomic entry." />
@@ -453,7 +481,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         Target Profit (BPS)
                         <InfoTooltip text="Net profit cushion locked in per round-trip after deducting taker fees and closing spread." />
                       </span>
-                      <span className="text-[10px] text-slate-400">0.1 - 100 bps</span>
                     </label>
                     <div className="flex items-center space-x-2">
                       <input
@@ -463,7 +490,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         max="100"
                         value={targetProfitBps}
                         onChange={(e) => setTargetProfitBps(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
                       />
                       <span className="text-xs text-slate-500 font-semibold">bps</span>
                     </div>
@@ -478,13 +505,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       </span>
                       <span className="text-[10px] text-slate-400">Baseline</span>
                     </label>
-                    <div className="grid grid-cols-5 gap-1 bg-surface-raised p-1 rounded-lg border border-surface-border h-[38px] items-center">
+                    <div className="grid grid-cols-5 gap-1 bg-surface-raised p-1 rounded-md border border-surface-border h-[38px] items-center">
                       {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
                         <button
                           key={w}
                           type="button"
                           onClick={() => setSlidingWindow(w)}
-                          className={`h-7 rounded text-[11px] font-mono transition cursor-pointer flex items-center justify-center ${
+                          className={`h-7 rounded-sm text-[11px] font-mono transition cursor-pointer flex items-center justify-center ${
                             slidingWindow === w
                               ? "bg-accent text-white font-bold shadow-2xs"
                               : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
@@ -508,7 +535,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <select
                       value={windowPercentile}
                       onChange={(e) => setWindowPercentile(Math.max(50, parseInt(e.target.value, 10)))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
                     >
                       {PERCENTILE_OPTIONS.map((opt) => (
                         <option key={opt.value} value={opt.value}>
@@ -520,7 +547,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </div>
 
                 {/* Nominal Hurdle Visual Breakdown */}
-                <div className="bg-blue-50/70 border border-blue-200 rounded-lg p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-blue-900">
+                <div className="bg-blue-50/70 border border-blue-200 rounded-md p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-blue-900">
                   <div className="flex items-center space-x-2">
                     <Info className="w-4 h-4 text-blue-600 shrink-0" />
                     <div>
@@ -531,7 +558,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       </span>
                     </div>
                   </div>
-                  <span className="text-[10px] font-medium bg-white px-2 py-0.5 rounded border border-blue-200 text-blue-800 shrink-0">
+                  <span className="text-[10px] font-medium bg-white px-2 py-0.5 rounded-sm border border-blue-200 text-blue-800 shrink-0">
                     Gross spread must exceed {nominalHurdleBps.toFixed(1)} BPS
                   </span>
                 </div>
@@ -542,11 +569,11 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <span className="text-xs font-semibold text-slate-800">Execution Mode</span>
                     <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Double-Way) or maintain inventory until manual rebalancing (Single-Way)." />
                   </div>
-                  <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
+                  <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-md border border-surface-border text-xs">
                     <button
                       type="button"
                       onClick={() => setExecutionMode("SINGLE_WAY")}
-                      className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      className={`px-3 py-1 rounded transition cursor-pointer ${
                         executionMode === "SINGLE_WAY"
                           ? "bg-surface text-accent font-semibold shadow-xs border border-surface-border"
                           : "text-slate-600 hover:text-slate-900"
@@ -558,7 +585,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <button
                       type="button"
                       onClick={() => setExecutionMode("DOUBLE_WAY")}
-                      className={`px-3 py-1 rounded-md transition cursor-pointer ${
+                      className={`px-3 py-1 rounded transition cursor-pointer ${
                         executionMode === "DOUBLE_WAY"
                           ? "bg-surface text-accent font-semibold shadow-xs border border-surface-border"
                           : "text-slate-600 hover:text-slate-900"
@@ -572,9 +599,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               </div>
 
               {/* Section: Sizing, Grid Scaling & Cross-Venue Contract Compatibility */}
-              <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-3.5 shadow-xs">
+              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-accent" />
                     <span>Position Sizing & Grid Accumulation</span>
                     <InfoTooltip text="Cross-exchange compatible lot sizing, maximum accumulated grid units, and position clearing." />
@@ -596,7 +623,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) =>
                         setUnitSize(Math.max(minCompatible.minCompatibleSize, parseFloat(e.target.value) || minCompatible.minCompatibleSize))
                       }
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <div className="text-[10px] text-slate-500">
                       Notional: ~${(unitSize * ticker.basePrice).toFixed(2)} USD
@@ -616,7 +643,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       max="20"
                       value={maxAccumulatedUnits}
                       onChange={(e) => setMaxAccumulatedUnits(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <div className="text-[10px] text-slate-500">
                       Max Exposure: ~${(maxAccumulatedUnits * unitSize * ticker.basePrice).toFixed(2)} USD
@@ -630,13 +657,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       <span className="text-[10px] text-slate-400">Currently Filled</span>
                     </label>
                     <div className="flex items-center space-x-2">
-                      <div className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-800 font-bold text-center">
+                      <div className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-800 font-bold text-center">
                         {currentAccumulatedUnits} / {maxAccumulatedUnits}
                       </div>
                       <button
                         type="button"
                         onClick={() => setCurrentAccumulatedUnits(0)}
-                        className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-lg text-[11px] transition cursor-pointer"
+                        className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-md text-[11px] transition cursor-pointer"
                         title="Clear accumulated units back to 0"
                       >
                         <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -653,10 +680,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </div>
 
                 {/* Compatibility Info Bar */}
-                <div className="bg-surface-raised p-2.5 rounded-lg border border-surface-border flex items-center justify-between text-[11px] text-slate-600">
+                <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border flex items-center justify-between text-[11px] text-slate-600">
                   <div className="flex items-center space-x-2">
                     <span className="font-semibold text-slate-800">Minimum Compatible Lot:</span>
-                    <span className="bg-surface px-2 py-0.5 rounded border border-surface-border font-bold text-slate-900">
+                    <span className="bg-surface px-2 py-0.5 rounded-sm border border-surface-border font-bold text-slate-900">
                       {minCompatible.minCompatibleSize} {ticker.base}
                     </span>
                     <span className="text-slate-500">across ({ticker.venues.join(", ")})</span>
@@ -666,9 +693,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               </div>
 
               {/* Section: Safe Futures Leverage & Margin Risk Calculator */}
-              <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-3.5 shadow-xs">
+              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
                     <span>Safe Effective Leverage & Margin Requirement</span>
                     <InfoTooltip text="Calculates minimum safe leverage ratio and margin requirements across enabled exchanges." />
@@ -688,28 +715,28 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         onChange={(e) =>
                           setUserTargetLeverage(Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 5)))
                         }
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                       />
                       <span className="text-slate-500 font-semibold">x</span>
                     </div>
                   </div>
 
-                  <div className="bg-surface-raised p-2.5 rounded-lg border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 uppercase font-semibold">Effective Safe Leverage</span>
+                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
+                    <span className="text-[10px] text-slate-500 font-semibold">Effective Safe Leverage</span>
                     <div className="text-sm font-bold text-blue-700">{safeLeverage.effectiveLeverage}x</div>
                     <span className="text-[10px] text-slate-400">Max venue: {safeLeverage.maxVenueLeverage}x</span>
                   </div>
 
-                  <div className="bg-surface-raised p-2.5 rounded-lg border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 uppercase font-semibold">Margin / Unit (USD)</span>
+                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
+                    <span className="text-[10px] text-slate-500 font-semibold">Margin / Unit (USD)</span>
                     <div className="text-sm font-bold text-slate-900">
                       ${safeLeverage.totalMarginRequiredUsd.toFixed(2)}
                     </div>
                     <span className="text-[10px] text-slate-400">${safeLeverage.marginPerLegUsd.toFixed(2)} / leg</span>
                   </div>
 
-                  <div className="bg-surface-raised p-2.5 rounded-lg border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 uppercase font-semibold">Liquidation Buffer</span>
+                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
+                    <span className="text-[10px] text-slate-500 font-semibold">Liquidation Buffer</span>
                     <div className="text-sm font-bold text-emerald-700">
                       {safeLeverage.liquidationBufferPct.toFixed(1)}%
                     </div>
@@ -723,15 +750,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           {/* TAB 2: Funding Carry Radar */}
           {activeStrategyTab === "funding" && (
             <div className="space-y-4">
-              <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-4 shadow-xs">
+              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
                 <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <Coins className="w-3.5 h-3.5 text-accent" />
                     <span>Delta-Neutral Perpetual Funding Carry Settings</span>
                   </h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Configure position size and annual yield hurdle for {ticker.symbol}.
-                  </p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -743,9 +767,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       min="1000"
                       value={fundingTradeSizeUsd}
                       onChange={(e) => setFundingTradeSizeUsd(Math.max(100, parseFloat(e.target.value) || 1000))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Notional per leg</p>
+                    <p className="text-[10px] text-slate-400">Notional Per Leg</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -756,7 +780,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       min="1"
                       value={fundingMinAprPct}
                       onChange={(e) => setFundingMinAprPct(Math.max(0.1, parseFloat(e.target.value) || 1))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <p className="text-[10px] text-slate-400">Ignore opportunities below this net APR</p>
                   </div>
@@ -770,9 +794,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       max="365"
                       value={fundingHoldingDays}
                       onChange={(e) => setFundingHoldingDays(Math.max(1, parseInt(e.target.value, 10) || 14))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Projected carry amortization duration</p>
+                    <p className="text-[10px] text-slate-400">Projected Carry Amortization Duration</p>
                   </div>
                 </div>
               </div>
@@ -782,15 +806,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           {/* TAB 3: Spot Arbitrage */}
           {activeStrategyTab === "spot" && (
             <div className="space-y-4">
-              <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-4 shadow-xs">
+              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
                 <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs uppercase font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <Layers className="w-3.5 h-3.5 text-accent" />
                     <span>Cross-Exchange Spot Arbitrage Parameters</span>
                   </h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    Parameters for simultaneous dual-leg spot balance execution for {ticker.symbol}.
-                  </p>
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
@@ -802,7 +823,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       min="100"
                       value={spotTradeSizeUsd}
                       onChange={(e) => setSpotTradeSizeUsd(Math.max(10, parseFloat(e.target.value) || 500))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
                     <p className="text-[10px] text-slate-400">Capital deployed per flash cycle</p>
                   </div>
@@ -816,22 +837,22 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       max="50"
                       value={spotMaxSlippageBps}
                       onChange={(e) => setSpotMaxSlippageBps(Math.max(0.1, parseFloat(e.target.value) || 5))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Orderbook tolerance limit</p>
+                    <p className="text-[10px] text-slate-400">Orderbook Tolerance Limit</p>
                   </div>
 
                   <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Min Expected Net Profit (USD)</label>
+                    <label className="text-slate-700 font-medium">Min Net Spread (BPS)</label>
                     <input
                       type="number"
                       step="0.5"
                       min="0.1"
-                      value={spotMinNetProfitUsd}
-                      onChange={(e) => setSpotMinNetProfitUsd(Math.max(0.1, parseFloat(e.target.value) || 1))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                      value={spotMinNetSpreadBps}
+                      onChange={(e) => setSpotMinNetSpreadBps(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Hurdle after transfer & taker fees</p>
+                    <p className="text-[10px] text-slate-400">Net spread required to auto-execute</p>
                   </div>
                 </div>
               </div>
@@ -845,7 +866,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <button
             type="button"
             onClick={handleResetDefaults}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-lg border border-surface-border transition cursor-pointer"
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-md border border-surface-border transition cursor-pointer"
             title="Reset to default quantitative parameters"
           >
             <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -856,7 +877,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer"
+              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-md font-medium transition cursor-pointer"
             >
               Cancel
             </button>
@@ -865,7 +886,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               type="button"
               onClick={handleSave}
               disabled={isSaving}
-              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-lg font-semibold transition shadow-xs cursor-pointer ${
+              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-md font-semibold transition shadow-xs cursor-pointer ${
                 saveSuccess
                   ? "bg-profit text-white border border-profit-border"
                   : "bg-accent hover:bg-blue-600 text-white"
@@ -877,10 +898,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <span>Saved!</span>
                 </>
               ) : (
-                <>
-                  <SlidersHorizontal className="w-3.5 h-3.5" />
-                  <span>{isSaving ? "Saving..." : "Save & Apply"}</span>
-                </>
+                <span>{isSaving ? "Saving..." : "Save & Apply"}</span>
               )}
             </button>
           </div>

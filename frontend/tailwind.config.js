@@ -39,10 +39,8 @@ export default {
       },
       fontFamily: {
         mono: [
-          '"JetBrainsMono Nerd Font"',
-          '"JetBrainsMono NF"',
-          '"JetBrains Mono Nerd"',
-          '"JetBrains Mono"',
+          '"Geist Mono Variable"',
+          '"Geist Mono"',
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",
@@ -51,10 +49,8 @@ export default {
           "monospace"
         ],
         sans: [
-          '"JetBrainsMono Nerd Font"',
-          '"JetBrainsMono NF"',
-          '"JetBrains Mono Nerd"',
-          '"JetBrains Mono"',
+          '"Geist Variable"',
+          '"Geist"',
           "Inter",
           "-apple-system",
           "BlinkMacSystemFont",

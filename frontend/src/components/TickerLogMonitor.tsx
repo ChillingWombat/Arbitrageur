@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type { ExecutionLogEntry, TickerStrategyConfigDto, VenueOrderBookDto } from "../types";
 import { formatCurrencyPnl, formatCurrencyPrice } from "../types/tickers";
+import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
 
 export interface LogItem {
   id: string;
@@ -41,10 +42,32 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   isPaused = false,
 }) => {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
+  const [logDepth, setLogDepth] = useState<string>("100");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [runtimeLogs, setRuntimeLogs] = useState<LogItem[]>([]);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
+  const storageKey = `ticker-log-monitor:${symbol}`;
+
+  // Load persisted telemetry stream for this ticker (survives remounts/restarts)
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      setRuntimeLogs(raw ? (JSON.parse(raw) as LogItem[]) : []);
+    } catch {
+      setRuntimeLogs([]);
+    }
+  }, [storageKey]);
+
+  // Persist the telemetry stream automatically (capped) — the engine creates
+  // and stores logs continuously; there is no manual scanning mode.
+  useEffect(() => {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(runtimeLogs.slice(-500)));
+    } catch {
+      // Storage quota exceeded — telemetry remains visible but unpersisted
+    }
+  }, [runtimeLogs, storageKey]);
 
   // Convert backend execution logs into structured log items for this ticker
   const executionItems = useMemo<LogItem[]>(() => {
@@ -109,9 +132,23 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
     }
 
     const grossSpreadBps = bestAsk > 0 && bestBid > 0 ? ((bestBid - bestAsk) / bestAsk) * 10000 : 0;
-    const estFees = 7.0 + 0.6;
-    const netSpreadBps = grossSpreadBps - estFees;
-    const hurdleBps = config ? config.targetProfitBps + estFees : 12.6;
+    // Round-trip fees come from venue metadata; unresolved routes report gross only.
+    const feeBpsFor = (venueName: string): number | null => {
+      const key = venueName.toLowerCase();
+      const meta = EXCHANGES_ALPHABETICAL.find(
+        (e) => key.includes(e.name.toLowerCase()) || e.name.toLowerCase().includes(key),
+      );
+      return meta ? meta.feeBps : null;
+    };
+    const askFee = feeBpsFor(bestAskVenue);
+    const bidFee = feeBpsFor(bestBidVenue);
+    const estFees = askFee !== null && bidFee !== null ? askFee + bidFee : null;
+    const netSpreadBps = estFees !== null ? grossSpreadBps - estFees : grossSpreadBps;
+    const hurdleBps = (config?.targetProfitBps ?? 5.0) + (estFees ?? 0);
+    const spreadNote =
+      estFees !== null
+        ? `Net spread: ${netSpreadBps.toFixed(1)} BPS (hurdle: ${hurdleBps.toFixed(1)} BPS)`
+        : `Gross spread: ${grossSpreadBps.toFixed(1)} BPS (route fees unresolved)`;
 
     if (isPaused) {
       newEntries.push({
@@ -123,39 +160,39 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         message: `Trading currently PAUSED. Strategy executions suspended. All positions and margin preserved safely.`,
         status: "WARNING",
       });
-    } else if (autoBotEnabled) {
-      if (netSpreadBps >= (config?.targetProfitBps || 5.0)) {
-        newEntries.push({
-          id: `eval-${epochMs}`,
-          timestamp,
-          epochMs,
-          level: "TRIGGER",
-          source: "AutoBot",
-          message: `Hurdle breached! Net spread +${netSpreadBps.toFixed(1)} BPS exceeded target +${config?.targetProfitBps.toFixed(1)} BPS (Hurdle: ${hurdleBps.toFixed(1)} BPS). Evaluating order execution.`,
-          route: `${bestAskVenue} ➔ ${bestBidVenue}`,
-          spreadBps: netSpreadBps,
-          status: "INFO",
-        });
-      } else {
-        newEntries.push({
-          id: `scan-${epochMs}`,
-          timestamp,
-          epochMs,
-          level: "SCAN",
-          source: "MarketDataHub",
-          message: `Polled ${orderbooks.length} venues. Best: Buy ${bestAskVenue} @ ${formatCurrencyPrice(bestAsk)} / Sell ${bestBidVenue} @ ${formatCurrencyPrice(bestBid)}. Net spread: ${netSpreadBps.toFixed(1)} BPS (below ${hurdleBps.toFixed(1)} BPS hurdle).`,
-          route: `${bestAskVenue} ➔ ${bestBidVenue}`,
-          spreadBps: netSpreadBps,
-          status: "INFO",
-        });
-      }
+    } else if (estFees !== null && netSpreadBps >= (config?.targetProfitBps || 5.0)) {
+      newEntries.push({
+        id: `eval-${epochMs}`,
+        timestamp,
+        epochMs,
+        level: autoBotEnabled ? "TRIGGER" : "EVAL",
+        source: autoBotEnabled ? "AutoBot" : "Signal Evaluator",
+        message: `Hurdle breached! Net spread +${netSpreadBps.toFixed(1)} BPS exceeded target +${(config?.targetProfitBps ?? 5.0).toFixed(1)} BPS (Hurdle: ${hurdleBps.toFixed(1)} BPS). ${
+          autoBotEnabled ? "Evaluating order execution." : "Entries disabled — monitoring only."
+        }`,
+        route: `${bestAskVenue} ➔ ${bestBidVenue}`,
+        spreadBps: netSpreadBps,
+        status: "INFO",
+      });
+    } else {
+      newEntries.push({
+        id: `scan-${epochMs}`,
+        timestamp,
+        epochMs,
+        level: "SCAN",
+        source: "MarketDataHub",
+        message: `Polled ${orderbooks.length} venues. Best: Buy ${bestAskVenue} @ ${formatCurrencyPrice(bestAsk)} / Sell ${bestBidVenue} @ ${formatCurrencyPrice(bestBid)}. ${spreadNote}.`,
+        route: `${bestAskVenue} ➔ ${bestBidVenue}`,
+        spreadBps: netSpreadBps,
+        status: "INFO",
+      });
     }
 
     if (newEntries.length > 0) {
       setRuntimeLogs((prev) => {
-        // Keep up to 200 recent telemetry entries
+        // Keep up to 500 recent telemetry entries
         const combined = [...prev, ...newEntries];
-        return combined.slice(-200);
+        return combined.slice(-500);
       });
     }
   }, [orderbooks, symbol, autoBotEnabled, isPaused, config]);
@@ -166,9 +203,9 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
     return combined.sort((a, b) => b.epochMs - a.epochMs);
   }, [executionItems, runtimeLogs]);
 
-  // Filter logs by level and search query
+  // Filter logs by level, search query, and depth/time window
   const filteredLogs = useMemo<LogItem[]>(() => {
-    return allLogs.filter((item) => {
+    let out = allLogs.filter((item) => {
       if (levelFilter === "TRADES" && item.level !== "EXEC") return false;
       if (levelFilter === "TRIGGER" && item.level !== "TRIGGER") return false;
       if (levelFilter === "EVAL" && item.level !== "EVAL" && item.level !== "TRIGGER") return false;
@@ -183,7 +220,18 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
 
       return true;
     });
-  }, [allLogs, levelFilter, searchQuery]);
+
+    const now = Date.now();
+    if (logDepth === "1h") {
+      out = out.filter((item) => item.epochMs >= now - 3_600_000);
+    } else if (logDepth === "24h") {
+      out = out.filter((item) => item.epochMs >= now - 86_400_000);
+    } else if (logDepth !== "all") {
+      // Logs are sorted newest-first — count presets take the head
+      out = out.slice(0, Number(logDepth));
+    }
+    return out;
+  }, [allLogs, levelFilter, searchQuery, logDepth]);
 
   // Scroll to top/bottom when logs change if auto-scroll is enabled
   useEffect(() => {
@@ -194,6 +242,11 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
 
   const handleClearLogs = () => {
     setRuntimeLogs([]);
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      // ignore
+    }
   };
 
   const getLevelBadgeClass = (level: LogItem["level"]) => {
@@ -221,18 +274,20 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2 border-b border-surface-border">
         {/* Left: Scope indicator */}
         <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border">
+          <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-md border border-surface-border">
             <Terminal className="w-3.5 h-3.5 text-accent" />
             <span className="font-bold text-slate-900">{symbol}</span>
-            <span className="text-slate-400">·</span>
-            <span className="text-accent font-semibold">{strategyName}</span>
           </div>
 
           <div className="flex items-center space-x-1.5 text-[11px] text-slate-500">
-            <span className="w-1.5 h-1.5 rounded-full bg-profit animate-pulse" />
-            <span>{autoBotEnabled ? "Auto-Bot Active" : "Manual Scanning"}</span>
+            <span
+              className={`w-1.5 h-1.5 rounded-full ${
+                orderbooks.length > 0 ? "bg-profit animate-pulse" : "bg-slate-300"
+              }`}
+            />
+            <span>{orderbooks.length > 0 ? "Live Feed" : "Awaiting Market Data"}</span>
             {isPaused && (
-              <span className="px-1.5 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold">
+              <span className="px-1.5 py-0.2 rounded-sm bg-amber-50 text-amber-700 border border-amber-200 font-semibold">
                 PAUSED
               </span>
             )}
@@ -242,13 +297,13 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         {/* Right: Controls (Level Filters, Search, Clear) */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Level Filter Chips */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
             {(["ALL", "TRADES", "TRIGGER", "SCAN", "ERRORS"] as const).map((lvl) => (
               <button
                 key={lvl}
                 type="button"
                 onClick={() => setLevelFilter(lvl)}
-                className={`px-2 py-0.5 rounded font-medium transition cursor-pointer ${
+                className={`px-2 py-0.5 rounded-sm font-medium transition cursor-pointer ${
                   levelFilter === lvl
                     ? "bg-surface text-accent font-bold shadow-2xs border border-surface-border"
                     : "text-slate-500 hover:text-slate-900"
@@ -259,6 +314,24 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
             ))}
           </div>
 
+          {/* Depth / Time-Window Filter */}
+          <div className="flex items-center bg-surface-raised px-2 py-0.5 rounded-md border border-surface-border text-[11px]">
+            <select
+              value={logDepth}
+              onChange={(e) => setLogDepth(e.target.value)}
+              className="bg-transparent text-slate-700 font-mono text-[11px] focus:outline-none cursor-pointer"
+              title="How many / how far back logs to display"
+            >
+              <option value="50">Last 50</option>
+              <option value="100">Last 100</option>
+              <option value="200">Last 200</option>
+              <option value="500">Last 500</option>
+              <option value="1h">Last 1h</option>
+              <option value="24h">Last 24h</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+
           {/* Search Bar */}
           <div className="relative">
             <Search className="w-3 h-3 text-slate-400 absolute left-2 top-2" />
@@ -267,7 +340,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
               placeholder="Search logs..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-7 pr-2 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-lg text-[11px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+              className="pl-7 pr-2 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-md text-[11px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </div>
 
@@ -275,7 +348,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
           <button
             type="button"
             onClick={handleClearLogs}
-            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
+            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
             title="Clear runtime telemetry logs"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -284,19 +357,16 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
       </div>
 
       {/* 2. Log Stream Table */}
-      <div className="rounded-xl border border-surface-border bg-surface overflow-hidden shadow-2xs">
+      <div className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs">
         {filteredLogs.length === 0 ? (
           <div className="py-12 text-center text-slate-400 font-mono text-xs px-4 space-y-2">
             <Activity className="w-6 h-6 mx-auto text-slate-300 animate-pulse" />
             <div className="font-semibold text-slate-700">No telemetry logs recorded for {symbol}</div>
-            <div className="text-[11px] text-slate-500 max-w-md mx-auto">
-              Real-time telemetry, hurdle checks, and execution fills for {strategyName} will appear here as orderbooks are scanned.
-            </div>
           </div>
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
             <table className="w-full text-left font-mono text-xs">
-              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[10px] text-slate-500 uppercase tracking-wider">
+              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[10px] text-slate-500 tracking-wider">
                 <tr>
                   <th className="py-2 px-3 w-40">Timestamp</th>
                   <th className="py-2 px-2.5 w-20">Level</th>
@@ -317,7 +387,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                       {/* Level */}
                       <td className="py-2 px-2.5 whitespace-nowrap">
                         <span
-                          className={`px-1.5 py-0.2 rounded text-[9px] font-bold border ${getLevelBadgeClass(
+                          className={`px-1.5 py-0.2 rounded-sm text-[9px] font-bold border ${getLevelBadgeClass(
                             item.level
                           )}`}
                         >
@@ -388,9 +458,9 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
               type="checkbox"
               checked={autoScroll}
               onChange={(e) => setAutoScroll(e.target.checked)}
-              className="rounded border-surface-border text-accent focus:ring-accent"
+              className="rounded-sm border-surface-border text-accent focus:ring-accent"
             />
-            <span className="text-[10px]">Follow live stream</span>
+            <span className="text-[10px]">Follow Live Stream</span>
           </label>
         </div>
       </div>

@@ -1,74 +1,65 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { api, invokeDesktopOrDemo, nativeCommandAvailable } from "./api.ts";
+import {
+  api,
+  invokeDesktop,
+  nativeCommandAvailable,
+  DESKTOP_REQUIRED_ERROR,
+} from "./api.ts";
 
-test("invokeDesktopOrDemo calls demo when core is null and returns its value", async () => {
-  let demoCalled = false;
-  const result = await invokeDesktopOrDemo(
-    "fetch_orderbooks",
-    { symbol: "BTC-USDC" },
-    () => {
-      demoCalled = true;
-      return "demo-value";
-    },
-    async () => null,
+test("invokeDesktop throws DESKTOP_REQUIRED_ERROR when core is null", async () => {
+  await assert.rejects(
+    invokeDesktop("fetch_orderbooks", { symbol: "BTC-USDC" }, async () => null),
+    (err: unknown) =>
+      err instanceof Error && err.message === DESKTOP_REQUIRED_ERROR,
   );
-  assert.equal(result, "demo-value");
-  assert.equal(demoCalled, true);
 });
 
-test("invokeDesktopOrDemo propagates desktop invoke rejection and never calls demo", async () => {
+test("invokeDesktop returns the desktop invoke result", async () => {
+  const core = {
+    invoke: async <R>(_command: string, _args?: Record<string, unknown>): Promise<R> =>
+      "desktop-value" as R,
+  };
+  const result = await invokeDesktop(
+    "fetch_orderbooks",
+    { symbol: "BTC-USDC" },
+    async () => core,
+  );
+  assert.equal(result, "desktop-value");
+});
+
+test("invokeDesktop propagates desktop invoke rejection", async () => {
   const failure = new Error("ipc invoke failed");
-  let demoCalled = false;
   const core = {
     invoke: async <R>(_command: string, _args?: Record<string, unknown>): Promise<R> => {
       throw failure;
     },
   };
   await assert.rejects(
-    invokeDesktopOrDemo(
-      "fetch_orderbooks",
-      undefined,
-      () => {
-        demoCalled = true;
-        return "demo";
-      },
-      async () => core,
-    ),
+    invokeDesktop("fetch_orderbooks", undefined, async () => core),
     (err: unknown) => err === failure,
   );
-  assert.equal(demoCalled, false);
 });
 
-test("invokeDesktopOrDemo propagates core loader failure", async () => {
+test("invokeDesktop propagates core loader failure", async () => {
   const failure = new Error("tauri core import failed");
-  let demoCalled = false;
   await assert.rejects(
-    invokeDesktopOrDemo(
-      "get_system_status",
-      undefined,
-      () => {
-        demoCalled = true;
-        return "demo";
-      },
-      async () => {
-        throw failure;
-      },
-    ),
+    invokeDesktop("get_system_status", undefined, async () => {
+      throw failure;
+    }),
     (err: unknown) => err === failure,
   );
-  assert.equal(demoCalled, false);
 });
 
-test("browser demo setLiveMode(true) rejects and setLiveMode(false) returns false", async () => {
-  await assert.rejects(api.setLiveMode(true), /Live execution is unavailable in browser demo mode/);
-  assert.equal(await api.setLiveMode(false), false);
+test("api.setLiveMode rejects without the desktop application", async () => {
+  await assert.rejects(api.setLiveMode(true), new RegExp(DESKTOP_REQUIRED_ERROR));
+  await assert.rejects(api.setLiveMode(false), new RegExp(DESKTOP_REQUIRED_ERROR));
 });
 
-test("browser demo deleteExchangeCredentials rejects", async () => {
+test("api.deleteExchangeCredentials rejects without the desktop application", async () => {
   await assert.rejects(
     api.deleteExchangeCredentials("hyperliquid"),
-    /Secure credential storage is unavailable in browser demo mode/,
+    new RegExp(DESKTOP_REQUIRED_ERROR),
   );
 });
 

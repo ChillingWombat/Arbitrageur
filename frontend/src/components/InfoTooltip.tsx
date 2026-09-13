@@ -27,7 +27,7 @@ export const InfoTooltip: React.FC<InfoTooltipProps> = ({
       <HelpCircle className="w-3.5 h-3.5 text-slate-400 hover:text-accent transition-colors cursor-help shrink-0" />
       {isOpen && (
         <span
-          className={`absolute z-50 w-64 max-w-xs p-2.5 bg-slate-900/95 text-white text-[11px] font-sans font-normal rounded-lg shadow-xl border border-slate-700/80 pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs ${
+          className={`absolute z-50 w-64 max-w-xs p-2.5 bg-slate-900/95 text-white text-[11px] font-sans font-normal normal-case tracking-normal whitespace-pre-line rounded-md shadow-xl border border-slate-700/80 pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs ${
             position === "top"
               ? "bottom-full left-1/2 -translate-x-1/2 mb-2"
               : "top-full left-1/2 -translate-x-1/2 mt-2"
