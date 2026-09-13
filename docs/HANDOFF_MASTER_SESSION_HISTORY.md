@@ -214,9 +214,9 @@ DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
    - Persist venue mid/dislocation samples in SQLite WAL; compute deviation series + analytics in `arbitrager-math` (not the frontend); chart windows default to the bot's trailing window and extend to days via rollups.
    - Seasonality (hour-of-day, day-of-week), per-pair mean/half-life, regime-shift detection; parameter recommendations (hurdle, window, units, leverage) validated out-of-sample via existing WFO module; opt-in auto-tune modes; curated default presets for distribution.
    - Data-first mandate: accumulate our own corpus and analyze patterns before offering auto-tune to external users.
-1. **WebSocket Orderbook Streaming Integration**:
+1. **WebSocket Orderbook Streaming Integration** *(spec published — [GitHub Issue #4](https://github.com/Dav1D1010/Arbitrager/issues/4), label `ready-for-agent`)*:
    - Hyperliquid already features direct REST/WS endpoints.
-   - Wire persistent WebSockets for Lighter zkDEX, Vanta (Orderly), and Robinhood EVM to achieve continuous sub-10ms quote updates.
+   - Wire persistent WebSockets for Lighter zkDEX, Vanta (Orderly), and Robinhood EVM to achieve continuous sub-10ms quote updates. Robinhood has no CLOB API — spec routes it to honestly-attributed on-chain pool quotes; Vanta/Robinhood now fail closed until feeds land (post-sweep they contribute zero orderbook data).
 2. **Triangular Backend Migration**:
    - `TriangularArbitrage.tsx` currently delegates to `api.scanTriangleOpportunities`.
    - Implement native `scan_triangular_opportunities` and `execute_triangular_arbitrage` in `frontend/src-tauri/src/commands.rs`.
