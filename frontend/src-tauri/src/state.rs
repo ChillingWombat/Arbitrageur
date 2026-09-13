@@ -669,6 +669,14 @@ impl EngineSettingsDto {
     }
 }
 
+/// Cached 24h venue volumes: fetch instant + (venue_id -> asset -> volume USD).
+type VolumeCache = Mutex<
+    Option<(
+        std::time::Instant,
+        std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
+    )>,
+>;
+
 #[allow(dead_code)]
 pub struct AppEngineState {
     pub ex_hl: Arc<SimulatedExchange>,
@@ -704,12 +712,7 @@ pub struct AppEngineState {
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
     /// 24h volume cache: venue_id -> asset -> volume USD (5-minute TTL).
-    pub volume_cache: Mutex<
-        Option<(
-            std::time::Instant,
-            std::collections::HashMap<String, std::collections::HashMap<String, f64>>,
-        )>,
-    >,
+    pub volume_cache: VolumeCache,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented

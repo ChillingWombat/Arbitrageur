@@ -70,8 +70,8 @@ impl ExchangeAdapter for PolymarketAdapter {
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
         let book = self.fetch_orderbook(symbol).await?;
-        let bid = book.best_bid_price().unwrap_or(dec!(0.41));
-        let ask = book.best_ask_price().unwrap_or(dec!(0.42));
+        let bid = book.best_bid_price().unwrap_or(dec!(0));
+        let ask = book.best_ask_price().unwrap_or(dec!(0));
 
         Ok(Ticker {
             venue: self.venue_id.clone(),
@@ -79,7 +79,6 @@ impl ExchangeAdapter for PolymarketAdapter {
             bid,
             ask,
             last: (bid + ask) / dec!(2),
-            volume_24h: dec!(500000),
             timestamp: Utc::now(),
         })
     }
@@ -179,8 +178,8 @@ impl ExchangeAdapter for KalshiAdapter {
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
         let book = self.fetch_orderbook(symbol).await?;
-        let bid = book.best_bid_price().unwrap_or(dec!(0.56));
-        let ask = book.best_ask_price().unwrap_or(dec!(0.57));
+        let bid = book.best_bid_price().unwrap_or(dec!(0));
+        let ask = book.best_ask_price().unwrap_or(dec!(0));
 
         Ok(Ticker {
             venue: self.venue_id.clone(),
@@ -188,7 +187,6 @@ impl ExchangeAdapter for KalshiAdapter {
             bid,
             ask,
             last: (bid + ask) / dec!(2),
-            volume_24h: dec!(350000),
             timestamp: Utc::now(),
         })
     }

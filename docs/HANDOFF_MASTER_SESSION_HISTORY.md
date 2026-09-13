@@ -297,7 +297,7 @@ The gadget is now backend-driven end to end; no frontend math.
 
 ### 7.10 Working Tree State
 - All changes **uncommitted**; `git status` shows modifications across `crates/` (exchange.rs, hyperliquid.rs, lighter.rs), `src-tauri` (commands.rs, main.rs, state.rs, vault.rs, state_store.rs new), and most frontend components. New files: `SignalTrendGadget.tsx`, `TickerTelemetryGadget.tsx`, `BotLifecycleControls.tsx`, `ExchangeAccounts.tsx`.
-- Known caveat: `Ticker.volume_24h` in several adapters still returns placeholder constants — it is **not surfaced to any UI/DTO** but should be wired to real data or removed in a future pass.
+- ~~Known caveat: `Ticker.volume_24h` in several adapters still returns placeholder constants~~ — **resolved post-handoff**: the dead field was removed from `Ticker` entirely (it was write-only, never consumed); real per-venue volume data continues to flow through `fetch_volumes_24h`. Prediction-market empty-book ticker fallbacks (`0.41/0.42`, `0.56/0.57`) were also zeroed for consistency.
 
 ### 7.11 Verification (all green at handoff)
 ```bash

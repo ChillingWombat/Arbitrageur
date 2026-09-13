@@ -155,7 +155,6 @@ impl ExchangeAdapter for PopDexAdapter {
             bid,
             ask,
             last: (bid + ask) / dec!(2),
-            volume_24h: dec!(35000000.0),
             timestamp: Utc::now(),
         })
     }

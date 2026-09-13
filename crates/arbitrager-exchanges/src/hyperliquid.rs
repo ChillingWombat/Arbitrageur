@@ -142,7 +142,6 @@ impl ExchangeAdapter for HyperliquidAdapter {
             bid,
             ask,
             last,
-            volume_24h: dec!(10000000),
             timestamp: Utc::now(),
         })
     }

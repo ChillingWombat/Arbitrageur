@@ -221,7 +221,6 @@ pub struct Ticker {
     pub bid: Decimal,
     pub ask: Decimal,
     pub last: Decimal,
-    pub volume_24h: Decimal,
     pub timestamp: DateTime<Utc>,
 }
 

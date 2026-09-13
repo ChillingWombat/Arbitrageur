@@ -190,10 +190,6 @@ impl ExchangeAdapter for VantaAdapter {
                         .and_then(|m| m.as_f64())
                         .and_then(Decimal::from_f64_retain)
                         .unwrap_or(dec!(0));
-                    let vol = data.get("24h_amount")
-                        .and_then(|v| v.as_f64())
-                        .and_then(Decimal::from_f64_retain)
-                        .unwrap_or(dec!(1000000));
 
                     if mark_px > dec!(0) {
                         let spread_half = mark_px * dec!(0.0001);
@@ -203,7 +199,6 @@ impl ExchangeAdapter for VantaAdapter {
                             bid: mark_px - spread_half,
                             ask: mark_px + spread_half,
                             last: mark_px,
-                            volume_24h: vol,
                             timestamp: Utc::now(),
                         });
                     }
@@ -222,7 +217,6 @@ impl ExchangeAdapter for VantaAdapter {
             bid,
             ask,
             last,
-            volume_24h: dec!(8000000),
             timestamp: Utc::now(),
         })
     }

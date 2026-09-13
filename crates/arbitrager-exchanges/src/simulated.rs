@@ -193,7 +193,6 @@ impl ExchangeAdapter for SimulatedExchange {
             bid,
             ask,
             last,
-            volume_24h: dec!(0),
             timestamp: Utc::now(),
         })
     }

@@ -20,6 +20,7 @@ mod tests {
 
     /// Per-call scripted behavior for MockExchange::place_order.
     #[derive(Clone)]
+    #[allow(clippy::large_enum_variant)]
     enum MockResponse {
         /// place_order returns Err
         Fail,
@@ -78,7 +79,6 @@ mod tests {
                 bid: dec!(100),
                 ask: dec!(101),
                 last: dec!(100.5),
-                volume_24h: dec!(1000),
                 timestamp: chrono::Utc::now(),
             })
         }

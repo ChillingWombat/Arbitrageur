@@ -195,7 +195,6 @@ impl ExchangeAdapter for LighterAdapter {
             bid,
             ask,
             last,
-            volume_24h: dec!(5000000),
             timestamp: Utc::now(),
         })
     }

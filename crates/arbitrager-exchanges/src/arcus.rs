@@ -155,7 +155,6 @@ impl ExchangeAdapter for ArcusAdapter {
             bid,
             ask,
             last: (bid + ask) / dec!(2),
-            volume_24h: dec!(50000000.0),
             timestamp: Utc::now(),
         })
     }

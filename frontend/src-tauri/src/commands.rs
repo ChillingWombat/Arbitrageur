@@ -4464,9 +4464,11 @@ mod tests {
 
         // A flat settings save now merges into the bound default profile
         // instead of creating a second record for the same venue.
-        let mut s = EngineSettingsDto::default();
-        s.hyperliquid_enabled = true;
-        s.hyperliquid_private_key = "SENTINEL_NEW".into();
+        let s = EngineSettingsDto {
+            hyperliquid_enabled: true,
+            hyperliquid_private_key: "SENTINEL_NEW".into(),
+            ..Default::default()
+        };
         save_engine_settings_impl(s, &state).expect("save");
         let stored = state.vault.write().get_data().expect("vault data").clone();
         assert_eq!(
@@ -4972,9 +4974,11 @@ mod tests {
         // Toggle the venue off without resubmitting any secrets: the stored
         // record stays discoverable because configured_venues means
         // "credentials exist", not "venue active"
-        let mut off = EngineSettingsDto::default();
-        off.hyperliquid_enabled = false;
-        off.hyperliquid_spot_enabled = false;
+        let off = EngineSettingsDto {
+            hyperliquid_enabled: false,
+            hyperliquid_spot_enabled: false,
+            ..Default::default()
+        };
         save_engine_settings_impl(off, &state).expect("save toggle off");
         assert_eq!(
             get_engine_settings_impl(&state).expect("settings").configured_venues,

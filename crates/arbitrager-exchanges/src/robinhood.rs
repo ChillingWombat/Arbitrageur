@@ -180,7 +180,6 @@ impl ExchangeAdapter for RobinhoodAdapter {
             bid,
             ask,
             last,
-            volume_24h: dec!(15000000),
             timestamp: Utc::now(),
         })
     }
