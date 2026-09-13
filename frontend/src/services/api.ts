@@ -67,6 +67,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_system_status",
   "fetch_orderbooks",
   "get_ticker_volumes",
+  "get_signal_series",
   "scan_spatial_opportunities",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
@@ -108,13 +109,20 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_strategy_performance",
   "run_wfo_calibration",
   "flatten_ticker_positions",
+  "execute_spatial_candidates",
+  "list_signal_executions",
+  "get_ticker_position_state",
 ]);
 
 export function nativeCommandAvailable(command: string): boolean {
   return NATIVE_COMMANDS.has(command);
 }
 
-function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
+export function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
+  const rawWindow = c?.slidingWindow ?? c?.sliding_window;
+  const slidingWindow = (["10s", "30s", "1m", "5m", "15m"] as const).includes(rawWindow)
+    ? rawWindow
+    : "1m";
   if (!c) {
     return {
       symbol: "BTC-USDC",
@@ -125,6 +133,7 @@ function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
       executionMode: "SINGLE_WAY",
       unitSize: 0.005,
       userTargetLeverage: 5,
+      slidingWindow,
     };
   }
   return {
@@ -136,6 +145,7 @@ function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
     executionMode: c.executionMode || c.execution_mode || "SINGLE_WAY",
     unitSize: Number(c.unitSize ?? c.unit_size ?? 0.005),
     userTargetLeverage: Number(c.userTargetLeverage ?? c.user_target_leverage ?? 5),
+    slidingWindow,
   };
 }
 

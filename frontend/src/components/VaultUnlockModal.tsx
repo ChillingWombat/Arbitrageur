@@ -30,8 +30,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if (isInitializing && Array.from(password).length < 6) {
-      setError("Password must be at least 6 characters long.");
+    if (isInitializing && Array.from(password).length < 12) {
+      setError("Password must be at least 12 characters long.");
       return;
     }
 
@@ -123,7 +123,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
               />
               <p className="mt-1.5 text-[10px] text-slate-500 font-mono leading-relaxed">
-                Use at least 6 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer.
+                Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer.
               </p>
             </div>
           )}

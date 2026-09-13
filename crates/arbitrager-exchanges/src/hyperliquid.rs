@@ -213,8 +213,17 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let user = self.wallet_address.as_deref().unwrap_or("0x0000000000000000000000000000000000000000");
-        let res = self.post_info(json!({"type": "clearinghouseState", "user": user})).await?;
+        let user = self
+            .wallet_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Hyperliquid account fetch requires a wallet address")
+            })?;
+        let res = self
+            .post_info(json!({"type": "clearinghouseState", "user": user}))
+            .await?;
 
         let margin_summary = res.get("marginSummary");
         let account_value = margin_summary
@@ -323,5 +332,26 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fetch_account_requires_wallet_address() {
+        for wallet in [None, Some(String::new()), Some("   ".to_string())] {
+            let adapter =
+                HyperliquidAdapter::new(Some("http://127.0.0.1:1".to_string()), wallet, None);
+            let err = adapter
+                .fetch_account()
+                .await
+                .expect_err("must fail closed without identity");
+            assert_eq!(
+                err.to_string(),
+                "Hyperliquid account fetch requires a wallet address"
+            );
+        }
     }
 }

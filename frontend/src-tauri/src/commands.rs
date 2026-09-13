@@ -1280,7 +1280,8 @@ async fn execute_spatial_arbitrage_inner(
     validate_adapter_book(&book_sell, &sell_vid, symbol)
         .map_err(|e| format!("Sell-side order book rejected: {}", e))?;
 
-    let qty_dec = Decimal::from_f64_retain(order_qty)
+    let qty_dec = Decimal::from_str_exact(&order_qty.to_string())
+        .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "Invalid order quantity".to_string())?;
     let (max_slippage_bps, min_depth_ratio) = {
@@ -1917,7 +1918,7 @@ pub async fn execute_spatial_candidates_impl(
 pub async fn list_signal_executions(
     symbol: Option<String>,
     status: Option<String>,
-    state: tauri::State<'_, AppEngineState>,
+    state: tauri::State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<crate::state_store::SignalExecution>, String> {
     let st = match status.as_deref() {
         Some(s) => Some(
@@ -1937,7 +1938,7 @@ pub async fn list_signal_executions(
 #[tauri::command]
 pub async fn get_ticker_position_state(
     symbol: String,
-    state: tauri::State<'_, AppEngineState>,
+    state: tauri::State<'_, Arc<AppEngineState>>,
 ) -> Result<serde_json::Value, String> {
     let blocking = state
         .state_store
@@ -1958,7 +1959,7 @@ pub async fn get_ticker_position_state(
 #[tauri::command]
 pub async fn execute_spatial_candidates(
     candidates: Vec<SpatialCandidateInput>,
-    state: tauri::State<'_, AppEngineState>,
+    state: tauri::State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<CandidateOutcomeDto>, String> {
     execute_spatial_candidates_impl(candidates, &state).await
 }
@@ -2174,6 +2175,25 @@ pub struct FlattenResultDto {
     pub notes: Vec<String>,
 }
 
+fn ledger_qty_to_dec(value: f64, what: &str) -> Result<Decimal, String> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("{what} must be finite and nonnegative, got {value}"));
+    }
+    Decimal::from_str_exact(&value.to_string())
+        .map_err(|_| format!("{what} {value} is not representable as Decimal"))
+}
+
+fn dec_to_f64(value: Decimal, what: &str) -> Result<f64, String> {
+    let f = value
+        .to_string()
+        .parse::<f64>()
+        .map_err(|_| format!("{what} {value} is not representable as f64"))?;
+    if !f.is_finite() {
+        return Err(format!("{what} {value} is not finite as f64"));
+    }
+    Ok(f)
+}
+
 /// Place a reduce-only market order on a venue's paper exchange to close one
 /// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
 async fn flatten_leg_on_paper(
@@ -2181,8 +2201,8 @@ async fn flatten_leg_on_paper(
     venue: &str,
     symbol: &str,
     side: Side,
-    qty: f64,
-) -> Result<Option<(f64, f64, f64, String)>, String> {
+    qty: Decimal,
+) -> Result<Option<(Decimal, Decimal, Decimal, String)>, String> {
     let canonical = crate::state::canonical_venue_id(venue)
         .ok_or_else(|| format!("Unknown venue '{venue}'"))?;
     let adapter = state
@@ -2212,36 +2232,113 @@ async fn flatten_leg_on_paper(
     };
     paper.replace_orderbook(book).map_err(|e| e.to_string())?;
 
-    let qty_dec = Decimal::from_f64_retain(qty)
-        .filter(|q| *q > dec!(0))
-        .ok_or_else(|| "Invalid leg quantity".to_string())?;
-    let mut order = arbitrager_core::order::OrderRequest::new_market(
-        paper.venue_id(),
-        symbol,
-        side,
-        qty_dec,
-    );
+    if qty <= dec!(0) {
+        return Err("Invalid leg quantity".to_string());
+    }
+    let mut order =
+        arbitrager_core::order::OrderRequest::new_market(paper.venue_id(), symbol, side, qty);
     order.reduce_only = true;
 
     let resp = paper.place_order(order).await.map_err(|e| e.to_string())?;
-    let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
-    if filled <= 0.0 {
+    if resp.filled_qty <= dec!(0) {
         return Ok(None);
     }
     let px = resp
         .avg_fill_price
-        .and_then(|p| p.to_string().parse::<f64>().ok())
-        .unwrap_or(0.0);
-    let fee = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
-    Ok(Some((filled, px, fee, resp.order_id)))
+        .filter(|p| *p > dec!(0))
+        .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
+    Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
+}
+
+fn close_flattened_spatial_lot(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    family: &[crate::state_store::SignalExecution],
+) {
+    use crate::state_store::LegSide;
+    use arbitrager_execution::virtual_ledger::CycleStatus;
+
+    let venue_of = |side: LegSide| {
+        sig.legs
+            .iter()
+            .find(|l| l.side == side)
+            .and_then(|l| crate::state::canonical_venue_id(&l.venue))
+    };
+    let (Some(long_venue), Some(short_venue)) =
+        (venue_of(LegSide::Long), venue_of(LegSide::Short))
+    else {
+        return;
+    };
+
+    #[derive(Default)]
+    struct LegAgg {
+        qty: f64,
+        px_qty: f64,
+        fee: f64,
+    }
+    let mut fills: HashMap<(String, &'static str), LegAgg> = HashMap::new();
+    for child in family {
+        for leg in &child.legs {
+            let Some(canon) = crate::state::canonical_venue_id(&leg.venue) else {
+                continue;
+            };
+            let (Some(px), qty, fee) = (leg.fill_price, leg.filled_qty, leg.fee_usd) else {
+                continue;
+            };
+            if !(qty.is_finite() && qty > 0.0 && px.is_finite() && px > 0.0 && fee.is_finite())
+            {
+                continue;
+            }
+            let agg = fills
+                .entry((canon.to_string(), leg.side.as_str()))
+                .or_default();
+            agg.qty += qty;
+            agg.px_qty += qty * px;
+            agg.fee += fee;
+        }
+    }
+    let exit_fees: f64 = fills.values().map(|a| a.fee).sum();
+    let agg_for = |venue: &str, side: LegSide| fills.get(&(venue.to_string(), side.as_str()));
+    let (Some(long_exit), Some(short_exit)) = (
+        agg_for(long_venue, LegSide::Short),
+        agg_for(short_venue, LegSide::Long),
+    ) else {
+        return;
+    };
+
+    let lot_id = {
+        let ledger = state.virtual_ledger.read();
+        ledger
+            .lots
+            .values()
+            .find(|lot| {
+                lot.strategy_id == "spatial_spread"
+                    && lot.symbol == sig.symbol
+                    && lot.status == CycleStatus::Open
+                    && crate::state::canonical_venue_id(&lot.venue_long) == Some(long_venue)
+                    && crate::state::canonical_venue_id(&lot.venue_short) == Some(short_venue)
+                    && long_exit.qty + 1e-9 >= lot.long_qty
+                    && short_exit.qty + 1e-9 >= lot.short_qty
+            })
+            .map(|l| l.id.clone())
+    };
+    if let Some(id) = lot_id {
+        state.virtual_ledger.write().close_cycle(
+            &id,
+            long_exit.px_qty / long_exit.qty,
+            short_exit.px_qty / short_exit.qty,
+            exit_fees,
+            CycleStatus::StoppedOut,
+        );
+    }
 }
 
 /// Emergency per-strategy exit: for every open signal of `strategy_id`
 /// (optionally scoped to `symbol`), dispatch inverse reduce-only market orders
-/// on the paper venues for each filled leg, persist a closing signal with the
-/// actual fills, and mark the original `closed` only once its legs are fully
-/// neutralized. Bypasses pause/circuit-breaker because it is strictly
-/// risk-reducing; refused in live mode until authenticated venue exits exist.
+/// sized to that root family's attributed residual on each paper venue, and
+/// mark the original `closed` only once its attributed legs are neutralized.
+/// Bypasses pause/circuit-breaker because it is strictly risk-reducing;
+/// refused in live mode until authenticated venue exits exist.
 pub async fn flatten_ticker_positions_impl(
     symbol: Option<&str>,
     strategy_id: &str,
@@ -2255,18 +2352,24 @@ pub async fn flatten_ticker_positions_impl(
     }
     let _execution_guard = state.execution_lock.lock().await;
 
-    let open: Vec<crate::state_store::SignalExecution> = state
+    let all_signals = state
         .state_store
         .list_signals(symbol, None)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter(|s| s.strategy_id.eq_ignore_ascii_case(&sid) && s.status.counts_as_open())
+        .map_err(|e| e.to_string())?;
+    let roots: Vec<crate::state_store::SignalExecution> = all_signals
+        .iter()
+        .filter(|s| {
+            !s.id.starts_with("flat-")
+                && s.strategy_id.eq_ignore_ascii_case(&sid)
+                && s.status.counts_as_open()
+        })
+        .cloned()
         .collect();
 
     let mut out = FlattenResultDto {
         strategy_id: sid.clone(),
         symbol: symbol.map(|s| s.to_string()),
-        signals_processed: open.len(),
+        signals_processed: roots.len(),
         signals_closed: 0,
         legs_closed: 0,
         residual_signals: 0,
@@ -2279,22 +2382,199 @@ pub async fn flatten_ticker_positions_impl(
         *step
     };
 
-    for sig in open {
-        let filled: Vec<&crate::state_store::SignalLeg> =
-            sig.legs.iter().filter(|l| l.filled_qty > 0.0).collect();
+    let papers = state.paper_exchanges();
+    let opposite = |s: LegSide| match s {
+        LegSide::Long => LegSide::Short,
+        LegSide::Short => LegSide::Long,
+    };
 
-        if filled.is_empty() {
-            state
-                .state_store
-                .update_signal_status(&sig.id, SignalStatus::Closed, Some("flatten: signal never filled"))
-                .map_err(|e| e.to_string())?;
-            out.signals_closed += 1;
+    struct LegExposure {
+        canonical: &'static str,
+        entry_side: LegSide,
+        expected_pos_side: Side,
+        entry_qty: Decimal,
+    }
+    struct CloseTarget {
+        venue: String,
+        account_id: Option<String>,
+        order_side: Side,
+        leg_side: LegSide,
+        qty: Decimal,
+    }
+
+    let child_fills_on = |family: &[crate::state_store::SignalExecution],
+                          canonical: &str,
+                          side: LegSide|
+     -> Result<Decimal, String> {
+        let mut total = dec!(0);
+        for child in family {
+            for cl in &child.legs {
+                if cl.side == side
+                    && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
+                {
+                    total += ledger_qty_to_dec(cl.filled_qty, "child leg fill")?;
+                }
+            }
+        }
+        Ok(total)
+    };
+
+    for sig in roots {
+        let family_prefix = format!("flat-{}-", sig.id);
+        let family: Vec<crate::state_store::SignalExecution> = all_signals
+            .iter()
+            .filter(|s| s.id.starts_with(&family_prefix))
+            .cloned()
+            .collect();
+
+        let mut exposures: Vec<LegExposure> = Vec::new();
+        let mut targets: Vec<CloseTarget> = Vec::new();
+        let mut undetermined = false;
+        let mut seen: std::collections::HashSet<(String, &'static str)> =
+            std::collections::HashSet::new();
+        let mut accounts: HashMap<&'static str, arbitrager_core::position::AccountSnapshot> =
+            HashMap::new();
+        let mut unreadable: std::collections::HashSet<&'static str> =
+            std::collections::HashSet::new();
+
+        for leg in &sig.legs {
+            let Some(canonical) = crate::state::canonical_venue_id(&leg.venue) else {
+                undetermined = true;
+                out.notes.push(format!(
+                    "{}: venue '{}' is not a canonical paper venue",
+                    sig.id, leg.venue
+                ));
+                continue;
+            };
+            if !seen.insert((canonical.to_string(), leg.side.as_str())) {
+                continue;
+            }
+            let entry_qty = ledger_qty_to_dec(leg.filled_qty, "root leg fill")?;
+            let closed_qty = child_fills_on(&family, canonical, opposite(leg.side))?;
+            let residual = (entry_qty - closed_qty).max(dec!(0));
+            let expected_pos_side = match leg.side {
+                LegSide::Long => Side::Buy,
+                LegSide::Short => Side::Sell,
+            };
+            exposures.push(LegExposure {
+                canonical,
+                entry_side: leg.side,
+                expected_pos_side,
+                entry_qty,
+            });
+            if residual <= dec!(0) {
+                continue;
+            }
+            if !accounts.contains_key(canonical) && !unreadable.contains(canonical) {
+                match papers
+                    .iter()
+                    .find(|(vid, _)| *vid == canonical)
+                    .map(|(_, p)| p.clone())
+                {
+                    Some(paper) => match paper.fetch_account().await {
+                        Ok(acc) => {
+                            accounts.insert(canonical, acc);
+                        }
+                        Err(e) => {
+                            unreadable.insert(canonical);
+                            out.notes.push(format!(
+                                "{}: cannot read {} paper account: {e}",
+                                sig.id, leg.venue
+                            ));
+                        }
+                    },
+                    None => {
+                        unreadable.insert(canonical);
+                        out.notes.push(format!(
+                            "{}: no paper account exists for venue '{}'",
+                            sig.id, leg.venue
+                        ));
+                    }
+                }
+            }
+            if unreadable.contains(canonical) {
+                undetermined = true;
+                continue;
+            }
+            let pos = accounts
+                .get(canonical)
+                .and_then(|acc| {
+                    acc.positions
+                        .iter()
+                        .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
+                });
+            match pos {
+                None => {}
+                Some(p) if p.side != expected_pos_side => {
+                    undetermined = true;
+                    out.notes.push(format!(
+                        "{}: {} position side {:?} contradicts {:?} leg; leaving open",
+                        sig.id, leg.venue, p.side, leg.side
+                    ));
+                }
+                Some(p) => {
+                    let qty = residual.min(p.quantity);
+                    targets.push(CloseTarget {
+                        venue: leg.venue.clone(),
+                        account_id: leg.account_id.clone(),
+                        order_side: match p.side {
+                            Side::Buy => Side::Sell,
+                            Side::Sell => Side::Buy,
+                        },
+                        leg_side: opposite(leg.side),
+                        qty,
+                    });
+                }
+            }
+        }
+
+        if undetermined {
             continue;
         }
 
-        // Closing signal mirrors each filled leg on the same venue/account,
-        // inverted — per-venue and per-signal delta nets to exactly zero.
+        let close_family = |note: &str| -> Result<(), String> {
+            state
+                .state_store
+                .update_signal_status(&sig.id, SignalStatus::Closed, Some(note))
+                .map_err(|e| e.to_string())?;
+            for child in state
+                .state_store
+                .list_signals(None, None)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .filter(|s| s.id.starts_with(&family_prefix) && s.status.counts_as_open())
+            {
+                state
+                    .state_store
+                    .update_signal_status(&child.id, SignalStatus::Closed, Some(note))
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+
+        if targets.is_empty() {
+            close_family(&format!("flatten {}: no residual paper position", sig.id))?;
+            out.signals_closed += 1;
+            close_flattened_spatial_lot(state, &sig, &family);
+            continue;
+        }
+
         let close_id = format!("flat-{}-{:04x}", sig.id, rand::random::<u16>());
+        let child_legs = targets
+            .iter()
+            .map(|t| -> Result<NewSignalLeg, String> {
+                let intended = dec_to_f64(t.qty, "close quantity")?;
+                if intended <= 0.0 {
+                    return Err(format!("close quantity {} is not positive", t.qty));
+                }
+                Ok(NewSignalLeg {
+                    account_id: t.account_id.clone(),
+                    venue: t.venue.clone(),
+                    side: t.leg_side,
+                    intended_qty: intended,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         state
             .state_store
             .record_signal_execution(&NewSignalExecution {
@@ -2304,86 +2584,108 @@ pub async fn flatten_ticker_positions_impl(
                 route_id: sig.route_id.clone(),
                 expected_net_usd: None,
                 note: Some(format!("emergency flatten of {}", sig.id)),
-                legs: filled
-                    .iter()
-                    .map(|l| NewSignalLeg {
-                        account_id: l.account_id.clone(),
-                        venue: l.venue.clone(),
-                        side: match l.side {
-                            LegSide::Long => LegSide::Short,
-                            LegSide::Short => LegSide::Long,
-                        },
-                        intended_qty: l.filled_qty,
-                    })
-                    .collect(),
+                legs: child_legs,
             })
             .map_err(|e| format!("Failed to persist flatten signal record: {e}"))?;
 
-        let mut fully_flat = true;
         let mut leg_desc = Vec::new();
-        for leg in &filled {
-            let close_side = match leg.side {
-                LegSide::Long => Side::Sell,
-                LegSide::Short => Side::Buy,
-            };
-            let close_leg_side = match leg.side {
-                LegSide::Long => LegSide::Short,
-                LegSide::Short => LegSide::Long,
-            };
-            match flatten_leg_on_paper(state, &leg.venue, &sig.symbol, close_side, leg.filled_qty).await {
+        for t in &targets {
+            match flatten_leg_on_paper(state, &t.venue, &sig.symbol, t.order_side, t.qty).await {
                 Ok(Some((qty, px, fee, oid))) => {
-                    let _ = state.state_store.apply_leg_fill(
-                        &close_id,
-                        close_leg_side,
-                        qty,
-                        px,
-                        fee,
-                        Some(oid.as_str()),
-                    );
+                    state
+                        .state_store
+                        .apply_leg_fill(
+                            &close_id,
+                            t.leg_side,
+                            dec_to_f64(qty, "fill quantity")?,
+                            dec_to_f64(px, "fill price")?,
+                            dec_to_f64(fee, "fill fee")?,
+                            Some(oid.as_str()),
+                        )
+                        .map_err(|e| e.to_string())?;
                     out.legs_closed += 1;
-                    leg_desc.push(format!("{} {:?} {}/{}", leg.venue, leg.side, qty, leg.filled_qty));
-                    if qty + f64::EPSILON < leg.filled_qty {
-                        fully_flat = false;
+                    leg_desc.push(format!("{} {:?} {}/{}", t.venue, t.leg_side, qty, t.qty));
+                    if qty < t.qty {
                         out.notes.push(format!(
                             "{}: {} leg partially closed {}/{}",
-                            sig.id, leg.venue, qty, leg.filled_qty
+                            sig.id, t.venue, qty, t.qty
                         ));
                     }
                 }
                 Ok(None) => {
-                    fully_flat = false;
                     out.notes.push(format!(
                         "{}: {} leg got no fill (empty book)",
-                        sig.id, leg.venue
+                        sig.id, t.venue
                     ));
                 }
                 Err(e) => {
-                    fully_flat = false;
-                    out.notes.push(format!("{}: {} leg close failed: {e}", sig.id, leg.venue));
+                    out.notes
+                        .push(format!("{}: {} leg close failed: {e}", sig.id, t.venue));
                 }
             }
         }
 
-        let final_status = if fully_flat {
-            SignalStatus::Closed
-        } else {
-            // Residual exposure stays unresolved → the ticker remains blocked.
-            SignalStatus::Unresolved
-        };
+        let family_now: Vec<crate::state_store::SignalExecution> = state
+            .state_store
+            .list_signals(None, None)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|s| s.id.starts_with(&family_prefix))
+            .collect();
+
+        let mut fully_flat = true;
+        for exp in &exposures {
+            let residual = (exp.entry_qty
+                - child_fills_on(&family_now, exp.canonical, opposite(exp.entry_side))?)
+            .max(dec!(0));
+            if residual <= dec!(0) {
+                continue;
+            }
+            let Some((_, paper)) = papers.iter().find(|(vid, _)| *vid == exp.canonical) else {
+                fully_flat = false;
+                continue;
+            };
+            match paper.fetch_account().await {
+                Ok(acc) => match acc
+                    .positions
+                    .iter()
+                    .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
+                {
+                    None => {}
+                    Some(p) if p.side != exp.expected_pos_side => {
+                        fully_flat = false;
+                        out.notes.push(format!(
+                            "{}: {} position side {:?} contradicts {:?} leg; leaving open",
+                            sig.id, exp.canonical, p.side, exp.entry_side
+                        ));
+                    }
+                    Some(_) => fully_flat = false,
+                },
+                Err(_) => fully_flat = false,
+            }
+        }
+
         let note = format!("emergency flatten via {close_id}");
-        let _ = state
-            .state_store
-            .update_signal_status(&close_id, final_status, Some(&note));
-        state
-            .state_store
-            .update_signal_status(&sig.id, final_status, Some(&note))
-            .map_err(|e| e.to_string())?;
         if fully_flat {
+            close_family(&note)?;
             out.signals_closed += 1;
+            close_flattened_spatial_lot(state, &sig, &family_now);
+        } else {
+            state
+                .state_store
+                .update_signal_status(&sig.id, SignalStatus::Unresolved, Some(&note))
+                .map_err(|e| e.to_string())?;
+            state
+                .state_store
+                .update_signal_status(&close_id, SignalStatus::Unresolved, Some(&note))
+                .map_err(|e| e.to_string())?;
         }
 
         let (venue_a, venue_b) = (
-            sig.legs.first().map(|l| l.venue.clone()).unwrap_or_default(),
+            sig.legs
+                .first()
+                .map(|l| l.venue.clone())
+                .unwrap_or_default(),
             sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
         );
         state.execution_logs.write().push(ExecutionLogEntry {
@@ -2403,7 +2705,10 @@ pub async fn flatten_ticker_positions_impl(
             note: if fully_flat {
                 format!("Emergency flatten closed signal {}", sig.id)
             } else {
-                format!("Emergency flatten PARTIAL for signal {} — residual exposure", sig.id)
+                format!(
+                    "Emergency flatten PARTIAL for signal {} — residual exposure",
+                    sig.id
+                )
             },
             direction: Some("Emergency Flatten".into()),
             trigger_spread_bps: None,
@@ -2414,20 +2719,18 @@ pub async fn flatten_ticker_positions_impl(
         });
     }
 
-    // Residual count = signals still open with recorded fills.
     out.residual_signals = state
         .state_store
         .list_signals(symbol, None)
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|s| {
-            s.strategy_id.eq_ignore_ascii_case(&sid)
+            !s.id.starts_with("flat-")
+                && s.strategy_id.eq_ignore_ascii_case(&sid)
                 && s.status.counts_as_open()
-                && s.legs.iter().any(|l| l.filled_qty > 0.0)
         })
         .count();
 
-    // Refresh realized P&L from paper equity (closing fills change equity).
     let mut equity_after = dec!(0);
     for (_, paper) in state.paper_exchanges() {
         equity_after += paper
@@ -3891,6 +4194,20 @@ mod tests {
         state.market_data_hub.update_orderbook(book);
     }
 
+    fn seed_test_funding(state: &AppEngineState, venue_id: &str, symbol: &str) {
+        state
+            .market_data_hub
+            .update_funding(arbitrager_core::quote::FundingRate {
+                venue: arbitrager_core::types::VenueId::new(venue_id),
+                symbol: symbol.to_string(),
+                rate: dec!(0.0001),
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            });
+    }
+
     #[tokio::test]
     async fn test_system_status_command() {
         let state = AppEngineState::new();
@@ -3999,6 +4316,8 @@ mod tests {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64210.0), dec!(64215.0));
+        seed_test_funding(&state, "hyperliquid", "BTC-USDC");
+        seed_test_funding(&state, "lighter", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("fetch should succeed");
 
@@ -4674,6 +4993,8 @@ mod tests {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "AVAX-USDC", dec!(28.5), dec!(28.6));
         seed_test_book(&state, "lighter", "AVAX-USDC", dec!(28.55), dec!(28.65));
+        seed_test_funding(&state, "hyperliquid", "AVAX-USDC");
+        seed_test_funding(&state, "lighter", "AVAX-USDC");
 
         let books_avax = fetch_orderbooks_impl("AVAX-USDC", &state).await.expect("avax books");
         assert!(books_avax.len() >= 2);
@@ -5890,6 +6211,8 @@ mod tests {
         crossed.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(crossed);
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_funding(&state, "hyperliquid", "BTC-USDC");
+        seed_test_funding(&state, "lighter", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
         assert_eq!(books.len(), 1);
@@ -6077,6 +6400,8 @@ mod tests {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
+        seed_test_funding(&state, "hyperliquid", "BTC-USDC");
+        seed_test_funding(&state, "lighter", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
         assert_eq!(books.len(), 2);
@@ -6090,5 +6415,329 @@ mod tests {
         assert_eq!(hl.mid, 60002.5);
         assert_eq!(hl.best_bid, 60000.0);
         assert_eq!(hl.best_ask, 60005.0);
+    }
+
+    #[test]
+    fn test_tauri_commands_resolve_managed_arc_state() {
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(AppEngineState::new()))
+            .invoke_handler(tauri::generate_handler![
+                list_signal_executions,
+                get_ticker_position_state,
+                execute_spatial_candidates
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app builds");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview builds");
+
+        for (cmd, body) in [
+            (
+                "list_signal_executions",
+                serde_json::json!({"symbol": null, "status": null}),
+            ),
+            (
+                "get_ticker_position_state",
+                serde_json::json!({"symbol": "BTC-USDC"}),
+            ),
+            (
+                "execute_spatial_candidates",
+                serde_json::json!({"candidates": []}),
+            ),
+        ] {
+            let response = tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "tauri://localhost".parse().expect("invoke url"),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            );
+            assert!(
+                response.is_ok(),
+                "{cmd} must resolve the managed Arc<AppEngineState>: {:?}",
+                response.err()
+            );
+        }
+    }
+
+    fn seed_book_depth(
+        state: &AppEngineState,
+        venue_id: &str,
+        symbol: &str,
+        bid: Decimal,
+        bid_qty: Decimal,
+        ask: Decimal,
+        ask_qty: Decimal,
+    ) {
+        let mut book = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new(venue_id),
+            symbol.to_string(),
+        );
+        book.bids
+            .push(arbitrager_core::quote::BookLevel::new(bid, bid_qty));
+        book.asks
+            .push(arbitrager_core::quote::BookLevel::new(ask, ask_qty));
+        book.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(book);
+    }
+
+    #[tokio::test]
+    async fn test_emergency_flatten_retries_partial_close() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        seed_test_book(
+            &state,
+            "lighter",
+            "BTC-USDC",
+            dec!(64360.0),
+            dec!(64365.0),
+        );
+
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await
+        .expect("spatial execution");
+        assert!(res.execution_success);
+
+        seed_book_depth(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(0.05),
+            dec!(64205.0),
+            dec!(10.0),
+        );
+        seed_book_depth(
+            &state,
+            "lighter",
+            "BTC-USDC",
+            dec!(64360.0),
+            dec!(10.0),
+            dec!(64365.0),
+            dec!(0.05),
+        );
+
+        let first = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("first flatten");
+        assert_eq!(
+            first.residual_signals, 1,
+            "partial close must leave exactly one residual root signal"
+        );
+
+        let acc_hl = state.ex_hl.fetch_account().await.expect("hl account");
+        let acc_lgt = state.ex_lighter.fetch_account().await.expect("lgt account");
+        let hl_qty = acc_hl
+            .get_position("BTC-USDC")
+            .map(|p| p.quantity)
+            .expect("hl residual");
+        let lgt_qty = acc_lgt
+            .get_position("BTC-USDC")
+            .map(|p| p.quantity)
+            .expect("lgt residual");
+        assert!(
+            (hl_qty - dec!(0.05)).abs() < dec!(0.0001),
+            "hl residual {hl_qty}"
+        );
+        assert!(
+            (lgt_qty - dec!(0.05)).abs() < dec!(0.0001),
+            "lgt residual {lgt_qty}"
+        );
+
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        seed_test_book(
+            &state,
+            "lighter",
+            "BTC-USDC",
+            dec!(64360.0),
+            dec!(64365.0),
+        );
+
+        let second = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("second flatten");
+        assert_eq!(
+            second.residual_signals, 0,
+            "second flatten notes: {:?}",
+            second.notes
+        );
+
+        let acc_hl = state.ex_hl.fetch_account().await.expect("hl account");
+        let acc_lgt = state.ex_lighter.fetch_account().await.expect("lgt account");
+        assert!(
+            acc_hl.positions.is_empty(),
+            "no residual or reverse position may remain: {:?}",
+            acc_hl.positions
+        );
+        assert!(
+            acc_lgt.positions.is_empty(),
+            "no residual or reverse position may remain: {:?}",
+            acc_lgt.positions
+        );
+
+        assert!(!state
+            .state_store
+            .ticker_blocked("BTC-USDC")
+            .expect("blocked"));
+        for sig in state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("signals")
+        {
+            assert_eq!(
+                sig.status,
+                crate::state_store::SignalStatus::Closed,
+                "record {} must be closed",
+                sig.id
+            );
+        }
+
+        let ledger = state.virtual_ledger.read();
+        let open_lots: Vec<_> = ledger
+            .lots
+            .values()
+            .filter(|l| {
+                l.strategy_id == "spatial_spread"
+                    && l.symbol == "BTC-USDC"
+                    && l.status == arbitrager_execution::virtual_ledger::CycleStatus::Open
+            })
+            .collect();
+        assert!(open_lots.is_empty(), "spatial lot must not stay Open");
+        let lot = ledger
+            .lots
+            .values()
+            .find(|l| l.strategy_id == "spatial_spread" && l.symbol == "BTC-USDC")
+            .expect("spatial lot exists");
+        assert_eq!(
+            lot.status,
+            arbitrager_execution::virtual_ledger::CycleStatus::StoppedOut
+        );
+        assert!(lot.realized_pnl_usd.is_some(), "realized PnL populated");
+    }
+
+    #[tokio::test]
+    async fn test_flatten_futures_root_preserves_other_strategy_position() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+
+        let mut paper_book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        paper_book
+            .bids
+            .push(arbitrager_core::quote::BookLevel::new(dec!(64200.0), dec!(10.0)));
+        paper_book
+            .asks
+            .push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(10.0)));
+        state
+            .ex_hl
+            .replace_orderbook(paper_book)
+            .expect("seed paper book");
+
+        let open = arbitrager_core::order::OrderRequest::new_market(
+            state.ex_hl.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.2),
+        );
+        let resp = state.ex_hl.place_order(open).await.expect("open position");
+        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Filled);
+
+        for (id, strategy) in [("root-fut", "futures"), ("root-spot", "spot")] {
+            state
+                .state_store
+                .record_signal_execution(&NewSignalExecution {
+                    id: id.into(),
+                    strategy_id: strategy.into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: LegSide::Long,
+                        intended_qty: 0.1,
+                    }],
+                })
+                .expect("record root");
+            state
+                .state_store
+                .apply_leg_fill(id, LegSide::Long, 0.1, 64205.0, 0.0, None)
+                .expect("root fill");
+        }
+
+        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("flatten futures");
+
+        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        let pos = acc
+            .get_position("BTC-USDC")
+            .expect("spot strategy's residual must remain");
+        assert_eq!(pos.side, Side::Buy, "no reverse position may be opened");
+        assert!(
+            (pos.quantity - dec!(0.1)).abs() < dec!(0.0001),
+            "only the futures-attributed 0.1 may be closed, got residual {}",
+            pos.quantity
+        );
+
+        let fut = state
+            .state_store
+            .get_signal("root-fut")
+            .expect("fut")
+            .expect("fut exists");
+        assert_eq!(fut.status, SignalStatus::Closed);
+        let spot = state
+            .state_store
+            .get_signal("root-spot")
+            .expect("spot")
+            .expect("spot exists");
+        assert!(
+            spot.status.counts_as_open(),
+            "spot root must stay open, got {:?}",
+            spot.status
+        );
+        for sig in state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("signals")
+        {
+            if sig.id.starts_with("flat-root-fut-") {
+                assert_eq!(sig.status, SignalStatus::Closed, "child {}", sig.id);
+            }
+        }
+        assert_eq!(res.residual_signals, 0);
+        assert_eq!(res.signals_closed, 1);
     }
 }

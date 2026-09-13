@@ -486,6 +486,7 @@ export const App: React.FC = () => {
                 api.computeOptimalThresholds(theta, mu, sigma, cost)
               }
               onFitOu={(prices, dt) => api.fitOuProcess(prices, dt)}
+              onFetchQuotes={(symbols) => api.fetchMultiMarketQuotes(symbols)}
             />
           )}
 

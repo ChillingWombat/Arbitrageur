@@ -1,22 +1,24 @@
 import React, { useState } from "react";
 import { AlertCircle, RefreshCw } from "lucide-react";
-import type { StatArbStepResultDto, BertramThresholdDto, OuFitDto } from "../types";
+import type { StatArbStepResultDto, BertramThresholdDto, OuFitDto, TickerMarketQuoteDto } from "../types";
 
 interface StatArbLabProps {
   onRunStep: (step: number, py: number, px: number) => Promise<StatArbStepResultDto>;
   onSolveBertram: (theta: number, mu: number, sigma: number, cost: number) => Promise<BertramThresholdDto>;
   onFitOu: (prices: number[], dt: number) => Promise<OuFitDto>;
+  onFetchQuotes: (symbols: string[]) => Promise<TickerMarketQuoteDto[]>;
 }
 
 export const StatArbLab: React.FC<StatArbLabProps> = ({
   onRunStep,
   onSolveBertram,
   onFitOu,
+  onFetchQuotes,
 }) => {
   // Kalman Tracker State
   const [step, setStep] = useState(1);
-  const [priceY, setPriceY] = useState(64200.0);
-  const [priceX, setPriceX] = useState(3450.0);
+  const [priceY, setPriceY] = useState(0);
+  const [priceX, setPriceX] = useState(0);
   const [isManual, setIsManual] = useState(false);
   const [history, setHistory] = useState<StatArbStepResultDto[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -39,24 +41,26 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
       let py = priceY;
 
       if (!isManual) {
-        try {
-          const resp = await fetch("https://api.hyperliquid.xyz/info", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ type: "allMids" }),
-          });
-          if (resp.ok) {
-            const mids = await resp.json();
-            if (mids && mids.BTC && mids.ETH) {
-              py = parseFloat(mids.BTC);
-              px = parseFloat(mids.ETH);
-              setPriceX(px);
-              setPriceY(py);
-            }
-          }
-        } catch {
-          // Keep current px and py on network error
+        const quotes = await onFetchQuotes(["BTC-USDC", "ETH-USDC"]);
+        const btc = quotes.find((q) => q.symbol === "BTC-USDC")?.mid_price;
+        const eth = quotes.find((q) => q.symbol === "ETH-USDC")?.mid_price;
+        if (
+          btc === undefined || eth === undefined ||
+          !Number.isFinite(btc) || !Number.isFinite(eth) ||
+          btc <= 0 || eth <= 0
+        ) {
+          setErrorMsg("Live quotes unavailable for BTC-USDC / ETH-USDC; step not run.");
+          return;
         }
+        py = btc;
+        px = eth;
+        setPriceY(py);
+        setPriceX(px);
+      } else if (
+        !Number.isFinite(py) || !Number.isFinite(px) || py <= 0 || px <= 0
+      ) {
+        setErrorMsg("Manual prices must be finite positive numbers; step not run.");
+        return;
       }
 
       setStep(nextStep);
@@ -100,27 +104,15 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
   const handleFitOu = async () => {
     setErrorMsg(null);
     try {
-      let series: number[] = [];
-      try {
-        const resp = await fetch("https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=100");
-        if (resp.ok) {
-          const klines = await resp.json();
-          if (Array.isArray(klines) && klines.length > 10) {
-            const closes = klines.map((k: any) => parseFloat(k[4]));
-            const mean = closes.reduce((a: number, b: number) => a + b, 0) / closes.length;
-            series = closes.map((c: number) => mu + (c - mean) / mean);
-          }
-        }
-      } catch {
-        // network error
-      }
-
-      if (series.length === 0) {
-        setErrorMsg("Unable to retrieve live market klines for OU calibration. Check network connection or configure data feed. Zero synthetic series is fabricated.");
+      const series = history
+        .map((h) => h.residual_spread)
+        .filter((v) => Number.isFinite(v));
+      if (series.length < 10) {
+        setErrorMsg("Insufficient Kalman history for OU calibration: run at least 10 steps first.");
         return;
       }
 
-      const res = await onFitOu(series, 0.1);
+      const res = await onFitOu(series, 1.0);
       setOuFitResult(res);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -145,7 +137,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
         <div className="flex items-center space-x-2 text-xs font-mono">
           <span className="px-2.5 py-1 rounded-sm bg-surface-raised border border-surface-border text-slate-500">
-            Latency: <span className="text-profit font-bold">19.15 ns</span> / update
+            <span className="text-profit font-bold">Rust-side calculation</span>
           </span>
         </div>
       </div>
@@ -203,7 +195,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                   !isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
                 }`}
               >
-                Auto Drift
+                Live Quotes
               </button>
               <button
                 onClick={() => setIsManual(true)}

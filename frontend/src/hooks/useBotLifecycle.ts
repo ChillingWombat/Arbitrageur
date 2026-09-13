@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api } from "../services/api";
+import { api } from "../services/api.ts";
 
 /**
  * Per-strategy bot lifecycle: the durable signal ledger is the source of
@@ -14,6 +14,36 @@ import { api } from "../services/api";
 export type BotPhase = "idle" | "running" | "paused" | "reduce_only" | "stopping";
 
 const OPEN_STATUSES = new Set(["in_flight", "balanced", "imbalanced", "unresolved"]);
+
+export interface BotControlAvailability {
+  start: boolean;
+  pause: boolean;
+  reduceOnly: boolean;
+  stop: boolean;
+}
+
+export function getBotControlAvailability(
+  phase: BotPhase,
+  hasOpenPositions: boolean,
+  entriesDisabled: boolean,
+  reduceOnlyAvailable = false,
+): BotControlAvailability {
+  const stopping = phase === "stopping";
+  return {
+    start:
+      !entriesDisabled &&
+      !stopping &&
+      !hasOpenPositions &&
+      (phase === "idle" || phase === "paused"),
+    pause: phase === "running",
+    reduceOnly:
+      reduceOnlyAvailable &&
+      !stopping &&
+      hasOpenPositions &&
+      (phase === "running" || phase === "paused"),
+    stop: !stopping && (phase !== "idle" || hasOpenPositions),
+  };
+}
 
 interface UseBotLifecycleOptions {
   /** Ledger strategy id: futures | funding | spot | prediction | stat_arb. */

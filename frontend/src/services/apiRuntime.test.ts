@@ -4,6 +4,7 @@ import {
   api,
   invokeDesktop,
   nativeCommandAvailable,
+  normalizeTickerStrategyConfig,
   DESKTOP_REQUIRED_ERROR,
 } from "./api.ts";
 
@@ -66,6 +67,8 @@ test("api.deleteExchangeCredentials rejects without the desktop application", as
 const REGISTERED_NATIVE_COMMANDS = [
   "get_system_status",
   "fetch_orderbooks",
+  "get_ticker_volumes",
+  "get_signal_series",
   "scan_spatial_opportunities",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
@@ -95,6 +98,9 @@ const REGISTERED_NATIVE_COMMANDS = [
   "unlock_vault",
   "lock_vault",
   "delete_exchange_credentials",
+  "execute_spatial_candidates",
+  "list_signal_executions",
+  "get_ticker_position_state",
   "get_venue_balances",
   "get_strategy_performance",
   "run_wfo_calibration",
@@ -106,6 +112,26 @@ test("nativeCommandAvailable mirrors the registered desktop command set", () => 
   }
   assert.equal(nativeCommandAvailable("scan_triangle_opportunities"), false);
   assert.equal(nativeCommandAvailable("execute_triangle_arbitrage"), false);
+});
+
+test("normalizeTickerStrategyConfig preserves the backend sliding window", () => {
+  assert.equal(
+    normalizeTickerStrategyConfig({ slidingWindow: "5m" }).slidingWindow,
+    "5m",
+  );
+  assert.equal(
+    normalizeTickerStrategyConfig({ sliding_window: "30s" }).slidingWindow,
+    "30s",
+  );
+});
+
+test("normalizeTickerStrategyConfig defaults unknown windows to 1m", () => {
+  assert.equal(
+    normalizeTickerStrategyConfig({ slidingWindow: "99x" }).slidingWindow,
+    "1m",
+  );
+  assert.equal(normalizeTickerStrategyConfig(null).slidingWindow, "1m");
+  assert.equal(normalizeTickerStrategyConfig({}).slidingWindow, "1m");
 });
 
 test("triangle scan and execution fail closed in desktop mode", async () => {

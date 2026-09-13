@@ -20,7 +20,7 @@ type HmacSha256 = Hmac<Sha256>;
 const VAULT_MAGIC: &[u8; 8] = b"ARBVLT2\0";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const MIN_PASSWORD_CHARS: usize = 6;
+const MIN_PASSWORD_CHARS: usize = 12;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ExchangeCredentials {
@@ -339,7 +339,7 @@ impl SecureVault {
             );
         }
         if password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("Password must be at least 6 characters long");
+            anyhow::bail!("Password must be at least 12 characters long");
         }
 
         let empty_data = VaultData {
@@ -715,7 +715,7 @@ impl SecureVault {
         let mut changed = false;
 
         for (profile_id, enabled) in enablement {
-            let pid = profile_id.trim().to_lowercase();
+            let pid = normalize_profile_id(profile_id)?;
             if let Some(existing) = data
                 .credentials
                 .iter_mut()
@@ -817,9 +817,9 @@ mod tests {
         assert!(!vault.is_initialized());
 
         let err = vault.initialize("short").unwrap_err();
-        assert!(err.to_string().contains("at least 6 characters"));
+        assert!(err.to_string().contains("at least 12 characters"));
 
-        assert!(vault.initialize("abcdef").is_ok());
+        assert!(vault.initialize("a-valid-long-password").is_ok());
         let err = vault.initialize("another-long-password").unwrap_err();
         assert!(err.to_string().contains("already initialized"));
 
@@ -827,12 +827,18 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_accepts_six_character_passwords_without_composition_rules() {
+    fn test_vault_accepts_twelve_character_passwords_without_composition_rules() {
+        let (dir, file) = temp_vault_path("too_short");
+        let mut vault = SecureVault::new_with_path(file);
+        let err = vault.initialize("abcdef").unwrap_err();
+        assert!(err.to_string().contains("at least 12 characters"));
+        let _ = fs::remove_dir_all(dir);
+
         for (kind, password) in [
-            ("letters", "abcdef"),
-            ("numbers", "123456"),
-            ("symbols", "!@#$%^"),
-            ("mixed", "a1!b2@"),
+            ("letters", "abcdefghijkl"),
+            ("numbers", "123456789012"),
+            ("symbols", "!@#$%^&*()_+"),
+            ("mixed", "a1!b2@c3#d4$"),
         ] {
             let (dir, file) = temp_vault_path(kind);
             let mut vault = SecureVault::new_with_path(file);
@@ -848,7 +854,7 @@ mod tests {
         let (dir, file) = temp_vault_path("persisted_init");
         {
             let mut vault = SecureVault::new_with_path(file.clone());
-            vault.initialize("abcdef").unwrap();
+            vault.initialize("correct horse battery").unwrap();
             let status = vault.get_status();
             assert!(status.is_initialized);
             assert!(status.is_unlocked);
@@ -858,7 +864,7 @@ mod tests {
         let locked_status = reopened.get_status();
         assert!(locked_status.is_initialized);
         assert!(!locked_status.is_unlocked);
-        reopened.unlock("abcdef").unwrap();
+        reopened.unlock("correct horse battery").unwrap();
         assert!(reopened.get_status().is_unlocked);
 
         let _ = fs::remove_dir_all(dir);

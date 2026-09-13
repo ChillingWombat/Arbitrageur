@@ -19,9 +19,9 @@ The system targets **Spatial Price Differences** (orderbook spread capture) and 
 This repository is a **research and paper-trading platform only**. Read this before running anything:
 
 - **Live trading is disabled and fails closed.** Order signing, submission, and cancellation are not implemented for any venue. Every real/live order action and every unsupported native execution path (spot, cross-ticker, funding, prediction, triangular) returns an explicit error rather than simulating success; spatial **paper** execution on the built-in simulator remains supported.
-- **The desktop app admits only Hyperliquid and Lighter**, and only their **read-only public orderbook feeds**. Lighter funding-rate ingestion is unavailable.
+- **The desktop app admits only Hyperliquid and Lighter**, and only their **read-only public orderbook feeds**. Lighter funding-rate ingestion is unavailable. These unauthenticated requests disclose your IP address and the requested symbols to the venue endpoints.
 - **Vanta, Robinhood, Arcus, PopDEX, Polymarket, and Kalshi adapters are scaffolds.** They are not wired into native scanning or execution and cannot place orders.
-- **Browser mode is an explicitly synthetic demo** for execution, balances, P&L, risk, and calibration; public quote views may fetch unauthenticated market data, which discloses your IP address and the requested symbols to those endpoints. The demo is never used as a fallback when desktop IPC fails — Tauri command errors propagate to the UI.
+- **Browser mode has no synthetic demo engine.** All engine and quote calls require the desktop application's IPC; in the browser they fail closed with the desktop-required error rather than fabricating execution, balances, quotes, P&L, risk, or calibration. Tauri command errors propagate to the UI — there is no fallback path.
 - **Paper spatial execution** uses freshly fetched, identity- and structure-validated orderbooks, bounded IOC (immediate-or-cancel) simulation, a maximum 5x leverage, and margin/delta/depth/slippage checks. Only **one open pair per symbol** is supported because the closing/convergence lifecycle remains on the backlog.
 - **Credential vault:** local AES-256-GCM encryption with Argon2id key derivation, `0600` file / `0700` directory permissions on Unix, and write-only secret entry from the UI (there is no credential-read IPC). Even so, **only ever enter read-only or minimum-permission API credentials — never funded signing keys**.
 
@@ -149,11 +149,11 @@ Arbitrager includes a native, low-latency quantitative trading workstation front
 
 ### 🚀 Running the Frontend
 
-#### 1. Web Dev Server (Browser Mode — Demo Engine)
+#### 1. Web Dev Server (Browser Mode)
 ```bash
 pixi run dev-frontend
 ```
-Open `http://localhost:1420` in your browser. In browser mode, execution, balances, P&L, risk, and calibration are synthetic; public quote views may use unauthenticated market data fetched directly from venue endpoints (which discloses your IP address and requested symbols). Desktop IPC and order submission are unavailable.
+Open `http://localhost:1420` in your browser. In browser mode, desktop IPC and order submission are unavailable: all engine and quote calls (execution, balances, quotes, P&L, risk, calibration) fail closed with the desktop-required error instead of serving synthetic data.
 
 #### 2. Build Production Web Assets
 ```bash

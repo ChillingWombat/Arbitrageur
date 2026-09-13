@@ -1,11 +1,13 @@
 import React from "react";
 import { Play, Pause, TrendingDown, OctagonX } from "lucide-react";
+import { getBotControlAvailability } from "../hooks/useBotLifecycle";
 import type { BotPhase } from "../hooks/useBotLifecycle";
 
 interface BotLifecycleControlsProps {
   phase: BotPhase;
   hasOpenPositions: boolean;
   disabled?: boolean;
+  reduceOnlyAvailable?: boolean;
   onStart: () => void;
   onPause: () => void;
   onReduceOnly: () => void;
@@ -31,13 +33,19 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
   phase,
   hasOpenPositions,
   disabled = false,
+  reduceOnlyAvailable = false,
   onStart,
   onPause,
   onReduceOnly,
   onStop,
 }) => {
   const stopping = phase === "stopping";
-  const idle = phase === "idle";
+  const availability = getBotControlAvailability(
+    phase,
+    hasOpenPositions,
+    disabled,
+    reduceOnlyAvailable,
+  );
 
   const buttons: BtnDef[] = [
     {
@@ -45,7 +53,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       label: "Start",
       title: phase === "paused" ? "Resume entries" : "Start the bot",
       icon: <Play className="w-3 h-3" />,
-      enabled: !disabled && !stopping && (idle || phase === "paused"),
+      enabled: availability.start,
       onClick: onStart,
       activeClass: "text-emerald-700 hover:bg-emerald-50 border-emerald-300",
     },
@@ -55,20 +63,18 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       title: "Suspend new executions; positions preserved",
       icon: <Pause className="w-3 h-3" />,
       // Suspending is safe — stays available even when entries are disabled
-      enabled: phase === "running",
+      enabled: availability.pause,
       onClick: onPause,
       activeClass: "text-slate-700 hover:bg-slate-100 border-slate-300",
     },
     {
       key: "reduce",
       label: "Reduce Only",
-      title: "Exit-only mode — stops automatically once this strategy is flat",
+      title: reduceOnlyAvailable
+        ? "Exit-only mode — stops automatically once this strategy is flat"
+        : "Reduce-only exit scheduling is unavailable; use Stop to flatten paper positions",
       icon: <TrendingDown className="w-3 h-3" />,
-      // Risk-reducing: never gated by connectivity — must drain positions
-      // even if the feed dropped mid-session
-      enabled:
-        (phase === "running" || phase === "paused") &&
-        hasOpenPositions,
+      enabled: availability.reduceOnly,
       onClick: onReduceOnly,
       activeClass: "text-amber-700 hover:bg-amber-50 border-amber-300",
     },
@@ -78,8 +84,8 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       title:
         "Emergency exit — immediately flatten this strategy's positions to delta-neutral",
       icon: <OctagonX className="w-3 h-3" />,
-      // Emergency exit must never be greyed out while a phase is active
-      enabled: !idle && !stopping,
+      // Emergency exit stays armed while a phase is active or positions remain
+      enabled: availability.stop,
       onClick: onStop,
       activeClass: "text-red-700 hover:bg-red-50 border-red-300",
     },

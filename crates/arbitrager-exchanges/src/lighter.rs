@@ -111,40 +111,15 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let clean_sym = symbol.replace('/', "-").to_uppercase();
-        let base_sym = clean_sym.split('-').next().unwrap_or(&clean_sym);
-        
-        // Map symbol to market_id: Crypto perps + Lighter Robinhood synthetic equities
-        let market_id = if let Ok(numeric_id) = clean_sym.parse::<u64>() {
-            numeric_id
-        } else {
-            match base_sym {
-                // Perps
-                "ETH" if clean_sym.contains("PERP") || !clean_sym.contains("SPOT") => 0,
-                "BTC" => 1,
-                "SOL" => 2,
-                "DOGE" => 3,
-                "1000PEPE" | "PEPE" => 4,
-                "WLD" => 6,
-                "XRP" => 7,
-                // Robinhood Lighter Tokenized Equities (Web3 -> Traditional)
-                "RHNVDA" | "NVDA" => 2056,
-                "RHSPY" | "SPY" => 2057,
-                "RHQQQ" | "QQQ" => 2058,
-                // Lighter Spot
-                "ETH" => 2048,
-                "LIT" => 2049,
-                "LINK" => 2050,
-                "UNI" => 2051,
-                "AAVE" => 2052,
-                "SKY" => 2053,
-                "LDO" => 2054,
-                "AZTEC" => 2055,
-                _ => 1,
-            }
-        };
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let market_id = resolve_market_id(&details, symbol)?;
 
-        let res = self.get_json(&format!("/api/v1/orderBookOrders?market_id={}&limit=50", market_id)).await?;
+        let res = self
+            .get_json(&format!(
+                "/api/v1/orderBookOrders?market_id={}&limit=50",
+                market_id
+            ))
+            .await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
         if let Some(bids) = res.get("bids").and_then(|b| b.as_array()) {
@@ -239,7 +214,9 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let idx = self.account_index.unwrap_or(0);
+        let idx = self
+            .account_index
+            .ok_or_else(|| anyhow::anyhow!("Lighter account fetch requires an account index"))?;
         let path = format!("/api/v1/account?by=index&value={}", idx);
 
         let data = match self.rate_limiter.acquire_or_cache(true).await? {
@@ -353,5 +330,173 @@ impl ExchangeAdapter for LighterAdapter {
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+    }
+}
+
+fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Result<u64> {
+    let entries = details
+        .get("order_book_details")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
+
+    let clean = symbol.trim().replace('/', "-").to_uppercase();
+    let market_type = if clean.split('-').any(|t| t == "SPOT") {
+        "spot"
+    } else {
+        "perp"
+    };
+    let matches_type = |e: &serde_json::Value| {
+        e.get("market_type")
+            .and_then(|t| t.as_str())
+            .map(|t| t.eq_ignore_ascii_case(market_type))
+            .unwrap_or(false)
+    };
+
+    let lookup = clean
+        .split('-')
+        .filter(|t| *t != "SPOT")
+        .collect::<Vec<_>>()
+        .join("-");
+    if lookup.is_empty() {
+        anyhow::bail!("Lighter symbol '{}' carries no market identifier", symbol);
+    }
+
+    if let Ok(id) = lookup.parse::<u64>() {
+        if entries
+            .iter()
+            .any(|e| e.get("market_id").and_then(|m| m.as_u64()) == Some(id) && matches_type(e))
+        {
+            return Ok(id);
+        }
+        anyhow::bail!(
+            "No Lighter {} market with id {} for '{}'",
+            market_type,
+            id,
+            symbol
+        );
+    }
+
+    let base = lookup.split('-').next().unwrap_or(lookup.as_str());
+    let matched: Vec<u64> = entries
+        .iter()
+        .filter(|e| matches_type(e))
+        .filter(|e| {
+            e.get("symbol")
+                .and_then(|s| s.as_str())
+                .map(|s| s.eq_ignore_ascii_case(base))
+                .unwrap_or(false)
+        })
+        .filter_map(|e| e.get("market_id").and_then(|m| m.as_u64()))
+        .collect();
+    match matched.as_slice() {
+        [id] => Ok(*id),
+        [] => anyhow::bail!("Unknown Lighter {} symbol '{}'", market_type, symbol),
+        ids => anyhow::bail!(
+            "Ambiguous Lighter {} symbol '{}' matches market ids {:?}",
+            market_type,
+            symbol,
+            ids
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn details(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "order_book_details": entries })
+    }
+
+    #[test]
+    fn resolve_market_id_matches_exact_perp_symbol() {
+        let d = details(serde_json::json!([
+            { "symbol": "BTC", "market_id": 1, "market_type": "perp" },
+            { "symbol": "SOL", "market_id": 2, "market_type": "perp" }
+        ]));
+        assert_eq!(resolve_market_id(&d, "SOL").unwrap(), 2);
+        assert_eq!(resolve_market_id(&d, "sol/usdc").unwrap(), 2);
+        assert_eq!(resolve_market_id(&d, "SOL-USDC").unwrap(), 2);
+    }
+
+    #[test]
+    fn resolve_market_id_spot_selects_only_spot_entry() {
+        let d = details(serde_json::json!([
+            { "symbol": "ETH", "market_id": 0, "market_type": "perp" },
+            { "symbol": "ETH", "market_id": 2048, "market_type": "spot" }
+        ]));
+        assert_eq!(resolve_market_id(&d, "ETH-SPOT").unwrap(), 2048);
+        assert_eq!(resolve_market_id(&d, "eth/spot").unwrap(), 2048);
+        assert_eq!(resolve_market_id(&d, "ETH").unwrap(), 0);
+    }
+
+    #[test]
+    fn resolve_market_id_unknown_symbol_errors_not_btc() {
+        let d = details(serde_json::json!([
+            { "symbol": "BTC", "market_id": 1, "market_type": "perp" }
+        ]));
+        let err = resolve_market_id(&d, "AVAX").expect_err("unknown symbol must error");
+        assert!(err.to_string().contains("AVAX"), "unexpected err: {err}");
+    }
+
+    #[test]
+    fn resolve_market_id_never_aliases_pepe_to_1000pepe() {
+        let d = details(serde_json::json!([
+            { "symbol": "1000PEPE", "market_id": 4, "market_type": "perp" }
+        ]));
+        assert!(resolve_market_id(&d, "PEPE").is_err());
+        assert!(resolve_market_id(&d, "PEPE-USDC").is_err());
+        assert_eq!(resolve_market_id(&d, "1000PEPE").unwrap(), 4);
+    }
+
+    #[test]
+    fn resolve_market_id_numeric_requires_real_market_and_type() {
+        let d = details(serde_json::json!([
+            { "symbol": "BTC", "market_id": 1, "market_type": "perp" },
+            { "symbol": "ETH", "market_id": 2048, "market_type": "spot" }
+        ]));
+        assert_eq!(resolve_market_id(&d, "1").unwrap(), 1);
+        assert!(resolve_market_id(&d, "999").is_err());
+        assert!(
+            resolve_market_id(&d, "2048").is_err(),
+            "a spot market id must not resolve as perp"
+        );
+        assert_eq!(resolve_market_id(&d, "2048-SPOT").unwrap(), 2048);
+    }
+
+    #[test]
+    fn resolve_market_id_malformed_details_error() {
+        assert!(resolve_market_id(&serde_json::json!({}), "SOL").is_err());
+        assert!(
+            resolve_market_id(&serde_json::json!({"order_book_details": {"x": 1}}), "SOL").is_err()
+        );
+        assert!(resolve_market_id(&serde_json::Value::Null, "SOL").is_err());
+        let d = details(serde_json::json!([{ "symbol": "SOL" }]));
+        assert!(
+            resolve_market_id(&d, "SOL").is_err(),
+            "entry without market_id cannot resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_market_id_ambiguous_entries_error() {
+        let d = details(serde_json::json!([
+            { "symbol": "SOL", "market_id": 2, "market_type": "perp" },
+            { "symbol": "sol", "market_id": 77, "market_type": "perp" }
+        ]));
+        assert!(resolve_market_id(&d, "SOL").is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_account_requires_account_index() {
+        let adapter = LighterAdapter::new(Some("http://127.0.0.1:1".to_string()), None, None);
+        let err = adapter
+            .fetch_account()
+            .await
+            .expect_err("must fail closed without identity");
+        assert_eq!(
+            err.to_string(),
+            "Lighter account fetch requires an account index"
+        );
     }
 }

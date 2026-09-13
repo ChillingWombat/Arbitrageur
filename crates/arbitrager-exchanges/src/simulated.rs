@@ -250,6 +250,33 @@ impl ExchangeAdapter for SimulatedExchange {
         };
 
         let mut book = book_lock.write();
+        let mut acc = self.account.write();
+
+        let execution_qty = if order.reduce_only {
+            match acc.positions.iter().find(|p| p.symbol == order.symbol) {
+                Some(pos) if pos.side != order.side => order.quantity.min(pos.quantity),
+                _ => {
+                    return Ok(OrderResponse {
+                        order_id: format!("sim-{}", uuid::Uuid::new_v4()),
+                        client_order_id: order.client_order_id,
+                        venue: self.venue_id.clone(),
+                        symbol: order.symbol,
+                        status: OrderStatus::Rejected,
+                        original_qty: order.quantity,
+                        filled_qty: dec!(0),
+                        remaining_qty: order.quantity,
+                        avg_fill_price: None,
+                        fee: dec!(0),
+                        fee_currency: "USDC".to_string(),
+                        raw_response: None,
+                        timestamp: Utc::now(),
+                    });
+                }
+            }
+        } else {
+            order.quantity
+        };
+
         let levels = match order.side {
             Side::Buy => &book.asks,
             Side::Sell => &book.bids,
@@ -261,10 +288,10 @@ impl ExchangeAdapter for SimulatedExchange {
             if !acceptable(level.price) {
                 break;
             }
-            let take = (order.quantity - filled_qty).min(level.size);
+            let take = (execution_qty - filled_qty).min(level.size);
             filled_qty += take;
             cost += take * level.price;
-            if filled_qty >= order.quantity {
+            if filled_qty >= execution_qty {
                 break;
             }
         }
@@ -303,7 +330,6 @@ impl ExchangeAdapter for SimulatedExchange {
         // Opening additional exposure requires incremental initial margin;
         // reducing or flipping a position only needs margin on the new side's
         // residual quantity. Reject before consuming any book liquidity.
-        let mut acc = self.account.write();
         let existing_qty = acc
             .positions
             .iter()
@@ -462,5 +488,105 @@ impl ExchangeAdapter for SimulatedExchange {
         }
         Self::recompute_account_margins(&mut acc);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded() -> SimulatedExchange {
+        let ex = SimulatedExchange::new("sim", "Simulated", 0, dec!(0.0), dec!(100000.0));
+        ex.seed_market("BTC-USDC", dec!(100.0), dec!(101.0), dec!(5.0), dec!(0.0));
+        ex
+    }
+
+    fn market_order(
+        ex: &SimulatedExchange,
+        side: Side,
+        qty: Decimal,
+        reduce_only: bool,
+    ) -> OrderRequest {
+        let mut order = OrderRequest::new_market(ex.venue_id(), "BTC-USDC", side, qty);
+        order.reduce_only = reduce_only;
+        order
+    }
+
+    #[tokio::test]
+    async fn reduce_only_order_while_flat_is_rejected() {
+        let ex = seeded();
+        let resp = ex
+            .place_order(market_order(&ex, Side::Sell, dec!(1.0), true))
+            .await
+            .expect("reduce-only produces a rejection response");
+        assert_eq!(resp.status, OrderStatus::Rejected);
+        assert_eq!(resp.filled_qty, dec!(0));
+        assert_eq!(resp.remaining_qty, dec!(1.0));
+
+        let acc = ex.fetch_account().await.expect("account");
+        assert!(
+            acc.positions.is_empty(),
+            "reduce-only must never open a position"
+        );
+        let book = ex.fetch_orderbook("BTC-USDC").await.expect("book");
+        assert_eq!(book.bids.len(), 10);
+        assert_eq!(
+            book.bids[0].size,
+            dec!(5.0),
+            "rejection must not consume depth"
+        );
+    }
+
+    #[tokio::test]
+    async fn reduce_only_same_side_is_rejected() {
+        let ex = seeded();
+        ex.place_order(market_order(&ex, Side::Buy, dec!(1.0), false))
+            .await
+            .expect("opening order");
+
+        let resp = ex
+            .place_order(market_order(&ex, Side::Buy, dec!(0.5), true))
+            .await
+            .expect("reduce-only produces a rejection response");
+        assert_eq!(resp.status, OrderStatus::Rejected);
+        assert_eq!(resp.filled_qty, dec!(0));
+        assert_eq!(resp.remaining_qty, dec!(0.5));
+
+        let acc = ex.fetch_account().await.expect("account");
+        let pos = acc.get_position("BTC-USDC").expect("position");
+        assert_eq!(pos.side, Side::Buy);
+        assert_eq!(
+            pos.quantity,
+            dec!(1.0),
+            "same-side reduce-only must not add"
+        );
+    }
+
+    #[tokio::test]
+    async fn reduce_only_oversized_close_caps_at_position() {
+        let ex = seeded();
+        ex.place_order(market_order(&ex, Side::Buy, dec!(0.5), false))
+            .await
+            .expect("opening order");
+
+        let resp = ex
+            .place_order(market_order(&ex, Side::Sell, dec!(1.0), true))
+            .await
+            .expect("close order");
+        assert_eq!(resp.status, OrderStatus::PartiallyFilled);
+        assert_eq!(resp.original_qty, dec!(1.0));
+        assert_eq!(
+            resp.filled_qty,
+            dec!(0.5),
+            "fill is capped at the open position"
+        );
+        assert_eq!(resp.remaining_qty, dec!(0.5));
+
+        let acc = ex.fetch_account().await.expect("account");
+        assert!(
+            acc.positions.is_empty(),
+            "reduce-only must not leave a residual or reverse position: {:?}",
+            acc.positions
+        );
     }
 }
