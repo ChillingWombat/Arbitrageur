@@ -160,24 +160,10 @@ impl ExchangeAdapter for VantaAdapter {
             }
         }
 
-        // Public fallback using live Orderly futures market data
-        let public_url = format!("{}/v1/public/futures/{}", self.base_url, vanta_sym);
-        let pub_resp = self.client.get(&public_url).send().await?;
-        let pub_json = pub_resp.json::<serde_json::Value>().await?;
-        let data = pub_json.get("data").ok_or_else(|| anyhow::anyhow!("Vanta public futures data missing for {}", vanta_sym))?;
-
-        let mark_px = data.get("mark_price")
-            .and_then(|m| m.as_f64())
-            .and_then(Decimal::from_f64_retain)
-            .unwrap_or(dec!(60000.0));
-
-        let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        // Synthetic BBO from live Orderly mark price (tight 2 BPS spread)
-        let spread_half = mark_px * dec!(0.0001);
-        book.bids.push(BookLevel::new(mark_px - spread_half, dec!(5.0)));
-        book.asks.push(BookLevel::new(mark_px + spread_half, dec!(5.0)));
-        book.timestamp = Utc::now();
-        Ok(book)
+        anyhow::bail!(
+            "Vanta orderbook unavailable for {}; refusing to synthesize a BBO from mark price",
+            vanta_sym
+        )
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
