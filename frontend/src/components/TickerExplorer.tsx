@@ -25,7 +25,7 @@ import { SwitchToggle } from "./SwitchToggle";
 import type { ExecutionLogEntry, TickerStrategyConfigDto, SystemStatusDto, RiskOverviewDto, VenueVolumesDto } from "../types";
 
 interface TickerExplorerProps {
-  selectedSymbol: string;
+  selectedSymbol: string | null;
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
@@ -249,12 +249,12 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Top Header & Search */}
       <div className="p-3 border-b border-surface-border space-y-2.5">
         <div className="flex items-center justify-between">
-          <div className="text-[11px] font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
+          <div className="text-xs font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
             <span>Tickers</span>
-            <span className="text-[10px] font-normal text-slate-600">({processedTickers.length}/{totalAvailableCount})</span>
+            <span className="text-xs font-normal text-slate-600">({processedTickers.length}/{totalAvailableCount})</span>
           </div>
           <span
-            className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded-full border transition ${
+            className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border transition ${
               (enabledTickers?.size ?? 0) > 0
                 ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                 : "bg-slate-100 text-slate-500 border-slate-200"
@@ -317,7 +317,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
             {/* Floating Popover Menu */}
             {showSortMenu && (
               <div className="absolute right-0 top-full mt-1.5 w-48 bg-surface border border-surface-border rounded-md shadow-lg py-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
-                <div className="px-2.5 py-1 text-[10px] font-bold text-slate-600 border-b border-surface-border/60">
+                <div className="px-2.5 py-1 text-xs font-bold text-slate-600 border-b border-surface-border/60">
                   Sort Tickers
                 </div>
 
@@ -400,7 +400,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       </div>
 
       {/* Column Subheader */}
-      <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[10px] font-mono text-slate-600 font-semibold tracking-wider">
+      <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-xs font-mono text-slate-600 font-semibold tracking-wider">
         <span>Symbol</span>
         <span className="text-right">Net PnL</span>
       </div>
@@ -489,7 +489,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                 <div className="flex items-center space-x-2 shrink-0">
                   <div className="flex flex-col items-end">
                     <span
-                      className={`text-[11px] font-bold tabular-nums ${
+                      className={`text-xs font-bold tabular-nums ${
                         isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-700"
                       }`}
                       title={hasTrades ? `${ticker.tradeCount} txs · ${formatCurrencyPnl(ticker.netProfit)}` : "No trades executed"}
@@ -497,7 +497,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                       {formatCurrencyPnl(ticker.netProfit)}
                     </span>
                     <span
-                      className={`text-[9px] font-mono tabular-nums leading-none ${
+                      className={`text-xs font-mono tabular-nums leading-none ${
                         sortOption === "liquidity"
                           ? "text-slate-500"
                           : isProfit
@@ -557,7 +557,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       <div className="p-3 border-t border-surface-border bg-surface-raised space-y-2.5">
         <div className="flex items-center justify-between">
           <div className="flex flex-col">
-            <span className="text-[9px] font-mono tracking-wider text-slate-500 font-semibold">
+            <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">
               Net Profit
             </span>
             <span
@@ -605,7 +605,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
               <button
                 type="button"
                 onClick={onResetCircuitBreaker}
-                className="px-1.5 py-1 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-[10px] font-mono font-medium transition cursor-pointer"
+                className="px-1.5 py-1 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium transition cursor-pointer"
                 title="Reset Circuit Breaker"
               >
                 Reset

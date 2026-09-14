@@ -279,7 +279,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
             <span className="font-bold text-slate-900">{symbol}</span>
           </div>
 
-          <div className="flex items-center space-x-1.5 text-[11px] text-slate-500">
+          <div className="flex items-center space-x-1.5 text-xs text-slate-500">
             <span
               className={`w-1.5 h-1.5 rounded-full ${
                 orderbooks.length > 0 ? "bg-profit animate-pulse" : "bg-slate-300"
@@ -297,7 +297,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         {/* Right: Controls (Level Filters, Search, Clear) */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Level Filter Chips */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
             {(["ALL", "TRADES", "TRIGGER", "SCAN", "ERRORS"] as const).map((lvl) => (
               <button
                 key={lvl}
@@ -315,11 +315,11 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
           </div>
 
           {/* Depth / Time-Window Filter */}
-          <div className="flex items-center bg-surface-raised px-2 py-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center bg-surface-raised px-2 py-0.5 rounded-md border border-surface-border text-xs">
             <select
               value={logDepth}
               onChange={(e) => setLogDepth(e.target.value)}
-              className="bg-transparent text-slate-700 font-mono text-[11px] focus:outline-none cursor-pointer"
+              className="bg-transparent text-slate-700 font-mono text-xs focus:outline-none cursor-pointer"
               title="How many / how far back logs to display"
             >
               <option value="50">Last 50</option>
@@ -340,7 +340,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
               placeholder="Search logs..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-7 pr-2 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-md text-[11px] text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+              className="pl-7 pr-2 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-md text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </div>
 
@@ -366,7 +366,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
             <table className="w-full text-left font-mono text-xs">
-              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[10px] text-slate-500 tracking-wider">
+              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-xs text-slate-500 tracking-wider">
                 <tr>
                   <th className="py-2 px-3 w-40">Timestamp</th>
                   <th className="py-2 px-2.5 w-20">Level</th>
@@ -375,19 +375,19 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                   <th className="py-2 px-3 text-right w-24">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-surface-border text-[11px]">
+              <tbody className="divide-y divide-surface-border text-xs">
                 {filteredLogs.map((item) => {
                   return (
                     <tr key={item.id} className="hover:bg-surface-raised/60 transition">
                       {/* Timestamp */}
-                      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-[10px]">
+                      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-xs">
                         {item.timestamp}
                       </td>
 
                       {/* Level */}
                       <td className="py-2 px-2.5 whitespace-nowrap">
                         <span
-                          className={`px-1.5 py-0.2 rounded-sm text-[9px] font-bold border ${getLevelBadgeClass(
+                          className={`px-1.5 py-0.2 rounded-sm text-xs font-bold border ${getLevelBadgeClass(
                             item.level
                           )}`}
                         >
@@ -423,7 +423,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                       {/* Status */}
                       <td className="py-2 px-3 text-right whitespace-nowrap">
                         <span
-                          className={`text-[10px] font-semibold ${
+                          className={`text-xs font-semibold ${
                             item.status === "SUCCESS"
                               ? "text-profit"
                               : item.status === "WARNING"
@@ -446,7 +446,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
       </div>
 
       {/* 3. Footer Bar: Summary Count & Auto-Scroll Toggle */}
-      <div className="flex items-center justify-between text-[11px] text-slate-500 px-1 pt-0.5">
+      <div className="flex items-center justify-between text-xs text-slate-500 px-1 pt-0.5">
         <span>
           Showing <strong className="text-slate-800">{filteredLogs.length}</strong> of{" "}
           <strong className="text-slate-800">{allLogs.length}</strong> log events for {symbol} ({strategyName})
@@ -460,7 +460,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
               onChange={(e) => setAutoScroll(e.target.checked)}
               className="rounded-sm border-surface-border text-accent focus:ring-accent"
             />
-            <span className="text-[10px]">Follow Live Stream</span>
+            <span className="text-xs">Follow Live Stream</span>
           </label>
         </div>
       </div>

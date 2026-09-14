@@ -48,7 +48,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
           }`}
         />
       </button>
-      {label && <span className="text-[11px] font-mono text-slate-700">{label}</span>}
+      {label && <span className="text-xs font-mono text-slate-700">{label}</span>}
     </div>
   );
 };

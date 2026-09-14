@@ -4,15 +4,15 @@ import {
   Activity,
   ShieldCheck,
   Cpu,
-  Layers,
   Percent,
   Target,
-  FlaskConical,
+  Sigma,
   Coins,
   Triangle,
   Sliders,
   CheckCircle2,
 } from "lucide-react";
+import { SpreadGapIcon } from "./icons";
 import { api } from "../services/api";
 import type {
   RiskOverviewDto,
@@ -22,7 +22,8 @@ import type {
 } from "../types";
 
 interface PortfolioMonitorProps {
-  activeSymbol: string;
+  /** Selected ticker; null until the user explicitly picks one in the explorer. */
+  activeSymbol: string | null;
   riskData: RiskOverviewDto | null;
   status: SystemStatusDto | null;
   onResetCircuitBreaker: () => void;
@@ -51,6 +52,7 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   };
 
   const runCalibration = async () => {
+    if (!activeSymbol) return;
     setCalibrating(true);
     try {
       const result = await api.runWfoCalibration(activeSymbol);
@@ -100,7 +102,7 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   const getStrategyIcon = (id: string) => {
     switch (id) {
       case "spatial_spread":
-        return <Layers className="w-4 h-4 text-blue-600" />;
+        return <SpreadGapIcon className="w-4 h-4 text-blue-600" />;
       case "funding_rate":
         return <Percent className="w-4 h-4 text-emerald-600" />;
       case "spot_trade":
@@ -112,7 +114,7 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
       case "prediction_parity":
         return <Target className="w-4 h-4 text-purple-600" />;
       case "stat_arb":
-        return <FlaskConical className="w-4 h-4 text-indigo-600" />;
+        return <Sigma className="w-4 h-4 text-indigo-600" />;
       default:
         return <Activity className="w-4 h-4 text-slate-600" />;
     }
@@ -121,12 +123,12 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   const formatStrategyName = (id: string) => {
     switch (id) {
       case "spatial_spread":
-        return "Spread Range";
+        return "Single Spread";
       case "funding_rate":
         return "Funding Rate";
       case "spot_trade":
       case "spot_arb":
-        return "Spot Trade";
+        return "Spatial";
       case "triangular_arb":
       case "triangle":
         return "Triangle";
@@ -406,7 +408,7 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
                     <h3 className="text-xs lg:text-sm font-bold font-mono tracking-wider text-slate-900" title={formatStrategyName(m.strategy_id)}>
                       {formatStrategyName(m.strategy_id)}
                     </h3>
-                    <span className="text-[11px] font-mono text-slate-400 capitalize">{m.strategy_id.replace("_", " ")}</span>
+                    <span className="text-xs font-mono text-slate-400 capitalize">{m.strategy_id.replace("_", " ")}</span>
                   </div>
                 </div>
 

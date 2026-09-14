@@ -15,7 +15,7 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes returns only enabled HL/LGT in paper mode", () => {
+test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH in paper mode", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
@@ -31,7 +31,7 @@ test("getEnabledConnectedVenueCodes returns only enabled HL/LGT in paper mode", 
     kalshi_enabled: true,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT", "RH"]);
 });
 
 test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {

@@ -40,12 +40,27 @@ impl VantaAdapter {
         }
     }
 
-    fn to_vanta_symbol(symbol: &str) -> String {
+    /// Futures symbol normalization. Orderly perp ids are `PERP_*`; a spot
+    /// request (either `SPOT_*` exchange format or a `-SPOT` market-type
+    /// suffix) must fail closed — silently mapping it onto the perp book
+    /// would misattribute the market type.
+    fn to_vanta_symbol(symbol: &str) -> anyhow::Result<String> {
+        let tokens: Vec<&str> = symbol.split(['-', '/', '_']).collect();
+        let first = tokens.first().copied().unwrap_or("");
+        let last = tokens.last().copied().unwrap_or("");
+        if first.eq_ignore_ascii_case("spot") || last.eq_ignore_ascii_case("spot") {
+            anyhow::bail!(
+                "Vanta spot instrument '{symbol}' is not supported by this adapter's futures API; refusing to query a perp market"
+            );
+        }
         let clean = symbol.replace('-', "_");
         if clean.starts_with("PERP_") {
-            clean
+            Ok(clean)
         } else {
-            format!("PERP_{}_USDC", symbol.split('-').next().unwrap_or(symbol))
+            Ok(format!(
+                "PERP_{}_USDC",
+                symbol.split('-').next().unwrap_or(symbol)
+            ))
         }
     }
 
@@ -111,7 +126,7 @@ impl ExchangeAdapter for VantaAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let vanta_sym = Self::to_vanta_symbol(symbol);
+        let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let url = format!("{}/v1/orderbook/{}", self.base_url, vanta_sym);
 
         let mut req = self.client.get(&url);
@@ -167,7 +182,7 @@ impl ExchangeAdapter for VantaAdapter {
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
-        let vanta_sym = Self::to_vanta_symbol(symbol);
+        let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let public_url = format!("{}/v1/public/futures/{}", self.base_url, vanta_sym);
         if let Ok(resp) = self.client.get(&public_url).send().await {
             if let Ok(json_val) = resp.json::<serde_json::Value>().await {
@@ -208,7 +223,7 @@ impl ExchangeAdapter for VantaAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let vanta_sym = Self::to_vanta_symbol(symbol);
+        let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let public_url = format!("{}/v1/public/futures/{}", self.base_url, vanta_sym);
         let resp = self.client.get(&public_url).send().await?;
         if resp.status().is_success() {
@@ -254,5 +269,25 @@ impl ExchangeAdapter for VantaAdapter {
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
         anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vanta_symbol_mapping_normalizes_perp_and_rejects_spot() {
+        assert_eq!(
+            VantaAdapter::to_vanta_symbol("BTC-USDC").unwrap(),
+            "PERP_BTC_USDC"
+        );
+        assert_eq!(
+            VantaAdapter::to_vanta_symbol("PERP_ETH_USDC").unwrap(),
+            "PERP_ETH_USDC"
+        );
+        assert!(VantaAdapter::to_vanta_symbol("BTC-SPOT").is_err());
+        assert!(VantaAdapter::to_vanta_symbol("eth/spot").is_err());
+        assert!(VantaAdapter::to_vanta_symbol("SPOT_BTC_USDC").is_err());
     }
 }

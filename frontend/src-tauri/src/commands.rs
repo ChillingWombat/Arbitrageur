@@ -1,24 +1,26 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-use tauri::State;
-use serde::{Deserialize, Serialize};
-use chrono::Utc;
-use arbitrager_core::types::{dec, Decimal, Side, VenueId};
+use crate::state::{
+    AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto, VenueBalanceInfo,
+};
+use crate::state_store::{AccountProfile, StrategyAccountRoute};
+use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
+use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::quote::OrderBook;
+use arbitrager_core::types::{dec, Decimal, Side, VenueId};
+use arbitrager_execution::coordinator::ArbitrageExecutionResult;
+use arbitrager_execution::smart_routing::SmartOrderRouter;
+use arbitrager_execution::virtual_ledger::StrategyMetrics;
+use arbitrager_math::calibration::WfoOptimizationResult;
+use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
 use arbitrager_math::funding_carry::evaluate_funding_carry;
 use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrager_math::ou_process::OuModelParams;
 use arbitrager_math::spatial_spread::evaluate_spatial_spread;
-use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_execution::coordinator::ArbitrageExecutionResult;
-use arbitrager_execution::smart_routing::SmartOrderRouter;
 use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
-use crate::state::{AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto, VenueBalanceInfo};
-use crate::state_store::{AccountProfile, StrategyAccountRoute};
-use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
-use arbitrager_execution::virtual_ledger::StrategyMetrics;
-use arbitrager_math::calibration::WfoOptimizationResult;
-use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tauri::State;
 
 const LIVE_EXECUTION_DISABLED: &str = "Live execution is disabled until an authenticated adapter can sign, submit, and reconcile orders";
 
@@ -43,7 +45,10 @@ pub struct VenueStatusDto {
     pub name: String,
     pub market_type: String,
     pub status: String,
-    pub latency_ms: u64,
+    /// Measured round-trip to the venue's public market-metadata endpoint.
+    /// `None` when the venue is not admitted or the probe failed — never
+    /// fabricated.
+    pub latency_ms: Option<u64>,
     pub fee_bps: f64,
 }
 
@@ -255,7 +260,7 @@ pub struct TickerMarketQuoteDto {
     pub base_price: f64,
 }
 
-fn venue_fee_bps(vid: &str) -> Decimal {
+pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
     match vid.to_lowercase().as_str() {
         "hyperliquid" => dec!(2.0),
         "lighter" => dec!(1.5),
@@ -285,11 +290,11 @@ fn validate_market_symbol(symbol: &str) -> Result<(), String> {
         );
     }
     if !symbol.chars().next().unwrap_or(' ').is_ascii_alphanumeric() || symbol.contains("..") {
-        return Err("Invalid market symbol: must start with an alphanumeric and not contain '..'".into());
+        return Err(
+            "Invalid market symbol: must start with an alphanumeric and not contain '..'".into(),
+        );
     }
-    let has_empty_segment = symbol
-        .split(['-', '/', '_'])
-        .any(|seg| seg.is_empty());
+    let has_empty_segment = symbol.split(['-', '/', '_']).any(|seg| seg.is_empty());
     if has_empty_segment {
         return Err("Invalid market symbol: empty base/quote segment".into());
     }
@@ -316,20 +321,140 @@ fn validate_adapter_book(
     book.validate_for_execution()
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Implementation functions (pure, unit-testable without Tauri State wrapper)
 // ---------------------------------------------------------------------------
 
+/// All venue ids currently enabled — engine flag OR an enabled account
+/// profile. Drives which venues the status poll latency-probes.
+fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto) -> Vec<String> {
+    let account_enabled = |venue: &str| {
+        state
+            .state_store
+            .has_enabled_account(venue)
+            .unwrap_or(false)
+    };
+    let mut out = Vec::new();
+    let mut push = |id: &str, on: bool| {
+        if on {
+            out.push(id.to_string());
+        }
+    };
+    push("hyperliquid", s.hyperliquid_enabled || account_enabled("hyperliquid"));
+    push("lighter", s.lighter_enabled || account_enabled("lighter"));
+    push("robinhood", s.robinhood_enabled || account_enabled("robinhood"));
+    push("vanta", s.vanta_enabled || account_enabled("vanta"));
+    push("arcus", s.arcus_enabled || account_enabled("arcus"));
+    push("popdex", s.popdex_enabled || account_enabled("popdex"));
+    push(
+        "kraken",
+        s.kraken_enabled
+            || s.kraken_spot_enabled
+            || s.kraken_futures_enabled
+            || account_enabled("kraken_spot")
+            || account_enabled("kraken_futures"),
+    );
+    push("polymarket", s.polymarket_enabled || account_enabled("polymarket"));
+    push("kalshi", s.kalshi_enabled || account_enabled("kalshi"));
+    push("decibel", s.decibel_enabled || account_enabled("decibel"));
+    push("aster", s.aster_enabled || account_enabled("aster"));
+    push("binance", s.binance_enabled || account_enabled("binance"));
+    push("coinbase", s.coinbase_enabled || account_enabled("coinbase"));
+    push("okx", s.okx_enabled || account_enabled("okx"));
+    push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
+    push("ig", s.ig_enabled || account_enabled("ig"));
+    push("variational", s.variational_enabled || account_enabled("variational"));
+    out
+}
+
+/// Verified public endpoint per venue for latency probes when no adapter
+/// exists. Every URL was curl-verified to return a real response — venues
+/// with no reachable public API (popdex: parked domain; variational: no
+/// public REST API; ibkr: local TWS gateway) return None → honest N/A.
+///
+/// `accept_4xx`: for endpoints that require auth, an application-level 4xx
+/// (e.g. IG's JSON `error.security.api-key-missing`) still proves the
+/// origin processed the request — a valid RTT sample. Only set where the
+/// 4xx is known to come from the API tier, not an edge challenge page.
+struct PublicProbe {
+    url: &'static str,
+    accept_4xx: bool,
+}
+
+fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
+    let p = |url: &'static str, accept_4xx: bool| Some(PublicProbe { url, accept_4xx });
+    match vid {
+        "vanta" => p("https://api-evm.orderly.org/v1/public/system_info", false),
+        "arcus" => p("https://api.arcus.xyz/health", false),
+        "kraken" => p("https://api.kraken.com/0/public/Time", false),
+        "polymarket" => p("https://clob.polymarket.com/time", false),
+        "kalshi" => p(
+            "https://api.elections.kalshi.com/trade-api/v2/exchange/status",
+            false,
+        ),
+        // Aptos fullnode is the actual transaction-submission path for
+        // Decibel trades — its RTT is the arbitrage-relevant latency.
+        "decibel" => p("https://fullnode.mainnet.aptoslabs.com/v1", false),
+        "binance" => p("https://api.binance.com/api/v3/ping", false),
+        "okx" => p("https://www.okx.com/api/v5/public/time", false),
+        "coinbase" => p("https://api.coinbase.com/v2/time", false),
+        "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
+        // IG has no public endpoint; the session route returns an
+        // app-level JSON 400 that proves the API gateway responded.
+        "ig" => p("https://api.ig.com/gateway/deal/session", true),
+        _ => None,
+    }
+}
+
+/// HTTP probe for venues without an adapter: GET the venue's public
+/// endpoint; success = the server demonstrably responded (2xx, or 4xx for
+/// `accept_4xx` endpoints whose error is app-level JSON). A timeout or
+/// connection failure yields Err → the EMA drops and the UI shows N/A.
+async fn probe_http(spec: PublicProbe) -> Result<(), String> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+    let resp = client
+        .get(spec.url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let code = resp.status().as_u16();
+    if resp.status().is_success() || (spec.accept_4xx && (400..500).contains(&code)) {
+        Ok(())
+    } else {
+        Err(format!("probe got HTTP {code}"))
+    }
+}
+
 pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStatusDto, String> {
     let cb = &state.circuit_breaker;
     let is_live = *state.is_live_mode.read();
-    let total_pnl = state.total_realized_profit.read().to_string().parse::<f64>().unwrap_or(0.0);
-    let logs = state.execution_logs.read();
-    let success_count = logs.iter().filter(|l| l.success).count();
+    let total_pnl = state
+        .total_realized_profit
+        .read()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let (total_trades, success_count) = {
+        let logs = state.execution_logs.read();
+        (logs.len(), logs.iter().filter(|l| l.success).count())
+    };
 
-    let s = state.settings.read();
+    // Cloned so no lock guard is held across the latency-probe awaits.
+    let s = state.settings.read().clone();
+    // A venue is enabled when its engine flag is set OR it owns an enabled
+    // account profile — the same admission rule `get_venues` applies.
+    let account_enabled = |venue: &str| {
+        state
+            .state_store
+            .has_enabled_account(venue)
+            .unwrap_or(false)
+    };
     let venue_status = |enabled: bool, supported: bool| -> &str {
         if !enabled {
             "OFFLINE"
@@ -340,53 +465,152 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         }
     };
 
+    // Measure real round-trip latency for every *enabled* venue in
+    // parallel. Admitted venues probe via adapter::ping() (must reach the
+    // exchange — no local/edge cache hits); enabled venues without an
+    // adapter probe a verified public endpoint — the network path to the
+    // venue's API is the same either way, so the number stays honest for
+    // arbitrage decisions even before an adapter lands. Probes are
+    // throttled to one per venue per 30s — re-measuring on every 3s poll
+    // is request volume that trips edge WAFs without meaningfully fresher
+    // data. Between probes the last smoothed value is reported; a failed
+    // probe drops the average so the UI shows N/A rather than a stale
+    // number.
+    const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+    let admitted = state.get_venues();
+    let admitted_map: HashMap<&str, &Arc<dyn ExchangeAdapter>> = admitted
+        .iter()
+        .map(|(vid, _, a)| (*vid, a))
+        .collect();
+    let enabled_ids: Vec<String> = venue_enabled_ids(state, &s);
+    let mut probes = Vec::new();
+    {
+        let mut probed_at = state.latency_probe_at.lock();
+        for vid in &enabled_ids {
+            let due = probed_at
+                .get(vid.as_str())
+                .map(|t| t.elapsed() >= LATENCY_PROBE_INTERVAL)
+                .unwrap_or(true);
+            if !due {
+                continue;
+            }
+            probed_at.insert(vid.clone(), std::time::Instant::now());
+            if let Some(adapter) = admitted_map.get(vid.as_str()) {
+                let vid = vid.clone();
+                let adapter = Arc::clone(adapter);
+                probes.push(tokio::spawn(async move {
+                    let start = std::time::Instant::now();
+                    let ms = adapter
+                        .ping()
+                        .await
+                        .ok()
+                        .map(|_| start.elapsed().as_millis() as u64);
+                    (vid, ms)
+                }));
+            } else if let Some(spec) = public_probe_endpoint(vid) {
+                let vid = vid.clone();
+                probes.push(tokio::spawn(async move {
+                    let start = std::time::Instant::now();
+                    let ms = probe_http(spec)
+                        .await
+                        .ok()
+                        .map(|_| start.elapsed().as_millis() as u64);
+                    (vid, ms)
+                }));
+            }
+        }
+    }
+    let mut results = Vec::new();
+    for h in probes {
+        if let Ok(pair) = h.await {
+            results.push(pair);
+        }
+    }
+    // Fold each successful sample into a per-venue exponential moving
+    // average so the reported value is a rolling average, not a single
+    // jumpy measurement. The lock is scoped so no guard crosses an await.
+    // Report EMA only for currently-enabled venues — disabled venues stop
+    // being probed and their last average must not linger.
+    let enabled_set: std::collections::HashSet<&str> =
+        enabled_ids.iter().map(|s| s.as_str()).collect();
+    let latency_by_venue: HashMap<String, u64> = {
+        let mut ema = state.latency_ema.lock();
+        for (vid, res) in results {
+            match res {
+                Some(ms) => {
+                    let smoothed = ema
+                        .get(&vid)
+                        .map(|prev| 0.35 * ms as f64 + 0.65 * prev)
+                        .unwrap_or(ms as f64);
+                    ema.insert(vid, smoothed);
+                }
+                None => {
+                    ema.remove(&vid);
+                }
+            }
+        }
+        ema.iter()
+            .filter(|(vid, _)| enabled_set.contains(vid.as_str()))
+            .map(|(vid, v)| (vid.clone(), v.round() as u64))
+            .collect()
+    };
+    let probe_ms = |vid: &str| latency_by_venue.get(vid).copied();
+
     let venues = vec![
         VenueStatusDto {
             id: "hyperliquid".into(),
-            name: if is_live { "Hyperliquid (L1 DEX)".into() } else { "Hyperliquid (L1)".into() },
+            name: if is_live {
+                "Hyperliquid (L1 DEX)".into()
+            } else {
+                "Hyperliquid (L1)".into()
+            },
             market_type: "Perpetual CLOB".into(),
-            status: venue_status(s.hyperliquid_enabled, true).into(),
-            latency_ms: 0,
+            status: venue_status(
+                s.hyperliquid_enabled || account_enabled("hyperliquid"),
+                true,
+            )
+            .into(),
+            latency_ms: probe_ms("hyperliquid"),
             fee_bps: 2.0,
         },
         VenueStatusDto {
             id: "lighter".into(),
             name: "Lighter (zkDEX)".into(),
             market_type: "zk-Rollup CLOB".into(),
-            status: venue_status(s.lighter_enabled, true).into(),
-            latency_ms: 0,
+            status: venue_status(s.lighter_enabled || account_enabled("lighter"), true).into(),
+            latency_ms: probe_ms("lighter"),
             fee_bps: 1.5,
         },
         VenueStatusDto {
             id: "vanta".into(),
             name: "Vanta.exchange".into(),
             market_type: "Omnichain Perps".into(),
-            status: venue_status(s.vanta_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.vanta_enabled || account_enabled("vanta"), false).into(),
+            latency_ms: probe_ms("vanta"),
             fee_bps: 3.0,
         },
         VenueStatusDto {
             id: "arcus".into(),
             name: "Arcus DEX".into(),
             market_type: "Fast CLOB".into(),
-            status: venue_status(s.arcus_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.arcus_enabled || account_enabled("arcus"), false).into(),
+            latency_ms: probe_ms("arcus"),
             fee_bps: 1.5,
         },
         VenueStatusDto {
             id: "popdex".into(),
             name: "PopDEX".into(),
             market_type: "Lighter Hybrid".into(),
-            status: venue_status(s.popdex_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.popdex_enabled || account_enabled("popdex"), false).into(),
+            latency_ms: probe_ms("popdex"),
             fee_bps: 2.0,
         },
         VenueStatusDto {
             id: "robinhood".into(),
             name: "Robinhood EVM".into(),
             market_type: "EVM DEX Aggregator".into(),
-            status: venue_status(s.robinhood_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.robinhood_enabled || account_enabled("robinhood"), false).into(),
+            latency_ms: probe_ms("robinhood"),
             fee_bps: 2.5,
         },
         VenueStatusDto {
@@ -394,45 +618,129 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             name: "Kraken".into(),
             market_type: "Spot & Futures CLOB".into(),
             status: venue_status(
-                s.kraken_enabled || s.kraken_spot_enabled || s.kraken_futures_enabled,
+                s.kraken_enabled
+                    || s.kraken_spot_enabled
+                    || s.kraken_futures_enabled
+                    || account_enabled("kraken_spot")
+                    || account_enabled("kraken_futures"),
                 false,
             )
             .into(),
-            latency_ms: 0,
+            latency_ms: probe_ms("kraken"),
             fee_bps: 16.0,
         },
         VenueStatusDto {
             id: "polymarket".into(),
             name: "Polymarket (CTF CLOB)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.polymarket_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.polymarket_enabled || account_enabled("polymarket"), false)
+                .into(),
+            latency_ms: probe_ms("polymarket"),
             fee_bps: 0.0,
         },
         VenueStatusDto {
             id: "kalshi".into(),
             name: "Kalshi (CFTC)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.kalshi_enabled, false).into(),
-            latency_ms: 0,
+            status: venue_status(s.kalshi_enabled || account_enabled("kalshi"), false).into(),
+            latency_ms: probe_ms("kalshi"),
             fee_bps: 10.0,
+        },
+        VenueStatusDto {
+            id: "decibel".into(),
+            name: "Decibel".into(),
+            market_type: "Aptos Perp DEX".into(),
+            status: venue_status(s.decibel_enabled || account_enabled("decibel"), false).into(),
+            latency_ms: probe_ms("decibel"),
+            fee_bps: 2.5,
+        },
+        VenueStatusDto {
+            id: "aster".into(),
+            name: "Aster".into(),
+            market_type: "Multi-Chain Perp DEX".into(),
+            status: venue_status(s.aster_enabled || account_enabled("aster"), false).into(),
+            latency_ms: probe_ms("aster"),
+            fee_bps: 3.5,
+        },
+        VenueStatusDto {
+            id: "binance".into(),
+            name: "Binance".into(),
+            market_type: "CEX Spot & Perp".into(),
+            status: venue_status(s.binance_enabled || account_enabled("binance"), false).into(),
+            latency_ms: probe_ms("binance"),
+            fee_bps: 7.5,
+        },
+        VenueStatusDto {
+            id: "coinbase".into(),
+            name: "Coinbase".into(),
+            market_type: "CEX Spot & Perp".into(),
+            status: venue_status(s.coinbase_enabled || account_enabled("coinbase"), false).into(),
+            latency_ms: probe_ms("coinbase"),
+            fee_bps: 8.0,
+        },
+        VenueStatusDto {
+            id: "okx".into(),
+            name: "OKX".into(),
+            market_type: "CEX Spot & Perp".into(),
+            status: venue_status(s.okx_enabled || account_enabled("okx"), false).into(),
+            latency_ms: probe_ms("okx"),
+            fee_bps: 8.0,
+        },
+        VenueStatusDto {
+            id: "ibkr".into(),
+            name: "Interactive Brokers".into(),
+            market_type: "TradFi Broker".into(),
+            status: venue_status(s.ibkr_enabled || account_enabled("ibkr"), false).into(),
+            latency_ms: probe_ms("ibkr"),
+            fee_bps: 1.0,
+        },
+        VenueStatusDto {
+            id: "ig".into(),
+            name: "IG Trading".into(),
+            market_type: "TradFi Broker".into(),
+            status: venue_status(s.ig_enabled || account_enabled("ig"), false).into(),
+            latency_ms: probe_ms("ig"),
+            fee_bps: 5.0,
+        },
+        VenueStatusDto {
+            id: "variational".into(),
+            name: "Variational".into(),
+            market_type: "Perp DEX (Read-Only)".into(),
+            status: venue_status(s.variational_enabled || account_enabled("variational"), false)
+                .into(),
+            latency_ms: probe_ms("variational"),
+            fee_bps: 0.0,
         },
     ];
 
-    let current_drawdown = cb.current_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
-    let max_drawdown = cb.max_daily_drawdown_usd().to_string().parse::<f64>().unwrap_or(25000.0);
+    let current_drawdown = cb
+        .current_drawdown_usd()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let max_drawdown = cb
+        .max_daily_drawdown_usd()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(25000.0);
 
     let is_tripped = cb.is_tripped();
     let cb_status_str = match cb.trip_reason() {
         Some(reason) => format!("TRIPPED: {}", reason),
-        None => if is_tripped { "TRIPPED: Manual halt".into() } else { "ACTIVE".into() },
+        None => {
+            if is_tripped {
+                "TRIPPED: Manual halt".into()
+            } else {
+                "ACTIVE".into()
+            }
+        }
     };
 
     Ok(SystemStatusDto {
         is_live_mode: is_live,
         is_paused: *state.is_paused.read(),
         total_realized_pnl: total_pnl,
-        total_trades_count: logs.len(),
+        total_trades_count: total_trades,
         successful_trades_count: success_count,
         circuit_breaker_status: cb_status_str,
         circuit_breaker_tripped: is_tripped,
@@ -443,7 +751,10 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     })
 }
 
-pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Result<Vec<VenueOrderBookDto>, String> {
+pub async fn fetch_orderbooks_impl(
+    symbol: &str,
+    state: &AppEngineState,
+) -> Result<Vec<VenueOrderBookDto>, String> {
     validate_market_symbol(symbol)?;
     state.ensure_market(symbol);
     let venues = state.get_venues();
@@ -452,7 +763,11 @@ pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Resu
 
     for (vid, vname, adapter) in venues {
         let venue_id = adapter.venue_id();
-        let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, symbol, Some(std::time::Duration::from_millis(350)));
+        let maybe_book = state.market_data_hub.get_valid_orderbook(
+            &venue_id,
+            symbol,
+            Some(std::time::Duration::from_millis(350)),
+        );
         let book = match maybe_book {
             Some(b) => b,
             None => match adapter.fetch_orderbook(symbol).await {
@@ -470,38 +785,78 @@ pub async fn fetch_orderbooks_impl(symbol: &str, state: &AppEngineState) -> Resu
             continue;
         }
 
-        let best_bid = book.best_bid_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
-        let best_ask = book.best_ask_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+        let best_bid = book
+            .best_bid_price()
+            .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        let best_ask = book
+            .best_ask_price()
+            .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
         let spread = (best_ask - best_bid).max(0.0);
-        let mid = if best_bid > 0.0 && best_ask > 0.0 { (best_bid + best_ask) / 2.0 } else { 0.0 };
-        let spread_bps = if mid > 0.0 { (spread / mid) * 10000.0 } else { 0.0 };
+        let mid = if best_bid > 0.0 && best_ask > 0.0 {
+            (best_bid + best_ask) / 2.0
+        } else {
+            0.0
+        };
+        let spread_bps = if mid > 0.0 {
+            (spread / mid) * 10000.0
+        } else {
+            0.0
+        };
 
-        let bids_dto: Vec<[f64; 2]> = book.bids.iter().take(5).map(|b| [
-            b.price.to_string().parse::<f64>().unwrap_or(0.0),
-            b.size.to_string().parse::<f64>().unwrap_or(0.0),
-        ]).collect();
+        let bids_dto: Vec<[f64; 2]> = book
+            .bids
+            .iter()
+            .take(5)
+            .map(|b| {
+                [
+                    b.price.to_string().parse::<f64>().unwrap_or(0.0),
+                    b.size.to_string().parse::<f64>().unwrap_or(0.0),
+                ]
+            })
+            .collect();
 
-        let asks_dto: Vec<[f64; 2]> = book.asks.iter().take(5).map(|a| [
-            a.price.to_string().parse::<f64>().unwrap_or(0.0),
-            a.size.to_string().parse::<f64>().unwrap_or(0.0),
-        ]).collect();
+        let asks_dto: Vec<[f64; 2]> = book
+            .asks
+            .iter()
+            .take(5)
+            .map(|a| {
+                [
+                    a.price.to_string().parse::<f64>().unwrap_or(0.0),
+                    a.size.to_string().parse::<f64>().unwrap_or(0.0),
+                ]
+            })
+            .collect();
 
         let total_bid_depth: f64 = bids_dto.iter().map(|b| b[1]).sum();
         let total_ask_depth: f64 = asks_dto.iter().map(|a| a[1]).sum();
 
         let benchmark_size = dec!(0.5);
-        let vwap_bid = book.sell_execution_vwap(benchmark_size)
+        let vwap_bid = book
+            .sell_execution_vwap(benchmark_size)
             .map(|(v, _, _)| v.to_string().parse::<f64>().unwrap_or(best_bid))
             .unwrap_or(best_bid);
-        let vwap_ask = book.buy_execution_vwap(benchmark_size)
+        let vwap_ask = book
+            .buy_execution_vwap(benchmark_size)
             .map(|(v, _, _)| v.to_string().parse::<f64>().unwrap_or(best_ask))
             .unwrap_or(best_ask);
 
-        let funding_pct = if let Some(fr) = state.market_data_hub.get_funding_rate(&venue_id, symbol, Some(std::time::Duration::from_secs(60))) {
-            (fr.rate * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0)
+        let funding_pct = if let Some(fr) = state.market_data_hub.get_funding_rate(
+            &venue_id,
+            symbol,
+            Some(std::time::Duration::from_secs(60)),
+        ) {
+            (fr.rate * dec!(100))
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
         } else if let Ok(fr) = adapter.fetch_funding_rate(symbol).await {
             state.market_data_hub.update_funding(fr.clone());
-            (fr.rate * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0)
+            (fr.rate * dec!(100))
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
         } else {
             0.0
         };
@@ -583,7 +938,11 @@ pub async fn fetch_multi_market_quotes_impl(
 
         for (_vid, vname, adapter) in &venues {
             let venue_id = adapter.venue_id();
-            let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, &sym, Some(std::time::Duration::from_millis(500)));
+            let maybe_book = state.market_data_hub.get_valid_orderbook(
+                &venue_id,
+                &sym,
+                Some(std::time::Duration::from_millis(500)),
+            );
             let book = match maybe_book {
                 Some(b) => b,
                 None => match adapter.fetch_orderbook(&sym).await {
@@ -624,14 +983,18 @@ pub async fn fetch_multi_market_quotes_impl(
             }
         }
 
-        let (final_bid, final_ask, mid, spread_bps, best_buy_v, best_sell_v, fee) = if found_any && best_bid > 0.0 && best_ask < f64::INFINITY {
-            let m = (best_bid + best_ask) / 2.0;
-            let sp = best_buy_spread_bps.max(0.0);
-            let f = venue_fee_bps(&best_ask_venue).to_string().parse::<f64>().unwrap_or(2.0);
-            (best_bid, best_ask, m, sp, best_ask_venue, best_bid_venue, f)
-        } else {
-            (0.0, 0.0, 0.0, 0.0, "-".to_string(), "-".to_string(), 0.0)
-        };
+        let (final_bid, final_ask, mid, spread_bps, best_buy_v, best_sell_v, fee) =
+            if found_any && best_bid > 0.0 && best_ask < f64::INFINITY {
+                let m = (best_bid + best_ask) / 2.0;
+                let sp = best_buy_spread_bps.max(0.0);
+                let f = venue_fee_bps(&best_ask_venue)
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(2.0);
+                (best_bid, best_ask, m, sp, best_ask_venue, best_bid_venue, f)
+            } else {
+                (0.0, 0.0, 0.0, 0.0, "-".to_string(), "-".to_string(), 0.0)
+            };
 
         quotes.push(TickerMarketQuoteDto {
             symbol: sym,
@@ -672,7 +1035,11 @@ pub async fn scan_spatial_opportunities_impl(
     let mut books = Vec::new();
     for (vid, vname, adapter) in &venues {
         let venue_id = adapter.venue_id();
-        let maybe_book = state.market_data_hub.get_valid_orderbook(&venue_id, symbol, Some(std::time::Duration::from_millis(350)));
+        let maybe_book = state.market_data_hub.get_valid_orderbook(
+            &venue_id,
+            symbol,
+            Some(std::time::Duration::from_millis(350)),
+        );
         let book = match maybe_book {
             Some(b) => b,
             None => match adapter.fetch_orderbook(symbol).await {
@@ -712,18 +1079,36 @@ pub async fn scan_spatial_opportunities_impl(
 
     for i in 0..books.len() {
         for j in 0..books.len() {
-            if i == j { continue; }
+            if i == j {
+                continue;
+            }
             let (buy_id, buy_name, ref book_buy, buy_fee) = books[i];
             let (sell_id, sell_name, ref book_sell, sell_fee) = books[j];
 
-            if let Some(opp) = evaluate_spatial_spread(book_buy, book_sell, buy_fee, sell_fee, target_qty_dec) {
+            if let Some(opp) =
+                evaluate_spatial_spread(book_buy, book_sell, buy_fee, sell_fee, target_qty_dec)
+            {
                 let gross_spread_f = opp.gross_spread.to_string().parse::<f64>().unwrap_or(0.0);
-                let gross_spread_bps_f = opp.gross_spread_bps.to_string().parse::<f64>().unwrap_or(0.0);
+                let gross_spread_bps_f = opp
+                    .gross_spread_bps
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
                 let net_spread_bps_f = opp.net_profit_bps.to_string().parse::<f64>().unwrap_or(0.0);
-                let est_profit_f = opp.total_net_profit_usd.to_string().parse::<f64>().unwrap_or(0.0);
+                let est_profit_f = opp
+                    .total_net_profit_usd
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
 
-                let best_ask = book_buy.best_ask_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
-                let best_bid = book_sell.best_bid_price().map(|p| p.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+                let best_ask = book_buy
+                    .best_ask_price()
+                    .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
+                    .unwrap_or(0.0);
+                let best_bid = book_sell
+                    .best_bid_price()
+                    .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
+                    .unwrap_or(0.0);
 
                 let is_executable = net_spread_bps_f >= min_bps
                     && match (book_buy.best_ask_price(), book_sell.best_bid_price()) {
@@ -765,9 +1150,16 @@ pub async fn scan_spatial_opportunities_impl(
                     sell_price: best_bid,
                     gross_spread: gross_spread_f,
                     gross_spread_bps: gross_spread_bps_f,
-                    fee_bps: (buy_fee + sell_fee).to_string().parse::<f64>().unwrap_or(0.0),
+                    fee_bps: (buy_fee + sell_fee)
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
                     net_spread_bps: net_spread_bps_f,
-                    order_qty: opp.executable_qty.to_string().parse::<f64>().unwrap_or(order_qty),
+                    order_qty: opp
+                        .executable_qty
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(order_qty),
                     estimated_profit_usd: est_profit_f,
                     is_executable,
                 });
@@ -775,7 +1167,11 @@ pub async fn scan_spatial_opportunities_impl(
         }
     }
 
-    opps.sort_by(|a, b| b.net_spread_bps.partial_cmp(&a.net_spread_bps).unwrap_or(std::cmp::Ordering::Equal));
+    opps.sort_by(|a, b| {
+        b.net_spread_bps
+            .partial_cmp(&a.net_spread_bps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(opps)
 }
 
@@ -792,10 +1188,16 @@ pub async fn execute_spot_arbitrage_impl(
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
     let _ = params;
     Err("Native 'spot' execution is disabled until authentic order submission and reconciliation are implemented".into())
@@ -822,7 +1224,11 @@ pub async fn scan_funding_opportunities_impl(
 
     for (vid, vname, adapter) in &venues {
         let venue_id = adapter.venue_id();
-        if let Some(fr) = state.market_data_hub.get_funding_rate(&venue_id, symbol, Some(std::time::Duration::from_secs(120))) {
+        if let Some(fr) = state.market_data_hub.get_funding_rate(
+            &venue_id,
+            symbol,
+            Some(std::time::Duration::from_secs(120)),
+        ) {
             rates.push((*vid, *vname, fr));
         } else if let Ok(rate) = adapter.fetch_funding_rate(symbol).await {
             state.market_data_hub.update_funding(rate.clone());
@@ -848,19 +1254,44 @@ pub async fn scan_funding_opportunities_impl(
                     symbol: symbol.to_string(),
                     long_venue: opp.long_venue,
                     short_venue: opp.short_venue,
-                    net_rate_8h_pct: (opp.net_rate_8h * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0),
-                    net_apr_pct: (opp.net_apr * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0),
-                    net_apy_pct: (opp.net_apy * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0),
-                    round_trip_fee_bps: opp.round_trip_fee_bps.to_string().parse::<f64>().unwrap_or(0.0),
-                    break_even_hours: opp.break_even_hours.to_string().parse::<f64>().unwrap_or(0.0),
-                    estimated_daily_income_usd: opp.daily_income_usd.to_string().parse::<f64>().unwrap_or(0.0),
+                    net_rate_8h_pct: (opp.net_rate_8h * dec!(100))
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    net_apr_pct: (opp.net_apr * dec!(100))
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    net_apy_pct: (opp.net_apy * dec!(100))
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    round_trip_fee_bps: opp
+                        .round_trip_fee_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    break_even_hours: opp
+                        .break_even_hours
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
+                    estimated_daily_income_usd: opp
+                        .daily_income_usd
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0),
                     trade_size_usd,
                 });
             }
         }
     }
 
-    opps.sort_by(|a, b| b.net_apy_pct.partial_cmp(&a.net_apy_pct).unwrap_or(std::cmp::Ordering::Equal));
+    opps.sort_by(|a, b| {
+        b.net_apy_pct
+            .partial_cmp(&a.net_apy_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     Ok(opps)
 }
 
@@ -885,7 +1316,11 @@ pub fn run_stat_arb_step_impl(
     let (hedge_ratio, residual) = kf.update(price_x, price_y);
     let z = kf.spread_z_score();
     let alpha = kf.intercept();
-    let variance = if z.abs() > 1e-6 { (residual / z).powi(2) } else { 1.0 };
+    let variance = if z.abs() > 1e-6 {
+        (residual / z).powi(2)
+    } else {
+        1.0
+    };
 
     let signal = if z > 2.0 {
         "ENTRY_SHORT_SPREAD"
@@ -916,15 +1351,14 @@ pub fn compute_optimal_thresholds_impl(
     sigma: f64,
     transaction_cost: f64,
 ) -> Result<BertramThresholdDto, String> {
-    if !theta.is_finite()
-        || !mu.is_finite()
-        || !sigma.is_finite()
-        || !transaction_cost.is_finite()
+    if !theta.is_finite() || !mu.is_finite() || !sigma.is_finite() || !transaction_cost.is_finite()
     {
         return Err("Invalid parameters: all inputs must be finite".into());
     }
     if theta <= 0.0 || sigma <= 0.0 || transaction_cost < 0.0 {
-        return Err("Invalid parameters: theta > 0, sigma > 0, and transaction_cost >= 0 required".into());
+        return Err(
+            "Invalid parameters: theta > 0, sigma > 0, and transaction_cost >= 0 required".into(),
+        );
     }
 
     let half_life = (2.0f64.ln()) / theta;
@@ -1079,7 +1513,10 @@ fn resolve_signal_accounts(
 fn reconcile_signal_legs(
     state: &AppEngineState,
     signal_id: &str,
-    fills: [(crate::state_store::LegSide, &arbitrager_core::order::OrderResponse); 2],
+    fills: [(
+        crate::state_store::LegSide,
+        &arbitrager_core::order::OrderResponse,
+    ); 2],
 ) -> Result<crate::state_store::SignalStatus, String> {
     use crate::state_store::SignalStatus;
     for (side, leg) in fills {
@@ -1101,7 +1538,14 @@ fn reconcile_signal_legs(
                 .ok_or_else(|| format!("leg {side:?} filled but reports no positive price"))?;
             state
                 .state_store
-                .apply_leg_fill(signal_id, side, filled, px, fee, Some(leg.order_id.as_str()))
+                .apply_leg_fill(
+                    signal_id,
+                    side,
+                    filled,
+                    px,
+                    fee,
+                    Some(leg.order_id.as_str()),
+                )
                 .map_err(|e| e.to_string())?;
         }
     }
@@ -1187,10 +1631,16 @@ async fn execute_spatial_arbitrage_inner(
     let _execution_guard = state.execution_lock.lock().await;
 
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
     if *state.is_live_mode.read() {
         return Err(LIVE_EXECUTION_DISABLED.into());
@@ -1217,17 +1667,21 @@ async fn execute_spatial_arbitrage_inner(
 
     state.ensure_market(symbol);
 
-    let buy_adapter = state
-        .get_adapter(buy_venue)
-        .ok_or_else(|| format!("Buy venue '{}' is not admitted for paper execution", buy_venue))?;
-    let sell_adapter = state
-        .get_adapter(sell_venue)
-        .ok_or_else(|| format!("Sell venue '{}' is not admitted for paper execution", sell_venue))?;
+    let buy_adapter = state.get_adapter(buy_venue).ok_or_else(|| {
+        format!(
+            "Buy venue '{}' is not admitted for paper execution",
+            buy_venue
+        )
+    })?;
+    let sell_adapter = state.get_adapter(sell_venue).ok_or_else(|| {
+        format!(
+            "Sell venue '{}' is not admitted for paper execution",
+            sell_venue
+        )
+    })?;
     let buy_vid = buy_adapter.venue_id();
     let sell_vid = sell_adapter.venue_id();
-    if crate::state::canonical_venue_id(buy_venue)
-        == crate::state::canonical_venue_id(sell_venue)
-    {
+    if crate::state::canonical_venue_id(buy_venue) == crate::state::canonical_venue_id(sell_venue) {
         return Err("Buy and sell venues must resolve to distinct canonical venues".into());
     }
     let buy_paper = state
@@ -1402,7 +1856,10 @@ async fn execute_spatial_arbitrage_inner(
 
     let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
     let acc_buy = buy_paper.fetch_account().await.map_err(|e| e.to_string())?;
-    let acc_sell = sell_paper.fetch_account().await.map_err(|e| e.to_string())?;
+    let acc_sell = sell_paper
+        .fetch_account()
+        .await
+        .map_err(|e| e.to_string())?;
     for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
         match margin_monitor.evaluate_account(acc) {
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
@@ -1449,10 +1906,16 @@ async fn execute_spatial_arbitrage_inner(
     }
 
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
 
     buy_paper
@@ -1462,20 +1925,10 @@ async fn execute_spatial_arbitrage_inner(
         .replace_orderbook(book_sell.clone())
         .map_err(|e| e.to_string())?;
 
-    let order_buy = router.build_ioc_order(
-        buy_paper.venue_id(),
-        symbol,
-        Side::Buy,
-        buy_ref,
-        qty_dec,
-    );
-    let order_sell = router.build_ioc_order(
-        sell_paper.venue_id(),
-        symbol,
-        Side::Sell,
-        sell_ref,
-        qty_dec,
-    );
+    let order_buy =
+        router.build_ioc_order(buy_paper.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
+    let order_sell =
+        router.build_ioc_order(sell_paper.venue_id(), symbol, Side::Sell, sell_ref, qty_dec);
 
     buy_paper
         .set_leverage(symbol, target_leverage)
@@ -1562,7 +2015,7 @@ async fn execute_spatial_arbitrage_inner(
     // unrealized open-position exposure is not marked into it.
     let total_f = {
         let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - dec!(200000);
+        *total_pnl = equity_after - state.paper_baseline_equity();
         total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
     };
     state.circuit_breaker.update_equity(equity_after);
@@ -1643,7 +2096,9 @@ async fn execute_spatial_arbitrage_inner(
                     "Paper position opened; expected convergence capture ${:.2} is unrealized",
                     expected_capture_f
                 ),
-                direction: direction.clone().or_else(|| Some("Divergence Entry".into())),
+                direction: direction
+                    .clone()
+                    .or_else(|| Some("Divergence Entry".into())),
                 trigger_spread_bps: Some(net_bps_f),
                 baseline_mean_spread_bps,
                 position_step: position_step.or(Some(1)),
@@ -1773,7 +2228,9 @@ async fn execute_spatial_arbitrage_inner(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!("Atomic trade failed: {:?}", other),
-                direction: direction.clone().or_else(|| Some("Divergence Entry".into())),
+                direction: direction
+                    .clone()
+                    .or_else(|| Some("Divergence Entry".into())),
                 trigger_spread_bps: Some(net_bps_f),
                 baseline_mean_spread_bps,
                 position_step: position_step.or(Some(1)),
@@ -1848,15 +2305,19 @@ pub async fn execute_spatial_candidates_impl(
 
     let mut outcomes = Vec::new();
     for (symbol_key, mut cands) in by_symbol {
-        let outcome_for = |c: &SpatialCandidateInput, selected: bool, reason: Option<String>, result: Option<SimStepResultDto>| CandidateOutcomeDto {
-            symbol: c.symbol.clone(),
-            buy_venue: c.buy_venue.clone(),
-            sell_venue: c.sell_venue.clone(),
-            expected_net_usd: c.expected_net_usd,
-            selected,
-            reason,
-            result,
-        };
+        let outcome_for =
+            |c: &SpatialCandidateInput,
+             selected: bool,
+             reason: Option<String>,
+             result: Option<SimStepResultDto>| CandidateOutcomeDto {
+                symbol: c.symbol.clone(),
+                buy_venue: c.buy_venue.clone(),
+                sell_venue: c.sell_venue.clone(),
+                expected_net_usd: c.expected_net_usd,
+                selected,
+                reason,
+                result,
+            };
 
         if state
             .state_store
@@ -1974,12 +2435,25 @@ pub async fn execute_cross_ticker_arbitrage_impl(
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
-    let _ = (long_symbol, short_symbol, long_venue, short_venue, order_qty, net_spread_bps);
+    let _ = (
+        long_symbol,
+        short_symbol,
+        long_venue,
+        short_venue,
+        order_qty,
+        net_spread_bps,
+    );
     Err("Native 'cross-ticker' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
@@ -1991,10 +2465,16 @@ pub async fn execute_funding_carry_impl(
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
     let _ = (symbol, long_venue, short_venue, trade_size_usd);
     Err("Native 'funding' execution is disabled until authentic order submission and reconciliation are implemented".into())
@@ -2008,10 +2488,16 @@ pub async fn execute_prediction_arbitrage_impl(
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!("Execution halted by Risk Circuit Breaker: {}", reason));
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
     }
     if *state.is_paused.read() {
-        return Err("Trading engine is PAUSED. Positions are preserved, but new executions are suspended.".into());
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
     }
     let _ = (market_title, buy_yes_venue, buy_no_venue, quantity);
     Err("Native 'prediction' execution is disabled until authentic order submission and reconciliation are implemented".into())
@@ -2033,10 +2519,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let total_equity_dec: Decimal = accounts.iter().map(|a| a.equity).sum();
     let total_free_margin_dec: Decimal = accounts.iter().map(|a| a.free_margin).sum();
     let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
-    let all_positions: Vec<_> = accounts
-        .iter()
-        .flat_map(|a| a.positions.clone())
-        .collect();
+    let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
 
     // Feed observed equity into the breaker, then re-read its state so a
     // drawdown trip is reflected in this same snapshot.
@@ -2044,7 +2527,13 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let is_halted = cb.is_tripped();
     let cb_str = match cb.trip_reason() {
         Some(reason) => format!("TRIPPED: {}", reason),
-        None => if is_halted { "TRIPPED: Manual halt".into() } else { "ACTIVE".into() },
+        None => {
+            if is_halted {
+                "TRIPPED: Manual halt".into()
+            } else {
+                "ACTIVE".into()
+            }
+        }
     };
 
     let delta_limit = state.delta_guard.read().max_unhedged_usd_per_asset();
@@ -2070,12 +2559,31 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     deltas_dto.sort_by(|a, b| a.asset.cmp(&b.asset));
 
     let total_equity = total_equity_dec.to_string().parse::<f64>().unwrap_or(0.0);
-    let total_free_margin = total_free_margin_dec.to_string().parse::<f64>().unwrap_or(0.0);
+    let total_free_margin = total_free_margin_dec
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
     let total_mm = total_mm_dec.to_string().parse::<f64>().unwrap_or(0.0);
-    let current_drawdown = cb.current_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
-    let max_drawdown_limit = cb.max_daily_drawdown_usd().to_string().parse::<f64>().unwrap_or(0.0);
-    let day_start = cb.day_start_equity().to_string().parse::<f64>().unwrap_or(0.0);
-    let drawdown_pct = if day_start > 0.0 { (current_drawdown / day_start) * 100.0 } else { 0.0 };
+    let current_drawdown = cb
+        .current_drawdown_usd()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let max_drawdown_limit = cb
+        .max_daily_drawdown_usd()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let day_start = cb
+        .day_start_equity()
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let drawdown_pct = if day_start > 0.0 {
+        (current_drawdown / day_start) * 100.0
+    } else {
+        0.0
+    };
 
     let severity = |s: MarginHealthStatus| match s {
         MarginHealthStatus::Healthy => 0,
@@ -2140,7 +2648,11 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         margin_health: MarginHealthDto {
             maintenance_margin_req_usd: total_mm,
             margin_balance_usd: total_free_margin,
-            margin_ratio_pct: if total_equity > 0.0 { (total_mm / total_equity) * 100.0 } else { 0.0 },
+            margin_ratio_pct: if total_equity > 0.0 {
+                (total_mm / total_equity) * 100.0
+            } else {
+                0.0
+            },
             liquidation_distance_pct: if all_positions.is_empty() {
                 0.0
             } else {
@@ -2157,7 +2669,9 @@ pub fn reset_circuit_breaker_impl(state: &AppEngineState) -> Result<String, Stri
 }
 
 pub fn trigger_emergency_killswitch_impl(state: &AppEngineState) -> Result<String, String> {
-    state.circuit_breaker.trip("EMERGENCY KILLSWITCH ENGAGED BY OPERATOR");
+    state
+        .circuit_breaker
+        .trip("EMERGENCY KILLSWITCH ENGAGED BY OPERATOR");
     Ok("EMERGENCY KILLSWITCH ENGAGED. All trading operations halted immediately.".into())
 }
 
@@ -2177,7 +2691,9 @@ pub struct FlattenResultDto {
 
 fn ledger_qty_to_dec(value: f64, what: &str) -> Result<Decimal, String> {
     if !value.is_finite() || value < 0.0 {
-        return Err(format!("{what} must be finite and nonnegative, got {value}"));
+        return Err(format!(
+            "{what} must be finite and nonnegative, got {value}"
+        ));
     }
     Decimal::from_str_exact(&value.to_string())
         .map_err(|_| format!("{what} {value} is not representable as Decimal"))
@@ -2264,8 +2780,7 @@ fn close_flattened_spatial_lot(
             .find(|l| l.side == side)
             .and_then(|l| crate::state::canonical_venue_id(&l.venue))
     };
-    let (Some(long_venue), Some(short_venue)) =
-        (venue_of(LegSide::Long), venue_of(LegSide::Short))
+    let (Some(long_venue), Some(short_venue)) = (venue_of(LegSide::Long), venue_of(LegSide::Short))
     else {
         return;
     };
@@ -2285,8 +2800,7 @@ fn close_flattened_spatial_lot(
             let (Some(px), qty, fee) = (leg.fill_price, leg.filled_qty, leg.fee_usd) else {
                 continue;
             };
-            if !(qty.is_finite() && qty > 0.0 && px.is_finite() && px > 0.0 && fee.is_finite())
-            {
+            if !(qty.is_finite() && qty > 0.0 && px.is_finite() && px > 0.0 && fee.is_finite()) {
                 continue;
             }
             let agg = fills
@@ -2409,8 +2923,7 @@ pub async fn flatten_ticker_positions_impl(
         let mut total = dec!(0);
         for child in family {
             for cl in &child.legs {
-                if cl.side == side
-                    && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
+                if cl.side == side && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
                 {
                     total += ledger_qty_to_dec(cl.filled_qty, "child leg fill")?;
                 }
@@ -2496,13 +3009,11 @@ pub async fn flatten_ticker_positions_impl(
                 undetermined = true;
                 continue;
             }
-            let pos = accounts
-                .get(canonical)
-                .and_then(|acc| {
-                    acc.positions
-                        .iter()
-                        .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
-                });
+            let pos = accounts.get(canonical).and_then(|acc| {
+                acc.positions
+                    .iter()
+                    .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
+            });
             match pos {
                 None => {}
                 Some(p) if p.side != expected_pos_side => {
@@ -2741,7 +3252,7 @@ pub async fn flatten_ticker_positions_impl(
     }
     {
         let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - dec!(200000);
+        *total_pnl = equity_after - state.paper_baseline_equity();
     }
     state.circuit_breaker.update_equity(equity_after);
 
@@ -2799,6 +3310,12 @@ pub fn save_engine_settings_impl(
         Ok(ip) if ip.is_loopback() => {}
         _ => return Err("bind_address must be a loopback IP address".into()),
     }
+    if !settings.paper_starting_balance_usd.is_finite()
+        || settings.paper_starting_balance_usd <= 0.0
+        || settings.paper_starting_balance_usd > 1_000_000_000_000.0
+    {
+        return Err("Paper starting balance must be a positive number up to 1e12 USD".into());
+    }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
@@ -2822,40 +3339,81 @@ pub fn save_engine_settings_impl(
     }
     // Toggle-only saves must still update enabled metadata on existing vault
     // records; a locked vault skips this silently since no secrets changed.
+    // A venue credential stays enabled when either the engine flag is on or
+    // an enabled account profile exists — a settings save can never disable a
+    // venue the user explicitly switched on at the account level.
+    let account_enabled = |venue: &str| {
+        state
+            .state_store
+            .has_enabled_account(venue)
+            .unwrap_or(false)
+    };
     let enablement: Vec<(String, bool)> = vec![
         ("remote_hsm".into(), true),
         (
             "hyperliquid".into(),
-            settings.hyperliquid_enabled || settings.hyperliquid_spot_enabled,
+            settings.hyperliquid_enabled || account_enabled("hyperliquid"),
         ),
         (
             "lighter".into(),
-            settings.lighter_enabled || settings.lighter_spot_enabled,
+            settings.lighter_enabled || account_enabled("lighter"),
         ),
-        ("vanta".into(), settings.vanta_enabled),
-        ("robinhood".into(), settings.robinhood_enabled),
-        ("arcus".into(), settings.arcus_enabled),
-        ("popdex".into(), settings.popdex_enabled),
+        (
+            "vanta".into(),
+            settings.vanta_enabled || account_enabled("vanta"),
+        ),
+        (
+            "robinhood".into(),
+            settings.robinhood_enabled || account_enabled("robinhood"),
+        ),
+        (
+            "arcus".into(),
+            settings.arcus_enabled || account_enabled("arcus"),
+        ),
+        (
+            "popdex".into(),
+            settings.popdex_enabled || account_enabled("popdex"),
+        ),
         (
             "kraken_spot".into(),
-            settings.kraken_enabled && settings.kraken_spot_enabled,
+            (settings.kraken_enabled && settings.kraken_spot_enabled)
+                || account_enabled("kraken_spot"),
         ),
         (
             "kraken_futures".into(),
-            settings.kraken_enabled && settings.kraken_futures_enabled,
+            (settings.kraken_enabled && settings.kraken_futures_enabled)
+                || account_enabled("kraken_futures"),
         ),
-        ("polymarket".into(), settings.polymarket_enabled),
-        ("kalshi".into(), settings.kalshi_enabled),
+        (
+            "polymarket".into(),
+            settings.polymarket_enabled || account_enabled("polymarket"),
+        ),
+        (
+            "kalshi".into(),
+            settings.kalshi_enabled || account_enabled("kalshi"),
+        ),
     ];
     {
         let mut vault = state.vault.write();
         if vault.is_unlocked() {
-            vault.update_enabled(&enablement).map_err(|e| e.to_string())?;
+            vault
+                .update_enabled(&enablement)
+                .map_err(|e| e.to_string())?;
         }
     }
     let mut sanitized = settings;
     sanitized.clear_credential_material();
     sanitized.configured_venues = state.vault.write().configured_venues().unwrap_or_default();
+    // A changed starting balance reinitializes every paper account: fresh
+    // equity, no open positions. Unrelated saves leave paper state alone.
+    let prev_balance = state.settings.read().paper_starting_balance_usd;
+    if sanitized.paper_starting_balance_usd != prev_balance {
+        if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
+            for (_, paper) in state.paper_exchanges() {
+                paper.reset_account(eq);
+            }
+        }
+    }
     *state.settings.write() = sanitized;
     Ok("Configuration applied to the current session".into())
 }
@@ -2865,19 +3423,24 @@ pub fn save_engine_settings_impl(
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-pub async fn get_system_status(state: State<'_, Arc<AppEngineState>>) -> Result<SystemStatusDto, String> {
+pub async fn get_system_status(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SystemStatusDto, String> {
     get_system_status_impl(&state).await
 }
 
 #[tauri::command]
-pub async fn fetch_orderbooks(symbol: String, state: State<'_, Arc<AppEngineState>>) -> Result<Vec<VenueOrderBookDto>, String> {
+pub async fn fetch_orderbooks(
+    symbol: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<VenueOrderBookDto>, String> {
     fetch_orderbooks_impl(&symbol, &state).await
 }
 
 /// Venue 24h-volume maps behind a 5-minute shared cache — volumes move
 /// slowly and both the liquidity sort and the signal-series weighting
 /// consume them. Venues that fail to report are simply absent.
-async fn cached_venue_volumes(
+pub(crate) async fn cached_venue_volumes(
     state: &AppEngineState,
 ) -> HashMap<String, HashMap<String, f64>> {
     const TTL: std::time::Duration = std::time::Duration::from_secs(300);
@@ -2905,7 +3468,9 @@ async fn cached_venue_volumes(
 }
 
 #[tauri::command]
-pub async fn get_ticker_volumes(state: State<'_, Arc<AppEngineState>>) -> Result<Vec<VenueVolumesDto>, String> {
+pub async fn get_ticker_volumes(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<VenueVolumesDto>, String> {
     let map = cached_venue_volumes(&state).await;
     Ok(map
         .into_iter()
@@ -3144,7 +3709,8 @@ pub async fn execute_spatial_arbitrage(
         max_units,
         nominal_hurdle_bps,
         &state,
-    ).await
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3157,7 +3723,16 @@ pub async fn execute_cross_ticker_arbitrage(
     net_spread_bps: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_cross_ticker_arbitrage_impl(&long_symbol, &short_symbol, &long_venue, &short_venue, order_qty, net_spread_bps, &state).await
+    execute_cross_ticker_arbitrage_impl(
+        &long_symbol,
+        &short_symbol,
+        &long_venue,
+        &short_venue,
+        order_qty,
+        net_spread_bps,
+        &state,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3187,21 +3762,34 @@ pub async fn execute_prediction_arbitrage(
     quantity: f64,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_prediction_arbitrage_impl(&market_title, &buy_yes_venue, &buy_no_venue, quantity, &state).await
+    execute_prediction_arbitrage_impl(
+        &market_title,
+        &buy_yes_venue,
+        &buy_no_venue,
+        quantity,
+        &state,
+    )
+    .await
 }
 
 #[tauri::command]
-pub async fn get_risk_overview(state: State<'_, Arc<AppEngineState>>) -> Result<RiskOverviewDto, String> {
+pub async fn get_risk_overview(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<RiskOverviewDto, String> {
     get_risk_overview_impl(&state).await
 }
 
 #[tauri::command]
-pub async fn reset_circuit_breaker(state: State<'_, Arc<AppEngineState>>) -> Result<String, String> {
+pub async fn reset_circuit_breaker(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
     reset_circuit_breaker_impl(&state)
 }
 
 #[tauri::command]
-pub async fn trigger_emergency_killswitch(state: State<'_, Arc<AppEngineState>>) -> Result<String, String> {
+pub async fn trigger_emergency_killswitch(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
     trigger_emergency_killswitch_impl(&state)
 }
 
@@ -3215,22 +3803,32 @@ pub async fn flatten_ticker_positions(
 }
 
 #[tauri::command]
-pub async fn get_execution_logs(state: State<'_, Arc<AppEngineState>>) -> Result<Vec<ExecutionLogEntry>, String> {
+pub async fn get_execution_logs(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_impl(&state)
 }
 
 #[tauri::command]
-pub async fn set_live_mode(enabled: bool, state: State<'_, Arc<AppEngineState>>) -> Result<bool, String> {
+pub async fn set_live_mode(
+    enabled: bool,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
     set_live_mode_impl(enabled, &state)
 }
 
 #[tauri::command]
-pub async fn set_engine_paused(paused: bool, state: State<'_, Arc<AppEngineState>>) -> Result<bool, String> {
+pub async fn set_engine_paused(
+    paused: bool,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
     set_engine_paused_impl(paused, &state)
 }
 
 #[tauri::command]
-pub async fn get_engine_settings(state: State<'_, Arc<AppEngineState>>) -> Result<EngineSettingsDto, String> {
+pub async fn get_engine_settings(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<EngineSettingsDto, String> {
     get_engine_settings_impl(&state)
 }
 
@@ -3242,7 +3840,10 @@ pub async fn save_engine_settings(
     save_engine_settings_impl(settings, &state)
 }
 
-pub fn get_ticker_strategy_config_impl(symbol: &str, state: &AppEngineState) -> Result<TickerStrategyConfigDto, String> {
+pub fn get_ticker_strategy_config_impl(
+    symbol: &str,
+    state: &AppEngineState,
+) -> Result<TickerStrategyConfigDto, String> {
     let configs = state.strategy_configs.read();
     if let Some(cfg) = configs.get(symbol) {
         Ok(cfg.clone())
@@ -3254,7 +3855,10 @@ pub fn get_ticker_strategy_config_impl(symbol: &str, state: &AppEngineState) -> 
     }
 }
 
-pub fn save_ticker_strategy_config_impl(config: TickerStrategyConfigDto, state: &AppEngineState) -> Result<(), String> {
+pub fn save_ticker_strategy_config_impl(
+    config: TickerStrategyConfigDto,
+    state: &AppEngineState,
+) -> Result<(), String> {
     if !config.target_profit_bps.is_finite() || config.target_profit_bps <= 0.0 {
         return Err("target_profit_bps must be finite and positive".into());
     }
@@ -3275,7 +3879,9 @@ pub fn save_ticker_strategy_config_impl(config: TickerStrategyConfigDto, state: 
     Ok(())
 }
 
-pub fn get_all_ticker_strategy_configs_impl(state: &AppEngineState) -> Result<Vec<TickerStrategyConfigDto>, String> {
+pub fn get_all_ticker_strategy_configs_impl(
+    state: &AppEngineState,
+) -> Result<Vec<TickerStrategyConfigDto>, String> {
     let configs = state.strategy_configs.read();
     Ok(configs.values().cloned().collect())
 }
@@ -3308,7 +3914,10 @@ pub fn get_vault_status_impl(state: &AppEngineState) -> VaultStatus {
     vault.get_status()
 }
 
-pub fn initialize_vault_impl(password: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
+pub fn initialize_vault_impl(
+    password: &str,
+    state: &AppEngineState,
+) -> Result<VaultStatus, String> {
     let status = {
         let mut vault = state.vault.write();
         vault.initialize(password).map_err(|e| e.to_string())?;
@@ -3392,14 +4001,17 @@ pub struct AccountDto {
     pub has_passphrase: bool,
     pub has_account_id: bool,
     pub has_wallet_address: bool,
-    pub account_index: Option<u32>,
-    pub subaccount_index: Option<u32>,
-    pub api_key_index: Option<u32>,
+    pub account_index: Option<u64>,
+    pub subaccount_index: Option<u64>,
+    pub api_key_index: Option<u64>,
     pub has_private_key: bool,
+    /// "standard" | "plus" | "premium" — Lighter-family tier drives the
+    /// venue's shared-IP rate budget and fee adjustments.
+    pub account_tier: String,
 }
 
 // Intentionally no Debug: may transiently hold credential material.
-#[derive(Clone, Deserialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCredentialInput {
     #[serde(default)]
@@ -3413,11 +4025,11 @@ pub struct AccountCredentialInput {
     #[serde(default)]
     pub wallet_address: Option<String>,
     #[serde(default)]
-    pub account_index: Option<u32>,
+    pub account_index: Option<u64>,
     #[serde(default)]
-    pub subaccount_index: Option<u32>,
+    pub subaccount_index: Option<u64>,
     #[serde(default)]
-    pub api_key_index: Option<u32>,
+    pub api_key_index: Option<u64>,
     #[serde(default)]
     pub private_key: Option<String>,
 }
@@ -3448,8 +4060,11 @@ impl AccountCredentialInput {
     }
 
     fn into_record(self, venue: &str, profile_id: &str, enabled: bool) -> ExchangeCredentials {
-        let trimmed_opt =
-            |v: &Option<String>| v.as_ref().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let trimmed_opt = |v: &Option<String>| {
+            v.as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
         ExchangeCredentials {
             venue: venue.to_string(),
             profile_id: Some(profile_id.to_string()),
@@ -3483,6 +4098,10 @@ pub struct AccountUpsertInput {
     pub enabled: bool,
     #[serde(default)]
     pub make_default: bool,
+    /// "standard" | "plus" | "premium". `None` preserves the stored tier on
+    /// update and means standard on create.
+    #[serde(default)]
+    pub account_tier: Option<String>,
     #[serde(default)]
     pub credentials: Option<AccountCredentialInput>,
 }
@@ -3511,8 +4130,7 @@ fn is_valid_account_id(raw: &str) -> bool {
     let v = raw.trim();
     !v.is_empty()
         && v.len() <= 128
-        && v
-            .chars()
+        && v.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
@@ -3533,14 +4151,19 @@ fn ensure_default_profile(
     {
         Some(existing) => {
             if existing.venue != venue {
-                return Err(format!(
-                    "account ID {pid} is bound to a different venue"
-                ));
+                return Err(format!("account ID {pid} is bound to a different venue"));
             }
             if existing.enabled != enabled {
                 state
                     .state_store
-                    .upsert_account(&pid, venue, &existing.label, enabled, existing.is_default)
+                    .upsert_account(
+                        &pid,
+                        venue,
+                        &existing.label,
+                        enabled,
+                        existing.is_default,
+                        &existing.account_tier,
+                    )
                     .map_err(|e| e.to_string())
             } else {
                 Ok(existing)
@@ -3548,7 +4171,7 @@ fn ensure_default_profile(
         }
         None => state
             .state_store
-            .upsert_account(&pid, venue, "Default", enabled, true)
+            .upsert_account(&pid, venue, "Default", enabled, true, "standard")
             .map_err(|e| e.to_string()),
     }
 }
@@ -3609,7 +4232,7 @@ fn ensure_credential_migration(state: &AppEngineState) -> Result<(), String> {
             None => {
                 state
                     .state_store
-                    .upsert_account(&pid, &cred.venue, "Default", cred.enabled, true)
+                    .upsert_account(&pid, &cred.venue, "Default", cred.enabled, true, "standard")
                     .map_err(|e| e.to_string())?;
             }
         }
@@ -3654,6 +4277,7 @@ fn account_dto(
         account_index: presence.and_then(|p| p.account_index),
         subaccount_index: presence.and_then(|p| p.subaccount_index),
         api_key_index: presence.and_then(|p| p.api_key_index),
+        account_tier: profile.account_tier.clone(),
     }
 }
 
@@ -3720,6 +4344,10 @@ pub fn upsert_account_impl(
                     &input.label,
                     input.enabled,
                     input.make_default,
+                    input
+                        .account_tier
+                        .as_deref()
+                        .unwrap_or(&existing.account_tier),
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -3748,6 +4376,7 @@ pub fn upsert_account_impl(
                     &input.label,
                     input.enabled,
                     input.make_default,
+                    input.account_tier.as_deref().unwrap_or("standard"),
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -3760,9 +4389,10 @@ pub fn upsert_account_impl(
             if !vault.is_unlocked() {
                 cred_error = Some("vault is locked".to_string());
             } else {
-                let record = creds
-                    .clone()
-                    .into_record(&profile.venue, &profile.id, profile.enabled);
+                let record =
+                    creds
+                        .clone()
+                        .into_record(&profile.venue, &profile.id, profile.enabled);
                 if let Err(e) = vault.upsert_profile_credentials(&profile.id, record) {
                     cred_error = Some(e.to_string());
                 }
@@ -3783,7 +4413,9 @@ pub fn upsert_account_impl(
         .next()
         .ok_or_else(|| "account disappeared after save".to_string())?;
     if let Some(err) = cred_error {
-        return Err(format!("account saved but credentials were not stored: {err}"));
+        return Err(format!(
+            "account saved but credentials were not stored: {err}"
+        ));
     }
     Ok(dto)
 }
@@ -3838,6 +4470,74 @@ pub fn delete_account_impl(account_id: &str, state: &AppEngineState) -> Result<b
         }
     }
     Ok(deleted)
+}
+
+/// Removes only the credential records bound to one account profile; the
+/// account itself is kept. Distinct from `delete_account_impl`, which removes
+/// the whole profile, and from `delete_exchange_credentials_impl`, which is
+/// venue-wide.
+pub fn delete_account_credentials_impl(
+    account_id: &str,
+    state: &AppEngineState,
+) -> Result<bool, String> {
+    let exists = state
+        .state_store
+        .get_account(account_id)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !exists {
+        return Err(format!("Unknown account '{account_id}'"));
+    }
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before removing credentials.".into());
+    }
+    vault
+        .delete_profile_credentials(account_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Returns the decrypted credentials bound to one account profile for the
+/// local settings UI. Requires an unlocked vault; unknown accounts and locked
+/// vaults fail closed. Values are returned over local IPC only — they are
+/// never logged or persisted anywhere new.
+pub fn get_account_credentials_impl(
+    account_id: &str,
+    state: &AppEngineState,
+) -> Result<AccountCredentialInput, String> {
+    let exists = state
+        .state_store
+        .get_account(account_id)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !exists {
+        return Err(format!("Unknown account '{account_id}'"));
+    }
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before viewing credentials.".into());
+    }
+    let data = vault.get_data().map_err(|e| e.to_string())?;
+    let cred = data
+        .credentials
+        .iter()
+        .find(|c| c.profile_id.as_deref() == Some(account_id));
+    match cred {
+        Some(c) => Ok(AccountCredentialInput {
+            api_key: c.api_key.clone(),
+            api_secret: c.api_secret.clone(),
+            passphrase: c.passphrase.clone(),
+            account_id: c.account_id.clone(),
+            wallet_address: c.wallet_address.clone(),
+            account_index: c.account_index,
+            subaccount_index: c.subaccount_index,
+            api_key_index: c.api_key_index,
+            private_key: c.private_key.clone(),
+        }),
+        None => Err(format!(
+            "No credentials configured for account '{account_id}'"
+        )),
+    }
 }
 
 pub fn set_default_account_impl(
@@ -3908,7 +4608,11 @@ pub fn upsert_strategy_route_impl(
                         .map(|a| format!("{}:{}", a.venue, a.label))
                         .unwrap_or_else(|| aid.to_string())
                 };
-                format!("{} \u{2194} {}", name(&input.account_a_id), name(&input.account_b_id))
+                format!(
+                    "{} \u{2194} {}",
+                    name(&input.account_a_id),
+                    name(&input.account_b_id)
+                )
             }
         }
     } else {
@@ -3927,10 +4631,7 @@ pub fn upsert_strategy_route_impl(
         .map_err(|e| e.to_string())
 }
 
-pub fn delete_strategy_route_impl(
-    route_id: &str,
-    state: &AppEngineState,
-) -> Result<bool, String> {
+pub fn delete_strategy_route_impl(route_id: &str, state: &AppEngineState) -> Result<bool, String> {
     state
         .state_store
         .delete_strategy_route(route_id)
@@ -3952,7 +4653,9 @@ pub fn eligible_strategy_routes_impl(
         .map_err(|e| e.to_string())
 }
 
-pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<VenueBalanceInfo>, String> {
+pub async fn get_venue_balances_impl(
+    state: &AppEngineState,
+) -> Result<Vec<VenueBalanceInfo>, String> {
     if *state.is_live_mode.read() {
         return Ok(Vec::new());
     }
@@ -3967,9 +4670,17 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
         };
         let account = paper.fetch_account().await.map_err(|e| e.to_string())?;
 
-        let free_margin_usd = account.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
+        let free_margin_usd = account
+            .free_margin
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0);
         let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
-        let margin_rate_pct = account.margin_usage_pct.to_string().parse::<f64>().unwrap_or(0.0);
+        let margin_rate_pct = account
+            .margin_usage_pct
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0);
 
         let (status, action) = match monitor.evaluate_account(&account) {
             MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
@@ -3979,7 +4690,10 @@ pub async fn get_venue_balances_impl(state: &AppEngineState) -> Result<Vec<Venue
             ),
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => (
                 "DEPLETED".to_string(),
-                Some(format!("Critical: {} margin utilization breached. Execution halted on this leg.", name)),
+                Some(format!(
+                    "Critical: {} margin utilization breached. Execution halted on this leg.",
+                    name
+                )),
             ),
         };
 
@@ -4050,9 +4764,7 @@ pub async fn unlock_vault(
 }
 
 #[tauri::command]
-pub async fn lock_vault(
-    state: State<'_, Arc<AppEngineState>>,
-) -> Result<VaultStatus, String> {
+pub async fn lock_vault(state: State<'_, Arc<AppEngineState>>) -> Result<VaultStatus, String> {
     Ok(lock_vault_impl(&state))
 }
 
@@ -4086,6 +4798,22 @@ pub async fn delete_account(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<bool, String> {
     delete_account_impl(&account_id, &state)
+}
+
+#[tauri::command]
+pub async fn delete_account_credentials(
+    account_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
+    delete_account_credentials_impl(&account_id, &state)
+}
+
+#[tauri::command]
+pub async fn get_account_credentials(
+    account_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<AccountCredentialInput, String> {
+    get_account_credentials_impl(&account_id, &state)
 }
 
 #[tauri::command]
@@ -4155,6 +4883,151 @@ pub async fn run_wfo_calibration(
 }
 
 // ---------------------------------------------------------------------------
+// Spread Range Monitor — systematic cross-venue opportunity radar
+// ---------------------------------------------------------------------------
+
+fn monitor_engine(
+    state: &AppEngineState,
+) -> Result<Arc<crate::monitor::SpreadMonitorEngine>, String> {
+    state
+        .monitor
+        .lock()
+        .clone()
+        .ok_or_else(|| "spread monitor is not running".to_string())
+}
+
+#[tauri::command]
+pub async fn get_monitor_snapshot(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Option<crate::monitor::MonitorSnapshotDto>, String> {
+    Ok(monitor_engine(&state)?.snapshot())
+}
+
+#[tauri::command]
+pub async fn get_monitor_config(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::monitor::MonitorConfigDto, String> {
+    Ok(monitor_engine(&state)?.config())
+}
+
+#[tauri::command]
+pub async fn set_monitor_config(
+    config: crate::monitor::MonitorConfigDto,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    monitor_engine(&state)?.set_config(config, &state)
+}
+
+#[tauri::command]
+pub async fn set_ticker_exempted(
+    symbol: String,
+    exempt: bool,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    let sym = crate::monitor::canonical_base(&symbol);
+    if sym.is_empty() || sym.len() > 64 {
+        return Err("invalid symbol".into());
+    }
+    state
+        .state_store
+        .set_ticker_exempt(&sym, exempt)
+        .map_err(|e| e.to_string())?;
+    // Force the watchlist to re-derive on the next tick.
+    if let Some(engine) = state.monitor.lock().clone() {
+        engine.request_watchlist_refresh();
+    }
+    Ok(())
+}
+
+/// Currently exempted symbols (canonical base form).
+#[tauri::command]
+pub async fn get_exempted_tickers(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<String>, String> {
+    state
+        .state_store
+        .exempt_tickers()
+        .map_err(|e| e.to_string())
+}
+
+/// Global "reveal all": clears every ticker exemption. Returns the number
+/// of exemptions removed.
+#[tauri::command]
+pub async fn reveal_all_tickers(state: State<'_, Arc<AppEngineState>>) -> Result<usize, String> {
+    let n = state
+        .state_store
+        .clear_ticker_exemptions()
+        .map_err(|e| e.to_string())?;
+    if let Some(engine) = state.monitor.lock().clone() {
+        engine.request_watchlist_refresh();
+    }
+    Ok(n)
+}
+
+/// Per-row Execute: re-validates the opportunity against the latest
+/// snapshot (must still be qualified and unblocked), converts the USD size
+/// to base quantity on the live book, then dispatches the existing guarded
+/// paper execution path.
+#[tauri::command]
+pub async fn execute_monitor_opportunity(
+    symbol: String,
+    buy_venue: String,
+    sell_venue: String,
+    size_usd: f64,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SimStepResultDto, String> {
+    let engine = monitor_engine(&state)?;
+    let sym = crate::monitor::canonical_base(&symbol);
+    if !(size_usd.is_finite() && size_usd > 0.0) {
+        return Err("invalid size".into());
+    }
+    let snap = engine
+        .snapshot()
+        .ok_or_else(|| "monitor has not produced a snapshot yet".to_string())?;
+    let row = snap
+        .rows
+        .iter()
+        .find(|r| r.symbol == sym && r.buy_venue == buy_venue && r.sell_venue == sell_venue)
+        .ok_or_else(|| "opportunity is no longer tracked".to_string())?;
+    if !row.executable {
+        return Err(row
+            .block_reason
+            .clone()
+            .unwrap_or_else(|| "opportunity is not executable".into()));
+    }
+    // Convert USD size to base qty at the current buy-side ask.
+    let book = state
+        .market_data_hub
+        .get_valid_orderbook(
+            &arbitrager_core::types::VenueId(buy_venue.clone()),
+            &sym,
+            Some(std::time::Duration::from_secs(60)),
+        )
+        .ok_or_else(|| "buy-side orderbook went stale".to_string())?;
+    let ask = book
+        .asks
+        .first()
+        .and_then(|l| l.price.to_string().parse::<f64>().ok())
+        .filter(|p| *p > 0.0)
+        .ok_or_else(|| "no ask on buy-side book".to_string())?;
+    let qty = size_usd / ask;
+    execute_spatial_arbitrage_impl(
+        &sym,
+        &buy_venue,
+        &sell_venue,
+        qty,
+        Some("OPEN".into()),
+        row.current_edge_bps,
+        row.baseline_bps,
+        None,
+        None,
+        None,
+        &state,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Unit Tests (deep verification of all command business logic and edge cases)
 // ---------------------------------------------------------------------------
 
@@ -4186,10 +5059,21 @@ mod tests {
         (state, dir)
     }
 
-    fn seed_test_book(state: &AppEngineState, venue_id: &str, symbol: &str, bid: Decimal, ask: Decimal) {
-        let mut book = arbitrager_core::quote::OrderBook::new(arbitrager_core::types::VenueId::new(venue_id), symbol.to_string());
-        book.bids.push(arbitrager_core::quote::BookLevel::new(bid, dec!(10.0)));
-        book.asks.push(arbitrager_core::quote::BookLevel::new(ask, dec!(10.0)));
+    fn seed_test_book(
+        state: &AppEngineState,
+        venue_id: &str,
+        symbol: &str,
+        bid: Decimal,
+        ask: Decimal,
+    ) {
+        let mut book = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new(venue_id),
+            symbol.to_string(),
+        );
+        book.bids
+            .push(arbitrager_core::quote::BookLevel::new(bid, dec!(10.0)));
+        book.asks
+            .push(arbitrager_core::quote::BookLevel::new(ask, dec!(10.0)));
         book.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(book);
     }
@@ -4211,24 +5095,75 @@ mod tests {
     #[tokio::test]
     async fn test_system_status_command() {
         let state = AppEngineState::new();
-        let status = get_system_status_impl(&state).await.expect("status should succeed");
+        let status = get_system_status_impl(&state)
+            .await
+            .expect("status should succeed");
 
         assert!(!status.is_live_mode);
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        assert_eq!(status.active_venues.len(), 9);
+        assert_eq!(status.active_venues.len(), 17);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
-            assert_eq!(v.latency_ms, 0);
+            assert_eq!(v.latency_ms, None);
         }
         assert!(!status.is_paused);
     }
 
     #[tokio::test]
+    async fn test_system_status_reflects_account_level_enablement() {
+        let (state, dir) = test_state_with_vault("status-acct");
+
+        // No flags, no accounts: everything OFFLINE.
+        let status = get_system_status_impl(&state).await.expect("status");
+        assert!(status.active_venues.iter().all(|v| v.status == "OFFLINE"));
+
+        // An enabled account profile admits the venue even with the engine
+        // flag unset — status must match what get_venues actually admits.
+        upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "lighter".into(),
+                label: "L1".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create account");
+
+        let status = get_system_status_impl(&state).await.expect("status");
+        let lighter = status
+            .active_venues
+            .iter()
+            .find(|v| v.id == "lighter")
+            .expect("lighter row");
+        assert_eq!(lighter.status, "READ_ONLY");
+        assert_eq!(
+            status
+                .active_venues
+                .iter()
+                .filter(|v| v.status != "OFFLINE")
+                .count(),
+            1
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_pause_and_continue_trading_state() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60005.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
 
         assert!(!*state.is_paused.read());
@@ -4243,9 +5178,19 @@ mod tests {
 
         // 2. Spatial arbitrage execution fails with PAUSED error while paused
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.01, Some("LONG_HL_SHORT_LGT".into()),
-            Some(15.0), Some(0.0), Some(0), Some(3), Some(12.0), &state
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.01,
+            Some("LONG_HL_SHORT_LGT".into()),
+            Some(15.0),
+            Some(0.0),
+            Some(0),
+            Some(3),
+            Some(12.0),
+            &state,
+        )
+        .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("PAUSED"));
 
@@ -4262,9 +5207,19 @@ mod tests {
 
         // 4. Executions succeed after continue
         let res_resumed = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.01, Some("LONG_HL_SHORT_LGT".into()),
-            Some(15.0), Some(0.0), Some(0), Some(3), Some(12.0), &state
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.01,
+            Some("LONG_HL_SHORT_LGT".into()),
+            Some(15.0),
+            Some(0.0),
+            Some(0),
+            Some(3),
+            Some(12.0),
+            &state,
+        )
+        .await;
         assert!(res_resumed.is_ok());
         assert_eq!(state.virtual_ledger.read().lots.len(), 1);
 
@@ -4281,11 +5236,15 @@ mod tests {
         assert_eq!(state.get_venues().len(), 0);
 
         // 2. Orderbooks return empty vector (fail-closed, no synthetic quotes fabricated)
-        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("fetch should succeed");
+        let books = fetch_orderbooks_impl("BTC-USDC", &state)
+            .await
+            .expect("fetch should succeed");
         assert_eq!(books.len(), 0);
 
         // 3. Multi-market quotes return 0.0 with no fake numbers
-        let quotes = fetch_multi_market_quotes_impl(vec!["BTC-USDC".into()], &state).await.expect("quotes");
+        let quotes = fetch_multi_market_quotes_impl(vec!["BTC-USDC".into()], &state)
+            .await
+            .expect("quotes");
         assert_eq!(quotes.len(), 1);
         assert_eq!(quotes[0].best_bid, 0.0);
         assert_eq!(quotes[0].best_ask, 0.0);
@@ -4294,16 +5253,24 @@ mod tests {
         assert_eq!(quotes[0].best_sell_venue, "-");
 
         // 4. Spatial, spot, funding, and prediction scans return empty vector (fail-closed)
-        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state).await.expect("opps");
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state)
+            .await
+            .expect("opps");
         assert_eq!(opps.len(), 0);
 
-        let spot_opps = scan_spot_opportunities_impl("", &state).await.expect("spot");
+        let spot_opps = scan_spot_opportunities_impl("", &state)
+            .await
+            .expect("spot");
         assert_eq!(spot_opps.len(), 0);
 
-        let funding_opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state).await.expect("funding");
+        let funding_opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
+            .await
+            .expect("funding");
         assert_eq!(funding_opps.len(), 0);
 
-        let pred_opps = scan_prediction_opportunities_impl("", &state).await.expect("pred");
+        let pred_opps = scan_prediction_opportunities_impl("", &state)
+            .await
+            .expect("pred");
         assert_eq!(pred_opps.len(), 0);
 
         // 5. Venue balances return empty
@@ -4314,15 +5281,26 @@ mod tests {
     #[tokio::test]
     async fn test_orderbooks_fetch_and_spread() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64210.0), dec!(64215.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
 
-        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("fetch should succeed");
+        let books = fetch_orderbooks_impl("BTC-USDC", &state)
+            .await
+            .expect("fetch should succeed");
 
         assert!(books.len() >= 2);
-        let hl = books.iter().find(|b| b.venue_id == "hyperliquid").expect("hyperliquid book");
+        let hl = books
+            .iter()
+            .find(|b| b.venue_id == "hyperliquid")
+            .expect("hyperliquid book");
         assert_eq!(hl.best_bid, 64200.0);
         assert_eq!(hl.best_ask, 64205.0);
         assert!(hl.spread >= 0.0);
@@ -4332,7 +5310,9 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_opportunity_scan() {
         let state = AppEngineState::new();
-        let opps = scan_spot_opportunities_impl("", &state).await.expect("scan should succeed");
+        let opps = scan_spot_opportunities_impl("", &state)
+            .await
+            .expect("scan should succeed");
         // Zero synthetic data: unconfigured state returns empty
         assert_eq!(opps.len(), 0);
     }
@@ -4361,14 +5341,18 @@ mod tests {
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
 
-        let opps_btc = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state).await.expect("btc scan");
+        let opps_btc = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
+            .await
+            .expect("btc scan");
         assert!(!opps_btc.is_empty());
     }
 
     #[tokio::test]
     async fn test_prediction_fail_closed_unconfigured() {
         let state = AppEngineState::new();
-        let opps = scan_prediction_opportunities_impl("FED", &state).await.expect("pred scan");
+        let opps = scan_prediction_opportunities_impl("FED", &state)
+            .await
+            .expect("pred scan");
         // Zero synthetic data: unconfigured state returns empty
         assert_eq!(opps.len(), 0);
     }
@@ -4376,7 +5360,13 @@ mod tests {
     #[tokio::test]
     async fn test_execute_spatial_arbitrage() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
@@ -4426,8 +5416,16 @@ mod tests {
             .fetch_account()
             .await
             .expect("lgt account");
-        let pos_hl = acc_hl.positions.iter().find(|p| p.symbol == "BTC-USDC").expect("hl position");
-        let pos_lgt = acc_lgt.positions.iter().find(|p| p.symbol == "BTC-USDC").expect("lgt position");
+        let pos_hl = acc_hl
+            .positions
+            .iter()
+            .find(|p| p.symbol == "BTC-USDC")
+            .expect("hl position");
+        let pos_lgt = acc_lgt
+            .positions
+            .iter()
+            .find(|p| p.symbol == "BTC-USDC")
+            .expect("lgt position");
         assert_eq!(pos_hl.side, Side::Buy);
         assert_eq!(pos_lgt.side, Side::Sell);
     }
@@ -4439,8 +5437,8 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Two admitted paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 200000.0);
+        // Three seeded paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 300000.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
@@ -4452,7 +5450,9 @@ mod tests {
         let halt_msg = trigger_emergency_killswitch_impl(&state).expect("killswitch");
         assert!(halt_msg.contains("EMERGENCY KILLSWITCH"));
 
-        let risk_after = get_risk_overview_impl(&state).await.expect("risk overview after halt");
+        let risk_after = get_risk_overview_impl(&state)
+            .await
+            .expect("risk overview after halt");
         assert!(risk_after.is_halted);
         assert!(risk_after.circuit_breaker_state.contains("TRIPPED"));
 
@@ -4460,7 +5460,9 @@ mod tests {
         let reset_msg = reset_circuit_breaker_impl(&state).expect("reset");
         assert!(reset_msg.contains("reset successfully"));
 
-        let risk_resumed = get_risk_overview_impl(&state).await.expect("risk overview resumed");
+        let risk_resumed = get_risk_overview_impl(&state)
+            .await
+            .expect("risk overview resumed");
         assert!(!risk_resumed.is_halted);
     }
 
@@ -4606,6 +5608,7 @@ mod tests {
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -4626,6 +5629,7 @@ mod tests {
 
         let a2 = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Alt".into(),
@@ -4653,10 +5657,7 @@ mod tests {
             .collect();
         assert!(secrets.contains(&"SENTINEL_ACCT1"));
         assert!(secrets.contains(&"SENTINEL_ACCT2"));
-        assert!(stored
-            .credentials
-            .iter()
-            .all(|c| c.profile_id.is_some()));
+        assert!(stored.credentials.iter().all(|c| c.profile_id.is_some()));
 
         // Sanitized DTO must never carry secret values over IPC.
         let dto_json = serde_json::to_string(&a1).expect("dto json");
@@ -4665,6 +5666,7 @@ mod tests {
         // Venue identity is immutable on update.
         assert!(upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: Some(a2.id.clone()),
                 venue: "lighter".into(),
                 label: "Moved".into(),
@@ -4678,6 +5680,7 @@ mod tests {
 
         let updated = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: Some(a2.id.clone()),
                 venue: "hyperliquid".into(),
                 label: "Alt Renamed".into(),
@@ -4705,6 +5708,156 @@ mod tests {
             stored.credentials[0].profile_id.as_deref(),
             Some(a1.id.as_str())
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_delete_account_credentials_keeps_profile_and_siblings() {
+        let (state, dir) = test_state_with_vault("cred-del");
+
+        // Locked vault and unknown accounts both fail closed.
+        assert!(delete_account_credentials_impl("lighter-default", &state).is_err());
+        initialize_vault_impl("test password", &state).expect("init vault");
+        assert!(delete_account_credentials_impl("no-such-account", &state).is_err());
+
+        let a1 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_DEL1".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a1");
+        let a2 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Alt".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_DEL2".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a2");
+
+        // Removing a1's credentials leaves the account profile and a2's
+        // secrets untouched.
+        assert!(delete_account_credentials_impl(&a1.id, &state).expect("delete creds"));
+        let stored = state.vault.write().get_data().expect("vault data").clone();
+        assert_eq!(stored.credentials.len(), 1);
+        assert_eq!(stored.credentials[0].api_secret, "SENTINEL_DEL2");
+        assert!(state
+            .state_store
+            .get_account(&a1.id)
+            .expect("account lookup")
+            .is_some());
+
+        let listed = list_accounts_impl(Some("hyperliquid"), &state).expect("list");
+        assert!(!listed
+            .iter()
+            .find(|a| a.id == a1.id)
+            .unwrap()
+            .credentials_configured
+            .unwrap_or(true));
+        assert!(listed
+            .iter()
+            .find(|a| a.id == a2.id)
+            .unwrap()
+            .credentials_configured
+            .unwrap_or(false));
+
+        // Second delete reports no remaining records.
+        assert!(!delete_account_credentials_impl(&a1.id, &state).unwrap());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_get_account_credentials_scoped_to_profile_and_unlocked() {
+        let (state, dir) = test_state_with_vault("cred-reveal");
+
+        // Locked vault and unknown accounts both fail closed.
+        assert!(get_account_credentials_impl("lighter-default", &state).is_err());
+        initialize_vault_impl("test password", &state).expect("init vault");
+        assert!(get_account_credentials_impl("no-such-account", &state).is_err());
+
+        let a1 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_REVEAL1".into(),
+                    private_key: Some("0xSENTINEL_PK1".into()),
+                    account_index: Some(7),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a1");
+        let a2 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Alt".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_REVEAL2".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a2");
+
+        // Reveal returns only the requested profile's material.
+        let revealed = get_account_credentials_impl(&a1.id, &state).expect("reveal a1");
+        assert_eq!(revealed.api_secret, "SENTINEL_REVEAL1");
+        assert_eq!(revealed.private_key.as_deref(), Some("0xSENTINEL_PK1"));
+        assert_eq!(revealed.account_index, Some(7));
+
+        // An accountless profile read errors rather than leaking siblings.
+        let a3 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Empty".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create a3");
+        assert!(get_account_credentials_impl(&a3.id, &state).is_err());
+        let revealed2 = get_account_credentials_impl(&a2.id, &state).expect("reveal a2");
+        assert_eq!(revealed2.api_secret, "SENTINEL_REVEAL2");
+        assert!(revealed2.private_key.as_deref().unwrap_or("").is_empty());
+
+        // Re-locking the vault blocks reveal again.
+        lock_vault_impl(&state);
+        assert!(get_account_credentials_impl(&a1.id, &state).is_err());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -4816,6 +5969,7 @@ mod tests {
 
         let hl = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "HL Main".into(),
@@ -4828,6 +5982,7 @@ mod tests {
         .expect("hl account");
         let lt = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "LT Main".into(),
@@ -4840,6 +5995,7 @@ mod tests {
         .expect("lt account");
         let lt_disabled = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "LT Off".into(),
@@ -4869,9 +6025,8 @@ mod tests {
         assert_eq!(route.account_b_id, lt.id);
         assert_eq!(route.account_b_venue, "lighter");
 
-        let eligible =
-            eligible_strategy_routes_impl("futures", "lighter", "hyperliquid", &state)
-                .expect("eligible");
+        let eligible = eligible_strategy_routes_impl("futures", "lighter", "hyperliquid", &state)
+            .expect("eligible");
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].id, route.id);
 
@@ -4920,6 +6075,7 @@ mod tests {
 
         let a = upsert_account_impl(
             AccountUpsertInput {
+                account_tier: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -4996,7 +6152,9 @@ mod tests {
         seed_test_funding(&state, "hyperliquid", "AVAX-USDC");
         seed_test_funding(&state, "lighter", "AVAX-USDC");
 
-        let books_avax = fetch_orderbooks_impl("AVAX-USDC", &state).await.expect("avax books");
+        let books_avax = fetch_orderbooks_impl("AVAX-USDC", &state)
+            .await
+            .expect("avax books");
         assert!(books_avax.len() >= 2);
         for b in &books_avax {
             assert!(b.best_bid > 0.0);
@@ -5029,14 +6187,22 @@ mod tests {
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
 
-        let opps_avax = scan_funding_opportunities_impl("AVAX-USDC", 10000.0, &state).await.expect("avax funding");
+        let opps_avax = scan_funding_opportunities_impl("AVAX-USDC", 10000.0, &state)
+            .await
+            .expect("avax funding");
         assert!(!opps_avax.is_empty());
     }
 
     #[tokio::test]
     async fn test_initial_execution_logs_presence() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let logs = get_execution_logs_impl(&state).expect("execution logs");
@@ -5070,7 +6236,21 @@ mod tests {
         seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.40), dec!(4.42));
         seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.45), dec!(4.47));
 
-        let exec_res = execute_spatial_arbitrage_impl("DOT-USDC", "Hyperliquid", "Lighter", 0.5, None, None, None, None, None, None, &state).await.expect("spatial exec on dot");
+        let exec_res = execute_spatial_arbitrage_impl(
+            "DOT-USDC",
+            "Hyperliquid",
+            "Lighter",
+            0.5,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await
+        .expect("spatial exec on dot");
         assert!(exec_res.execution_success);
         assert!(exec_res.realized_profit_usd < 0.0);
     }
@@ -5078,36 +6258,108 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_execution_rejects_unsafe_inputs() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         // Same venue, zero qty, NaN qty
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "Hyperliquid", 0.1, None, None, None, None, None, None, &state,
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "Hyperliquid",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("distinct"));
         // Same canonical venue through different aliases must also reject
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "hl", 0.1, None, None, None, None, None, None, &state,
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "hl",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("distinct"));
         // Malformed symbol
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC'; DROP", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
-        ).await;
+            "BTC-USDC'; DROP",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("Invalid market symbol"));
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.0, None, None, None, None, None, None, &state,
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("positive"));
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", f64::NAN, None, None, None, None, None, None, &state,
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            f64::NAN,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("finite"));
         // Negative hurdle
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, Some(-1.0), &state,
-        ).await;
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(-1.0),
+            &state,
+        )
+        .await;
         assert!(res.unwrap_err().contains("hurdle"));
 
         // Nothing may have mutated state
@@ -5125,18 +6377,38 @@ mod tests {
             arbitrager_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        crossed.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64300.0), dec!(10.0)));
-        crossed.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64200.0), dec!(10.0)));
+        crossed.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64300.0),
+            dec!(10.0),
+        ));
+        crossed.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64200.0),
+            dec!(10.0),
+        ));
         crossed.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(crossed);
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
         let err = res.expect_err("crossed book must be rejected");
-        assert!(err.contains("order book rejected"), "unexpected err: {}", err);
+        assert!(
+            err.contains("order book rejected"),
+            "unexpected err: {}",
+            err
+        );
         assert!(state.virtual_ledger.read().lots.is_empty());
     }
 
@@ -5152,9 +6424,18 @@ mod tests {
                 arbitrager_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(11.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64500.0), dec!(50.0)));
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64100.0),
+                dec!(50.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64205.0),
+                dec!(11.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64500.0),
+                dec!(50.0),
+            ));
             book.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(book);
 
@@ -5162,17 +6443,36 @@ mod tests {
                 arbitrager_core::types::VenueId::new("lighter"),
                 "BTC-USDC".to_string(),
             );
-            deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
-            deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+            deep.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64360.0),
+                dec!(50.0),
+            ));
+            deep.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64365.0),
+                dec!(50.0),
+            ));
             deep.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(deep);
         }
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 11.0, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            11.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
-        assert!(res.expect_err("depth ratio must reject").contains("depth"), "expected depth error");
+        assert!(
+            res.expect_err("depth ratio must reject").contains("depth"),
+            "expected depth error"
+        );
 
         // Slippage: qty 5 walks deep into a second level 300+ bps above top
         {
@@ -5180,32 +6480,88 @@ mod tests {
                 arbitrager_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(66200.0), dec!(50.0)));
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64100.0),
+                dec!(50.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64205.0),
+                dec!(1.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(66200.0),
+                dec!(50.0),
+            ));
             book.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(book);
         }
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 5.0, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            5.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
-        assert!(res.expect_err("slippage must reject").contains("slippage"), "expected slippage error");
+        assert!(
+            res.expect_err("slippage must reject").contains("slippage"),
+            "expected slippage error"
+        );
 
         // Non-profitable spread: sell VWAP below buy VWAP
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64330.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64330.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64200.0), dec!(64210.0));
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
-        assert!(res.expect_err("negative spread must reject").contains("not profitable"));
+        assert!(res
+            .expect_err("negative spread must reject")
+            .contains("not profitable"));
 
         // Profitable but below the caller's nominal hurdle
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64260.0), dec!(64265.0));
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, Some(50.0), &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(50.0),
+            &state,
         )
         .await;
         assert!(res.expect_err("hurdle must reject").contains("hurdle"));
@@ -5218,11 +6574,27 @@ mod tests {
     async fn test_spatial_execution_equal_qty_wide_spread_passes_delta() {
         let state = setup_test_state_with_venues();
         // Equal 3 BTC legs at materially different marks are delta-neutral
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60005.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(61000.0), dec!(61005.0));
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 3.0, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            3.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
         let res = res.expect("wide-spread equal-quantity pair must pass all guards");
@@ -5242,8 +6614,14 @@ mod tests {
             arbitrager_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        big_book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(59900.0), dec!(500.0)));
-        big_book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(60000.0), dec!(500.0)));
+        big_book.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(59900.0),
+            dec!(500.0),
+        ));
+        big_book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(60000.0),
+            dec!(500.0),
+        ));
         big_book.timestamp = Utc::now();
         hl_paper.replace_orderbook(big_book).expect("seed big book");
         let resp = hl_paper
@@ -5262,12 +6640,32 @@ mod tests {
             .await
             .expect("lower leverage");
         let acc = hl_paper.fetch_account().await.expect("account");
-        assert!(acc.margin_usage_pct >= dec!(85.0), "usage {} must be critical", acc.margin_usage_pct);
+        assert!(
+            acc.margin_usage_pct >= dec!(85.0),
+            "usage {} must be critical",
+            acc.margin_usage_pct
+        );
 
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
         let err = res.expect_err("critical margin must reject");
@@ -5288,21 +6686,36 @@ mod tests {
         };
         save_engine_settings_impl(settings, &state).expect("save creds");
         assert_eq!(
-            get_engine_settings_impl(&state).expect("settings").configured_venues,
+            get_engine_settings_impl(&state)
+                .expect("settings")
+                .configured_venues,
             vec!["hyperliquid".to_string()]
         );
 
-        // Toggle the venue off without resubmitting any secrets: the stored
-        // record stays discoverable because configured_venues means
-        // "credentials exist", not "venue active"
+        // Toggle the venue off: disable the account profile created by the
+        // first save plus the engine flag — both halves of the unified
+        // account/venue switch. The stored record stays discoverable because
+        // configured_venues means "credentials exist", not "venue active".
+        state
+            .state_store
+            .upsert_account(
+                "hyperliquid-default",
+                "hyperliquid",
+                "Default",
+                false,
+                false,
+                "standard",
+            )
+            .expect("disable account");
         let off = EngineSettingsDto {
             hyperliquid_enabled: false,
-            hyperliquid_spot_enabled: false,
             ..Default::default()
         };
         save_engine_settings_impl(off, &state).expect("save toggle off");
         assert_eq!(
-            get_engine_settings_impl(&state).expect("settings").configured_venues,
+            get_engine_settings_impl(&state)
+                .expect("settings")
+                .configured_venues,
             vec!["hyperliquid".to_string()]
         );
         let stored = state.vault.write().get_data().expect("vault data").clone();
@@ -5315,14 +6728,20 @@ mod tests {
         assert!(!hl.enabled);
 
         // Disabled records remain deletable
-        assert!(delete_exchange_credentials_impl("hyperliquid", &state).expect("delete disabled creds"));
         assert!(
-            get_engine_settings_impl(&state)
-                .expect("settings")
-                .configured_venues
-                .is_empty()
+            delete_exchange_credentials_impl("hyperliquid", &state).expect("delete disabled creds")
         );
-        assert!(state.vault.write().get_data().expect("vault data").credentials.is_empty());
+        assert!(get_engine_settings_impl(&state)
+            .expect("settings")
+            .configured_venues
+            .is_empty());
+        assert!(state
+            .vault
+            .write()
+            .get_data()
+            .expect("vault data")
+            .credentials
+            .is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5375,13 +6794,73 @@ mod tests {
         let res = save_engine_settings_impl(settings, &state);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("paper"));
-        assert_eq!(get_engine_settings_impl(&state).expect("settings").trading_mode, "paper");
+        assert_eq!(
+            get_engine_settings_impl(&state)
+                .expect("settings")
+                .trading_mode,
+            "paper"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_paper_starting_balance_resets_paper_accounts_on_change() {
+        let state = AppEngineState::new();
+
+        // Invalid values fail closed.
+        for bad in [0.0, -500.0, f64::NAN, f64::INFINITY, 2e12] {
+            let res = save_engine_settings_impl(
+                EngineSettingsDto {
+                    paper_starting_balance_usd: bad,
+                    ..EngineSettingsDto::default()
+                },
+                &state,
+            );
+            assert!(res.is_err(), "bad balance {bad} must be rejected");
+        }
+
+        // A new starting balance reinitializes every paper account.
+        save_engine_settings_impl(
+            EngineSettingsDto {
+                paper_starting_balance_usd: 25000.0,
+                ..EngineSettingsDto::default()
+            },
+            &state,
+        )
+        .expect("save");
+        for (_, paper) in state.paper_exchanges() {
+            let acc = paper.fetch_account().await.expect("account");
+            assert_eq!(acc.equity, dec!(25000.0));
+            assert_eq!(acc.free_margin, dec!(25000.0));
+            assert!(acc.positions.is_empty());
+        }
+
+        // Re-saving an unchanged balance is a no-op for paper accounts.
+        save_engine_settings_impl(
+            EngineSettingsDto {
+                paper_starting_balance_usd: 25000.0,
+                max_slippage_bps: 42.0,
+                ..EngineSettingsDto::default()
+            },
+            &state,
+        )
+        .expect("resave");
+        for (_, paper) in state.paper_exchanges() {
+            let acc = paper.fetch_account().await.expect("account");
+            assert_eq!(acc.equity, dec!(25000.0));
+        }
+        assert_eq!(state.settings.read().max_slippage_bps, 42.0);
     }
 
     #[tokio::test]
     async fn test_unsupported_native_executions_fail_closed() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60005.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60020.0), dec!(60025.0));
 
         let pnl_before = *state.total_realized_profit.read();
@@ -5396,15 +6875,24 @@ mod tests {
                 net_spread_bps: Some(12.0),
             },
             &state,
-        ).await;
+        )
+        .await;
         assert!(spot.is_err());
         assert!(spot.unwrap_err().contains("spot"));
 
-        let funding = execute_funding_carry_impl("BTC-USDC", "hyperliquid", "lighter", 25000.0, &state).await;
+        let funding =
+            execute_funding_carry_impl("BTC-USDC", "hyperliquid", "lighter", 25000.0, &state).await;
         assert!(funding.is_err());
         assert!(funding.unwrap_err().contains("funding"));
 
-        let pred = execute_prediction_arbitrage_impl("FED DECISION", "polymarket", "kalshi", 100.0, &state).await;
+        let pred = execute_prediction_arbitrage_impl(
+            "FED DECISION",
+            "polymarket",
+            "kalshi",
+            100.0,
+            &state,
+        )
+        .await;
         assert!(pred.is_err());
         assert!(pred.unwrap_err().contains("prediction"));
 
@@ -5416,8 +6904,20 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_multi_market_quotes() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
-        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3450.0), dec!(3452.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "ETH-USDC",
+            dec!(3450.0),
+            dec!(3452.0),
+        );
         seed_test_book(&state, "hyperliquid", "SOL-USDC", dec!(152.0), dec!(152.2));
 
         let symbols = vec![
@@ -5425,7 +6925,9 @@ mod tests {
             "ETH-USDC".to_string(),
             "SOL-USDC".to_string(),
         ];
-        let quotes = fetch_multi_market_quotes_impl(symbols, &state).await.expect("quotes");
+        let quotes = fetch_multi_market_quotes_impl(symbols, &state)
+            .await
+            .expect("quotes");
         assert_eq!(quotes.len(), 3);
         for q in &quotes {
             assert!(q.best_bid > 0.0);
@@ -5493,7 +6995,8 @@ mod tests {
         assert!(save_ticker_strategy_config_impl(updated.clone(), &state).is_ok());
 
         // 4. Retrieve saved config
-        let retrieved = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("retrieved config");
+        let retrieved =
+            get_ticker_strategy_config_impl("BTC-USDC", &state).expect("retrieved config");
         assert_eq!(retrieved.target_profit_bps, 8.5);
         assert_eq!(retrieved.window_percentile, 80);
         assert_eq!(retrieved.max_accumulated_units, 5);
@@ -5510,7 +7013,7 @@ mod tests {
     async fn test_venue_balances_report_paper_account() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
-        assert_eq!(balances.len(), 2);
+        assert_eq!(balances.len(), 3);
         for b in &balances {
             assert!(b.available_margin_usd > 0.0);
             assert!(b.equity_usd > 0.0);
@@ -5524,7 +7027,10 @@ mod tests {
         let perfs = get_strategy_performance_impl(None, &state).expect("performance");
         assert_eq!(perfs.len(), 4);
 
-        let spatial = perfs.iter().find(|p| p.strategy_id == "spatial_spread").expect("spatial metrics");
+        let spatial = perfs
+            .iter()
+            .find(|p| p.strategy_id == "spatial_spread")
+            .expect("spatial metrics");
         assert_eq!(spatial.total_cycles_completed, 0);
         assert_eq!(spatial.total_pnl_usd, 0.0);
     }
@@ -5568,9 +7074,13 @@ mod tests {
         };
         save_engine_settings_impl(settings, &state).expect("save configured settings");
 
-        let spot = scan_spot_opportunities_impl("BTC", &state).await.expect("spot scan");
+        let spot = scan_spot_opportunities_impl("BTC", &state)
+            .await
+            .expect("spot scan");
         assert!(spot.is_empty());
-        let pred = scan_prediction_opportunities_impl("FED", &state).await.expect("pred scan");
+        let pred = scan_prediction_opportunities_impl("FED", &state)
+            .await
+            .expect("pred scan");
         assert!(pred.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -5579,11 +7089,27 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_execution_rejects_repeated_open() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let first = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect("first execution");
@@ -5594,7 +7120,17 @@ mod tests {
         let lots_before = state.virtual_ledger.read().lots.len();
 
         let second = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
         let err = second.expect_err("second open must reject");
@@ -5615,9 +7151,18 @@ mod tests {
                 arbitrager_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64310.0), dec!(50.0)));
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64100.0),
+                dec!(50.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64205.0),
+                dec!(1.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64310.0),
+                dec!(50.0),
+            ));
             book.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(book);
 
@@ -5625,17 +7170,35 @@ mod tests {
                 arbitrager_core::types::VenueId::new("lighter"),
                 "BTC-USDC".to_string(),
             );
-            deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
-            deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+            deep.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64360.0),
+                dec!(50.0),
+            ));
+            deep.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64365.0),
+                dec!(50.0),
+            ));
             deep.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(deep);
         }
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 2.0, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            2.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await;
-        assert!(res.expect_err("must reject before dispatch").contains("slippage"));
+        assert!(res
+            .expect_err("must reject before dispatch")
+            .contains("slippage"));
         assert!(state.virtual_ledger.read().lots.is_empty());
         assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
     }
@@ -5643,7 +7206,13 @@ mod tests {
     #[tokio::test]
     async fn test_symbol_and_numeric_input_validation() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
 
         let oversized_symbol = "A".repeat(65);
         for bad in [
@@ -5666,7 +7235,9 @@ mod tests {
         }
 
         let oversized: Vec<String> = (0..101).map(|i| format!("S{}", i)).collect();
-        assert!(fetch_multi_market_quotes_impl(oversized, &state).await.is_err());
+        assert!(fetch_multi_market_quotes_impl(oversized, &state)
+            .await
+            .is_err());
         assert!(
             fetch_multi_market_quotes_impl(vec!["BTC-USDC?bad".into()], &state)
                 .await
@@ -5688,11 +7259,9 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(
-            scan_funding_opportunities_impl("BTC-USDC", -5.0, &state)
-                .await
-                .is_err()
-        );
+        assert!(scan_funding_opportunities_impl("BTC-USDC", -5.0, &state)
+            .await
+            .is_err());
         assert!(
             scan_funding_opportunities_impl("BTC-USDC", f64::INFINITY, &state)
                 .await
@@ -5716,15 +7285,30 @@ mod tests {
         let state = AppEngineState::new();
         let base = EngineSettingsDto::default();
 
-        let bad = EngineSettingsDto { max_slippage_bps: f64::NAN, ..base.clone() };
+        let bad = EngineSettingsDto {
+            max_slippage_bps: f64::NAN,
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { max_slippage_bps: 0.0, ..base.clone() };
+        let bad = EngineSettingsDto {
+            max_slippage_bps: 0.0,
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { min_depth_ratio: f64::NAN, ..base.clone() };
+        let bad = EngineSettingsDto {
+            min_depth_ratio: f64::NAN,
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { trading_mode: "simulation".into(), ..base.clone() };
+        let bad = EngineSettingsDto {
+            trading_mode: "simulation".into(),
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { bind_address: "0.0.0.0".into(), ..base.clone() };
+        let bad = EngineSettingsDto {
+            bind_address: "0.0.0.0".into(),
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
         let bad = EngineSettingsDto {
             engine_rpc_port: 9000,
@@ -5732,7 +7316,10 @@ mod tests {
             ..base.clone()
         };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto { engine_rpc_port: 0, ..base.clone() };
+        let bad = EngineSettingsDto {
+            engine_rpc_port: 0,
+            ..base.clone()
+        };
         assert!(save_engine_settings_impl(bad, &state).is_err());
 
         let ok = save_engine_settings_impl(base, &state);
@@ -5742,23 +7329,39 @@ mod tests {
     #[tokio::test]
     async fn test_risk_overview_open_position_free_margin_and_unknown_liquidation() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 200000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 200000.0);
+        assert_eq!(before.total_portfolio_value_usd, 300000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 300000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect("execution");
 
         let after = get_risk_overview_impl(&state).await.expect("risk after");
         assert!(
-            after.margin_health.margin_balance_usd < 200000.0,
+            after.margin_health.margin_balance_usd < before.margin_health.margin_balance_usd,
             "free margin must decrease after open: {}",
             after.margin_health.margin_balance_usd
         );
@@ -5779,11 +7382,27 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_pnl_synced_from_paper_equity() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect("execution");
@@ -5795,7 +7414,7 @@ mod tests {
         }
         assert_eq!(
             *state.total_realized_profit.read(),
-            equity_sum - dec!(200000)
+            equity_sum - dec!(300000)
         );
         // Fees are real outflow; the position open is not marked as profit
         assert!(*state.total_realized_profit.read() < dec!(0));
@@ -5817,19 +7436,37 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_execution_queued_call_reevaluates_breaker() {
         let state = Arc::new(setup_test_state_with_venues());
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let guard = state.execution_lock.lock().await;
         let st = state.clone();
         let task = tokio::spawn(async move {
             execute_spatial_arbitrage_impl(
-                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &st,
+                "BTC-USDC",
+                "hyperliquid",
+                "lighter",
+                0.1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &st,
             )
             .await
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        state.circuit_breaker.trip("killswitch while execution queued");
+        state
+            .circuit_breaker
+            .trip("killswitch while execution queued");
         drop(guard);
 
         let res = task.await.expect("join");
@@ -5848,22 +7485,52 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_concurrent_same_symbol_only_one_opens() {
         let state = Arc::new(setup_test_state_with_venues());
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let (r1, r2) = tokio::join!(
             execute_spatial_arbitrage_impl(
-                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+                "BTC-USDC",
+                "hyperliquid",
+                "lighter",
+                0.1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &state,
             ),
             execute_spatial_arbitrage_impl(
-                "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+                "BTC-USDC",
+                "hyperliquid",
+                "lighter",
+                0.1,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &state,
             ),
         );
         let oks = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
         assert_eq!(oks, 1, "exactly one execution may open: {:?} {:?}", r1, r2);
         let errs: Vec<String> = [r1, r2].into_iter().filter_map(|r| r.err()).collect();
         assert_eq!(errs.len(), 1);
-        assert!(errs[0].contains("already exists"), "unexpected err: {}", errs[0]);
+        assert!(
+            errs[0].contains("already exists"),
+            "unexpected err: {}",
+            errs[0]
+        );
         assert_eq!(state.virtual_ledger.read().lots.len(), 1);
         assert_eq!(state.execution_logs.read().len(), 1);
     }
@@ -5871,11 +7538,27 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_execution_persists_durable_signal() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect("execution");
@@ -5917,9 +7600,21 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_execution_blocked_by_unreconciled_signal() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
-        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "ETH-USDC",
+            dec!(3000.0),
+            dec!(3005.0),
+        );
         seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
 
         // A prior signal for BTC-USDC holds residual exposure: only its long
@@ -5970,7 +7665,17 @@ mod tests {
             .expect("status");
 
         let err = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None, None, &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect_err("blocked ticker must reject");
@@ -5978,7 +7683,17 @@ mod tests {
 
         // The gate is per-ticker: a different symbol still executes.
         let other = execute_spatial_arbitrage_impl(
-            "ETH-USDC", "hyperliquid", "lighter", 0.5, None, None, None, None, None, None, &state,
+            "ETH-USDC",
+            "hyperliquid",
+            "lighter",
+            0.5,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
         )
         .await
         .expect("different ticker executes");
@@ -5988,9 +7703,21 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_candidates_batch_picks_highest_expected() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
-        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "ETH-USDC",
+            dec!(3000.0),
+            dec!(3005.0),
+        );
         seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
 
         let outcomes = execute_spatial_candidates_impl(
@@ -6064,9 +7791,21 @@ mod tests {
     #[tokio::test]
     async fn test_spatial_candidates_reject_all_when_ticker_blocked() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
-        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3000.0), dec!(3005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "ETH-USDC",
+            dec!(3000.0),
+            dec!(3005.0),
+        );
         seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
 
         // In-flight signal on BTC-USDC blocks every candidate in the batch.
@@ -6147,7 +7886,7 @@ mod tests {
         let state = setup_test_state_with_venues();
         let account = state
             .state_store
-            .upsert_account("hl-main", "hyperliquid", "Main", true, false)
+            .upsert_account("hl-main", "hyperliquid", "Main", true, false, "standard")
             .expect("account");
 
         state
@@ -6181,8 +7920,14 @@ mod tests {
     async fn test_validate_adapter_book_helper() {
         let venue = arbitrager_core::types::VenueId::new("hyperliquid");
         let mut book = OrderBook::new(venue.clone(), "BTC-USDC".to_string());
-        book.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64000.0), dec!(1.0)));
-        book.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64001.0), dec!(1.0)));
+        book.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64000.0),
+            dec!(1.0),
+        ));
+        book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64001.0),
+            dec!(1.0),
+        ));
 
         assert!(validate_adapter_book(&book, &venue, "BTC-USDC").is_ok());
 
@@ -6206,31 +7951,69 @@ mod tests {
             arbitrager_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        crossed.bids.push(arbitrager_core::quote::BookLevel::new(dec!(65000.0), dec!(10.0)));
-        crossed.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64000.0), dec!(10.0)));
+        crossed.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(65000.0),
+            dec!(10.0),
+        ));
+        crossed.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64000.0),
+            dec!(10.0),
+        ));
         crossed.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(crossed);
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(
+            &state,
+            "robinhood",
+            "BTC-USDC",
+            dec!(64360.0),
+            dec!(64365.0),
+        );
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
 
-        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
-        assert_eq!(books.len(), 1);
+        let books = fetch_orderbooks_impl("BTC-USDC", &state)
+            .await
+            .expect("books");
+        assert_eq!(books.len(), 2);
         assert_eq!(books[0].venue_id, "lighter");
+        assert_eq!(books[1].venue_id, "robinhood");
 
-        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state).await.expect("scan");
-        assert!(opps.is_empty());
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state)
+            .await
+            .expect("scan");
+        // The malformed hyperliquid book must not participate; lighter and
+        // robinhood share identical seeded prices so any pair is non-executable.
+        assert!(opps.iter().all(|o| !o.is_executable));
+        assert!(opps
+            .iter()
+            .all(|o| o.buy_venue != "hyperliquid" && o.sell_venue != "hyperliquid"));
     }
 
     #[tokio::test]
     async fn test_decimal_conversion_overflow_rejects() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
-            "BTC-USDC", "hyperliquid", "lighter", 0.1, None, None, None, None, None,
-            Some(f64::MAX), &state,
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(f64::MAX),
+            &state,
         )
         .await;
         let err = res.expect_err("f64::MAX hurdle must reject");
@@ -6256,9 +8039,18 @@ mod tests {
             arbitrager_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        thin.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64100.0), dec!(50.0)));
-        thin.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(1.0)));
-        thin.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64310.0), dec!(50.0)));
+        thin.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64100.0),
+            dec!(50.0),
+        ));
+        thin.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64205.0),
+            dec!(1.0),
+        ));
+        thin.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64310.0),
+            dec!(50.0),
+        ));
         thin.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(thin);
 
@@ -6266,21 +8058,40 @@ mod tests {
             arbitrager_core::types::VenueId::new("lighter"),
             "BTC-USDC".to_string(),
         );
-        deep.bids.push(arbitrager_core::quote::BookLevel::new(dec!(64360.0), dec!(50.0)));
-        deep.asks.push(arbitrager_core::quote::BookLevel::new(dec!(64365.0), dec!(50.0)));
+        deep.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64360.0),
+            dec!(50.0),
+        ));
+        deep.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64365.0),
+            dec!(50.0),
+        ));
         deep.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(deep);
 
-        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 2.0, &state).await.expect("scan");
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 2.0, &state)
+            .await
+            .expect("scan");
         let opp = opps
             .iter()
             .find(|o| o.buy_venue.contains("Hyperliquid"))
             .expect("hl->lgt opportunity row");
-        assert!(!opp.is_executable, "out-of-limit depth must mark non-executable");
+        assert!(
+            !opp.is_executable,
+            "out-of-limit depth must mark non-executable"
+        );
 
-        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(3400.0), dec!(3401.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "ETH-USDC",
+            dec!(3400.0),
+            dec!(3401.0),
+        );
         seed_test_book(&state, "lighter", "ETH-USDC", dec!(3410.0), dec!(3411.0));
-        let opps = scan_spatial_opportunities_impl("ETH-USDC", 5.0, 0.1, &state).await.expect("scan eth");
+        let opps = scan_spatial_opportunities_impl("ETH-USDC", 5.0, 0.1, &state)
+            .await
+            .expect("scan eth");
         let opp = opps
             .iter()
             .find(|o| o.buy_venue.contains("Hyperliquid"))
@@ -6296,12 +8107,14 @@ mod tests {
         assert_eq!(state.circuit_breaker.day_start_equity(), dec!(400000.0));
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        assert_eq!(risk.current_drawdown_usd, 200000.0);
-        assert_eq!(risk.drawdown_pct, 50.0);
+        assert_eq!(risk.current_drawdown_usd, 100000.0);
+        assert_eq!(risk.drawdown_pct, 25.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();
-        let risk = get_risk_overview_impl(&state).await.expect("risk zero start");
+        let risk = get_risk_overview_impl(&state)
+            .await
+            .expect("risk zero start");
         assert_eq!(risk.drawdown_pct, 0.0);
     }
 
@@ -6365,14 +8178,22 @@ mod tests {
             assert!(hl < 0.0 && lgt > 0.0);
         }
         let band = s.band_max_bps[2] - s.band_min_bps[2];
-        assert!((band - 99.5025).abs() < 0.01, "band height = gross spread bps");
+        assert!(
+            (band - 99.5025).abs() < 0.01,
+            "band height = gross spread bps"
+        );
     }
 
     #[tokio::test]
     async fn test_signal_series_leader_mode_and_gap_preservation() {
         let state = AppEngineState::new();
         let now = Utc::now().timestamp_millis();
-        seed_samples(&state, "ETH-USDC", now - 2_000, &[("hyperliquid", 3000.0), ("lighter", 3006.0)]);
+        seed_samples(
+            &state,
+            "ETH-USDC",
+            now - 2_000,
+            &[("hyperliquid", 3000.0), ("lighter", 3006.0)],
+        );
         // Second bucket: only hyperliquid -> lighter cell must be null.
         seed_samples(&state, "ETH-USDC", now - 1_000, &[("hyperliquid", 3001.0)]);
 
@@ -6385,32 +8206,54 @@ mod tests {
         // first venue ("hyperliquid"), pinned at 0.
         assert_eq!(s.dev_bps[0][0], Some(0.0));
         assert_eq!(s.dev_bps[1][1], None, "missing venue stays a gap");
-        assert_eq!(s.band_max_bps[1], s.band_min_bps[1], "single-venue band collapses");
+        assert_eq!(
+            s.band_max_bps[1], s.band_min_bps[1],
+            "single-venue band collapses"
+        );
     }
 
     #[tokio::test]
     async fn test_signal_series_rejects_bad_symbol() {
         let state = AppEngineState::new();
-        assert!(get_signal_series_impl("  ", "consensus", 60, &state).await.is_err());
-        assert!(get_signal_series_impl("BTC\u{0}", "consensus", 60, &state).await.is_err());
+        assert!(get_signal_series_impl("  ", "consensus", 60, &state)
+            .await
+            .is_err());
+        assert!(get_signal_series_impl("BTC\u{0}", "consensus", 60, &state)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
     async fn test_fetch_orderbooks_persists_spread_samples() {
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(60000.0), dec!(60005.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60005.0),
+        );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
+        seed_test_book(
+            &state,
+            "robinhood",
+            "BTC-USDC",
+            dec!(60120.0),
+            dec!(60125.0),
+        );
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
 
-        let books = fetch_orderbooks_impl("BTC-USDC", &state).await.expect("books");
-        assert_eq!(books.len(), 2);
+        let books = fetch_orderbooks_impl("BTC-USDC", &state)
+            .await
+            .expect("books");
+        assert_eq!(books.len(), 3);
 
         let rows = state
             .state_store
             .spread_samples("BTC-USDC", 0, i64::MAX)
             .expect("samples");
-        assert_eq!(rows.len(), 2, "one row per reporting venue per poll");
+        assert_eq!(rows.len(), 3, "one row per reporting venue per poll");
         let hl = rows.iter().find(|r| r.venue_id == "hyperliquid").unwrap();
         assert_eq!(hl.mid, 60002.5);
         assert_eq!(hl.best_bid, 60000.0);
@@ -6497,13 +8340,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(
-            &state,
-            "lighter",
-            "BTC-USDC",
-            dec!(64360.0),
-            dec!(64365.0),
-        );
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let res = execute_spatial_arbitrage_impl(
             "BTC-USDC",
@@ -6575,13 +8412,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(
-            &state,
-            "lighter",
-            "BTC-USDC",
-            dec!(64360.0),
-            dec!(64365.0),
-        );
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let second = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
             .await
@@ -6650,15 +8481,23 @@ mod tests {
         use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
         let state = setup_test_state_with_venues();
-        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
 
         let mut paper_book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
-        paper_book
-            .bids
-            .push(arbitrager_core::quote::BookLevel::new(dec!(64200.0), dec!(10.0)));
-        paper_book
-            .asks
-            .push(arbitrager_core::quote::BookLevel::new(dec!(64205.0), dec!(10.0)));
+        paper_book.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64200.0),
+            dec!(10.0),
+        ));
+        paper_book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64205.0),
+            dec!(10.0),
+        ));
         state
             .ex_hl
             .replace_orderbook(paper_book)

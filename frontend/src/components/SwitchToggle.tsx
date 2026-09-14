@@ -59,7 +59,7 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
       </button>
       {showStatusText && (
         <span
-          className={`text-[10px] font-mono font-bold transition-colors ${
+          className={`text-xs font-mono font-bold transition-colors ${
             checked ? "text-emerald-600" : "text-slate-400"
           }`}
         >

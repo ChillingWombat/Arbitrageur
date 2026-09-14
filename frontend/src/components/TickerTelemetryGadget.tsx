@@ -127,7 +127,7 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
           </div>
           <div>
             <div className="flex items-center space-x-2">
-              <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
+              <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900">
                 Execution Telemetry
               </h3>
               <span className="px-2 py-0.5 rounded-sm bg-surface-raised border border-surface-border text-xs font-mono font-medium text-slate-700">
@@ -157,40 +157,40 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
       {/* Ticker KPI Summary Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 py-4 text-xs font-mono">
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Total Trades</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Total Trades</div>
           <div className="text-sm font-bold text-slate-900 mt-1">
-            {metrics.total} <span className="text-[11px] font-normal text-slate-500">({metrics.filled} filled)</span>
+            {metrics.total} <span className="text-xs font-normal text-slate-500">({metrics.filled} filled)</span>
           </div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Realized Net PnL</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Realized Net PnL</div>
           <div className={`text-sm font-bold mt-1 ${metrics.netPnl >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
             {formatCurrencyPnl(metrics.netPnl)}
           </div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Win / Fill Rate</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Win / Fill Rate</div>
           <div className="text-sm font-bold text-slate-900 mt-1">{metrics.winRate.toFixed(1)}%</div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Avg Trigger Spread</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Avg Trigger Spread</div>
           <div className="text-sm font-bold text-accent mt-1">
             {metrics.avgTrigger > 0 ? `+${metrics.avgTrigger.toFixed(1)} BPS` : "—"}
           </div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Signal Baseline Mean</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Signal Baseline Mean</div>
           <div className="text-sm font-bold text-slate-700 mt-1">
             {metrics.avgBaseline > 0 ? `${metrics.avgBaseline.toFixed(1)} BPS` : "—"}
           </div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
-          <div className="text-[10px] text-slate-500 tracking-wider font-semibold">Spread Dislocation Δ</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Spread Dislocation Δ</div>
           <div className={`text-sm font-bold mt-1 ${metrics.avgDislocation >= 0 ? "text-emerald-700" : "text-slate-700"}`}>
             {metrics.avgDislocation !== 0 ? `+${metrics.avgDislocation.toFixed(1)} BPS` : "—"}
           </div>
@@ -203,7 +203,7 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
           <div className="flex items-center space-x-2 text-accent font-semibold text-xs mb-2">
             <Sparkles className="w-3.5 h-3.5" />
             <span>Parameter Tuning & Calibration Assistant</span>
-            <span className="text-[11px] font-normal text-slate-500">
+            <span className="text-xs font-normal text-slate-500">
               (Target: {config?.targetProfitBps ?? 5.0} BPS | Percentile: {config?.windowPercentile ?? 50}% | Max Units: {config?.maxAccumulatedUnits ?? 3})
             </span>
           </div>
@@ -214,8 +214,8 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
                 {insight.type === "warning" && <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />}
                 {insight.type === "info" && <Sliders className="w-4 h-4 text-accent shrink-0 mt-0.5" />}
                 <div>
-                  <div className="font-semibold text-slate-900 text-[11px]">{insight.title}</div>
-                  <div className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">{insight.desc}</div>
+                  <div className="font-semibold text-slate-900 text-xs">{insight.title}</div>
+                  <div className="text-xs text-slate-600 mt-0.5 leading-relaxed">{insight.desc}</div>
                 </div>
               </div>
             ))}

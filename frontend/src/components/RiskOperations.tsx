@@ -62,7 +62,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Circuit Breaker</span>
             <span
-              className={`px-2 py-0.5 rounded-sm text-[10px] font-mono font-semibold ${
+              className={`px-2 py-0.5 rounded-sm text-xs font-mono font-semibold ${
                 isTripped
                   ? "bg-loss-dim text-loss border border-loss-border"
                   : "bg-profit-dim text-profit border border-profit-border"
@@ -97,7 +97,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Margin Proximity</span>
-            <span className="px-2 py-0.5 rounded-sm text-[10px] font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
+            <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
               {margin.status}
             </span>
           </div>
@@ -154,7 +154,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
 
       {/* DeltaGuard Net Exposure Table */}
       <div className="bg-surface rounded-lg border border-surface-border p-5 shadow-xs">
-        <h3 className="text-xs font-mono tracking-wider text-slate-500 mb-4 flex items-center justify-between">
+        <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
           <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
           <span className="text-slate-400 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
         </h3>
@@ -162,7 +162,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
-              <tr className="border-b border-surface-border text-slate-500 text-[10px] tracking-wider">
+              <tr className="border-b border-surface-border text-slate-500 text-xs tracking-wider">
                 <th className="py-2.5 px-3">Base Asset</th>
                 <th className="py-2.5 px-3">Net Quantity</th>
                 <th className="py-2.5 px-3">USD Exposure</th>
@@ -191,11 +191,11 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
                     <td className="py-3 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString()} limit</td>
                     <td className="py-3 px-3 text-right">
                       {isNeutral ? (
-                        <span className="px-2 py-0.5 rounded-sm text-[10px] font-semibold bg-profit-dim text-profit border border-profit-border">
+                        <span className="px-2 py-0.5 rounded-sm text-xs font-semibold bg-profit-dim text-profit border border-profit-border">
                           Delta Neutral
                         </span>
                       ) : (
-                        <span className="px-2 py-0.5 rounded-sm text-[10px] font-semibold bg-warn-dim text-warn border border-warn-border">
+                        <span className="px-2 py-0.5 rounded-sm text-xs font-semibold bg-warn-dim text-warn border border-warn-border">
                           Exposure Skew
                         </span>
                       )}

@@ -172,7 +172,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           </div>
 
           {isPaused && (
-            <span className="px-2 py-0.5 rounded-sm text-[11px] font-bold bg-warn-dim text-warn border border-warn-border">
+            <span className="px-2 py-0.5 rounded-sm text-xs font-bold bg-warn-dim text-warn border border-warn-border">
               Engine Paused
             </span>
           )}
@@ -202,7 +202,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}
@@ -214,7 +214,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
         {/* Left 2 Cols: 3-Leg Cycle Graph Visualizer */}
         <div className="lg:col-span-2 bg-surface p-5 lg:p-6 rounded-xl border border-surface-border shadow-xs space-y-4">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
-            <h2 className="text-xs font-bold tracking-wider text-slate-500 flex items-center space-x-2">
+            <h2 className="text-xs font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
               <Triangle className="w-4 h-4 text-accent" />
               <span>3-Leg Cycle Architecture</span>
             </h2>
@@ -240,7 +240,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                     <span>Price:</span>
                     <span className="font-bold text-slate-700">${activeOpp.leg1.price.toLocaleString()}</span>
                   </div>
-                  <div className="flex justify-between text-[11px] text-slate-400">
+                  <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
                     <span>{activeOpp.leg1.fee_bps} BPS</span>
                   </div>
@@ -257,7 +257,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                     <span>Price:</span>
                     <span className="font-bold text-slate-700">${activeOpp.leg2.price.toLocaleString()}</span>
                   </div>
-                  <div className="flex justify-between text-[11px] text-slate-400">
+                  <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
                     <span>{activeOpp.leg2.fee_bps} BPS</span>
                   </div>
@@ -274,7 +274,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                     <span>Price:</span>
                     <span className="font-bold text-slate-700">${activeOpp.leg3.price.toLocaleString()}</span>
                   </div>
-                  <div className="flex justify-between text-[11px] text-slate-400">
+                  <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
                     <span>{activeOpp.leg3.fee_bps} BPS</span>
                   </div>
@@ -306,7 +306,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
         {/* Right 1 Col: Execution Bot Settings & 1-Click Action */}
         <div className="bg-surface p-5 lg:p-6 rounded-xl border border-surface-border shadow-xs space-y-4">
           <div className="flex items-center justify-between border-b border-surface-border pb-3">
-            <h2 className="text-xs font-bold tracking-wider text-slate-500 flex items-center space-x-2">
+            <h2 className="text-xs font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
               <SlidersHorizontal className="w-4 h-4 text-accent" />
               <span>Cycle Guardrails</span>
             </h2>
@@ -394,7 +394,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       {/* 3. Real-Time Triangular Opportunities Table */}
       <div className="bg-surface rounded-xl border border-surface-border p-5 lg:p-6 shadow-xs space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border pb-3">
-          <h2 className="text-xs font-bold tracking-wider text-slate-500">
+          <h2 className="text-xs font-bold font-mono tracking-wider text-slate-900">
             Detected Triangular Opportunities ({opportunities.length})
           </h2>
           <div className="flex items-center space-x-3">
@@ -423,7 +423,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs font-mono">
             <thead>
-              <tr className="border-b border-surface-border text-slate-500 text-[11px]">
+              <tr className="border-b border-surface-border text-slate-500 text-xs">
                 <th className="py-2.5 px-3">Path</th>
                 <th className="py-2.5 px-3">Exchange</th>
                 <th className="py-2.5 px-3">Gross Discrepancy</th>
@@ -465,7 +465,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                       </td>
                       <td className="py-3 px-3">
                         <span
-                          className={`px-2 py-0.5 rounded-sm text-[10px] font-bold ${
+                          className={`px-2 py-0.5 rounded-sm text-xs font-bold ${
                             opp.is_executable
                               ? "bg-profit-dim text-profit border border-profit-border"
                               : "bg-surface-raised text-slate-400 border border-surface-border"

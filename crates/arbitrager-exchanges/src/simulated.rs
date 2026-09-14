@@ -22,6 +22,10 @@ pub struct SimulatedExchange {
     funding_rates: DashMap<String, FundingRate>,
     leverages: DashMap<String, u32>,
     account: Arc<RwLock<AccountSnapshot>>,
+    /// Seed equity the paper account started with — the baseline realized
+    /// P&L is measured against. Updated by `reset_account` when the
+    /// configured starting balance changes.
+    initial_equity: RwLock<Decimal>,
 }
 
 impl SimulatedExchange {
@@ -61,7 +65,14 @@ impl SimulatedExchange {
             funding_rates: DashMap::new(),
             leverages: DashMap::new(),
             account: Arc::new(RwLock::new(account)),
+            initial_equity: RwLock::new(initial_equity),
         }
+    }
+
+    /// The seed equity this paper account was started with — the baseline
+    /// for realized P&L, not the current equity.
+    pub fn initial_equity(&self) -> Decimal {
+        *self.initial_equity.read()
     }
 
     /// Seed a market with an orderbook and funding rate.
@@ -119,6 +130,20 @@ impl SimulatedExchange {
     /// Check if a symbol market has been seeded.
     pub fn has_market(&self, symbol: &str) -> bool {
         self.books.contains_key(symbol)
+    }
+
+    /// Reinitializes the paper account to `starting_equity` with zero open
+    /// positions. Used when the user changes the configured paper starting
+    /// balance; a new starting balance means a fresh paper account, so open
+    /// simulated positions are cleared rather than fabricating a partial
+    /// reset.
+    pub fn reset_account(&self, starting_equity: Decimal) {
+        *self.initial_equity.write() = starting_equity;
+        let mut acc = self.account.write();
+        acc.equity = starting_equity;
+        acc.positions.clear();
+        acc.timestamp = Utc::now();
+        Self::recompute_account_margins(&mut acc);
     }
 
     /// Replace a symbol's book with an externally sourced, execution-validated book.

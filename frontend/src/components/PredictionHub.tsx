@@ -1,4 +1,4 @@
-import React, { Fragment, useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Filter, ShieldAlert } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
 import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
@@ -131,36 +131,10 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}
-        </div>
-      </div>
-
-      {/* Synthetic Formula Explanation Card */}
-      <div className="bg-surface-raised border border-surface-border rounded-lg p-4 flex flex-col md:flex-row items-center justify-between gap-4 font-mono text-xs shadow-2xs">
-        <div>
-          <div className="font-bold font-mono tracking-wider text-slate-900 text-xs">Arrow-Debreu Equilibrium Condition</div>
-          <div className="text-[11px] text-slate-500">
-            Condition: Cost = Price(YES) + Price(NO) + Fees &lt; conditional $1.00 payout — valid only when contracts have identical settlement terms
-          </div>
-        </div>
-
-        <div className="flex items-center space-x-3 text-[11px]">
-          {(["polymarket", "kalshi"] as const).map((vid, i) => {
-            const meta = EXCHANGES_ALPHABETICAL.find((e) => e.id === vid);
-            return (
-              <Fragment key={vid}>
-                {i > 0 && <span className="text-slate-300">/</span>}
-                <span className="text-slate-500">
-                  {meta?.name ?? vid}: {((meta?.feeBps ?? 0) / 100).toFixed(2)}% fee
-                </span>
-              </Fragment>
-            );
-          })}
-          <span className="text-slate-300">/</span>
-          <span className="text-profit font-semibold">Payout: conditional $1.00 (identical settlement terms required)</span>
         </div>
       </div>
 
@@ -179,7 +153,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             >
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="px-2.5 py-0.5 rounded-sm font-mono text-[10px] font-semibold bg-accent-dim text-accent border border-accent-line">
+                  <span className="px-2.5 py-0.5 rounded-sm font-mono text-xs font-semibold bg-accent-dim text-accent border border-accent-line">
                     {opp.market_title}
                   </span>
                   <span className="font-mono text-xs font-bold text-profit">
@@ -191,7 +165,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                 <div className="bg-surface-raised border border-surface-border rounded-md p-3 space-y-2.5 my-3 font-mono text-xs">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
-                      <span className="px-1.5 py-0.5 rounded-sm bg-profit-dim text-profit border border-profit-border font-semibold text-[10px]">
+                      <span className="px-1.5 py-0.5 rounded-sm bg-profit-dim text-profit border border-profit-border font-semibold text-xs">
                         BUY YES
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_yes_venue}</span>
@@ -201,7 +175,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
 
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
-                      <span className="px-1.5 py-0.5 rounded-sm bg-loss-dim text-loss border border-loss-border font-semibold text-[10px]">
+                      <span className="px-1.5 py-0.5 rounded-sm bg-loss-dim text-loss border border-loss-border font-semibold text-xs">
                         BUY NO
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_no_venue}</span>
@@ -209,7 +183,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                     <span className="font-semibold text-slate-700">${(opp.no_price_cents / 100).toFixed(2)}</span>
                   </div>
 
-                  <div className="pt-2 border-t border-surface-border flex items-center justify-between text-[11px]">
+                  <div className="pt-2 border-t border-surface-border flex items-center justify-between text-xs">
                     <span className="text-slate-500">Total Combined Cost:</span>
                     <span className="font-semibold text-slate-900">${(opp.total_cost_cents / 100).toFixed(2)}</span>
                   </div>
@@ -217,7 +191,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
 
                 {/* Visual Probability Bar */}
                 <div className="space-y-1">
-                  <div className="flex justify-between text-[10px] font-mono text-slate-500">
+                  <div className="flex justify-between text-xs font-mono text-slate-500">
                     <span>YES: {opp.yes_price_cents.toFixed(0)}%</span>
                     <span className="text-profit font-semibold">Spread: +${(opp.net_profit_cents / 100).toFixed(2)}</span>
                     <span>NO: {opp.no_price_cents.toFixed(0)}%</span>

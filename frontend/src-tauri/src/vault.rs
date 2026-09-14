@@ -37,10 +37,10 @@ pub struct ExchangeCredentials {
     pub account_id: Option<String>,
     #[serde(default)]
     pub wallet_address: Option<String>,
-    pub account_index: Option<u32>,
-    pub subaccount_index: Option<u32>,
+    pub account_index: Option<u64>,
+    pub subaccount_index: Option<u64>,
     #[serde(default)]
-    pub api_key_index: Option<u32>,
+    pub api_key_index: Option<u64>,
     #[serde(default)]
     pub private_key: Option<String>,
     pub enabled: bool,
@@ -74,7 +74,10 @@ impl std::fmt::Debug for ExchangeCredentials {
             .field("subaccount_index", &self.subaccount_index)
             .field("enabled", &self.enabled)
             .field("has_api_key", &!self.api_key.is_empty())
-            .field("has_private_key", &self.private_key.as_ref().is_some_and(|k| !k.is_empty()))
+            .field(
+                "has_private_key",
+                &self.private_key.as_ref().is_some_and(|k| !k.is_empty()),
+            )
             .field("has_api_secret", &!self.api_secret.is_empty())
             .field(
                 "has_passphrase",
@@ -113,9 +116,9 @@ pub struct CredentialPresence {
     pub has_account_id: bool,
     pub has_wallet_address: bool,
     pub has_private_key: bool,
-    pub account_index: Option<u32>,
-    pub subaccount_index: Option<u32>,
-    pub api_key_index: Option<u32>,
+    pub account_index: Option<u64>,
+    pub subaccount_index: Option<u64>,
+    pub api_key_index: Option<u64>,
 }
 
 /// Account profile IDs use the same charset as the durable state store:
@@ -423,10 +426,11 @@ impl SecureVault {
             #[allow(deprecated)]
             let nonce = Nonce::from_slice(nonce_bytes);
 
-            let decrypted_bytes =
-                Zeroizing::new(cipher.decrypt(nonce, ciphertext).map_err(|_| {
-                    anyhow::anyhow!("Incorrect password or corrupted vault")
-                })?);
+            let decrypted_bytes = Zeroizing::new(
+                cipher
+                    .decrypt(nonce, ciphertext)
+                    .map_err(|_| anyhow::anyhow!("Incorrect password or corrupted vault"))?,
+            );
 
             let data: VaultData = serde_json::from_slice(decrypted_bytes.as_slice())
                 .map_err(|_| anyhow::anyhow!("Incorrect password or corrupted vault"))?;
@@ -618,10 +622,7 @@ impl SecureVault {
                 has_api_secret: !c.api_secret.is_empty(),
                 has_passphrase: c.passphrase.as_ref().is_some_and(|p| !p.is_empty()),
                 has_account_id: c.account_id.as_ref().is_some_and(|v| !v.is_empty()),
-                has_wallet_address: c
-                    .wallet_address
-                    .as_ref()
-                    .is_some_and(|v| !v.is_empty()),
+                has_wallet_address: c.wallet_address.as_ref().is_some_and(|v| !v.is_empty()),
                 has_private_key: c.private_key.as_ref().is_some_and(|v| !v.is_empty()),
                 account_index: c.account_index,
                 subaccount_index: c.subaccount_index,
@@ -662,9 +663,7 @@ impl SecureVault {
             .credentials
             .iter()
             .enumerate()
-            .filter(|(_, c)| {
-                c.profile_id.is_none() && c.venue.trim().to_lowercase() == venue_key
-            })
+            .filter(|(_, c)| c.profile_id.is_none() && c.venue.trim().to_lowercase() == venue_key)
             .map(|(i, _)| i)
             .collect();
         match matches.len() {
@@ -704,10 +703,7 @@ impl SecureVault {
     /// flag changed. The account profile in the state store remains the
     /// authoritative enablement source; this mirrors the flag for file-format
     /// consistency. Requires an unlocked vault.
-    pub fn update_profile_enabled(
-        &mut self,
-        enablement: &[(String, bool)],
-    ) -> anyhow::Result<()> {
+    pub fn update_profile_enabled(&mut self, enablement: &[(String, bool)]) -> anyhow::Result<()> {
         if !self.is_unlocked() {
             anyhow::bail!("Vault is locked. Please unlock before updating credentials.");
         }
@@ -886,7 +882,8 @@ mod tests {
             account_id: None,
             wallet_address: Some("0xwallet".into()),
             account_index: Some(0),
-            subaccount_index: Some(1),            api_key_index: None,
+            subaccount_index: Some(1),
+            api_key_index: None,
             private_key: None,
 
             enabled: true,
@@ -961,8 +958,9 @@ mod tests {
                 account_id: None,
                 wallet_address: None,
                 account_index: Some(7),
-                subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
 
                 enabled: true,
             }],
@@ -1019,7 +1017,8 @@ mod tests {
             account_id: Some("SENTINEL_ACCT_d88".into()),
             wallet_address: Some("SENTINEL_WALLET_e5a".into()),
             account_index: Some(3),
-            subaccount_index: Some(9),            api_key_index: None,
+            subaccount_index: Some(9),
+            api_key_index: None,
             private_key: None,
 
             enabled: true,
@@ -1060,8 +1059,9 @@ mod tests {
                 account_id: None,
                 wallet_address: Some("0xaaa".into()),
                 account_index: Some(1),
-                subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
 
                 enabled: true,
             }])
@@ -1078,8 +1078,9 @@ mod tests {
                 account_id: None,
                 wallet_address: None,
                 account_index: Some(2),
-                subaccount_index: Some(5),            api_key_index: None,
-            private_key: None,
+                subaccount_index: Some(5),
+                api_key_index: None,
+                private_key: None,
 
                 enabled: false,
             }])
@@ -1118,8 +1119,9 @@ mod tests {
                 account_id: None,
                 wallet_address: Some("0xkeep".into()),
                 account_index: Some(1),
-                subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
 
                 enabled: true,
             }])
@@ -1157,8 +1159,9 @@ mod tests {
                 account_id: None,
                 wallet_address: Some("0xkeep".into()),
                 account_index: Some(1),
-                subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
 
                 enabled: true,
             }])
@@ -1198,8 +1201,9 @@ mod tests {
                     account_id: None,
                     wallet_address: Some("0xhl".into()),
                     account_index: Some(1),
-                    subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                    subaccount_index: None,
+                    api_key_index: None,
+                    private_key: None,
 
                     enabled: true,
                 },
@@ -1212,8 +1216,9 @@ mod tests {
                     account_id: None,
                     wallet_address: None,
                     account_index: None,
-                    subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                    subaccount_index: None,
+                    api_key_index: None,
+                    private_key: None,
 
                     enabled: true,
                 },
@@ -1267,14 +1272,21 @@ mod tests {
                 account_id: None,
                 wallet_address: None,
                 account_index: None,
-                subaccount_index: None,            api_key_index: None,
-            private_key: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
 
                 enabled: true,
             }])
             .unwrap();
 
-        for bad in ["", "   ", "hyper liquid", "hyperliquid;drop", "../etc/passwd"] {
+        for bad in [
+            "",
+            "   ",
+            "hyper liquid",
+            "hyperliquid;drop",
+            "../etc/passwd",
+        ] {
             assert!(
                 vault.delete_credentials(bad).is_err(),
                 "delete accepted invalid venue {:?}",

@@ -141,7 +141,36 @@ export function getEnabledConnectedVenueCodes(
   if (settings.lighter_enabled === true) {
     active.add("LGT");
   }
+  if (settings.robinhood_enabled === true) {
+    active.add("RH");
+  }
 
+  return active;
+}
+
+/** Minimal shape of the venue status entries this helper reads. */
+export interface VenueStatusLike {
+  id: string;
+  status: string;
+}
+
+/**
+ * Venue codes currently admitted by the engine, derived from the backend's
+ * own system status — the same flag-OR-enabled-account rule `get_venues`
+ * applies — instead of stale frontend flag state. Only READ_ONLY venues
+ * count: OFFLINE means disabled, UNSUPPORTED means enabled without a real
+ * market-data adapter.
+ */
+export function getAdmittedVenueCodes(
+  status?: { active_venues?: VenueStatusLike[] } | null
+): Set<string> {
+  const active = new Set<string>();
+  for (const v of status?.active_venues ?? []) {
+    if (v.status === "READ_ONLY") {
+      const code = VENUE_ID_TO_CODE[v.id.toLowerCase()];
+      if (code) active.add(code);
+    }
+  }
   return active;
 }
 

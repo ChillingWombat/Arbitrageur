@@ -1,12 +1,13 @@
 import React from "react";
 import {
-  Layers,
   Percent,
   Coins,
   Triangle,
   Target,
-  FlaskConical,
+  Sigma,
+  Radar,
 } from "lucide-react";
+import { SpreadGapIcon } from "./icons";
 
 export type ActiveTab =
   | "spatial"
@@ -15,6 +16,7 @@ export type ActiveTab =
   | "triangle"
   | "prediction"
   | "statarb"
+  | "radar"
   | "portfolio_monitor";
 
 export interface NavigationProps {
@@ -39,9 +41,14 @@ export const Navigation: React.FC<NavigationProps> = ({
   const tabs = [
     {
       id: "spatial" as ActiveTab,
-      label: "Spread Range",
-      icon: Layers,
+      label: "Single Spread",
+      icon: SpreadGapIcon,
       badge: spatialCount > 0 ? spatialCount : undefined,
+    },
+    {
+      id: "radar" as ActiveTab,
+      label: "Spread Radar",
+      icon: Radar,
     },
     {
       id: "funding" as ActiveTab,
@@ -51,7 +58,7 @@ export const Navigation: React.FC<NavigationProps> = ({
     },
     {
       id: "spot_arb" as ActiveTab,
-      label: "Spot Trade",
+      label: "Spatial",
       icon: Coins,
       badge: spotCount > 0 ? spotCount : undefined,
     },
@@ -70,12 +77,12 @@ export const Navigation: React.FC<NavigationProps> = ({
     {
       id: "statarb" as ActiveTab,
       label: "Statistical",
-      icon: FlaskConical,
+      icon: Sigma,
     },
   ];
 
   return (
-    <nav className="w-full h-full grid grid-cols-6 divide-x divide-surface-border select-none bg-surface">
+    <nav className="w-full h-full grid grid-cols-7 divide-x divide-surface-border select-none bg-surface">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = activeTab === t.id;
@@ -83,7 +90,7 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             key={t.id}
             onClick={() => onSelectTab(t.id)}
-            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-[11px] xl:text-xs font-mono transition select-none group cursor-pointer ${
+            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-xs xl:text-xs font-mono transition select-none group cursor-pointer ${
               isActive
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/50 font-medium"
@@ -103,7 +110,7 @@ export const Navigation: React.FC<NavigationProps> = ({
             {t.badge !== undefined && (
               <span className="inline-flex items-center justify-center min-w-[16px] h-4 shrink-0">
                 <span
-                  className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  className={`px-1.5 py-0.2 rounded-sm text-xs font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                     isActive
                       ? "bg-accent text-white shadow-2xs"
                       : "bg-accent-dim text-accent border border-accent-line/60"

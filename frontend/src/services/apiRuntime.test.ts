@@ -98,6 +98,8 @@ const REGISTERED_NATIVE_COMMANDS = [
   "unlock_vault",
   "lock_vault",
   "delete_exchange_credentials",
+  "delete_account_credentials",
+  "get_account_credentials",
   "execute_spatial_candidates",
   "list_signal_executions",
   "get_ticker_position_state",

@@ -9,6 +9,7 @@ pub mod prediction_synthetic;
 pub mod risk_math;
 pub mod calibration;
 pub mod dislocation;
+pub mod pair_monitor;
 
 pub use rolling_stats::*;
 pub use spatial_spread::*;
@@ -21,6 +22,7 @@ pub use prediction_synthetic::*;
 pub use risk_math::*;
 pub use calibration::*;
 pub use dislocation::*;
+pub use pair_monitor::*;
 
 #[cfg(test)]
 mod tests {

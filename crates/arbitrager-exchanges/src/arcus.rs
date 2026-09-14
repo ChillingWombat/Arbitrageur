@@ -26,7 +26,9 @@ impl ArcusAdapter {
         api_key: Option<String>,
         api_secret: Option<String>,
     ) -> Self {
-        let base = base_url.unwrap_or_else(|| "https://api.arcus.exchange".to_string());
+        // api.arcus.exchange does not resolve; the live host is
+        // api.arcus.xyz (verified via /health, 2026-09).
+        let base = base_url.unwrap_or_else(|| "https://api.arcus.xyz".to_string());
         Self {
             venue_id: VenueId::new("arcus"),
             client: Client::builder().build().unwrap_or_default(),

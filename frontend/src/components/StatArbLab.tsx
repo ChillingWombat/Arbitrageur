@@ -124,24 +124,6 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
   return (
     <div className="p-4 space-y-4 overflow-y-auto h-full">
-      {/* Top Banner */}
-      <div className="bg-surface px-4 py-3 rounded-xl border border-surface-border flex items-center justify-between shadow-2xs">
-        <div>
-          <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900">
-            Quantitative Analytics & Statistical Arbitrage Lab
-          </h2>
-          <p className="text-xs text-slate-500 mt-1">
-            2D Online Kalman Filter dynamic hedge ratio estimation, Ornstein-Uhlenbeck MLE fitting, and Bertram-style numerical threshold search.
-          </p>
-        </div>
-
-        <div className="flex items-center space-x-2 text-xs font-mono">
-          <span className="px-2.5 py-1 rounded-sm bg-surface-raised border border-surface-border text-slate-500">
-            <span className="text-profit font-bold">Rust-side calculation</span>
-          </span>
-        </div>
-      </div>
-
       {errorMsg && (
         <div className="bg-loss-dim border border-loss-border text-loss px-4 py-3 rounded-lg text-xs font-mono flex items-center justify-between">
           <div className="flex items-center space-x-2">
@@ -188,10 +170,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           {/* Mode Switch & Manual Inputs */}
           <div className="bg-surface-raised border border-surface-border rounded-md p-2.5 font-mono text-xs flex items-center justify-between gap-3 shadow-2xs">
             <div className="flex items-center space-x-2">
-              <span className="text-[10px] text-slate-500">Input Mode:</span>
+              <span className="text-xs text-slate-500">Input Mode:</span>
               <button
                 onClick={() => setIsManual(false)}
-                className={`px-2 py-0.5 rounded-sm text-[11px] transition ${
+                className={`px-2 py-0.5 rounded-sm text-xs transition ${
                   !isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
                 }`}
               >
@@ -199,7 +181,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </button>
               <button
                 onClick={() => setIsManual(true)}
-                className={`px-2 py-0.5 rounded-sm text-[11px] transition ${
+                className={`px-2 py-0.5 rounded-sm text-xs transition ${
                   isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
                 }`}
               >
@@ -210,21 +192,21 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             {isManual && (
               <div className="flex items-center space-x-2">
                 <div className="flex items-center space-x-1">
-                  <span className="text-[10px] text-slate-500">Y:</span>
+                  <span className="text-xs text-slate-500">Y:</span>
                   <input
                     type="number"
                     value={priceY}
                     onChange={(e) => setPriceY(parseFloat(e.target.value) || 0)}
-                    className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-[11px]"
+                    className="w-20 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-xs"
                   />
                 </div>
                 <div className="flex items-center space-x-1">
-                  <span className="text-[10px] text-slate-500">X:</span>
+                  <span className="text-xs text-slate-500">X:</span>
                   <input
                     type="number"
                     value={priceX}
                     onChange={(e) => setPriceX(parseFloat(e.target.value) || 0)}
-                    className="w-16 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-[11px]"
+                    className="w-16 px-1.5 py-0.5 bg-surface border border-surface-border rounded-sm text-slate-900 text-xs"
                   />
                 </div>
               </div>
@@ -234,21 +216,21 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           {/* Metrics Row */}
           <div className="grid grid-cols-3 gap-3 font-mono text-xs">
             <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
-              <span className="text-[10px] text-slate-500">Hedge Ratio (Beta)</span>
+              <span className="text-xs text-slate-500">Hedge Ratio (Beta)</span>
               <div className="text-base font-bold text-accent mt-0.5">
                 {latest ? latest.dynamic_hedge_ratio.toFixed(4) : "—"}
               </div>
             </div>
 
             <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
-              <span className="text-[10px] text-slate-500">Residual Spread</span>
+              <span className="text-xs text-slate-500">Residual Spread</span>
               <div className="text-base font-bold text-slate-900 mt-0.5">
                 {latest ? `$${latest.residual_spread.toFixed(2)}` : "—"}
               </div>
             </div>
 
             <div className="p-3 bg-surface-raised border border-surface-border rounded-md shadow-2xs">
-              <span className="text-[10px] text-slate-500">Spread Z-Score</span>
+              <span className="text-xs text-slate-500">Spread Z-Score</span>
               <div
                 className={`text-base font-bold mt-0.5 ${
                   latest && Math.abs(latest.z_score) > 2
@@ -265,7 +247,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
           {/* Interactive SVG Sparkline Chart */}
           <div className="bg-surface-raised border border-surface-border rounded-md p-4 font-mono text-xs shadow-2xs">
-            <div className="flex justify-between text-[10px] text-slate-500 mb-2">
+            <div className="flex justify-between text-xs text-slate-500 mb-2">
               <span>Residual Z-Score Spread Walk (Last 25 Cycles)</span>
               <span className="text-accent font-medium">Entry Threshold: +/- 2.0 Z</span>
             </div>
@@ -299,7 +281,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               )}
             </div>
 
-            <div className="flex justify-between text-[9px] text-slate-400 mt-2">
+            <div className="flex justify-between text-xs text-slate-400 mt-2">
               <span className="text-profit">-2.0 Z Buy</span>
               <span className="text-slate-500">0.0 Z Mean</span>
               <span className="text-loss">+2.0 Z Short</span>
@@ -310,7 +292,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           <div className="p-3 rounded-md bg-surface-raised border border-surface-border flex items-center justify-between text-xs font-mono shadow-2xs">
             <span className="text-slate-500">Current Arbitrage Signal:</span>
             <span
-              className={`font-semibold px-2 py-0.5 rounded-sm text-[11px] ${
+              className={`font-semibold px-2 py-0.5 rounded-sm text-xs ${
                 latest?.signal === "ENTRY_LONG_SPREAD"
                   ? "bg-profit-dim text-profit border border-profit-border"
                   : latest?.signal === "ENTRY_SHORT_SPREAD"
@@ -332,7 +314,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               <h3 className="text-xs font-mono font-bold text-slate-900">
                 Bertram (2010) Optimal Thresholds
               </h3>
-              <span className="text-[10px] text-slate-500 font-mono">Analytic solver maximizing return per unit time</span>
+              <span className="text-xs text-slate-500 font-mono">Analytic solver maximizing return per unit time</span>
             </div>
 
             <button
@@ -346,7 +328,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           {/* Input Controls */}
           <div className="grid grid-cols-2 gap-3 text-xs font-mono">
             <div>
-              <span className="text-slate-500 text-[10px]">Speed (Theta):</span>
+              <span className="text-slate-500 text-xs">Speed (Theta):</span>
               <input
                 type="number"
                 step="0.01"
@@ -357,7 +339,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             </div>
 
             <div>
-              <span className="text-slate-500 text-[10px]">Volatility (Sigma):</span>
+              <span className="text-slate-500 text-xs">Volatility (Sigma):</span>
               <input
                 type="number"
                 step="0.01"
@@ -368,7 +350,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             </div>
 
             <div>
-              <span className="text-slate-500 text-[10px]">Mean (Mu):</span>
+              <span className="text-slate-500 text-xs">Mean (Mu):</span>
               <input
                 type="number"
                 step="0.01"
@@ -379,7 +361,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             </div>
 
             <div>
-              <span className="text-slate-500 text-[10px]">Cost (c):</span>
+              <span className="text-slate-500 text-xs">Cost (c):</span>
               <input
                 type="number"
                 step="0.001"
@@ -435,7 +417,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             </button>
 
             {ouFitResult && (
-              <div className="mt-2 p-2.5 rounded-sm bg-surface-raised border border-surface-border text-[11px] font-mono text-slate-700 flex justify-between shadow-2xs">
+              <div className="mt-2 p-2.5 rounded-sm bg-surface-raised border border-surface-border text-xs font-mono text-slate-700 flex justify-between shadow-2xs">
                 <span>Theta: {ouFitResult.theta.toFixed(3)}</span>
                 <span>Mu: {ouFitResult.mu.toFixed(3)}</span>
                 <span>Sigma: {ouFitResult.sigma.toFixed(3)}</span>

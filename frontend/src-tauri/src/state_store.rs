@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-use std::fs;
-use std::path::{Path, PathBuf};
 use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub const ALLOWED_STRATEGY_IDS: [&str; 5] =
     ["futures", "funding", "spot", "prediction", "stat_arb"];
@@ -18,8 +18,17 @@ pub struct AccountProfile {
     pub label: String,
     pub enabled: bool,
     pub is_default: bool,
+    /// Lighter-family account tier: "standard" | "plus" | "premium".
+    /// Drives the venue's shared-IP rate budget (the lowest tier among
+    /// enabled accounts applies) and fee adjustments (+0.5bps for plus).
+    #[serde(default = "default_account_tier")]
+    pub account_tier: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_account_tier() -> String {
+    "standard".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,18 +196,34 @@ pub struct VenueSampleEntry {
     pub best_ask: f64,
 }
 
+/// One persisted pair-signal lifecycle row (monitor_signals table).
+#[derive(Debug, Clone)]
+pub struct MonitorSignalRow {
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub status: String,
+    pub first_seen_ms: i64,
+    pub last_seen_ms: i64,
+    pub last_edge_bps: Option<f64>,
+    pub last_dev_bps: Option<f64>,
+}
+
+const ACCOUNT_COLS: &str =
+    "id, venue, label, enabled, is_default, account_tier, created_at, updated_at";
+
 const ACCOUNT_BY_ID_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
 FROM exchange_accounts
 WHERE id = ?1";
 
 const ACCOUNT_ALL_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
 FROM exchange_accounts
 ORDER BY venue COLLATE NOCASE, is_default DESC, label COLLATE NOCASE, id";
 
 const ACCOUNT_BY_VENUE_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
 FROM exchange_accounts
 WHERE venue = ?1
 ORDER BY is_default DESC, label COLLATE NOCASE, id";
@@ -223,12 +248,13 @@ WHERE venue = ?1 AND id = ?3 AND enabled = 1";
 
 const ACCOUNT_UPSERT_SQL: &str = "\
 INSERT INTO exchange_accounts
-    (id, venue, label, enabled, is_default, created_at, updated_at)
-VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)
+    (id, venue, label, enabled, is_default, account_tier, created_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6)
 ON CONFLICT(id) DO UPDATE SET
     label = excluded.label,
     enabled = excluded.enabled,
     is_default = 0,
+    account_tier = excluded.account_tier,
     updated_at = excluded.updated_at";
 
 const ROUTE_JOIN_SQL: &str = "\
@@ -346,6 +372,47 @@ CREATE INDEX ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);
 PRAGMA user_version = 3;
 COMMIT;";
 
+/// v4 adds the exchange account tier (Lighter-family Standard/Plus/Premium
+/// drive rate-limit budgets and fee adjustments) and the durable ticker
+/// exemption table for the spread monitor's hide/exclude control.
+const MIGRATION_V4_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE exchange_accounts
+    ADD COLUMN account_tier TEXT NOT NULL DEFAULT 'standard'
+    CHECK(account_tier IN ('standard', 'plus', 'premium', 'builder'));
+CREATE TABLE ticker_exemptions (
+    symbol TEXT PRIMARY KEY COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    exempt INTEGER NOT NULL CHECK(exempt IN (0, 1)),
+    updated_at TEXT NOT NULL
+);
+PRAGMA user_version = 4;
+COMMIT;";
+
+/// v5 adds the spread monitor's persisted configuration (single-row JSON)
+/// and the durable pair-signal lifecycle table so discovery timestamps and
+/// status survive restarts without replaying the full sample history.
+const MIGRATION_V5_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE monitor_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE monitor_signals (
+    symbol TEXT NOT NULL COLLATE NOCASE,
+    buy_venue TEXT NOT NULL COLLATE NOCASE,
+    sell_venue TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL CHECK(status IN ('collecting','watching','signaled','qualified','stale')),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    last_edge_bps REAL,
+    last_dev_bps REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, buy_venue, sell_venue)
+);
+PRAGMA user_version = 5;
+COMMIT;";
+
 /// Durable, non-secret account/route metadata store. Contains no credential
 /// material; secrets remain exclusively in the encrypted vault.
 pub struct StateStore {
@@ -410,9 +477,22 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<AccountProfile> {
         label: row.get(2)?,
         enabled: row.get(3)?,
         is_default: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        account_tier: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
+}
+
+/// Validated account tier label for `exchange_accounts.account_tier`.
+fn normalize_account_tier(raw: &str) -> anyhow::Result<String> {
+    let t = raw.trim().to_lowercase();
+    match t.as_str() {
+        "standard" | "plus" | "premium" | "builder" => Ok(t),
+        "" => Ok("standard".into()),
+        other => anyhow::bail!(
+            "invalid account tier '{other}': expected standard, plus, premium, or builder"
+        ),
+    }
 }
 
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<StrategyAccountRoute> {
@@ -445,8 +525,7 @@ fn signal_exec_from_row(row: &Row<'_>) -> rusqlite::Result<SignalExecution> {
         id: row.get(0)?,
         strategy_id: row.get(1)?,
         symbol: row.get(2)?,
-        status: SignalStatus::from_status(&status_raw)
-            .unwrap_or(SignalStatus::Unresolved),
+        status: SignalStatus::from_status(&status_raw).unwrap_or(SignalStatus::Unresolved),
         route_id: row.get(4)?,
         account_long_id: row.get(5)?,
         account_short_id: row.get(6)?,
@@ -501,12 +580,14 @@ impl StateStore {
             if let Some(parent) = path.parent() {
                 fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
             }
-            drop(fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(false)
-                .mode(0o600)
-                .open(path)?);
+            drop(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(path)?,
+            );
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         }
         let conn = Connection::open(path)?;
@@ -543,7 +624,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 3 {
+        if version > 5 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -564,6 +645,18 @@ impl StateStore {
                 return Err(err.into());
             }
         }
+        if version <= 3 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V4_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 4 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V5_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
         Ok(())
     }
 
@@ -574,10 +667,12 @@ impl StateStore {
         label: &str,
         enabled: bool,
         make_default: bool,
+        account_tier: &str,
     ) -> anyhow::Result<AccountProfile> {
         let id = normalize_id(id)?;
         let venue = normalize_venue(venue)?;
         let label = normalize_label(label)?;
+        let account_tier = normalize_account_tier(account_tier)?;
         let now = Utc::now().to_rfc3339();
 
         let mut conn = self.conn.lock();
@@ -602,7 +697,7 @@ impl StateStore {
 
         tx.execute(
             ACCOUNT_UPSERT_SQL,
-            params![id, venue, label, enabled, now],
+            params![id, venue, label, enabled, account_tier, now],
         )?;
 
         let chosen: Option<String> = if make_default && enabled {
@@ -652,8 +747,8 @@ impl StateStore {
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let (stored_venue, stored_enabled) = row
-            .ok_or_else(|| anyhow::anyhow!("account {account_id} does not exist"))?;
+        let (stored_venue, stored_enabled) =
+            row.ok_or_else(|| anyhow::anyhow!("account {account_id} does not exist"))?;
         if stored_venue != venue {
             anyhow::bail!("account {account_id} does not belong to venue {venue}");
         }
@@ -713,10 +808,8 @@ impl StateStore {
             return Ok(false);
         };
 
-        let deleted = match tx.execute(
-            "DELETE FROM exchange_accounts WHERE id = ?1",
-            [&account_id],
-        ) {
+        let deleted = match tx.execute("DELETE FROM exchange_accounts WHERE id = ?1", [&account_id])
+        {
             Ok(n) => n,
             Err(rusqlite::Error::SqliteFailure(err, _))
                 if err.code == rusqlite::ErrorCode::ConstraintViolation =>
@@ -763,7 +856,7 @@ impl StateStore {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id, venue, label, enabled, is_default, created_at, updated_at
+                "SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
 FROM exchange_accounts
 WHERE venue = ?1 AND enabled = 1
 ORDER BY is_default DESC, label COLLATE NOCASE, id
@@ -812,14 +905,13 @@ LIMIT 1",
             anyhow::bail!("enabled routes require both endpoint accounts to be enabled");
         }
 
-        let (first, second) =
-            if (account_a.venue.as_str(), account_a.id.as_str())
-                <= (account_b.venue.as_str(), account_b.id.as_str())
-            {
-                (account_a, account_b)
-            } else {
-                (account_b, account_a)
-            };
+        let (first, second) = if (account_a.venue.as_str(), account_a.id.as_str())
+            <= (account_b.venue.as_str(), account_b.id.as_str())
+        {
+            (account_a, account_b)
+        } else {
+            (account_b, account_a)
+        };
 
         let prior_created: Option<String> = tx
             .query_row(
@@ -1130,8 +1222,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             binds.push(Box::new(st.as_str().to_string()));
         }
         sql.push_str(" ORDER BY created_at DESC, id");
-        let refs: Vec<&dyn rusqlite::types::ToSql> =
-            binds.iter().map(|b| b.as_ref()).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(refs.as_slice(), signal_exec_from_row)?
@@ -1279,12 +1370,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                     continue;
                 }
                 stmt.execute(params![
-                    symbol,
-                    venue_id,
-                    ts_ms,
-                    e.mid,
-                    e.best_bid,
-                    e.best_ask
+                    symbol, venue_id, ts_ms, e.mid, e.best_bid, e.best_ask
                 ])?;
             }
         }
@@ -1352,6 +1438,180 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// Set or clear a ticker's monitor/strategy exemption. Exempt tickers are
+    /// dropped from the spread-monitor watchlist; a row with `exempt = false`
+    /// is deleted so the table only ever holds active exemptions.
+    pub fn set_ticker_exempt(&self, symbol: &str, exempt: bool) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(symbol)?;
+        let conn = self.conn.lock();
+        if exempt {
+            conn.execute(
+                "INSERT INTO ticker_exemptions (symbol, exempt, updated_at)
+                 VALUES (?1, 1, ?2)
+                 ON CONFLICT(symbol) DO UPDATE SET exempt = 1, updated_at = ?2",
+                params![symbol, Utc::now().to_rfc3339()],
+            )?;
+        } else {
+            conn.execute("DELETE FROM ticker_exemptions WHERE symbol = ?1", [&symbol])?;
+        }
+        Ok(())
+    }
+
+    /// Symbols currently exempted from the monitor.
+    pub fn exempt_tickers(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT symbol FROM ticker_exemptions WHERE exempt = 1 ORDER BY symbol")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remove every ticker exemption — the global "reveal all" control.
+    pub fn clear_ticker_exemptions(&self) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM ticker_exemptions", [])?)
+    }
+
+    /// Account tiers of enabled accounts on a venue — the venue's shared-IP
+    /// rate budget is driven by the lowest tier present (Lighter applies the
+    /// lowest limit across accounts on the same IP).
+    pub fn venue_enabled_tiers(&self, venue: &str) -> anyhow::Result<Vec<String>> {
+        let venue = normalize_venue(venue)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT account_tier FROM exchange_accounts
+             WHERE venue = ?1 AND enabled = 1",
+        )?;
+        let rows = stmt.query_map([&venue], |r| r.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Spread monitor: persisted config + pair-signal lifecycle            */
+    /* ------------------------------------------------------------------ */
+
+    /// Load the monitor config JSON blob, if one was saved.
+    pub fn monitor_config_json(&self) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT config_json FROM monitor_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Persist the monitor config JSON blob (single row, upserted).
+    pub fn save_monitor_config_json(&self, json: &str) -> anyhow::Result<()> {
+        if json.is_empty() || json.len() > 64 * 1024 {
+            anyhow::bail!("invalid monitor config payload");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO monitor_config (id, config_json, updated_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET config_json = ?1, updated_at = ?2",
+            params![json, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    /// Upsert one pair signal's lifecycle state.
+    pub fn upsert_monitor_signal(
+        &self,
+        symbol: &str,
+        buy_venue: &str,
+        sell_venue: &str,
+        status: &str,
+        first_seen_ms: i64,
+        last_seen_ms: i64,
+        last_edge_bps: Option<f64>,
+        last_dev_bps: Option<f64>,
+    ) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(symbol)?;
+        let buy_venue = normalize_venue(buy_venue)?;
+        let sell_venue = normalize_venue(sell_venue)?;
+        match status {
+            "collecting" | "watching" | "signaled" | "qualified" | "stale" => {}
+            other => anyhow::bail!("invalid monitor signal status '{other}'"),
+        }
+        if first_seen_ms < 0 || last_seen_ms < 0 {
+            anyhow::bail!("negative signal timestamp");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO monitor_signals
+                 (symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
+                  last_edge_bps, last_dev_bps, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(symbol, buy_venue, sell_venue) DO UPDATE SET
+                 status = ?4, first_seen_ms = ?5, last_seen_ms = ?6,
+                 last_edge_bps = ?7, last_dev_bps = ?8, updated_at = ?9",
+            params![
+                symbol,
+                buy_venue,
+                sell_venue,
+                status,
+                first_seen_ms,
+                last_seen_ms,
+                last_edge_bps,
+                last_dev_bps,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Load every persisted pair signal's lifecycle state.
+    pub fn monitor_signals(&self) -> anyhow::Result<Vec<MonitorSignalRow>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
+                    last_edge_bps, last_dev_bps
+             FROM monitor_signals",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(MonitorSignalRow {
+                symbol: r.get(0)?,
+                buy_venue: r.get(1)?,
+                sell_venue: r.get(2)?,
+                status: r.get(3)?,
+                first_seen_ms: r.get(4)?,
+                last_seen_ms: r.get(5)?,
+                last_edge_bps: r.get(6)?,
+                last_dev_bps: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Drop signal rows whose pair is no longer tracked (venue or symbol
+    /// left the watchlist) so stale lifecycle state can't resurface.
+    pub fn prune_monitor_signals(&self, keep: &[(String, String, String)]) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        let mut all: Vec<(String, String, String)> = {
+            let mut s =
+                conn.prepare("SELECT symbol, buy_venue, sell_venue FROM monitor_signals")?;
+            let rows = s
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        all.retain(|k| {
+            !keep
+                .iter()
+                .any(|(s, b, sv)| s == &k.0 && b == &k.1 && sv == &k.2)
+        });
+        let mut del = conn.prepare(
+            "DELETE FROM monitor_signals WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3",
+        )?;
+        for k in all {
+            del.execute(params![k.0, k.1, k.2])?;
+        }
+        Ok(())
+    }
+
     fn legs_for(conn: &Connection, signal_id: &str) -> rusqlite::Result<Vec<SignalLeg>> {
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
@@ -1391,7 +1651,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 3);
+            assert_eq!(version, 5);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -1416,14 +1676,14 @@ mod tests {
     fn test_default_account_lifecycle() {
         let store = StateStore::open_in_memory().unwrap();
         let first = store
-            .upsert_account("hl_main", "HyperLiquid", "Main", true, false)
+            .upsert_account("hl_main", "HyperLiquid", "Main", true, false, "standard")
             .unwrap();
         assert!(first.is_default);
         assert!(store.has_enabled_account("hyperliquid").unwrap());
         assert!(!store.has_enabled_account("lighter").unwrap());
 
         let second = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false)
+            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard")
             .unwrap();
         assert!(!second.is_default);
         assert_eq!(
@@ -1432,31 +1692,29 @@ mod tests {
         );
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", true, false)
+            .upsert_account("hl_zulu", "hyperliquid", "Zulu", true, false, "standard")
             .unwrap();
-        store
-            .set_default_account("hyperliquid", "hl_zulu")
-            .unwrap();
+        store.set_default_account("hyperliquid", "hl_zulu").unwrap();
         assert!(store.get_account("hl_zulu").unwrap().unwrap().is_default);
         assert!(!store.get_account("hl_main").unwrap().unwrap().is_default);
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", false, false)
+            .upsert_account("hl_zulu", "hyperliquid", "Zulu", false, false, "standard")
             .unwrap();
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
         assert_eq!(promoted.id, "hl_alt");
 
         store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", false, false)
+            .upsert_account("hl_alt", "hyperliquid", "Alt", false, false, "standard")
             .unwrap();
         store
-            .upsert_account("hl_main", "hyperliquid", "Main", false, false)
+            .upsert_account("hl_main", "hyperliquid", "Main", false, false, "standard")
             .unwrap();
         assert!(store.default_account("hyperliquid").unwrap().is_none());
         assert!(!store.has_enabled_account("hyperliquid").unwrap());
 
         let reenabled = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false)
+            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard")
             .unwrap();
         assert!(reenabled.is_default);
     }
@@ -1465,13 +1723,13 @@ mod tests {
     fn test_delete_default_promotes_alphabetically_first_enabled() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("a_main", "hyperliquid", "Main", true, true)
+            .upsert_account("a_main", "hyperliquid", "Main", true, true, "standard")
             .unwrap();
         store
-            .upsert_account("a_zulu", "hyperliquid", "Zulu", true, false)
+            .upsert_account("a_zulu", "hyperliquid", "Zulu", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("a_beta", "hyperliquid", "Beta", true, false)
+            .upsert_account("a_beta", "hyperliquid", "Beta", true, false, "standard")
             .unwrap();
         assert!(store.delete_account("a_main").unwrap());
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
@@ -1482,38 +1740,52 @@ mod tests {
     fn test_validation_and_immutable_venue() {
         let store = StateStore::open_in_memory().unwrap();
         assert!(store
-            .upsert_account("", "hyperliquid", "Main", true, false)
+            .upsert_account("", "hyperliquid", "Main", true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account("bad id", "hyperliquid", "Main", true, false)
+            .upsert_account("bad id", "hyperliquid", "Main", true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account(&"x".repeat(129), "hyperliquid", "Main", true, false)
+            .upsert_account(
+                &"x".repeat(129),
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard"
+            )
             .is_err());
         assert!(store
-            .upsert_account("a", "", "Main", true, false)
+            .upsert_account("a", "", "Main", true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account("a", "bad venue", "Main", true, false)
+            .upsert_account("a", "bad venue", "Main", true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", "", true, false)
+            .upsert_account("a", "hyperliquid", "", true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", &"y".repeat(81), true, false)
+            .upsert_account("a", "hyperliquid", &"y".repeat(81), true, false, "standard")
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", "bad\u{0007}label", true, false)
+            .upsert_account(
+                "a",
+                "hyperliquid",
+                "bad\u{0007}label",
+                true,
+                false,
+                "standard"
+            )
             .is_err());
 
         store
-            .upsert_account("acct1", "hyperliquid", "Main", true, false)
+            .upsert_account("acct1", "hyperliquid", "Main", true, false, "standard")
             .unwrap();
         assert!(store
-            .upsert_account("acct1", "lighter", "Moved", true, false)
+            .upsert_account("acct1", "lighter", "Moved", true, false, "standard")
             .is_err());
         let renamed = store
-            .upsert_account("acct1", "HyperLiquid", "Renamed", true, false)
+            .upsert_account("acct1", "HyperLiquid", "Renamed", true, false, "standard")
             .unwrap();
         assert_eq!(renamed.venue, "hyperliquid");
         assert_eq!(renamed.label, "Renamed");
@@ -1523,13 +1795,13 @@ mod tests {
     fn test_label_uniqueness_scoped_to_venue() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("a1", "hyperliquid", "Main", true, false)
+            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard")
             .unwrap();
         assert!(store
-            .upsert_account("a2", "hyperliquid", "MAIN", true, false)
+            .upsert_account("a2", "hyperliquid", "MAIN", true, false, "standard")
             .is_err());
         store
-            .upsert_account("a2", "lighter", "main", true, false)
+            .upsert_account("a2", "lighter", "main", true, false, "standard")
             .unwrap();
         assert_eq!(store.list_accounts(None).unwrap().len(), 2);
     }
@@ -1538,16 +1810,16 @@ mod tests {
     fn test_route_rules_and_canonicalization() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false)
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("hl_b", "hyperliquid", "HL B", true, false)
+            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false)
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_off", "lighter", "LT Off", false, false)
+            .upsert_account("lt_off", "lighter", "LT Off", false, false, "standard")
             .unwrap();
 
         assert!(store
@@ -1595,10 +1867,10 @@ mod tests {
     fn test_referenced_account_delete_requires_route_removal() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false)
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false)
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
             .unwrap();
         store
             .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -1617,16 +1889,16 @@ mod tests {
     fn test_eligible_strategy_routes_filters() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false)
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("hl_b", "hyperliquid", "HL B", true, false)
+            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false)
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_b", "lighter", "LT B", true, false)
+            .upsert_account("lt_b", "lighter", "LT B", true, false, "standard")
             .unwrap();
 
         store
@@ -1639,7 +1911,7 @@ mod tests {
             .upsert_strategy_route("r3", "futures", "Stale", "hl_a", "lt_b", true)
             .unwrap();
         store
-            .upsert_account("lt_b", "lighter", "LT B", false, false)
+            .upsert_account("lt_b", "lighter", "LT B", false, false, "standard")
             .unwrap();
 
         let eligible = store
@@ -1670,10 +1942,10 @@ mod tests {
         {
             let store = StateStore::open(&file).unwrap();
             store
-                .upsert_account("hl_a", "hyperliquid", "Main", true, false)
+                .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
                 .unwrap();
             store
-                .upsert_account("lt_a", "lighter", "Alt", true, false)
+                .upsert_account("lt_a", "lighter", "Alt", true, false, "standard")
                 .unwrap();
             store
                 .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -1683,11 +1955,7 @@ mod tests {
         let store = StateStore::open(&file).unwrap();
         let accounts = store.list_accounts(None).unwrap();
         assert_eq!(accounts.len(), 2);
-        assert!(store
-            .get_account("hl_a")
-            .unwrap()
-            .unwrap()
-            .is_default);
+        assert!(store.get_account("hl_a").unwrap().unwrap().is_default);
         let routes = store.list_strategy_routes(Some("futures")).unwrap();
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].account_a_id, "hl_a");
@@ -1695,7 +1963,12 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
-    fn two_leg_signal(id: &str, symbol: &str, acct_a: Option<&str>, acct_b: Option<&str>) -> NewSignalExecution {
+    fn two_leg_signal(
+        id: &str,
+        symbol: &str,
+        acct_a: Option<&str>,
+        acct_b: Option<&str>,
+    ) -> NewSignalExecution {
         NewSignalExecution {
             id: id.to_string(),
             strategy_id: "futures".into(),
@@ -1724,14 +1997,19 @@ mod tests {
     fn test_signal_lifecycle_blocks_then_frees_ticker() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "Main", true, false)
+            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "Main", true, false)
+            .upsert_account("lt_a", "lighter", "Main", true, false, "standard")
             .unwrap();
 
         let sig = store
-            .record_signal_execution(&two_leg_signal("s1", "BTC-USDC", Some("hl_a"), Some("lt_a")))
+            .record_signal_execution(&two_leg_signal(
+                "s1",
+                "BTC-USDC",
+                Some("hl_a"),
+                Some("lt_a"),
+            ))
             .unwrap();
         assert_eq!(sig.status, SignalStatus::InFlight);
         assert_eq!(sig.account_long_id.as_deref(), Some("hl_a"));
@@ -1851,7 +2129,7 @@ mod tests {
 
         // account_has_signal_legs gates deletion.
         store
-            .upsert_account("hl_a", "hyperliquid", "Main", true, false)
+            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
             .unwrap();
         assert!(!store.account_has_signal_legs("hl_a").unwrap());
         store
@@ -1903,10 +2181,7 @@ mod tests {
             store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
             Some(1_000)
         );
-        assert_eq!(
-            store.earliest_spread_sample_ts("SOL-USDC").unwrap(),
-            None
-        );
+        assert_eq!(store.earliest_spread_sample_ts("SOL-USDC").unwrap(), None);
     }
 
     #[test]
@@ -1928,13 +2203,14 @@ mod tests {
         assert_eq!(rows.len(), 2, "non-finite/non-positive mids are dropped");
         assert_eq!(rows[0].venue_id, "hyperliquid", "venue ids normalize");
         // Empty batches and negative timestamps are no-ops.
-        store
-            .record_spread_samples("BTC-USDC", 5_000, &[])
-            .unwrap();
+        store.record_spread_samples("BTC-USDC", 5_000, &[]).unwrap();
         store
             .record_spread_samples("BTC-USDC", -1, &[sample("lighter", 1.0)])
             .unwrap();
-        assert_eq!(store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap().len(), 2);
+        assert_eq!(
+            store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap().len(),
+            2
+        );
     }
 
     #[test]

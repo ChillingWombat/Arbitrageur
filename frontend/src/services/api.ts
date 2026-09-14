@@ -26,6 +26,7 @@ import type {
   WfoOptimizationResult,
   AccountDto,
   AccountUpsertInput,
+  AccountCredentialInput,
   StrategyAccountRouteDto,
   StrategyRouteUpsertInput,
   SpatialCandidateInput,
@@ -33,6 +34,8 @@ import type {
   SignalExecutionDto,
   TickerPositionState,
   FlattenResultDto,
+  MonitorSnapshotDto,
+  MonitorConfigDto,
 } from "../types/index.ts";
 
 // Check if running inside Tauri IPC environment
@@ -100,6 +103,8 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "list_accounts",
   "upsert_account",
   "delete_account",
+  "delete_account_credentials",
+  "get_account_credentials",
   "set_default_account",
   "list_strategy_routes",
   "upsert_strategy_route",
@@ -375,6 +380,15 @@ export const api = {
     return invokeDesktop<boolean>("delete_account", { accountId });
   },
 
+  async deleteAccountCredentials(accountId: string): Promise<boolean> {
+    return invokeDesktop<boolean>("delete_account_credentials", { accountId });
+  },
+
+  /** Full decrypted credentials for one account. Requires unlocked vault; desktop only. */
+  async getAccountCredentials(accountId: string): Promise<AccountCredentialInput> {
+    return invokeDesktop<AccountCredentialInput>("get_account_credentials", { accountId });
+  },
+
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {
     return invokeDesktop<void>("set_default_account", { venue, accountId });
   },
@@ -435,6 +449,45 @@ export const api = {
 
   async runWfoCalibration(symbol: string): Promise<WfoOptimizationResult> {
     return invokeDesktop<WfoOptimizationResult>("run_wfo_calibration", { symbol });
+  },
+
+  // ---- Spread Range Monitor (Opportunity Radar) ----
+  async getMonitorSnapshot(): Promise<MonitorSnapshotDto | null> {
+    return invokeDesktop<MonitorSnapshotDto | null>("get_monitor_snapshot");
+  },
+
+  async getMonitorConfig(): Promise<MonitorConfigDto> {
+    return invokeDesktop<MonitorConfigDto>("get_monitor_config");
+  },
+
+  async setMonitorConfig(config: MonitorConfigDto): Promise<void> {
+    return invokeDesktop<void>("set_monitor_config", { config });
+  },
+
+  async setTickerExempted(symbol: string, exempt: boolean): Promise<void> {
+    return invokeDesktop<void>("set_ticker_exempted", { symbol, exempt });
+  },
+
+  async getExemptedTickers(): Promise<string[]> {
+    return invokeDesktop<string[]>("get_exempted_tickers");
+  },
+
+  async revealAllTickers(): Promise<number> {
+    return invokeDesktop<number>("reveal_all_tickers");
+  },
+
+  async executeMonitorOpportunity(
+    symbol: string,
+    buyVenue: string,
+    sellVenue: string,
+    sizeUsd: number,
+  ): Promise<SimStepResultDto> {
+    return invokeDesktop<SimStepResultDto>("execute_monitor_opportunity", {
+      symbol,
+      buyVenue,
+      sellVenue,
+      sizeUsd,
+    });
   },
 };
 

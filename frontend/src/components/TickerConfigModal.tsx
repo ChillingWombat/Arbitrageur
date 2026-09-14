@@ -12,6 +12,7 @@ import {
   Layers,
   Sparkles,
 } from "lucide-react";
+import { SpreadGapIcon } from "./icons";
 import type { TickerStrategyConfigDto, ArbitrageExecutionMode, SlidingWindowOption } from "../types";
 import {
   PERP_TICKERS,
@@ -77,6 +78,32 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 }) => {
   // Strategy Tab State
   const [activeStrategyTab, setActiveStrategyTab] = useState<"futures" | "funding" | "spot">("futures");
+
+  // Ticker visibility/exemption (monitor + strategy selection)
+  const [exempted, setExempted] = useState(false);
+  const [exemptBusy, setExemptBusy] = useState(false);
+  const tickerBase = useMemo(
+    () => tickerSymbol.split(/[-_/]/)[0].toUpperCase(),
+    [tickerSymbol],
+  );
+  useEffect(() => {
+    if (!isOpen) return;
+    api
+      .getExemptedTickers()
+      .then((list) => setExempted(list.includes(tickerBase)))
+      .catch(() => {});
+  }, [isOpen, tickerBase]);
+  const handleToggleExempt = async () => {
+    setExemptBusy(true);
+    try {
+      await api.setTickerExempted(tickerBase, !exempted);
+      setExempted(!exempted);
+    } catch {
+      /* leave state unchanged on failure */
+    } finally {
+      setExemptBusy(false);
+    }
+  };
 
   // Sync active tab with initialStrategy when opening
   useEffect(() => {
@@ -331,6 +358,26 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 />
               </div>
             )}
+            {/* Hide/exempt from the monitor + all strategy selection.
+                Durable on the backend; reversed globally via System
+                Settings → Reveal All Tickers. */}
+            <button
+              type="button"
+              disabled={exemptBusy}
+              onClick={handleToggleExempt}
+              className={`px-2.5 py-1 rounded-md border text-xs font-mono font-semibold transition cursor-pointer ${
+                exempted
+                  ? "bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100"
+                  : "text-slate-500 border-surface-border hover:text-slate-700 hover:bg-surface-raised"
+              }`}
+              title={
+                exempted
+                  ? "Hidden from the Opportunity Radar and strategy selection — click to restore"
+                  : "Hide this ticker from the Opportunity Radar and strategy selection"
+              }
+            >
+              {exempted ? "Hidden" : "Hide"}
+            </button>
             <button
               type="button"
               onClick={onClose}
@@ -348,7 +395,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
             <div className="space-y-3">
               <div className="px-2 pt-1 flex items-center justify-between">
-                <span className="text-[10px] font-mono font-bold tracking-wider text-slate-400">
+                <span className="text-xs font-mono font-bold tracking-wider text-slate-400">
                   Strategies
                 </span>
               </div>
@@ -363,10 +410,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                   }`}
                 >
-                  <Layers className={`w-4 h-4 shrink-0 ${activeStrategyTab === "futures" ? "text-blue-600" : "text-slate-400"}`} />
+                  <SpreadGapIcon className={`w-4 h-4 shrink-0 ${activeStrategyTab === "futures" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">Spread Range</div>
-                    <div className="text-[10px] font-normal text-slate-400 truncate">Basis & Dislocation</div>
+                    <div className="truncate">Single Spread</div>
+                    <div className="text-xs font-normal text-slate-400 truncate">Basis & Dislocation</div>
                   </div>
                 </button>
 
@@ -382,7 +429,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <Percent className={`w-4 h-4 shrink-0 ${activeStrategyTab === "funding" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate">Funding Rate</div>
-                    <div className="text-[10px] font-normal text-slate-400 truncate">Rate Arbitrage</div>
+                    <div className="text-xs font-normal text-slate-400 truncate">Rate Arbitrage</div>
                   </div>
                 </button>
 
@@ -397,16 +444,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 >
                   <Coins className={`w-4 h-4 shrink-0 ${activeStrategyTab === "spot" ? "text-blue-600" : "text-slate-400"}`} />
                   <div className="min-w-0 flex-1">
-                    <div className="truncate">Spot Trade</div>
-                    <div className="text-[10px] font-normal text-slate-400 truncate">Atomic Flash</div>
+                    <div className="truncate">Spatial</div>
+                    <div className="text-xs font-normal text-slate-400 truncate">Atomic Flash</div>
                   </div>
                 </button>
               </div>
             </div>
 
             {/* Left Sidebar Bottom Ticker Quick Telemetry Card */}
-            <div className="p-2.5 bg-surface border border-surface-border rounded-lg space-y-1.5 font-mono text-[11px]">
-              <div className="flex items-center justify-between text-slate-500 text-[10px] font-bold">
+            <div className="p-2.5 bg-surface border border-surface-border rounded-lg space-y-1.5 font-mono text-xs">
+              <div className="flex items-center justify-between text-slate-500 text-xs font-bold">
                 <span>Asset Telemetry</span>
                 <span className="text-accent">{safeLeverage.effectiveLeverage}x Lev</span>
               </div>
@@ -466,7 +513,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               {/* Section: Profit Hurdle & Dislocation Filters */}
               <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <TrendingUp className="w-3.5 h-3.5 text-accent" />
                     <span>Hurdle Rate & Dislocation Triggers</span>
                     <InfoTooltip text="Calculates minimum statistical spread needed for atomic entry." />
@@ -503,7 +550,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         Sliding Window
                         <InfoTooltip text="Time duration for calculating historical mean spread baseline and statistical percentile thresholds." />
                       </span>
-                      <span className="text-[10px] text-slate-400">Baseline</span>
+                      <span className="text-xs text-slate-400">Baseline</span>
                     </label>
                     <div className="grid grid-cols-5 gap-1 bg-surface-raised p-1 rounded-md border border-surface-border h-[38px] items-center">
                       {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
@@ -511,7 +558,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                           key={w}
                           type="button"
                           onClick={() => setSlidingWindow(w)}
-                          className={`h-7 rounded-sm text-[11px] font-mono transition cursor-pointer flex items-center justify-center ${
+                          className={`h-7 rounded-sm text-xs font-mono transition cursor-pointer flex items-center justify-center ${
                             slidingWindow === w
                               ? "bg-accent text-white font-bold shadow-2xs"
                               : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
@@ -530,7 +577,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                         Window Percentile
                         <InfoTooltip text="Strictly filters entries to spreads at or above this percentile of the rolling sliding window." />
                       </span>
-                      <span className="text-[10px] text-slate-400">Min 50%</span>
+                      <span className="text-xs text-slate-400">Min 50%</span>
                     </label>
                     <select
                       value={windowPercentile}
@@ -553,12 +600,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <div>
                       <span className="font-bold text-blue-800">Nominal Hurdle:</span>{" "}
                       <strong className="text-blue-700 text-sm">{nominalHurdleBps.toFixed(1)} BPS</strong>
-                      <span className="text-[11px] text-slate-500 ml-2">
+                      <span className="text-xs text-slate-500 ml-2">
                         ({avgFeeBps.toFixed(1)} fee + {avgSpreadBps.toFixed(1)} friction + {targetProfitBps.toFixed(1)} target profit)
                       </span>
                     </div>
                   </div>
-                  <span className="text-[10px] font-medium bg-white px-2 py-0.5 rounded-sm border border-blue-200 text-blue-800 shrink-0">
+                  <span className="text-xs font-medium bg-white px-2 py-0.5 rounded-sm border border-blue-200 text-blue-800 shrink-0">
                     Gross spread must exceed {nominalHurdleBps.toFixed(1)} BPS
                   </span>
                 </div>
@@ -601,7 +648,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               {/* Section: Sizing, Grid Scaling & Cross-Venue Contract Compatibility */}
               <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-accent" />
                     <span>Position Sizing & Grid Accumulation</span>
                     <InfoTooltip text="Cross-exchange compatible lot sizing, maximum accumulated grid units, and position clearing." />
@@ -613,7 +660,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <div className="space-y-1.5">
                     <label className="text-slate-700 font-medium flex items-center justify-between">
                       <span>Unit Size ({ticker.base})</span>
-                      <span className="text-[10px] text-slate-400">Per Leg</span>
+                      <span className="text-xs text-slate-400">Per Leg</span>
                     </label>
                     <input
                       type="number"
@@ -625,7 +672,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       }
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <div className="text-[10px] text-slate-500">
+                    <div className="text-xs text-slate-500">
                       Notional: ~${(unitSize * ticker.basePrice).toFixed(2)} USD
                     </div>
                   </div>
@@ -634,7 +681,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <div className="space-y-1.5">
                     <label className="text-slate-700 font-medium flex items-center justify-between">
                       <span>Max Grid Units</span>
-                      <span className="text-[10px] text-slate-400">1 - 20 Units</span>
+                      <span className="text-xs text-slate-400">1 - 20 Units</span>
                     </label>
                     <input
                       type="number"
@@ -645,7 +692,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setMaxAccumulatedUnits(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <div className="text-[10px] text-slate-500">
+                    <div className="text-xs text-slate-500">
                       Max Exposure: ~${(maxAccumulatedUnits * unitSize * ticker.basePrice).toFixed(2)} USD
                     </div>
                   </div>
@@ -654,7 +701,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <div className="space-y-1.5">
                     <label className="text-slate-700 font-medium flex items-center justify-between">
                       <span>Accumulated Units</span>
-                      <span className="text-[10px] text-slate-400">Currently Filled</span>
+                      <span className="text-xs text-slate-400">Currently Filled</span>
                     </label>
                     <div className="flex items-center space-x-2">
                       <div className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-800 font-bold text-center">
@@ -663,13 +710,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       <button
                         type="button"
                         onClick={() => setCurrentAccumulatedUnits(0)}
-                        className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-md text-[11px] transition cursor-pointer"
+                        className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-md text-xs transition cursor-pointer"
                         title="Clear accumulated units back to 0"
                       >
                         <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
                       </button>
                     </div>
-                    <div className="text-[10px] text-slate-500">
+                    <div className="text-xs text-slate-500">
                       {currentAccumulatedUnits >= maxAccumulatedUnits ? (
                         <span className="text-amber-700 font-semibold">Grid Capacity Full</span>
                       ) : (
@@ -680,7 +727,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </div>
 
                 {/* Compatibility Info Bar */}
-                <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border flex items-center justify-between text-[11px] text-slate-600">
+                <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border flex items-center justify-between text-xs text-slate-600">
                   <div className="flex items-center space-x-2">
                     <span className="font-semibold text-slate-800">Minimum Compatible Lot:</span>
                     <span className="bg-surface px-2 py-0.5 rounded-sm border border-surface-border font-bold text-slate-900">
@@ -695,7 +742,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               {/* Section: Safe Futures Leverage & Margin Risk Calculator */}
               <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
                 <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
                     <span>Safe Effective Leverage & Margin Requirement</span>
                     <InfoTooltip text="Calculates minimum safe leverage ratio and margin requirements across enabled exchanges." />
@@ -722,25 +769,25 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   </div>
 
                   <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 font-semibold">Effective Safe Leverage</span>
+                    <span className="text-xs text-slate-500 font-semibold">Effective Safe Leverage</span>
                     <div className="text-sm font-bold text-blue-700">{safeLeverage.effectiveLeverage}x</div>
-                    <span className="text-[10px] text-slate-400">Max venue: {safeLeverage.maxVenueLeverage}x</span>
+                    <span className="text-xs text-slate-400">Max venue: {safeLeverage.maxVenueLeverage}x</span>
                   </div>
 
                   <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 font-semibold">Margin / Unit (USD)</span>
+                    <span className="text-xs text-slate-500 font-semibold">Margin / Unit (USD)</span>
                     <div className="text-sm font-bold text-slate-900">
                       ${safeLeverage.totalMarginRequiredUsd.toFixed(2)}
                     </div>
-                    <span className="text-[10px] text-slate-400">${safeLeverage.marginPerLegUsd.toFixed(2)} / leg</span>
+                    <span className="text-xs text-slate-400">${safeLeverage.marginPerLegUsd.toFixed(2)} / leg</span>
                   </div>
 
                   <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-[10px] text-slate-500 font-semibold">Liquidation Buffer</span>
+                    <span className="text-xs text-slate-500 font-semibold">Liquidation Buffer</span>
                     <div className="text-sm font-bold text-emerald-700">
                       {safeLeverage.liquidationBufferPct.toFixed(1)}%
                     </div>
-                    <span className="text-[10px] text-slate-400">Dual-leg safety margin</span>
+                    <span className="text-xs text-slate-400">Dual-leg safety margin</span>
                   </div>
                 </div>
               </div>
@@ -752,7 +799,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <div className="space-y-4">
               <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
                 <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <Coins className="w-3.5 h-3.5 text-accent" />
                     <span>Delta-Neutral Perpetual Funding Carry Settings</span>
                   </h3>
@@ -769,7 +816,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setFundingTradeSizeUsd(Math.max(100, parseFloat(e.target.value) || 1000))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Notional Per Leg</p>
+                    <p className="text-xs text-slate-400">Notional Per Leg</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -782,7 +829,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setFundingMinAprPct(Math.max(0.1, parseFloat(e.target.value) || 1))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Ignore opportunities below this net APR</p>
+                    <p className="text-xs text-slate-400">Ignore opportunities below this net APR</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -796,7 +843,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setFundingHoldingDays(Math.max(1, parseInt(e.target.value, 10) || 14))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Projected Carry Amortization Duration</p>
+                    <p className="text-xs text-slate-400">Projected Carry Amortization Duration</p>
                   </div>
                 </div>
               </div>
@@ -808,9 +855,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <div className="space-y-4">
               <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
                 <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold text-slate-900 tracking-wider flex items-center space-x-1.5">
+                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
                     <Layers className="w-3.5 h-3.5 text-accent" />
-                    <span>Cross-Exchange Spot Arbitrage Parameters</span>
+                    <span>Cross-Exchange Spatial Arbitrage Parameters</span>
                   </h3>
                 </div>
 
@@ -825,7 +872,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setSpotTradeSizeUsd(Math.max(10, parseFloat(e.target.value) || 500))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Capital deployed per flash cycle</p>
+                    <p className="text-xs text-slate-400">Capital deployed per flash cycle</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -839,7 +886,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setSpotMaxSlippageBps(Math.max(0.1, parseFloat(e.target.value) || 5))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Orderbook Tolerance Limit</p>
+                    <p className="text-xs text-slate-400">Orderbook Tolerance Limit</p>
                   </div>
 
                   <div className="space-y-1.5">
@@ -852,7 +899,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                       onChange={(e) => setSpotMinNetSpreadBps(Math.max(0.1, parseFloat(e.target.value) || 1))}
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-[10px] text-slate-400">Net spread required to auto-execute</p>
+                    <p className="text-xs text-slate-400">Net spread required to auto-execute</p>
                   </div>
                 </div>
               </div>

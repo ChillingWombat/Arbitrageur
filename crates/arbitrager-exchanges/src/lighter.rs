@@ -28,14 +28,25 @@ impl LighterAdapter {
         account_index: Option<u64>,
         api_key_private_key: Option<String>,
     ) -> Self {
+        Self::new_with_venue(base_url, account_index, api_key_private_key, "lighter")
+    }
+
+    /// Lighter-protocol deployment under a different venue identity — e.g.
+    /// Robinhood Chain serves the same API at api.rh.lighter.xyz.
+    pub fn new_with_venue(
+        base_url: Option<String>,
+        account_index: Option<u64>,
+        api_key_private_key: Option<String>,
+        venue_id: &str,
+    ) -> Self {
         let base = base_url.unwrap_or_else(|| "https://mainnet.zklighter.elliot.ai".to_string());
         Self {
-            venue_id: VenueId::new("lighter"),
+            venue_id: VenueId::new(venue_id),
             client: Client::builder().build().unwrap_or_default(),
             base_url: base,
             account_index,
             api_key_private_key,
-            rate_limiter: AccountRequestCoordinator::new("lighter", 200, 3000, 500, 15000),
+            rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
 
@@ -79,6 +90,33 @@ impl ExchangeAdapter for LighterAdapter {
         "Lighter"
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        // Bypass the single-flight cache (get_json) and any CDN edge cache:
+        // a unique query param forces the request to reach origin so the
+        // measured round-trip reflects real exchange latency, not a cache hit.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let url = format!("{}/api/v1/orderBookDetails?cb={}", self.base_url, nonce);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Lighter ping failed: {}", resp.status());
+        }
+        // A WAF challenge page can return 200 HTML — only a real JSON
+        // response counts as reaching the exchange.
+        let is_json = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|ct| ct.contains("json"))
+            .unwrap_or(false);
+        if !is_json {
+            anyhow::bail!("Lighter ping returned non-JSON response (likely edge challenge)");
+        }
+        Ok(())
+    }
+
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let res = self.get_json("/api/v1/orderBookDetails").await?;
         let details = res.get("order_book_details").and_then(|d| d.as_array()).ok_or_else(|| {
@@ -92,7 +130,16 @@ impl ExchangeAdapter for LighterAdapter {
             let price_dec = item.get("price_decimals").and_then(|p| p.as_u64()).unwrap_or(4) as u32;
             let size_dec = item.get("size_decimals").and_then(|s| s.as_u64()).unwrap_or(2) as u32;
 
-            let symbol = Symbol::perp(symbol_str, "USD");
+            let is_spot = item
+                .get("market_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t.eq_ignore_ascii_case("spot"))
+                .unwrap_or(false);
+            let symbol = if is_spot {
+                Symbol::spot(symbol_str, "USD")
+            } else {
+                Symbol::perp(symbol_str, "USD")
+            };
             markets.push(MarketMetadata {
                 symbol,
                 venue: self.venue_id.clone(),
@@ -175,10 +222,67 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let _ = symbol;
-        anyhow::bail!(
-            "Lighter funding-rate ingestion is not implemented; refusing to return a baseline rate"
-        )
+        let coin = symbol
+            .trim()
+            .replace('/', "-")
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .to_uppercase();
+        if coin.is_empty() {
+            anyhow::bail!("Lighter funding-rate request carries no market identifier");
+        }
+        let rates = self.fetch_funding_rates().await?;
+        rates
+            .into_iter()
+            .find(|r| {
+                r.symbol
+                    .split('-')
+                    .next()
+                    .map(|b| b.eq_ignore_ascii_case(&coin))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| anyhow::anyhow!("No Lighter funding rate for {}", symbol))
+    }
+
+    /// Lighter-protocol venues expose `/api/v1/funding-rates`: one call
+    /// returns every market's funding alongside third-party reference
+    /// rates (binance, bybit, hyperliquid). Only the venue's own entries —
+    /// labelled `exchange: "lighter"` on both mainnet and the Robinhood
+    /// Chain deployment — are used; external exchange rows are context, not
+    /// this venue's rate. Rates are hourly fractions.
+    async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
+        let res = self.get_json("/api/v1/funding-rates").await?;
+        let rows = res
+            .get("funding_rates")
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing funding_rates in Lighter response"))?;
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        for row in rows {
+            let exchange = row.get("exchange").and_then(|e| e.as_str()).unwrap_or("");
+            if !exchange.eq_ignore_ascii_case("lighter") {
+                continue;
+            }
+            let base = row.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            let rate_f = row.get("rate").and_then(|r| r.as_f64());
+            if base.is_empty() || !seen.insert(base.to_uppercase()) {
+                continue;
+            }
+            if let Some(rate_f) = rate_f {
+                let rate = Decimal::try_from(rate_f).unwrap_or(dec!(0));
+                out.push(FundingRate {
+                    venue: self.venue_id.clone(),
+                    symbol: Symbol::perp(base, "USD").canonical(),
+                    rate,
+                    predicted_rate: None,
+                    interval_hours: 1, // Lighter funding accrues hourly
+                    next_funding_time: Utc::now(),
+                    timestamp: Utc::now(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
@@ -340,10 +444,11 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
         .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
 
     let clean = symbol.trim().replace('/', "-").to_uppercase();
-    let market_type = if clean.split('-').any(|t| t == "SPOT") {
-        "spot"
-    } else {
-        "perp"
+    // Market type is a trailing `-SPOT` suffix only — a perp literally named
+    // "SPOT" (e.g. "SPOT-USDC") must still resolve as a perp.
+    let (market_type, lookup) = match clean.strip_suffix("-SPOT") {
+        Some(base) => ("spot", base.to_string()),
+        None => ("perp", clean.clone()),
     };
     let matches_type = |e: &serde_json::Value| {
         e.get("market_type")
@@ -352,11 +457,6 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
             .unwrap_or(false)
     };
 
-    let lookup = clean
-        .split('-')
-        .filter(|t| *t != "SPOT")
-        .collect::<Vec<_>>()
-        .join("-");
     if lookup.is_empty() {
         anyhow::bail!("Lighter symbol '{}' carries no market identifier", symbol);
     }

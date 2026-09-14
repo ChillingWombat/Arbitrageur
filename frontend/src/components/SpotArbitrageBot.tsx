@@ -175,7 +175,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
             type="button"
             onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}
             className="flex items-center space-x-1.5 px-3 py-1.5 rounded-md border border-accent-line/60 bg-surface hover:bg-slate-100 text-xs font-mono text-accent font-semibold transition shadow-xs cursor-pointer"
-            title="Configure Spot Arbitrage Parameters"
+            title="Configure Spatial Arbitrage Parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
             <span>Configure Strategy</span>
@@ -191,7 +191,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}
@@ -201,37 +201,37 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
       {/* Summary Telemetry Metrics Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         <div className="bg-surface p-3 rounded-lg border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono">Scanned Discrepancies</div>
+          <div className="text-xs font-medium text-slate-400 font-mono">Scanned Discrepancies</div>
           <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">{opportunities.length} Pairs</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">
+          <div className="text-xs text-slate-500 mt-0.5">
             {opportunities.length > 0 ? "Live Orderbook Depth" : "Zero synthetic pairs"}
           </div>
         </div>
 
         <div className="bg-surface p-3 rounded-lg border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono">Max Net Spread</div>
+          <div className="text-xs font-medium text-slate-400 font-mono">Max Net Spread</div>
           <div className="text-lg font-bold text-emerald-600 font-mono mt-0.5">
             {bestOpp ? `+${bestOpp.net_spread_bps.toFixed(1)} BPS` : "—"}
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">
+          <div className="text-xs text-slate-500 mt-0.5">
             {bestOpp ? `${bestOpp.symbol} (${bestOpp.buy_venue} ➔ ${bestOpp.sell_venue})` : (loading ? "Scanning..." : "Requires configured spot venues")}
           </div>
         </div>
 
         <div className="bg-surface p-3 rounded-lg border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono">Target Bot Latency</div>
+          <div className="text-xs font-medium text-slate-400 font-mono">Target Bot Latency</div>
           <div className="text-lg font-bold text-slate-900 font-mono mt-0.5">
             {bestOpp ? `~${bestOpp.estimated_latency_ms.toFixed(1)} ms` : "—"}
           </div>
-          <div className="text-[10px] text-slate-500 mt-0.5">
+          <div className="text-xs text-slate-500 mt-0.5">
             {opportunities.length > 0 ? "Concurrent Atomic Dispatch" : "Idle (No active pairs)"}
           </div>
         </div>
 
         <div className="bg-surface p-3 rounded-lg border border-surface-border">
-          <div className="text-[11px] font-medium text-slate-400 font-mono">Realized Spot Profit</div>
+          <div className="text-xs font-medium text-slate-400 font-mono">Realized Spot Profit</div>
           <div className="text-lg font-bold text-emerald-600 font-mono mt-0.5">+${totalSpotPnl.toFixed(2)} USD</div>
-          <div className="text-[10px] text-slate-500 mt-0.5">{spotLogs.length} Bot Fills</div>
+          <div className="text-xs text-slate-500 mt-0.5">{spotLogs.length} Bot Fills</div>
         </div>
       </div>
 
@@ -267,7 +267,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           {/* Table */}
           <div className="flex-1 overflow-x-auto">
             <table className="w-full text-left text-xs font-mono select-none">
-              <thead className="bg-surface-raised/70 border-b border-surface-border text-slate-500 tracking-wider text-[10px]">
+              <thead className="bg-surface-raised/70 border-b border-surface-border text-slate-500 tracking-wider text-xs">
                 <tr>
                   <th className="py-2.5 px-4 font-semibold">Pair</th>
                   <th className="py-2.5 px-4 font-semibold">Buy Venue (Ask)</th>
@@ -285,7 +285,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                     <td colSpan={8} className="py-12 text-center text-slate-400 font-sans">
                       <div className="flex flex-col items-center justify-center space-y-2">
                         <Coins className="w-8 h-8 text-slate-300" />
-                        <p className="font-medium text-slate-600">No Spot Arbitrage Discrepancies Detected</p>
+                        <p className="font-medium text-slate-600">No Spatial Arbitrage Discrepancies Detected</p>
                         <p className="text-xs text-slate-400 max-w-md">
                           Requires at least 2 enabled and connected spot venues with configured API credentials in System Settings (e.g. Kraken Spot, Arcus, Robinhood).
                         </p>
@@ -311,11 +311,11 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                         </td>
                         <td className="py-3 px-4">
                           <div className="font-semibold text-slate-800">{opp.buy_venue}</div>
-                          <div className="text-[11px] text-slate-500 font-mono">${opp.buy_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                          <div className="text-xs text-slate-500 font-mono">${opp.buy_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
                         </td>
                         <td className="py-3 px-4">
                           <div className="font-semibold text-slate-800">{opp.sell_venue}</div>
-                          <div className="text-[11px] text-slate-500 font-mono">${opp.sell_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
+                          <div className="text-xs text-slate-500 font-mono">${opp.sell_price.toLocaleString(undefined, { minimumFractionDigits: 2 })}</div>
                         </td>
                         <td className="py-3 px-4 text-right text-slate-700">
                           +{opp.gross_spread_bps.toFixed(1)}
@@ -343,7 +343,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                               e.stopPropagation();
                               handleSelectOpp(opp);
                             }}
-                            className={`px-3 py-1 rounded text-[11px] font-medium transition ${
+                            className={`px-3 py-1 rounded text-xs font-medium transition ${
                               isSelected
                                 ? "bg-accent text-white font-semibold"
                                 : "bg-surface-raised border border-surface-border text-slate-700 hover:border-accent hover:text-accent"
@@ -505,7 +505,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
               Recent Spot Bot Fills
             </h3>
             {spotLogs.length === 0 ? (
-              <div className="text-[11px] text-slate-400 font-sans py-4 text-center">
+              <div className="text-xs text-slate-400 font-sans py-4 text-center">
                 No spot executions logged yet in this session.
               </div>
             ) : (
@@ -513,17 +513,17 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 {spotLogs.slice(0, 5).map((log) => (
                   <div
                     key={log.id}
-                    className="p-2 bg-surface-raised/60 rounded-md border border-surface-border text-[11px] font-mono flex items-center justify-between"
+                    className="p-2 bg-surface-raised/60 rounded-md border border-surface-border text-xs font-mono flex items-center justify-between"
                   >
                     <div>
                       <div className="font-bold text-slate-800">{log.symbol}</div>
-                      <div className="text-[10px] text-slate-500">
+                      <div className="text-xs text-slate-500">
                         {log.venue_a} ➔ {log.venue_b}
                       </div>
                     </div>
                     <div className="text-right">
                       <div className="font-bold text-emerald-600">+${(log.net_profit || 0).toFixed(2)}</div>
-                      <div className="text-[10px] text-slate-400">{Math.round((log.latency_us || 0) / 1000)}ms</div>
+                      <div className="text-xs text-slate-400">{Math.round((log.latency_us || 0) / 1000)}ms</div>
                     </div>
                   </div>
                 ))}

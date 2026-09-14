@@ -17,7 +17,7 @@ export interface VenueStatusDto {
   name: string;
   market_type: string;
   status: string;
-  latency_ms: number;
+  latency_ms: number | null;
   fee_bps: number;
 }
 
@@ -311,9 +311,7 @@ export interface EngineSettingsDto {
 
   // Exchange Enablement Toggles
   hyperliquid_enabled?: boolean;
-  hyperliquid_spot_enabled?: boolean;
   lighter_enabled?: boolean;
-  lighter_spot_enabled?: boolean;
   vanta_enabled?: boolean;
   robinhood_enabled?: boolean;
   arcus_enabled?: boolean;
@@ -390,6 +388,7 @@ export interface EngineSettingsDto {
 
   // Execution & Warm-up Modes
   trading_mode: "paper" | "real";
+  paper_starting_balance_usd?: number;
   fast_warmup_enabled: boolean;
 
   // Subaccount mappings
@@ -446,6 +445,9 @@ export interface AccountDto {
   accountIndex: number | null;
   subaccountIndex: number | null;
   apiKeyIndex: number | null;
+  /** "standard" | "plus" | "premium" | "builder" — drives the venue's
+   *  shared-IP rate budget and Lighter Plus fee adjustment. */
+  accountTier: string;
 }
 
 export interface AccountCredentialInput {
@@ -468,6 +470,8 @@ export interface AccountUpsertInput {
   label?: string;
   enabled?: boolean;
   makeDefault?: boolean;
+  /** Omit to preserve the stored tier on update (standard on create). */
+  accountTier?: string | null;
   credentials?: AccountCredentialInput | null;
 }
 
@@ -680,6 +684,90 @@ export interface TriangleExecutionParams {
   trade_size_usd: number;
   min_profit_bps: number;
   net_spread_bps?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Spread Range Monitor (Opportunity Radar)
+// ---------------------------------------------------------------------------
+
+export type MonitorRowStatus =
+  | "collecting"
+  | "watching"
+  | "signaled"
+  | "qualified"
+  | "stale";
+
+export interface CapacityTierDto {
+  sizeUsd: number;
+  filledUsd: number;
+  netBps: number | null;
+  expectedNetBps: number | null;
+  marginalPWin: number | null;
+}
+
+export interface MonitorRowDto {
+  symbol: string;
+  buyVenue: string;
+  sellVenue: string;
+  status: MonitorRowStatus;
+  currentEdgeBps: number | null;
+  baselineBps: number | null;
+  deviationBps: number | null;
+  netCaptureBps: number | null;
+  pWin: number | null;
+  expectedProfitBps: number | null;
+  expectedProfitUsd: number | null;
+  optimalSizeUsd: number | null;
+  breakevenSizeUsd: number | null;
+  capacityLadder: CapacityTierDto[];
+  fundingCarryBps: number | null;
+  fundingUnknown: boolean;
+  firstSeenMs: number | null;
+  lastSeenMs: number | null;
+  signalAgeSecs: number | null;
+  expectedConvergeSecs: number | null;
+  qualificationProgress: number;
+  observedEpisodes: number;
+  executable: boolean;
+  blockReason: string | null;
+}
+
+export interface VenueLaneStatusDto {
+  venue: string;
+  readBudgetPerMin: number;
+  usedLastMin: number;
+  symbols: number;
+  refreshIntervalSecs: number;
+  backingOff: boolean;
+  accountTier: string;
+}
+
+export interface MonitorSnapshotDto {
+  generatedTsMs: number;
+  running: boolean;
+  rows: MonitorRowDto[];
+  watchlist: string[];
+  venues: VenueLaneStatusDto[];
+  exempted: string[];
+}
+
+export interface MonitorConfigDto {
+  enabled: boolean;
+  watchlistRefreshSecs: number;
+  qualificationMode: "auto" | "manual";
+  manualWindowSecs: number;
+  halfLifeMultiplier: number;
+  minWindowSecs: number;
+  frictionCoverMult: number;
+  capacityTiersUsd: number[];
+  minWinProbability: number;
+  executionMode: "one_way" | "two_way";
+  participationCap: number;
+  txReservePct: number;
+  minEpisodes: number;
+  historyWindowSecs: number;
+  maxSymbolIntervalSecs: number;
+  minSymbolIntervalSecs: number;
 }
 
 export * from "./tickers";

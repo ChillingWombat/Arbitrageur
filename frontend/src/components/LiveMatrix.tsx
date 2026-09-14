@@ -45,7 +45,8 @@ import { TickerConfigModal } from "./TickerConfigModal";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
-  symbol: string;
+  /** Selected ticker; null until the user explicitly picks one in the explorer. */
+  symbol: string | null;
   orderbooks: VenueOrderBookDto[];
   opportunities: SpatialOpportunityDto[];
   onRefresh: (qty?: number, minBps?: number) => void;
@@ -77,11 +78,14 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   isPaused = false,
   positionState = null,
 }) => {
+  // Empty-string alias for internal computations; `symbol` stays nullable so
+  // "no selection" is distinguishable from a real ticker.
+  const sym = symbol ?? "";
   const rawTicker = (availableTickers ?? PERP_TICKERS).find((t) => t.symbol === symbol) || {
-    symbol,
-    base: symbol.split("-")[0],
-    quote: symbol.split("-")[1] || "USDC",
-    name: symbol,
+    symbol: sym,
+    base: sym.split("-")[0],
+    quote: sym.split("-")[1] || "USDC",
+    name: sym,
     venues: ["HL", "LGT", "VNT"],
     basePrice: 100,
   };
@@ -97,9 +101,10 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
     };
   }, [rawTicker, activeVenues]);
 
-  // A ticker is only real when at least 2 of its venues are connected —
-  // otherwise the panel shows N/A instead of fabricated defaults.
-  const hasActiveTicker = activeVenues.length >= 2;
+  // A ticker is only real when the user selected one AND at least 2 of its
+  // venues are connected — otherwise the panel shows N/A instead of
+  // fabricated defaults.
+  const hasActiveTicker = symbol !== null && activeVenues.length >= 2;
 
   // State
   const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
@@ -113,12 +118,12 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(() => new Map());
 
   const currentStrategyConfig: TickerStrategyConfigDto = useMemo(() => {
-    const existing = strategyConfigs.get(symbol);
+    const existing = strategyConfigs.get(sym);
     if (existing) return existing;
 
-    const minLot = getMinCompatibleSize(symbol, activeTicker.venues, activeTicker.basePrice).minCompatibleSize;
+    const minLot = getMinCompatibleSize(sym, activeTicker.venues, activeTicker.basePrice).minCompatibleSize;
     return {
-      symbol,
+      symbol: sym,
       targetProfitBps: minBps,
       windowPercentile: 50,
       maxAccumulatedUnits: 3,
@@ -140,7 +145,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
   const handleBotStart = () => {
     if (!isTickerEnabled && onToggleTicker) {
-      onToggleTicker(symbol, true);
+      onToggleTicker(sym, true);
     }
     bot.start();
   };
@@ -163,7 +168,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
   const handleOpenConfig = () => {
     if (onOpenTickerConfig) {
-      onOpenTickerConfig(symbol, "futures");
+      onOpenTickerConfig(sym, "futures");
     } else {
       setInternalConfigModalOpen(true);
     }
@@ -184,14 +189,15 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
 
   // Load persisted strategy config for active symbol on select
   useEffect(() => {
+    if (symbol === null) return;
     let isMounted = true;
     api
-      .getTickerStrategyConfig(symbol)
+      .getTickerStrategyConfig(sym)
       .then((cfg) => {
         if (isMounted && cfg) {
           setStrategyConfigs((prev) => {
             const next = new Map(prev);
-            next.set(symbol, cfg);
+            next.set(sym, cfg);
             return next;
           });
           setMinBps(cfg.targetProfitBps);
@@ -215,7 +221,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   const tickerStats = useMemo(() => {
     let count = 0;
     let pnl = 0;
-    const symKey = symbol.toUpperCase();
+    const symKey = sym.toUpperCase();
     const baseKey = symKey.split(/[-_/]/)[0];
 
     for (const log of executionLogs) {
@@ -238,7 +244,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
       return { venues: [], venueLabels: [], grid: [] };
     }
     return buildCrossVenueMatrix(
-      symbol,
+      sym,
       orderbooks,
       windowSeconds,
       orderQty,
@@ -394,7 +400,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
   const [bottomTab, setBottomTab] = useState<"opportunities" | "signal" | "history" | "telemetry" | "logs">("opportunities");
 
   const tickerLogsCount = useMemo(() => {
-    const symKey = symbol.toUpperCase();
+    const symKey = sym.toUpperCase();
     const baseKey = symKey.split(/[-_/]/)[0];
     return (executionLogs || []).filter((l) => {
       if (!l.symbol) return false;
@@ -409,11 +415,15 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
              (same layout as the other strategy pages) */}
       <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs select-none">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
+            Strategy Parameters
+          </span>
+
           {/* Symbol Pill */}
           <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1.5 rounded-md border border-surface-border">
             <span className="font-bold text-slate-900">{hasActiveTicker ? symbol : "N/A"}</span>
             {hasActiveTicker && (
-              <span className="text-[10px] font-semibold px-1.5 py-0.2 bg-blue-50 text-accent rounded-sm border border-blue-200">
+              <span className="text-xs font-semibold px-1.5 py-0.2 bg-blue-50 text-accent rounded-sm border border-blue-200">
                 PERP
               </span>
             )}
@@ -427,15 +437,11 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               title={`Signal ${positionState.blockingSignalIds.join(", ")} is in-flight or imbalanced — new orders on ${symbol} are refused until its legs confirm delta-neutral. Net filled position: ${positionState.netPositionQty}`}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-              <span className="font-bold text-[10px] tracking-wide">
+              <span className="font-bold text-xs tracking-wide">
                 Reconciling{positionState.netPositionQty !== 0 ? ` (${positionState.netPositionQty > 0 ? "+" : ""}${positionState.netPositionQty.toFixed(4)} net)` : ""}
               </span>
             </div>
           )}
-
-          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
-          </span>
 
           {/* Strategy parameters — hidden when no ticker is connected;
               the defaults would be fabricated. */}
@@ -536,7 +542,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                 Max Arb: {bestMatrixCell.netSpreadBps > 0 ? "+" : ""}
                 {bestMatrixCell.netSpreadBps.toFixed(1)} BPS
               </span>
-              <span className="text-[10px] text-slate-500 font-sans">
+              <span className="text-xs text-slate-500 font-sans">
                 ({bestMatrixCell.longVenue} ➔ {bestMatrixCell.shortVenue})
               </span>
             </div>
@@ -589,7 +595,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-[10px] font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}
@@ -611,18 +617,18 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               </h3>
             </div>
 
-            <div className="flex items-center space-x-3 text-[11px] font-mono">
+            <div className="flex items-center space-x-3 text-xs font-mono">
               {/* Min BPS Filter — set via Configure Strategy (Target Profit) */}
               <div
                 className="flex items-center space-x-1 bg-surface-raised px-2 py-0.5 rounded-sm border border-surface-border"
                 title="Minimum net spread threshold — equals Target Profit, edit via Configure Strategy"
               >
-                <span className="text-slate-500 text-[10px]">Min BPS:</span>
-                <span className="font-bold text-slate-900 text-[11px]">{minBps}</span>
+                <span className="text-slate-500 text-xs">Min BPS:</span>
+                <span className="font-bold text-slate-900 text-xs">{minBps}</span>
               </div>
 
               {/* Compact Color Legend */}
-              <div className="hidden sm:flex items-center space-x-2 text-[10px]">
+              <div className="hidden sm:flex items-center space-x-2 text-xs">
                 <div className="flex items-center space-x-1">
                   <span className="w-2 h-2 rounded-sm bg-emerald-100 border border-emerald-400 inline-block" />
                   <span className="text-emerald-800 font-medium">≥ {minBps}</span>
@@ -643,16 +649,27 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           <div className="overflow-auto max-h-[500px] rounded-md border border-surface-border">
             {venueMatrix.grid.length < 2 ? (
               <div className="py-12 text-center text-slate-500 font-mono text-xs px-4 space-y-1.5">
-                  <div className="font-bold text-slate-800 text-sm">Cross-Venue Arbitrage Unavailable</div>
-                  <div className="text-[11px] text-slate-500">
-                    At least 2 enabled &amp; connected exchanges are required for this ticker.
-                  </div>
+                  {symbol === null ? (
+                    <>
+                      <div className="font-bold text-slate-800 text-sm">No Ticker Selected</div>
+                      <div className="text-xs text-slate-500">
+                        Pick a market in the explorer to stream its live venue quotes.
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="font-bold text-slate-800 text-sm">Cross-Venue Arbitrage Unavailable</div>
+                      <div className="text-xs text-slate-500">
+                        At least 2 enabled &amp; connected exchanges are required for this ticker.
+                      </div>
+                    </>
+                  )}
                 </div>
               ) : (
                 <table className="w-full border-collapse font-mono text-xs">
                   <thead className="sticky top-0 z-20 bg-surface-raised shadow-2xs">
                     <tr className="bg-surface-raised border-b border-surface-border">
-                      <th className="p-2.5 text-left font-semibold text-slate-500 text-[10px] tracking-wider border-r border-b border-surface-border min-w-[120px] sticky top-0 left-0 bg-surface-raised z-30">
+                      <th className="p-2.5 text-left font-semibold text-slate-500 text-xs tracking-wider border-r border-b border-surface-border min-w-[120px] sticky top-0 left-0 bg-surface-raised z-30">
                         <div className="flex items-center justify-between">
                           <span>LONG ↓</span>
                           <span>SHORT →</span>
@@ -665,8 +682,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                             key={colVenue}
                             className="p-2 text-center font-bold text-slate-800 border-r border-b border-surface-border last:border-r-0 min-w-[110px] sticky top-0 bg-surface-raised z-20"
                           >
-                            <div className="text-[11px] text-slate-900">{colVenue}</div>
-                            <div className="text-[10px] font-normal text-profit mt-0.5">
+                            <div className="text-xs text-slate-900">{colVenue}</div>
+                            <div className="text-xs font-normal text-profit mt-0.5">
                               Sell @ {formatCurrencyPrice(sellPrice)}
                             </div>
                           </th>
@@ -683,8 +700,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                         <tr key={venueMatrix.venues[i]} className="hover:bg-surface-raised/40 transition">
                           {/* Row Header (Long Leg) */}
                           <td className="p-2.5 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10">
-                            <div className="text-[11px] font-bold text-slate-900">{rowLabel}</div>
-                            <div className="text-[10px] font-normal text-loss mt-0.5">
+                            <div className="text-xs font-bold text-slate-900">{rowLabel}</div>
+                            <div className="text-xs font-normal text-loss mt-0.5">
                               Buy @ {formatCurrencyPrice(buyPrice)}
                             </div>
                           </td>
@@ -722,7 +739,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                                   </div>
 
                                   <div
-                                    className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-sm text-[9px] font-mono ${visuals.deltaBadgeBg}`}
+                                    className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-sm text-xs font-mono ${visuals.deltaBadgeBg}`}
                                   >
                                     {cell.deltaBps > 0 ? (
                                       <TrendingUp className="w-2 h-2 inline" />
@@ -757,7 +774,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                   Consolidated Venue Quotes
                 </span>
               </div>
-              <span className="text-[10px] font-mono text-slate-400">
+              <span className="text-xs font-mono text-slate-400">
                 {orderbooks.length} Venues Active
               </span>
             </div>
@@ -765,7 +782,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             {/* Consolidated Level 2 Table */}
             <div className="overflow-x-auto rounded-md border border-surface-border">
               <table className="w-full text-left font-mono text-xs">
-                <thead className="bg-surface-raised text-[10px] text-slate-500 tracking-wider border-b border-surface-border">
+                <thead className="bg-surface-raised text-xs text-slate-500 tracking-wider border-b border-surface-border">
                   <tr>
                     <th className="py-2 px-2.5">Venue</th>
                     <th className="py-2 px-2.5">Bid (Sell)</th>
@@ -774,7 +791,16 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                     <th className="py-2 px-2.5 text-right">8h Fund</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-surface-border text-[11px]">
+                <tbody className="divide-y divide-surface-border text-xs">
+                  {orderbooks.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="py-8 px-2.5 text-center text-slate-400 font-mono text-xs">
+                        {symbol === null
+                          ? "No ticker selected — venue quotes appear here once a market is picked."
+                          : "No venue quotes — enable and connect at least one exchange."}
+                      </td>
+                    </tr>
+                  )}
                   {orderbooks.map((book) => {
                     const isBestBid = book.best_bid === overallBestBid && overallBestBid > 0;
                     const isBestAsk = book.best_ask === overallBestAsk && overallBestAsk > 0;
@@ -789,7 +815,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_bid)}</span>
                             {isBestBid && (
-                              <span className="px-1 py-0.2 rounded-sm text-[9px] font-bold bg-profit-dim text-profit border border-profit-border">
+                              <span className="px-1 py-0.2 rounded-sm text-xs font-bold bg-profit-dim text-profit border border-profit-border">
                                 BEST
                               </span>
                             )}
@@ -799,7 +825,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_ask)}</span>
                             {isBestAsk && (
-                              <span className="px-1 py-0.2 rounded-sm text-[9px] font-bold bg-loss-dim text-loss border border-loss-border">
+                              <span className="px-1 py-0.2 rounded-sm text-xs font-bold bg-loss-dim text-loss border border-loss-border">
                                 BEST
                               </span>
                             )}
@@ -819,20 +845,22 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               </table>
             </div>
 
-            {/* Quick venue dislocation footer */}
-            <div className="text-[11px] font-mono text-slate-500 flex items-center justify-between pt-1">
-              <span>
-                Dislocation:{" "}
-                <strong className={overallBestSpreadBps >= minBps ? "text-profit" : "text-slate-700"}>
-                  {overallBestSpreadBps > 0 ? "+" : ""}
-                  {overallBestSpreadBps.toFixed(1)} BPS
-                </strong>
-              </span>
-              <span className="text-slate-400">
-                Buy: {orderbooks.find((b) => b.best_ask === overallBestAsk)?.venue_name || "—"} ➔ Sell:{" "}
-                {orderbooks.find((b) => b.best_bid === overallBestBid)?.venue_name || "—"}
-              </span>
-            </div>
+            {/* Quick venue dislocation footer — only meaningful with live books */}
+            {orderbooks.length > 0 && (
+              <div className="text-xs font-mono text-slate-500 flex items-center justify-between pt-1">
+                <span>
+                  Dislocation:{" "}
+                  <strong className={overallBestSpreadBps >= minBps ? "text-profit" : "text-slate-700"}>
+                    {overallBestSpreadBps > 0 ? "+" : ""}
+                    {overallBestSpreadBps.toFixed(1)} BPS
+                  </strong>
+                </span>
+                <span className="text-slate-400">
+                  Buy: {orderbooks.find((b) => b.best_ask === overallBestAsk)?.venue_name || "—"} ➔ Sell:{" "}
+                  {orderbooks.find((b) => b.best_bid === overallBestBid)?.venue_name || "—"}
+                </span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -858,7 +886,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               />
               <span>Ranked Opportunities</span>
               <span
-                className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                className={`px-1.5 py-0.2 rounded-sm text-xs font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                   bottomTab === "opportunities"
                     ? "bg-accent text-white shadow-2xs"
                     : "bg-accent-dim text-accent border border-accent-line/60"
@@ -907,7 +935,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               />
               <span>Execution History</span>
               <span
-                className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                className={`px-1.5 py-0.2 rounded-sm text-xs font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                   bottomTab === "history"
                     ? "bg-accent text-white shadow-2xs"
                     : "bg-slate-200/80 text-slate-600"
@@ -956,7 +984,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
               />
               <span>Log Monitor</span>
               <span
-                className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                className={`px-1.5 py-0.2 rounded-sm text-xs font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                   bottomTab === "logs"
                     ? "bg-accent text-white shadow-2xs"
                     : "bg-slate-200/80 text-slate-600"
@@ -981,7 +1009,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
             ) : (
               <div className="overflow-x-auto max-h-64 overflow-y-auto">
                 <table className="w-full text-left text-xs font-mono">
-                  <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-slate-500 text-[10px] tracking-wider">
+                  <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-slate-500 text-xs tracking-wider">
                     <tr>
                       <th className="py-2 px-3">Route (Buy / Sell)</th>
                       <th className="py-2 px-3">Buy Price</th>
@@ -1084,7 +1112,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           ) : bottomTab === "signal" ? (
             <div className="max-h-96 overflow-y-auto">
               <SignalTrendGadget
-                symbol={symbol}
+                symbol={sym}
                 botWindowSec={windowSeconds}
                 hurdleBps={minBps}
               />
@@ -1092,7 +1120,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           ) : bottomTab === "history" ? (
             <div className="max-h-96 overflow-y-auto">
               <TickerTransactionHistory
-                symbol={symbol}
+                symbol={sym}
                 logs={executionLogs || []}
                 config={currentStrategyConfig}
                 onRefresh={() => onRefresh(orderQty, minBps)}
@@ -1101,7 +1129,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           ) : bottomTab === "telemetry" ? (
             <div className="max-h-96 overflow-y-auto">
               <TickerTelemetryGadget
-                symbol={symbol}
+                symbol={sym}
                 logs={executionLogs || []}
                 config={currentStrategyConfig}
               />
@@ -1109,8 +1137,8 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
           ) : (
             <div className="overflow-y-auto">
               <TickerLogMonitor
-                symbol={symbol}
-                strategyName="Spread Range"
+                symbol={sym}
+                strategyName="Single Spread"
                 config={currentStrategyConfig}
                 executionLogs={executionLogs || []}
                 orderbooks={orderbooks}
@@ -1127,7 +1155,7 @@ export const LiveMatrix: React.FC<LiveMatrixProps> = ({
         <TickerConfigModal
           isOpen={internalConfigModalOpen}
           onClose={() => setInternalConfigModalOpen(false)}
-          tickerSymbol={symbol}
+          tickerSymbol={sym}
           strategyConfig={currentStrategyConfig}
           onSaveConfig={handleUpdateStrategyConfig}
           initialStrategy="futures"

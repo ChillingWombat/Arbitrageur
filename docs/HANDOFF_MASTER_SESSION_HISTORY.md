@@ -317,4 +317,62 @@ npm run build                           # production build succeeds
 - `get_ticker_volumes` and `get_signal_series` share `cached_venue_volumes` (5-min TTL) so the chart's baseline weighting doesn't add exchange traffic.
 
 ---
+
+## 8. Session Handoff — 2026-09-14 (Robinhood Live Data, Spread Range Monitor / Opportunity Radar)
+
+### 8.1 Theme
+Two workstreams: (a) completing the venue layer — Robinhood wired as a real Lighter-protocol adapter instead of a stub, latency probes verified/hardened, ticker universe driven by the backend's own admission report; (b) the **Spread Range Monitor** (spec `SPEC_SPREAD_RANGE_MONITOR.md`) — a system-wide opportunity radar across all spread-eligible tickers × all admitted venues with statistical qualification, capacity math, funding carry, and per-row paper execution. Everything remains research/paper-trading only; live signing/execution is still absent by design.
+
+### 8.2 Robinhood — real adapter (was a stub)
+- `RobinhoodAdapter` deleted; `LighterAdapter` is now venue-parameterized via `new_with_venue(base_url, venue_id)` — Robinhood Chain serves the Lighter protocol at `api.rh.lighter.xyz`, so `live_robinhood` is a genuine adapter with venue id `robinhood`.
+- `get_venues` admits it on flag-or-account → real `ping()` latency probe (~930ms AU→origin, honest red tier) and real `fetch_markets`/`fetch_orderbook`.
+- `get_paper_exchange`/`paper_exchanges()`/`canonical_venue_id` include robinhood → its seeded $100k sim shows in the balance panel and monitor/execution paths resolve it.
+- **Bug found while wiring**: `total_realized_profit` had a hardcoded `dec!(200000)` baseline — `SimulatedExchange` now tracks `initial_equity` (updated by `reset_account`, which also clears positions so a paper-balance reset can't fabricate PnL); the baseline is `state.paper_baseline_equity()` = sum of actual sim seeds.
+
+### 8.3 Latency & UI truthfulness fixes
+- `ping()` hardened: requires `Content-Type: json` — a WAF 200 HTML challenge no longer counts as a fast fake success.
+- Both displayed latencies verified live: Robinhood ~0.9s/req (EMA 669ms shown), Lighter ~96ms warm keep-alive (curl pays fresh TCP+TLS → ~160ms).
+- "No available tickers" bug: `availableTickers` read stale frontend engine flags and never mapped robinhood. Now derives from `systemStatus.active_venues` (backend's real admission, 3s poll); `getAdmittedVenueCodes` added in `tickers.ts`, `VENUE_ID_TO_CODE` already covered `robinhood→RH`.
+- Settings-page scroll jank: removed full-screen `backdrop-blur` (GPU re-composite per frame), `EngineSettings` wrapped in `React.memo` with venue-aware equality (was re-rendering the ~2400-line tree every 3s status poll), App callbacks stabilized with `useCallback`.
+
+### 8.4 Spread Range Monitor — backend
+- **Math** (`arbitrager-math/src/pair_monitor.rs`, new): time-aligned directional pair series; episode segmentation (open on threshold, win on revert-to-band, stop at k·σ, else open); empirical conditional `P_win(dev)` — for a fresh entry at deviation x the lookup uses the *smallest observed threshold ≥ x* (excursions whose peak reached at least x); capacity ladder walking **both** books with per-level deviation→probability weighting, `optimal_size_usd` (argmax expected USD under participation cap) and `breakeven_size_usd` (largest tier with E>0 **and** marginal p ≥ `minWinProbability`, default 0.90); conservative funding carry (`f_A − f_B` × horizon, cost→`max(t̂,8h)`, gain→`min(t̂,1h)`). All outputs fail closed below data floors — never fabricated zeroes.
+- **Bulk funding** on `ExchangeAdapter::fetch_funding_rates()` (default empty): Lighter `/api/v1/funding-rates` filtered to the venue's own entries; Hyperliquid `metaAndAssetCtxs` (one call, all coins). Feeds a per-(venue,symbol) EMA — funding is noisy, snapshots lie.
+- **Schema V4**: `account_tier` on `exchange_accounts` (standard/plus/premium/builder; Plus adds the documented +0.5bps), `ticker_exemptions` table. **Schema V5**: `monitor_config` JSON row + `monitor_signals` durable lifecycle table.
+- **`SpreadMonitorEngine`** (`frontend/src-tauri/src/monitor.rs`, tokio task spawned in `main.rs`):
+  - One lane per admitted venue — **default account only**, no per-account data duplication.
+  - Per-lane rolling 60s budget from the **lowest enabled account tier sharing the IP** (Lighter standard 60/min; plus/premium/builder mapped conservatively inside their weighted envelopes; Hyperliquid 500/min; unknown → 60). `txReservePct` (25%) always held back for transaction + UI traffic.
+  - Per-symbol refresh = `symbols × 60s / usable` clamped `[min, max]` (5s..300s), round-robin cursor, exponential backoff ≤120s on failures.
+  - **Request weighting**: Lighter-family book reads cost **2 slots** (orderBookDetails + orderBookOrders).
+  - Jobs run concurrently via `JoinSet` — slow venues never serialize a cycle; adapter `AccountRequestCoordinator` min-intervals still serialize per venue.
+  - Watchlist = symbols on ≥2 admitted venues per hourly `fetch_markets()`, minus durable exemptions. Empty on failure — never fabricated.
+  - Samples persist to `spread_samples` under the **canonical base** (`BTC`); evaluation merges `BASE`/`BASE-USDC`/`BASE-USD` keys so legacy ticker-flow history feeds the same baseline. `canonical_base` handles USDT quotes and refuses to collapse real tickers ending in USD (`TUSD`, `SUSD`, `BUSD` stay intact).
+  - Lifecycle `collecting → watching → signaled → qualified` (stale any time books lapse); qualification window = `max(halfLifeMultiplier × OU half-life, minWindowSecs)` (default 2×hl, 30-min floor) or manual 24h; per-chunk `variation ≥ frictionCoverMult × friction` noise gate.
+  - **Directional honesty**: signals require `dev ≥ +friction` (positive only — negative dev is the reverse pair's trade); `net_capture_bps`/`expected_profit_bps` are signed, never `abs()`'d into phantom gains; ladder requires a real `μ` (empty otherwise); two-way exit est = exit fees + top-of-book crossing both books (documented floor).
+  - Lifecycle persists on transitions (±60s last-seen heartbeat) → `firstSeenMs`/duration survive restarts and long refresh gaps; rehydrated at engine boot.
+  - `set_config` clamps every field to sane ranges (modes whitelisted, windows/tiers bounded, empty tier list → defaults).
+  - `qualified_opportunities()` = the documented seam for the future autonomous bot — same qualified surface the UI executes from.
+
+### 8.5 Spread Range Monitor — IPC + UI
+- Commands: `get_monitor_snapshot`, `get/set_monitor_config`, `set_ticker_exempted`, `get_exempted_tickers`, `reveal_all_tickers`, `execute_monitor_opportunity` (re-validates qualified+executable on the latest snapshot, converts USD→qty at live ask, dispatches the existing guarded paper path — blocking signals still block).
+- `OpportunityRadar.tsx` (new nav tab): full table — ticker, route, edge/base/dev bps, net bps, P(win), E[bp], E[$], optimal/breakeven size, funding carry, signal age, T→μ, status chip, per-row Execute with `block_reason` tooltips. Filters: ticker search, buy-venue, sell-venue, min E[bp], min P%. Expandable capacity-ladder bars per row. Lane chips show `used/budget /min`, tier, refresh interval, backoff.
+- Config drawer exposes every user-requested knob: enable, qualification mode, manual window, half-life ×, min window, friction-cover ×, capacity tiers, min win prob, execution mode (one_way default / two_way), tx reserve, watchlist refresh, history window.
+- `TickerConfigModal`: per-ticker exemption toggle. `EngineSettings`: global reveal-all. `App.tsx` applies exemptions to explorer/strategy ticker derivation.
+
+### 8.6 Verification (all green at handoff)
+```bash
+cargo test -p arbitrager-desktop    # 110 pass / 0 fail (7 monitor tests incl. end-to-end evaluate)
+cargo test -p arbitrager-math       # 32 pass
+cargo test -p arbitrager-exchanges  # 31 pass
+cd frontend && npx tsc --noEmit     # clean
+npm test                            # 37 pass (node:test — NOT vitest)
+git diff --check                    # clean
+```
+
+### 8.7 Working tree state & open items
+- **Everything uncommitted** — the session's full diff spans `crates/`, `frontend/src-tauri/`, and `frontend/src/`. `docs/HANDOFF_*.md` + `SPEC_SPREAD_RANGE_MONITOR.md` updated.
+- **Not done / next**: (1) the autonomous opportunities bot consuming `qualified_opportunities()` — spec'd seam only; (2) depth-dependent *exit* walk for two-way mode (current exit estimate is a top-of-book floor); (3) live `sendTx` remains unimplemented everywhere — monitor execution is paper-only and the execute gate hard-blocks live mode; (4) monitor's lane budget doesn't count requests the *UI itself* issues to the same Lighter IP — `txReservePct` is the mitigation, revisit if WAF pressure reappears; (5) no PR/merge state — local working tree only.
+- Rebuild the desktop binary (`cargo build --release --bin arbitrager-desktop` or the debug `cargo build -p arbitrager-desktop`) before relaunching — last-pass fixes landed after the running binary was built.
+
+---
 *Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*

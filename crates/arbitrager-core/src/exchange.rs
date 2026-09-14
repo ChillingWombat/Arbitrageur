@@ -20,6 +20,14 @@ pub trait ExchangeAdapter: Send + Sync {
     /// List available markets and instrument metadata.
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>>;
 
+    /// Connectivity probe used for latency measurement. The request must
+    /// reach the exchange — implementations must bypass local response
+    /// caches and CDN edge caching so the round-trip is meaningful.
+    /// Default reuses `fetch_markets()`.
+    async fn ping(&self) -> anyhow::Result<()> {
+        self.fetch_markets().await.map(|_| ())
+    }
+
     /// Fetch latest L2 orderbook snapshot.
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook>;
 
@@ -28,6 +36,15 @@ pub trait ExchangeAdapter: Send + Sync {
 
     /// Fetch current funding rate (for perpetual contracts).
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate>;
+
+    /// Fetch funding rates for all markets in one request. Adapters with a
+    /// bulk endpoint (Hyperliquid metaAndAssetCtxs, Lighter funding-rates)
+    /// override this; the default returns an empty list so callers can use
+    /// per-symbol `fetch_funding_rate` as a fallback. Returning rates for a
+    /// venue's own exchange only — third-party reference rates are excluded.
+    async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
+        Ok(Vec::new())
+    }
 
     /// Fetch consolidated account balance, equity and positions.
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot>;

@@ -51,6 +51,19 @@ impl HyperliquidAdapter {
     }
 }
 
+/// Perp symbol normalization: Hyperliquid perp endpoints take the bare coin
+/// ("BTC-USDC" -> "BTC"). A `-SPOT` market-type suffix must fail closed —
+/// answering a spot query with the perp book would misattribute the market.
+fn perp_coin(symbol: &str) -> anyhow::Result<String> {
+    let clean = symbol.trim().replace('/', "-");
+    if clean.to_uppercase().ends_with("-SPOT") {
+        anyhow::bail!(
+            "Hyperliquid spot instrument '{symbol}' needs spot metadata this adapter does not implement; refusing to return perp data"
+        );
+    }
+    Ok(clean.split('-').next().unwrap_or(clean.as_str()).to_string())
+}
+
 #[async_trait]
 impl ExchangeAdapter for HyperliquidAdapter {
     fn venue_id(&self) -> VenueId {
@@ -91,8 +104,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        // Strip suffixes if present, Hyperliquid expects bare coin e.g. "BTC" or "ETH"
-        let coin = symbol.split('-').next().unwrap_or(symbol);
+        let coin = perp_coin(symbol)?;
         let res = self.post_info(json!({"type": "l2Book", "coin": coin})).await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
@@ -147,7 +159,23 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let coin = symbol.split('-').next().unwrap_or(symbol);
+        let coin = perp_coin(symbol)?;
+        self.fetch_funding_rates()
+            .await?
+            .into_iter()
+            .find(|r| {
+                r.symbol
+                    .split('-')
+                    .next()
+                    .map(|b| b.eq_ignore_ascii_case(&coin))
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| anyhow::anyhow!("Funding rate not found for coin: {}", coin))
+    }
+
+    /// `metaAndAssetCtxs` returns every perp's funding in one call — far
+    /// cheaper than per-symbol queries for the monitor's venue sweep.
+    async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
         let res = self.post_info(json!({"type": "metaAndAssetCtxs"})).await?;
 
         // Format is [meta, [assetCtx, ...]]
@@ -157,30 +185,30 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 let contexts = arr[1].as_array();
 
                 if let (Some(uni), Some(ctxs)) = (universe, contexts) {
+                    let mut out = Vec::new();
                     for (i, item) in uni.iter().enumerate() {
                         if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                            if name.eq_ignore_ascii_case(coin) {
-                                if let Some(ctx) = ctxs.get(i) {
-                                    let rate_str = ctx.get("funding").and_then(|f| f.as_str()).unwrap_or("0");
-                                    let rate = Decimal::from_str(rate_str).unwrap_or(dec!(0));
-                                    return Ok(FundingRate {
-                                        venue: self.venue_id.clone(),
-                                        symbol: symbol.to_string(),
-                                        rate,
-                                        predicted_rate: None,
-                                        interval_hours: 1, // Hyperliquid hourly continuous funding
-                                        next_funding_time: Utc::now(),
-                                        timestamp: Utc::now(),
-                                    });
-                                }
+                            if let Some(ctx) = ctxs.get(i) {
+                                let rate_str =
+                                    ctx.get("funding").and_then(|f| f.as_str()).unwrap_or("0");
+                                let rate = Decimal::from_str(rate_str).unwrap_or(dec!(0));
+                                out.push(FundingRate {
+                                    venue: self.venue_id.clone(),
+                                    symbol: Symbol::perp(name, "USDC").canonical(),
+                                    rate,
+                                    predicted_rate: None,
+                                    interval_hours: 1, // Hyperliquid hourly continuous funding
+                                    next_funding_time: Utc::now(),
+                                    timestamp: Utc::now(),
+                                });
                             }
                         }
                     }
+                    return Ok(out);
                 }
             }
         }
-
-        anyhow::bail!("Funding rate not found for coin: {}", coin)
+        anyhow::bail!("metaAndAssetCtxs response missing universe/contexts")
     }
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
@@ -338,6 +366,16 @@ impl ExchangeAdapter for HyperliquidAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn perp_coin_normalizes_and_rejects_spot() {
+        assert_eq!(perp_coin("BTC-USDC").unwrap(), "BTC");
+        assert_eq!(perp_coin("eth").unwrap(), "eth");
+        assert!(perp_coin("ETH-SPOT").is_err());
+        assert!(perp_coin("eth/spot").is_err());
+        // A perp actually named SPOT must still resolve as a perp.
+        assert_eq!(perp_coin("SPOT-USDC").unwrap(), "SPOT");
+    }
 
     #[tokio::test]
     async fn fetch_account_requires_wallet_address() {

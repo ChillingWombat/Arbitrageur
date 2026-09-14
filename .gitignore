@@ -38,3 +38,4 @@ logs/
 *.log
 data/cache/
 data/captures/
+.playwright-mcp/

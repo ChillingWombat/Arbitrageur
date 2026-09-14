@@ -1,12 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod monitor;
 mod state;
 mod state_store;
 mod vault;
 
-use std::sync::Arc;
 use state::AppEngineState;
+use std::sync::Arc;
 use tauri::Manager;
 
 fn main() {
@@ -25,6 +26,14 @@ fn main() {
     let engine_state = Arc::new(
         AppEngineState::new_persistent().expect("failed to initialize durable application state"),
     );
+
+    // Install and spawn the spread-range monitor engine.
+    {
+        let monitor = monitor::SpreadMonitorEngine::new(&engine_state);
+        *engine_state.monitor.lock() = Some(monitor.clone());
+        let bg_state = engine_state.clone();
+        tauri::async_runtime::spawn(async move { monitor.run(bg_state).await });
+    }
 
     tauri::Builder::default()
         .manage(engine_state)
@@ -72,6 +81,8 @@ fn main() {
             commands::list_accounts,
             commands::upsert_account,
             commands::delete_account,
+            commands::delete_account_credentials,
+            commands::get_account_credentials,
             commands::set_default_account,
             commands::list_strategy_routes,
             commands::upsert_strategy_route,
@@ -83,6 +94,13 @@ fn main() {
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::run_wfo_calibration,
+            commands::get_monitor_snapshot,
+            commands::get_monitor_config,
+            commands::set_monitor_config,
+            commands::set_ticker_exempted,
+            commands::get_exempted_tickers,
+            commands::reveal_all_tickers,
+            commands::execute_monitor_opportunity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrager Tauri desktop application");

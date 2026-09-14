@@ -7,13 +7,13 @@ import {
   EyeOff,
   Plus,
   RefreshCw,
-  Star,
   Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
   AccountCredentialInput,
   AccountDto,
+  EngineSettingsDto,
   StrategyAccountRouteDto,
 } from "../types";
 import { ToggleSwitch } from "./ToggleSwitch";
@@ -57,11 +57,11 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "Futures API Key", secret: true },
     { key: "apiSecret", label: "Futures Secret Key", secret: true },
   ],
-  // Lighter: api_private_keys{index} + account_index — each API key has its own index (0-254)
+  // Lighter: api_private_keys{index} + account_index — each API key has its own index (2-254; 0-1 reserved for web/mobile)
   lighter: [
+    { key: "accountIndex", label: "Account Index", numeric: true, placeholder: "Exchange-assigned account ID, e.g. 746027" },
+    { key: "apiKeyIndex", label: "API Key Index", numeric: true, placeholder: "2-254" },
     { key: "privateKey", label: "API Private Key", secret: true },
-    { key: "accountIndex", label: "Account Index", numeric: true, placeholder: "e.g. 0" },
-    { key: "apiKeyIndex", label: "API Key Index", numeric: true, placeholder: "0-254" },
   ],
   // Polymarket: L1 Polygon key signs orders; L2 key/secret/passphrase authenticate the CLOB API
   polymarket: [
@@ -77,16 +77,18 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "privateKey", label: "Agent Private Key (Authorized)", secret: true, placeholder: "0x..." },
     { key: "apiKey", label: "API Token", secret: true, optional: true },
   ],
+  // Robinhood Chain is a Lighter deployment (apidocs.rh.lighter.xyz): same
+  // credential scheme — account_index + api_key_index + API private key.
   robinhood: [
-    { key: "walletAddress", label: "EVM Wallet Address", placeholder: "0x..." },
-    { key: "privateKey", label: "EVM Private Key", secret: true, placeholder: "0x..." },
-    { key: "subaccountIndex", label: "Subaccount Index", numeric: true, optional: true },
+    { key: "accountIndex", label: "Account Index", numeric: true, placeholder: "Exchange-assigned account ID" },
+    { key: "apiKeyIndex", label: "API Key Index", numeric: true, placeholder: "2-254" },
+    { key: "privateKey", label: "API Private Key", secret: true },
   ],
   vanta: [
     { key: "accountId", label: "Account ID", placeholder: "Orderly account id" },
     { key: "apiKey", label: "Orderly Key", secret: true, placeholder: "ed25519:..." },
     { key: "apiSecret", label: "Orderly Secret", secret: true },
-    { key: "subaccountIndex", label: "Subaccount Index", numeric: true, optional: true },
+    { key: "subaccountIndex", label: "Subaccount Index", numeric: true, optional: true, placeholder: "0 = main account" },
   ],
   // Decibel (Aptos): Geomi client key for reads, node key for SDK access, API wallet key signs txs
   decibel: [
@@ -155,6 +157,49 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
 
 const venueDisplay = (v: string) => ACCOUNT_VENUE_DISPLAY[v] ?? v;
 
+/** Maps a venue id to its engine-settings enable flag. */
+const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
+  arcus: "arcus_enabled",
+  aster: "aster_enabled",
+  binance: "binance_enabled",
+  coinbase: "coinbase_enabled",
+  decibel: "decibel_enabled",
+  hyperliquid: "hyperliquid_enabled",
+  ibkr: "ibkr_enabled",
+  ig: "ig_enabled",
+  kalshi: "kalshi_enabled",
+  kraken_futures: "kraken_futures_enabled",
+  kraken_spot: "kraken_spot_enabled",
+  lighter: "lighter_enabled",
+  okx: "okx_enabled",
+  polymarket: "polymarket_enabled",
+  popdex: "popdex_enabled",
+  robinhood: "robinhood_enabled",
+  vanta: "vanta_enabled",
+  variational: "variational_enabled",
+};
+
+/**
+ * Persist just the venue's enable flag without waiting for the full settings
+ * form's Save. Reads the sanitized current settings and re-saves them with the
+ * flag flipped — the sanitized payload carries no secrets, so nothing stored
+ * in the vault is touched. Writes are serialized so rapid toggles across
+ * different venues cannot lose each other's update.
+ */
+let flagWriteQueue: Promise<void> = Promise.resolve();
+const persistVenueFlag = (venue: string, enabled: boolean) => {
+  const key = VENUE_SETTINGS_FLAG[venue];
+  if (!key) return;
+  flagWriteQueue = flagWriteQueue.then(async () => {
+    try {
+      const current = await api.getEngineSettings();
+      await api.saveEngineSettings({ ...current, [key]: enabled });
+    } catch {
+      /* best-effort — the form's Save remains the fallback */
+    }
+  });
+};
+
 const fieldIsSet = (a: AccountDto, key: CredFieldKey): boolean => {
   switch (key) {
     case "apiKey":
@@ -208,40 +253,43 @@ const CredentialGrid: React.FC<CredGridProps> = ({
   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-mono">
     {fields.map((f) => {
       const stored = account ? fieldIsSet(account, f.key) : false;
+      const hasValue = (values[f.key] ?? "") !== "";
       const placeholder =
-        stored && f.secret
+        !hasValue && stored && f.secret
           ? STORED_MASK
-          : stored && !f.secret
+          : !hasValue && stored && !f.secret
           ? "(stored — leave blank to keep)"
           : f.placeholder ?? (f.optional ? "Optional" : "");
       const shown = showSecrets[f.key];
       return (
         <div key={f.key}>
-          <div className="flex items-center justify-between mb-1">
-            <label className="text-slate-600">
-              {f.label}
-              {f.optional ? " (Optional)" : ""}:
-            </label>
+          <label className="text-slate-600 block mb-1">
+            {f.label}
+            {f.optional ? " (Optional)" : ""}:
+          </label>
+          <div className="relative">
+            <input
+              type={f.secret && !shown ? "password" : f.numeric ? "number" : "text"}
+              disabled={disabled}
+              value={values[f.key] ?? ""}
+              placeholder={placeholder}
+              onChange={(e) => setValue(f.key, e.target.value)}
+              autoComplete="off"
+              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
+            />
             {f.secret && (
               <button
                 type="button"
                 onClick={() => toggleShow(f.key)}
-                className="text-slate-400 hover:text-slate-600 text-[11px] flex items-center space-x-1"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 transition cursor-pointer disabled:opacity-40"
+                disabled={disabled}
+                title={shown ? "Hide" : "Show"}
+                aria-label={shown ? `Hide ${f.label}` : `Show ${f.label}`}
               >
-                {shown ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3 text-blue-600" />}
-                <span>{shown ? "Hide" : "Show"}</span>
+                {shown ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             )}
           </div>
-          <input
-            type={f.secret && !shown ? "password" : f.numeric ? "number" : "text"}
-            disabled={disabled}
-            value={values[f.key] ?? ""}
-            placeholder={placeholder}
-            onChange={(e) => setValue(f.key, e.target.value)}
-            autoComplete="off"
-            className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50"
-          />
         </div>
       );
     })}
@@ -259,32 +307,71 @@ interface AccountCardProps {
   locked: boolean;
   /** When true the zone header owns this account's label — the in-card field is hidden. */
   labelInHeader?: boolean;
+  /**
+   * When true the zone header owns this account's enable/default/delete
+   * controls — the card renders credentials only. Each exchange zone is one
+   * account; controls must not appear twice.
+   */
+  controlsInHeader?: boolean;
   onChanged: () => void;
 }
 
-const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, labelInHeader = false, onChanged }) => {
+const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, labelInHeader = false, controlsInHeader = false, onChanged }) => {
   const fields = ACCOUNT_CREDENTIAL_FIELDS[account.venue] ?? [
     { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
     { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
   ];
   const [label, setLabel] = useState(account.label);
+  const [tier, setTier] = useState(account.accountTier || "standard");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  // Decrypted credentials loaded on demand — never fetched while locked.
+  const [storedCreds, setStoredCreds] = useState<AccountCredentialInput | null>(null);
+  const [credsRequested, setCredsRequested] = useState(false);
 
   // Reset local drafts when the account identity changes (e.g. venue switch).
   useEffect(() => {
     setLabel(account.label);
+    setTier(account.accountTier || "standard");
     setDrafts({});
     setError(null);
     setSaved(false);
     setShowSecrets({});
+    setStoredCreds(null);
+    setCredsRequested(false);
   }, [account.id, account.label]);
+
+  const ensureStoredCreds = useCallback(() => {
+    if (credsRequested || locked || !api.isTauri) return;
+    setCredsRequested(true);
+    api
+      .getAccountCredentials(account.id)
+      .then(setStoredCreds)
+      .catch(() => setStoredCreds(null));
+  }, [credsRequested, locked, account.id]);
+
+  // Drop decrypted material the moment the vault re-locks.
+  useEffect(() => {
+    if (locked) {
+      setStoredCreds(null);
+      setCredsRequested(false);
+      setShowSecrets({});
+    }
+  }, [locked]);
+
+  const storedValueFor = (key: CredFieldKey): string => {
+    if (!storedCreds) return "";
+    const raw = storedCreds[key];
+    return raw === null || raw === undefined ? "" : String(raw);
+  };
 
   const valueFor = (key: CredFieldKey): string => {
     if (drafts[key] !== undefined) return drafts[key];
+    const stored = storedValueFor(key);
+    if (stored !== "") return stored;
     // Numeric index fields are exposed non-secretly; prefill them so a
     // credentials save round-trips the current value instead of clearing it.
     if (key === "accountIndex") return account.accountIndex?.toString() ?? "";
@@ -307,7 +394,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
           any = true;
         } else {
           const n = Number.parseInt(raw, 10);
-          if (!Number.isFinite(n) || n < 0) return { error: `${f.label} must be a non-negative integer` };
+          if (!Number.isSafeInteger(n) || n < 0) return { error: `${f.label} must be a non-negative integer below 2^53` };
           (creds as Record<string, unknown>)[f.key] = n;
           any = true;
         }
@@ -343,14 +430,24 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
         label: label.trim(),
         enabled: account.enabled,
         makeDefault: account.isDefault,
+        accountTier: tier,
         credentials: creds ?? null,
       });
       setDrafts({});
       setSaved(true);
+      setCredsRequested(false);
+      // Refresh stored values so revealed fields show the new material.
+      if (storedCreds) {
+        api
+          .getAccountCredentials(account.id)
+          .then(setStoredCreds)
+          .catch(() => setStoredCreds(null));
+      }
     });
 
   const handleToggleEnabled = () =>
     run(async () => {
+      persistVenueFlag(account.venue, !account.enabled); // keep the venue flag in step
       await api.upsertAccount({
         id: account.id,
         label: account.label,
@@ -373,52 +470,60 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
     });
   };
 
-  const dirty = label.trim() !== account.label || Object.keys(drafts).length > 0;
+  const dirty =
+    label.trim() !== account.label ||
+    tier !== (account.accountTier || "standard") ||
+    Object.keys(drafts).length > 0;
+  // Lighter-family venues document per-account rate-limit tiers that share
+  // the IP budget — the monitor derives its read cadence from the lowest
+  // tier present on the venue.
+  const showTier = account.venue === "lighter" || account.venue === "robinhood";
 
   return (
     <div className="border border-surface-border rounded-lg bg-surface overflow-hidden">
-      {/* Card header: account title + actions */}
-      <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 bg-slate-50/70 border-b border-surface-border">
-        <div className="flex items-center gap-2 min-w-0 flex-1">
-          <span className="text-xs font-mono font-bold text-slate-900 truncate">
-            {venueDisplay(account.venue)} Account {ordinal}
-          </span>
-          {account.isDefault && (
-            <span className="px-1.5 py-0.5 rounded-sm text-[9px] font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wide shrink-0">
-              Default
+      {/* Card header: title + per-account actions — only for secondary
+          accounts; the primary account's controls live in the zone header. */}
+      {!controlsInHeader && (
+        <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 bg-slate-50/70 border-b border-surface-border">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <span className="text-xs font-mono font-bold text-slate-900 truncate">
+              {venueDisplay(account.venue)} Account {ordinal}
             </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2.5 shrink-0">
-          {!account.isDefault && (
+            {account.isDefault && (
+              <span className="px-1.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wide shrink-0">
+                Default
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2.5 shrink-0">
             <button
               type="button"
-              disabled={busy || !account.enabled}
-              onClick={() => void handleSetDefault()}
-              className="text-slate-400 hover:text-amber-500 disabled:opacity-40 transition cursor-pointer"
-              title="Make this the default account for the venue"
+              disabled={busy}
+              onClick={handleDelete}
+              className="text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
+              title="Delete this account and its stored credentials"
             >
-              <Star className="w-3.5 h-3.5" />
+              <Trash2 className="w-3.5 h-3.5" />
             </button>
-          )}
-          <ToggleSwitch
-            size="sm"
-            checked={account.enabled}
-            onChange={() => void handleToggleEnabled()}
-            disabled={busy}
-            label={account.enabled ? "Enabled" : "Off"}
-          />
-          <button
-            type="button"
-            disabled={busy}
-            onClick={handleDelete}
-            className="text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
-            title="Delete this account and its stored credentials"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+            <button
+              type="button"
+              disabled={busy || account.isDefault}
+              onClick={() => void handleSetDefault()}
+              className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+              title={account.isDefault ? "This account is the venue default" : "Set this account as the venue default"}
+            >
+              Set As Default
+            </button>
+            <ToggleSwitch
+              size="sm"
+              checked={account.enabled}
+              onChange={() => void handleToggleEnabled()}
+              disabled={busy}
+              label={account.enabled ? "Enabled" : "Off"}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Card body: label + credentials */}
       <div className="p-3.5 space-y-3">
@@ -437,6 +542,28 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
             />
           </div>
         )}
+        {showTier && (
+          <div className="text-xs font-mono">
+            <label className="text-slate-600 block mb-1">
+              Account Tier{" "}
+              <span className="text-slate-400">
+                (rate-limit budget — lowest tier on this IP wins)
+              </span>
+              :
+            </label>
+            <select
+              value={tier}
+              disabled={busy}
+              onChange={(e) => setTier(e.target.value)}
+              className="w-full max-w-56 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <option value="standard">Standard — 60 req/min per IP</option>
+              <option value="plus">Plus — high read limit, +0.5 bps fees</option>
+              <option value="premium">Premium — 24k weighted req/min</option>
+              <option value="builder">Builder — 240k weighted req/min</option>
+            </select>
+          </div>
+        )}
         <CredentialGrid
           fields={fields}
           values={Object.fromEntries(fields.map((f) => [f.key, valueFor(f.key)]))}
@@ -444,11 +571,14 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
           disabled={busy || locked}
           account={account}
           showSecrets={showSecrets}
-          toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
+          toggleShow={(k) => {
+            setShowSecrets((s) => ({ ...s, [k]: !s[k] }));
+            ensureStoredCreds();
+          }}
         />
 
         <div className="flex items-center justify-between pt-1">
-          <div className="text-[10px] font-mono text-slate-400">
+          <div className="text-xs font-mono text-slate-400">
             {account.credentialsConfigured === null
               ? "Unlock the vault to manage credentials"
               : account.credentialsConfigured
@@ -459,7 +589,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
             type="button"
             disabled={busy || locked || !dirty}
             onClick={() => void handleSave()}
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-[11px] font-mono font-bold rounded-md transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
             {saved && !dirty ? <CheckCircle2 className="w-3 h-3" /> : null}
             <span>{busy ? "Saving..." : saved && !dirty ? "Saved" : "Save Account"}</span>
@@ -467,7 +597,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
         </div>
 
         {error && (
-          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-[11px] font-mono text-red-600 flex items-start gap-1.5">
+          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600 flex items-start gap-1.5">
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
@@ -490,15 +620,18 @@ interface AddAccountFormProps {
   locked: boolean;
   /** When true the account label is owned by the zone header input — the form omits its own label field. */
   labelFromHeader?: boolean;
+  /** Next account number used when auto-naming a blank label. */
+  nextOrdinal?: number;
   onDone: () => void;
   onCancel?: () => void;
 }
 
-const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, locked, labelFromHeader = false, onDone, onCancel }) => {
+const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, locked, labelFromHeader = false, nextOrdinal = 1, onDone, onCancel }) => {
   const fields = ACCOUNT_CREDENTIAL_FIELDS[venue] ?? [
     { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
     { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
   ];
+  const autoLabel = `${venueDisplay(venue)} #${nextOrdinal}`;
   const [label, setLabel] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
@@ -509,10 +642,10 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
     setBusy(true);
     setError(null);
     try {
+      // Blank label auto-names the account — never a dead-end save.
       const effectiveLabel = labelFromHeader
-        ? (accountLabelDrafts.get(venue)?.trim() || `${venueDisplay(venue)} #1`)
-        : label.trim();
-      if (!effectiveLabel) throw new Error("Account label is required");
+        ? (accountLabelDrafts.get(venue)?.trim() || autoLabel)
+        : (label.trim() || autoLabel);
       const creds: AccountCredentialInput = {};
       let any = false;
       for (const f of fields) {
@@ -520,7 +653,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
         if (raw === "") continue;
         if (f.numeric) {
           const n = Number.parseInt(raw, 10);
-          if (!Number.isFinite(n) || n < 0) throw new Error(`${f.label} must be a non-negative integer`);
+          if (!Number.isSafeInteger(n) || n < 0) throw new Error(`${f.label} must be a non-negative integer below 2^53`);
           (creds as Record<string, unknown>)[f.key] = n;
         } else {
           (creds as Record<string, unknown>)[f.key] = raw;
@@ -544,7 +677,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
   return (
     <div className="border border-accent-line/60 rounded-lg bg-blue-50/30 overflow-hidden">
       <div className="px-3.5 py-2.5 bg-blue-50/70 border-b border-accent-line/40 flex items-center justify-between">
-        <span className="text-[11px] font-mono font-bold text-slate-800 tracking-wide">
+        <span className="text-xs font-mono font-bold text-slate-800 tracking-wide">
           Account Credential
         </span>
         {onCancel && (
@@ -552,7 +685,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
             type="button"
             onClick={onCancel}
             disabled={busy}
-            className="text-slate-400 hover:text-slate-600 text-[11px] font-mono cursor-pointer"
+            className="text-slate-400 hover:text-slate-600 text-xs font-mono cursor-pointer"
           >
             Cancel
           </button>
@@ -566,7 +699,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
               type="text"
               value={label}
               disabled={busy}
-              placeholder="e.g. Main, Market-Making, Arbitrage-2"
+              placeholder={autoLabel}
               onChange={(e) => setLabel(e.target.value)}
               autoFocus
               className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
@@ -584,13 +717,13 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
           toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
         />
         {locked && (
-          <p className="text-[10px] font-mono text-amber-600">
+          <p className="text-xs font-mono text-amber-600">
             Vault is locked: the account can be created now, but credentials require an unlocked vault.
           </p>
         )}
 
         {error && (
-          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-[11px] font-mono text-red-600 flex items-start gap-1.5">
+          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600 flex items-start gap-1.5">
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
@@ -599,11 +732,11 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
         <div className="flex justify-end">
           <button
             type="button"
-            disabled={busy || (!labelFromHeader && !label.trim())}
+            disabled={busy}
             onClick={() => void handleCreate()}
-            className="px-3.5 py-1.5 bg-surface-raised border border-surface-border hover:bg-slate-200 text-slate-700 text-[11px] font-mono font-semibold rounded-md transition disabled:opacity-40 cursor-pointer"
+            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
-            {busy ? "Saving..." : "Save"}
+            <span>{busy ? "Saving..." : "Save Account"}</span>
           </button>
         </div>
       </div>
@@ -653,7 +786,7 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
 
 
       {loadError && (
-        <div className="p-2 bg-red-50 border border-red-200 rounded-md text-[11px] font-mono text-red-600">
+        <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600">
           {loadError}
         </div>
       )}
@@ -672,9 +805,10 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
         />
       )}
 
+      {/* This section is one account — only the extra `accounts[1..]` cards keep their own header controls. */}
       <div className="space-y-2.5">
         {(accounts ?? []).map((a, i) => (
-          <AccountCard key={a.id} account={a} ordinal={i + 1} locked={locked} labelInHeader={i === 0} onChanged={() => { void reload(); onChanged?.(); }} />
+          <AccountCard key={a.id} account={a} ordinal={i + 1} locked={locked} labelInHeader={i === 0} controlsInHeader={i === 0} onChanged={() => { void reload(); onChanged?.(); }} />
         ))}
       </div>
     </div>
@@ -707,6 +841,7 @@ export const AddAccountSlot: React.FC<{
         venue={venue}
         hasDefault={(accounts ?? []).some((a) => a.isDefault)}
         locked={locked}
+        nextOrdinal={(accounts?.length ?? 0) + 1}
         onDone={() => {
           setAdding(false);
           onChanged?.();
@@ -724,7 +859,7 @@ export const AddAccountSlot: React.FC<{
       className="w-full min-h-[118px] border border-dashed border-surface-border rounded-xl bg-transparent hover:bg-surface-raised/60 hover:border-accent-line flex flex-col items-center justify-center gap-1.5 text-slate-400 hover:text-accent transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
     >
       <Plus className="w-5 h-5" />
-      <span className="text-[11px] font-mono font-semibold">Add Another Account</span>
+      <span className="text-xs font-mono font-semibold">Add Another Account</span>
     </button>
   );
 };
@@ -785,7 +920,7 @@ export const AccountLabelControl: React.FC<{
         if (e.key === "Enter") account && saveLabel((e.target as HTMLInputElement).value);
         if (e.key === "Escape") setEditing(null);
       }}
-      className="w-40 px-2 py-0.5 bg-surface-raised border border-surface-border rounded-md text-[10px] font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+      className="w-40 px-2 py-0.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
     />
   );
 };
@@ -833,7 +968,7 @@ export const VenueDefaultControl: React.FC<{
           })
           .finally(() => setBusy(false));
       }}
-      className="px-3 py-1 rounded-md border border-surface-border text-[11px] font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+      className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
       title={
         !account
           ? "No account configured for this venue"
@@ -844,6 +979,136 @@ export const VenueDefaultControl: React.FC<{
     >
       Set As Default
     </button>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Account credentials delete — bin icon in the zone header            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Permanently removes the credentials bound to the zone's account. The
+ * account profile stays — only its vault secrets are deleted. Renders
+ * nothing while the vault is locked or no credentials are stored.
+ */
+export const AccountCredentialsDelete: React.FC<{
+  venue: string;
+  refreshKey?: number;
+  locked?: boolean;
+  onChanged?: () => void;
+}> = ({ venue, refreshKey = 0, locked = false, onChanged }) => {
+  const [account, setAccount] = useState<AccountDto | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .listAccounts(venue)
+      .then((list) => setAccount(list[0] ?? null))
+      .catch(() => setAccount(null));
+  }, [venue, refreshKey]);
+
+  if (locked || !account?.credentialsConfigured) return null;
+
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => {
+        if (
+          !window.confirm(
+            `Remove the stored credentials for "${account.label}"? The account stays; only its vault secrets are permanently deleted.`
+          )
+        ) {
+          return;
+        }
+        setBusy(true);
+        void api
+          .deleteAccountCredentials(account.id)
+          .then(() => onChanged?.())
+          .catch((e) =>
+            alert(`Failed to remove credentials: ${e instanceof Error ? e.message : String(e)}`)
+          )
+          .finally(() => setBusy(false));
+      }}
+      className="p-1.5 text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
+      title={`Remove stored credentials for ${account.label}`}
+    >
+      <Trash2 className="w-3.5 h-3.5" />
+    </button>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Venue account enable toggle — sits in the zone header               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Enable switch bound to the account itself — what the zone's single
+ * header shows for the one account it represents. Writes the durable
+ * `account.enabled` flag and mirrors it into the venue's engine-settings
+ * flag so the per-venue admission check agrees. Before an account exists,
+ * the switch drives the venue flag directly via `fallbackEnabled`.
+ */
+export const VenueAccountToggle: React.FC<{
+  venue: string;
+  refreshKey?: number;
+  locked?: boolean;
+  /** Engine flag shown/persisted while the venue has no account yet. */
+  fallbackEnabled?: boolean;
+  onFallbackChange?: (enabled: boolean) => void;
+  onChanged?: () => void;
+}> = ({ venue, refreshKey = 0, locked = false, fallbackEnabled = false, onFallbackChange, onChanged }) => {
+  const [account, setAccount] = useState<AccountDto | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+
+  const reload = useCallback(async () => {
+    try {
+      const list = await api.listAccounts(venue);
+      setAccount(list[0] ?? null);
+    } catch {
+      setAccount(null);
+    }
+  }, [venue]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, refreshKey]);
+
+  if (account === undefined) return null;
+
+  const enabled = account ? account.enabled : fallbackEnabled;
+
+  return (
+    <ToggleSwitch
+      size="sm"
+      checked={enabled}
+      disabled={busy || locked}
+      label={enabled ? "Enabled" : "Off"}
+      onChange={() => {
+        const next = !enabled;
+        persistVenueFlag(venue, next); // keep the venue flag in step
+        if (!account) {
+          onFallbackChange?.(next);
+          return;
+        }
+        setBusy(true);
+        void api
+          .upsertAccount({
+            id: account.id,
+            label: account.label,
+            enabled: next,
+            makeDefault: account.isDefault,
+          })
+          .then(() => {
+            void reload();
+            onChanged?.();
+          })
+          .catch((e) =>
+            alert(`Failed to update account: ${e instanceof Error ? e.message : String(e)}`)
+          )
+          .finally(() => setBusy(false));
+      }}
+    />
   );
 };
 
@@ -887,7 +1152,7 @@ const RouteLegPicker: React.FC<RouteLegPickerProps> = ({
   const venueOptions =
     venue && !routableVenues.includes(venue) ? [...routableVenues, venue] : routableVenues;
   const selectClass =
-    "w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-[11px] font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 cursor-pointer";
+    "w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50 cursor-pointer";
   return (
     <div className="flex-1 min-w-0 grid grid-cols-2 gap-2">
       <select
@@ -1014,12 +1279,12 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div>
           <h4 className="text-xs font-mono font-bold text-slate-900">{strategy.name}</h4>
-          <p className="text-[10px] font-mono text-slate-500 mt-0.5">{strategy.desc}</p>
+          <p className="text-xs font-mono text-slate-500 mt-0.5">{strategy.desc}</p>
         </div>
         <button
           type="button"
           onClick={() => setAdding((v) => !v)}
-          className="px-2 py-1 rounded-md border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-[10px] font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+          className="px-2 py-1 rounded-md border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
         >
           <Plus className="w-3 h-3" />
           <span>Add Route</span>
@@ -1027,7 +1292,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
       </div>
 
       {routes.length === 0 && !adding && (
-        <div className="p-3 bg-surface-raised border border-dashed border-surface-border rounded-lg text-[11px] font-mono text-slate-500">
+        <div className="p-3 bg-surface-raised border border-dashed border-surface-border rounded-lg text-xs font-mono text-slate-500">
           No account routes. Every ticker using this strategy falls back to each exchange&apos;s
           <span className="font-bold"> default account</span>.
         </div>
@@ -1038,7 +1303,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
           key={r.id}
           className="flex items-center justify-between gap-3 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg"
         >
-          <div className="flex items-center gap-2 min-w-0 text-[11px] font-mono">
+          <div className="flex items-center gap-2 min-w-0 text-xs font-mono">
             <span className="font-bold text-slate-800 truncate">{r.label}</span>
             <span className="text-slate-300">|</span>
             <span className="text-slate-600 truncate">
@@ -1105,10 +1370,10 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
             disabled={busy}
             placeholder="Route label (optional)"
             onChange={(e) => setRouteLabel(e.target.value)}
-            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-[11px] font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {error && (
-            <div className="text-[10px] font-mono text-red-600 flex items-center gap-1">
+            <div className="text-xs font-mono text-red-600 flex items-center gap-1">
               <AlertCircle className="w-3 h-3" />
               <span>{error}</span>
             </div>
@@ -1118,7 +1383,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
               type="button"
               onClick={resetForm}
               disabled={busy}
-              className="px-2.5 py-1 text-[10px] font-mono text-slate-500 hover:text-slate-700 cursor-pointer"
+              className="px-2.5 py-1 text-xs font-mono text-slate-500 hover:text-slate-700 cursor-pointer"
             >
               Cancel
             </button>
@@ -1126,7 +1391,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
               type="button"
               disabled={busy || !acctA || !acctB}
               onClick={() => void handleAdd()}
-              className="px-3 py-1 bg-accent hover:bg-blue-600 text-white text-[10px] font-mono font-bold rounded-md transition disabled:opacity-40 cursor-pointer"
+              className="px-3 py-1 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition disabled:opacity-40 cursor-pointer"
             >
               {busy ? "Adding..." : "Add Route"}
             </button>
@@ -1135,7 +1400,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
       )}
 
       {error && !adding && (
-        <div className="text-[10px] font-mono text-red-600 flex items-center gap-1">
+        <div className="text-xs font-mono text-red-600 flex items-center gap-1">
           <AlertCircle className="w-3 h-3" />
           <span>{error}</span>
         </div>
@@ -1167,7 +1432,7 @@ export const StrategyRoutingPanel: React.FC = () => {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-mono text-slate-500 max-w-2xl">
+        <p className="text-xs font-mono text-slate-500 max-w-2xl">
           Account routes bind an account on one exchange to an account on another for every ticker
           using the strategy. Tickers without a route fall back to each exchange&apos;s default account.
         </p>
@@ -1182,7 +1447,7 @@ export const StrategyRoutingPanel: React.FC = () => {
       </div>
 
       {loadError && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-[11px] font-mono text-red-600">
+        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs font-mono text-red-600">
           {loadError}
         </div>
       )}

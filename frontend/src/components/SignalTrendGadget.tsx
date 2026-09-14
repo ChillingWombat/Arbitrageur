@@ -250,7 +250,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
             <LineChart className="w-3.5 h-3.5 text-accent" />
             <span className="font-bold text-slate-900">{symbol}</span>
           </div>
-          <span className="text-[11px] text-slate-500 flex items-center">
+          <span className="text-xs text-slate-500 flex items-center">
             Venue deviation from baseline
             <InfoTooltip
               position="bottom"
@@ -259,7 +259,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
           </span>
           {bandIsFresh && (
             <span
-              className={`px-2 py-0.5 rounded-sm border text-[10px] font-bold ${
+              className={`px-2 py-0.5 rounded-sm border text-xs font-bold ${
                 isExecutableSpread
                   ? "bg-profit-dim text-profit border-profit-border"
                   : "bg-surface-raised text-slate-600 border-surface-border"
@@ -273,7 +273,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
 
         <div className="flex flex-wrap items-center gap-2">
           {/* Baseline selector */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
             {(["consensus", "leader"] as const).map((m) => (
               <button
                 key={m}
@@ -295,7 +295,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
             ))}
           </div>
           {/* Window selector — default mirrors the bot's trailing window */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
             {windowOptions.map((w) => (
               <button
                 key={w.s}
@@ -328,7 +328,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
             return (
               <span
                 key={row.vid}
-                className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded-md border border-surface-border bg-surface-raised text-[10px]"
+                className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded-md border border-surface-border bg-surface-raised text-xs"
                 title={`${venueName(row.vid)} mid vs baseline`}
               >
                 <span
@@ -344,12 +344,12 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                   {fmtBps(row.dev)}
                 </span>
                 {isSell && (
-                  <span className="px-1 rounded-sm bg-loss-dim text-loss border border-loss-border font-bold text-[9px]">
+                  <span className="px-1 rounded-sm bg-loss-dim text-loss border border-loss-border font-bold text-xs">
                     SELL
                   </span>
                 )}
                 {isBuy && (
-                  <span className="px-1 rounded-sm bg-profit-dim text-profit border border-profit-border font-bold text-[9px]">
+                  <span className="px-1 rounded-sm bg-profit-dim text-profit border border-profit-border font-bold text-xs">
                     BUY
                   </span>
                 )}
@@ -376,7 +376,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                 ? `No recorded samples for ${symbol} in this window`
                 : "Collecting signal samples…"}
             </div>
-            <div className="text-[10px] text-slate-400">
+            <div className="text-xs text-slate-400">
               History accumulates while this ticker's order books are polled.
             </div>
           </div>
@@ -497,7 +497,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
 
         {/* Hover tooltip */}
         {hoverIdx !== null && series && hoverDevs.length > 0 && (
-          <div className="absolute top-2 right-2 bg-slate-900/95 text-white rounded-md shadow-xl border border-slate-700/80 px-2.5 py-2 text-[10px] font-mono pointer-events-none backdrop-blur-xs">
+          <div className="absolute top-2 right-2 bg-slate-900/95 text-white rounded-md shadow-xl border border-slate-700/80 px-2.5 py-2 text-xs font-mono pointer-events-none backdrop-blur-xs">
             <div className="text-slate-300 mb-1">
               {fmtTick(series.ts_ms[hoverIdx], spanMs)}
             </div>
@@ -519,7 +519,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
 
       {/* Footer: honesty indicators — how much real history backs this view */}
       {series && (
-        <div className="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
+        <div className="flex items-center justify-between text-xs text-slate-400 px-0.5">
           <span>
             {series.sample_count.toLocaleString()} venue samples in window
             {historyLabel ? ` · ${historyLabel} recorded` : ""}

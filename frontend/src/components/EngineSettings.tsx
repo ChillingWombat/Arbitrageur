@@ -15,12 +15,12 @@ import {
   ArrowLeftRight,
 } from "lucide-react";
 import { api } from "../services/api";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
 import { ToggleSwitch } from "./ToggleSwitch";
-import { VenueAccountsSection, StrategyRoutingPanel, AddAccountSlot, VenueDefaultControl, AccountLabelControl } from "./ExchangeAccounts";
+import { VenueAccountsSection, StrategyRoutingPanel, AddAccountSlot, VenueDefaultControl, VenueAccountToggle, AccountCredentialsDelete, AccountLabelControl } from "./ExchangeAccounts";
 
 /** Venue margin/metrics block rendered inside the venue's account zone. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
 const VenueBalancePanel: React.FC<{
@@ -31,8 +31,8 @@ const VenueBalancePanel: React.FC<{
       {/* Metric 1: Equity */}
       <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
         <div className="flex items-center justify-between text-slate-400">
-          <span className="text-[10px] font-bold tracking-wider">Total Equity</span>
-          <span className="text-[10px]">USD</span>
+          <span className="text-xs font-bold tracking-wider">Total Equity</span>
+          <span className="text-xs">USD</span>
         </div>
         <div className="text-xl font-bold text-slate-900 tracking-tight">
           {bal
@@ -44,8 +44,8 @@ const VenueBalancePanel: React.FC<{
       {/* Metric 2: Available Margin */}
       <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
         <div className="flex items-center justify-between text-slate-400">
-          <span className="text-[10px] font-bold tracking-wider">Available Margin</span>
-          <span className="text-[10px]">USD</span>
+          <span className="text-xs font-bold tracking-wider">Available Margin</span>
+          <span className="text-xs">USD</span>
         </div>
         <div className={`text-xl font-bold tracking-tight ${bal ? "text-emerald-700" : "text-slate-900"}`}>
           {bal
@@ -57,14 +57,14 @@ const VenueBalancePanel: React.FC<{
       {/* Metric 3: Margin Rate */}
       <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
         <div className="flex items-center justify-between text-slate-400">
-          <span className="text-[10px] font-bold tracking-wider">Margin Rate</span>
-          <span className="text-[10px]">Utilization</span>
+          <span className="text-xs font-bold tracking-wider">Margin Rate</span>
+          <span className="text-xs">Utilization</span>
         </div>
         <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight">
           {bal?.margin_rate_pct != null ? (
             <>
               <span>{bal.margin_rate_pct.toFixed(1)}%</span>
-              <span className="text-[11px] font-normal text-slate-400">utilized</span>
+              <span className="text-xs font-normal text-slate-400">utilized</span>
             </>
           ) : (
             <span>N/A</span>
@@ -83,6 +83,19 @@ const VenueBalancePanel: React.FC<{
           />
         </div>
       </div>
+    </div>
+
+    <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
+      {bal ? (
+        <>
+          <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider uppercase">
+            Paper
+          </span>
+          <span>Simulated account balance — virtual funds from the paper-trading engine, not your real exchange balance.</span>
+        </>
+      ) : (
+        <span>No paper account — paper execution is provisioned only for venues with a real market-data adapter (Hyperliquid, Lighter).</span>
+      )}
     </div>
 
     {bal?.recommended_action && (
@@ -147,7 +160,21 @@ interface EngineSettingsProps {
   onSettingsSaved?: (newSettings: EngineSettingsDto) => void;
 }
 
-export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, onClose, onSettingsSaved }) => {
+// Custom equality for React.memo: the component only reads
+// systemStatus.active_venues, so skip re-rendering when the 3s status poll
+// produces identical venue data (the common case — latency probes update
+// only every 30s). Without this the whole settings tree re-renders on
+// every poll and scrolling stutters.
+function areEngineSettingsPropsEqual(p: EngineSettingsProps, n: EngineSettingsProps): boolean {
+  if (p.onClose !== n.onClose || p.onSettingsSaved !== n.onSettingsSaved) return false;
+  if (p.systemStatus === n.systemStatus) return true;
+  return (
+    JSON.stringify(p.systemStatus?.active_venues ?? null) ===
+    JSON.stringify(n.systemStatus?.active_venues ?? null)
+  );
+}
+
+export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, onClose, onSettingsSaved }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
 
   // Remote HSM
@@ -158,7 +185,25 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   const [maxSlippageBps, setMaxSlippageBps] = useState(15.0);
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
+  const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
   const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
+  // Ticker visibility: count of hidden/exempted tickers + reveal-all action.
+  const [exemptCount, setExemptCount] = useState<number | null>(null);
+  const [revealBusy, setRevealBusy] = useState(false);
+  useEffect(() => {
+    api.getExemptedTickers().then((l) => setExemptCount(l.length)).catch(() => {});
+  }, []);
+  const handleRevealAll = async () => {
+    setRevealBusy(true);
+    try {
+      await api.revealAllTickers();
+      setExemptCount(0);
+    } catch {
+      /* leave the count as-is on failure */
+    } finally {
+      setRevealBusy(false);
+    }
+  };
 
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
@@ -167,9 +212,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
 
   // Exchange Enablement Toggles
   const [hlEnabled, setHlEnabled] = useState(false);
-  const [hlSpotEnabled, setHlSpotEnabled] = useState(false);
   const [lighterEnabled, setLighterEnabled] = useState(false);
-  const [lighterSpotEnabled, setLighterSpotEnabled] = useState(false);
   const [vantaEnabled, setVantaEnabled] = useState(false);
   const [robinhoodEnabled, setRobinhoodEnabled] = useState(false);
   const [krakenEnabled, setKrakenEnabled] = useState(false);
@@ -315,13 +358,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
   const [accountsEpoch, setAccountsEpoch] = useState(0);
+  // All account profiles — drives sidebar enable/configured badges so they
+  // reflect account-level state, not just the legacy venue flags.
+  const [accounts, setAccounts] = useState<AccountDto[]>([]);
+
+  useEffect(() => {
+    api.listAccounts().then(setAccounts).catch(() => setAccounts([]));
+  }, [accountsEpoch]);
 
 
   // Update check
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
 
-  const isExchangeEnabled = (id: ExchangeId): boolean => {
+  const venueFlagEnabled = (id: ExchangeId): boolean => {
     switch (id) {
       case "arcus": return arcusEnabled;
       case "aster": return asterEnabled;
@@ -344,11 +394,34 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     }
   };
 
+  // Kraken's two account zones are separate venues upstream of the sidebar id.
+  const accountsForVenue = (id: string): AccountDto[] =>
+    id === "kraken"
+      ? accounts.filter((a) => a.venue === "kraken" || a.venue === "kraken_spot" || a.venue === "kraken_futures")
+      : accounts.filter((a) => a.venue === id);
+
+  // Same admission rule as the backend: venue flag OR any enabled account.
+  const isExchangeEnabled = (id: ExchangeId): boolean =>
+    venueFlagEnabled(id) || accountsForVenue(id).some((a) => a.enabled);
+
+  const hasConfiguredAccount = (id: string): boolean =>
+    accountsForVenue(id).some((a) => a.credentialsConfigured === true);
+
   const getVenueBalance = (id: string): VenueBalanceInfo | null => {
     return (
       venueBalances.find((b) => b.venue.toLowerCase() === id.toLowerCase()) ?? null
     );
   };
+
+  // Measured round-trip to the venue API, from the live system status poll.
+  const getVenueLatency = (id: string): number | null => {
+    return (
+      liveVenues.find((v) => v.id.toLowerCase() === id.toLowerCase())?.latency_ms ?? null
+    );
+  };
+
+  const latencyClass = (ms: number): string =>
+    ms < 100 ? "text-emerald-600" : ms < 300 ? "text-amber-500" : "text-red-500";
 
   const loadVaultStatus = async () => {
     try {
@@ -383,6 +456,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         setBindAddress(s.bind_address || "127.0.0.1");
 
         setTradingMode(s.trading_mode === "real" ? "real" : "paper");
+        setPaperStartingBalance(s.paper_starting_balance_usd ?? 100000);
         setFastWarmupEnabled(s.fast_warmup_enabled ?? true);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
@@ -418,9 +492,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         setKalshiUrl(s.kalshi_url || "https://trading-api.kalshi.com");
 
         setHlEnabled(s.hyperliquid_enabled ?? false);
-        setHlSpotEnabled(s.hyperliquid_spot_enabled ?? false);
         setLighterEnabled(s.lighter_enabled ?? false);
-        setLighterSpotEnabled(s.lighter_spot_enabled ?? false);
         setVantaEnabled(s.vanta_enabled ?? false);
         setRobinhoodEnabled(s.robinhood_enabled ?? false);
         setArcusEnabled(s.arcus_enabled ?? false);
@@ -502,12 +574,11 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
         engine_ws_port: engineWsPort,
         bind_address: bindAddress,
         trading_mode: tradingMode,
+        paper_starting_balance_usd: paperStartingBalance,
         fast_warmup_enabled: fastWarmupEnabled,
         configured_venues: configuredVenues,
         hyperliquid_enabled: hlEnabled,
-        hyperliquid_spot_enabled: hlSpotEnabled,
         lighter_enabled: lighterEnabled,
-        lighter_spot_enabled: lighterSpotEnabled,
         vanta_enabled: vantaEnabled,
         robinhood_enabled: robinhoodEnabled,
         arcus_enabled: arcusEnabled,
@@ -635,39 +706,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     }
   };
 
-  const vaultCredentialIds = (id: ExchangeId): string[] => {
-    if (id === "kraken") {
-      return ["kraken_spot", "kraken_futures"].filter((v) =>
-        configuredVenues.includes(v)
-      );
-    }
-    return configuredVenues.includes(id) ? [id] : [];
-  };
-
-  const handleRemoveCredentials = async () => {
-    const ids = vaultCredentialIds(selectedExchange);
-    if (ids.length === 0) return;
-    const label =
-      EXCHANGES_ALPHABETICAL.find((ex) => ex.id === selectedExchange)?.name ||
-      selectedExchange;
-    if (
-      !window.confirm(
-        `Remove encrypted credentials for ${label}? This cannot be undone.`
-      )
-    ) {
-      return;
-    }
-    setErrorMsg(null);
-    try {
-      for (const id of ids) {
-        await api.deleteExchangeCredentials(id);
-      }
-      const sanitized = await api.getEngineSettings();
-      setConfiguredVenues(sanitized.configured_venues || []);
-      clearCredentialInputs();
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : String(err));
-    }
+  /** Reloads account lists and venue credential-presence after any account-level mutation (toggle, default, credential delete). */
+  const handleAccountsChanged = () => {
+    setAccountsEpoch((e) => e + 1);
+    void api
+      .getEngineSettings()
+      .then((s) => setConfiguredVenues(s.configured_venues || []))
+      .catch(() => undefined);
   };
 
   const handleRemoveHsmToken = async () => {
@@ -701,27 +746,28 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     const configured = (id: string) => configuredVenues.includes(id);
     switch (venue) {
       case "hyperliquid":
-        return hlEnabled && (configured("hyperliquid") || Boolean(hyperliquidWallet || hyperliquidPrivateKey));
+        return isExchangeEnabled("hyperliquid") && (configured("hyperliquid") || Boolean(hyperliquidWallet || hyperliquidPrivateKey) || hasConfiguredAccount("hyperliquid"));
       case "lighter":
-        return lighterEnabled && (configured("lighter") || Boolean(lighterApiKey));
+        return isExchangeEnabled("lighter") && (configured("lighter") || Boolean(lighterApiKey) || hasConfiguredAccount("lighter"));
       case "vanta":
-        return vantaEnabled && (configured("vanta") || Boolean(vantaOrderlyKey || vantaAccountId));
+        return isExchangeEnabled("vanta") && (configured("vanta") || Boolean(vantaOrderlyKey || vantaAccountId) || hasConfiguredAccount("vanta"));
       case "arcus":
-        return arcusEnabled && (configured("arcus") || Boolean(arcusApiKey));
+        return isExchangeEnabled("arcus") && (configured("arcus") || Boolean(arcusApiKey) || hasConfiguredAccount("arcus"));
       case "popdex":
-        return popdexEnabled && (configured("popdex") || Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0")));
+        return isExchangeEnabled("popdex") && (configured("popdex") || Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0")) || hasConfiguredAccount("popdex"));
       case "robinhood":
-        return robinhoodEnabled && (configured("robinhood") || Boolean(robinhoodWallet || robinhoodPrivateKey));
+        return isExchangeEnabled("robinhood") && (configured("robinhood") || Boolean(robinhoodWallet || robinhoodPrivateKey) || hasConfiguredAccount("robinhood"));
       case "kraken":
-        return krakenEnabled && (
+        return isExchangeEnabled("kraken") && (
           configured("kraken_spot") || configured("kraken_futures") ||
           (krakenSpotEnabled && Boolean(krakenSpotApiKey)) ||
-          (krakenFuturesEnabled && Boolean(krakenFuturesApiKey))
+          (krakenFuturesEnabled && Boolean(krakenFuturesApiKey)) ||
+          hasConfiguredAccount("kraken")
         );
       case "polymarket":
-        return polymarketEnabled && (configured("polymarket") || Boolean(polymarketApiKey || polymarketSecret));
+        return isExchangeEnabled("polymarket") && (configured("polymarket") || Boolean(polymarketApiKey || polymarketSecret) || hasConfiguredAccount("polymarket"));
       case "kalshi":
-        return kalshiEnabled && (configured("kalshi") || Boolean(kalshiApiKeyId || kalshiPrivateKey));
+        return isExchangeEnabled("kalshi") && (configured("kalshi") || Boolean(kalshiApiKeyId || kalshiPrivateKey) || hasConfiguredAccount("kalshi"));
       default:
         return false;
     }
@@ -739,17 +785,9 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
     isVenueConfigured("kalshi"),
   ].filter(Boolean).length;
 
-  const activeVenuesCount = [
-    hlEnabled,
-    lighterEnabled,
-    vantaEnabled,
-    arcusEnabled,
-    popdexEnabled,
-    robinhoodEnabled,
-    krakenEnabled,
-    polymarketEnabled,
-    kalshiEnabled,
-  ].filter(Boolean).length;
+  const activeVenuesCount = (
+    ["hyperliquid", "lighter", "vanta", "arcus", "popdex", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeId[]
+  ).filter((id) => isExchangeEnabled(id)).length;
 
   const isVaultLocked = !api.isTauri || !vaultStatus?.is_unlocked;
   const isVaultInitializing = vaultStatus?.is_initialized === false;
@@ -797,7 +835,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
             />
             <span>Exchanges</span>
             <span
-              className={`px-1.5 py-0.2 rounded-sm text-[10px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+              className={`px-1.5 py-0.2 rounded-sm text-xs font-bold font-mono min-w-[16px] text-center leading-tight transition ${
                 activeTab === "exchanges"
                   ? "bg-accent text-white shadow-2xs"
                   : "bg-accent-dim text-accent border border-accent-line/60"
@@ -871,25 +909,14 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
           </button>
         </div>
 
-        {/* Right Header: Lock Vault / Remove Credentials actions when unlocked on Exchanges Tab */}
+        {/* Right Header: Lock Vault action when unlocked on Exchanges Tab */}
         <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
           {activeTab === "exchanges" && !isVaultLocked && (
             <>
-              {vaultCredentialIds(selectedExchange).length > 0 && (
-                <button
-                  type="button"
-                  onClick={handleRemoveCredentials}
-                  className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
-                  title="Permanently remove the selected venue's stored credentials from the vault"
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-red-500" />
-                  <span>Remove Credentials</span>
-                </button>
-              )}
               <button
                 type="button"
                 onClick={handleLockVault}
-                className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Lock sensitive exchange credentials now"
               >
                 <Lock className="w-3.5 h-3.5 text-slate-500" />
@@ -903,7 +930,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
-                className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-[11px] font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Permanently remove the stored HSM token from the vault"
               >
                 <Trash2 className="w-3.5 h-3.5 text-red-500" />
@@ -950,7 +977,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               {/* Left Panel: Exchanges Selector in Alphabetical Order */}
               <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
                 <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center shrink-0">
-                  <span className="text-[11px] font-mono font-bold text-slate-700 tracking-wider">
+                  <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
                     Exchanges ({EXCHANGES_ALPHABETICAL.length})
                   </span>
                 </div>
@@ -960,6 +987,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     const isSelected = selectedExchange === ex.id;
                     const isEnabled = isExchangeEnabled(ex.id);
                     const bal = getVenueBalance(ex.id);
+                    const latency = getVenueLatency(ex.id);
                     return (
                       <button
                         key={ex.id}
@@ -991,13 +1019,24 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                         </div>
                         <div className="text-right shrink-0">
                           <span
-                            className={`text-[9px] font-mono block font-semibold ${
-                              isSelected ? "text-blue-100" : isEnabled ? "text-emerald-700" : "text-slate-400"
+                            className={`text-xs font-mono block font-semibold ${
+                              isSelected
+                                ? "text-blue-100"
+                                : !isEnabled
+                                ? "text-slate-400"
+                                : latency != null
+                                ? latencyClass(latency)
+                                : "text-slate-400"
                             }`}
+                            title={
+                              isEnabled && latency != null
+                                ? `Round-trip to the venue market-data endpoint: ${latency} ms`
+                                : undefined
+                            }
                           >
-                            {isEnabled ? "ACTIVE" : "OFF"}
+                            {!isEnabled ? "OFF" : latency != null ? `${latency} ms` : "N/A"}
                           </span>
-                          <span className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}>
+                          <span className={`text-xs font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}>
                             {bal
                               ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
                               : "N/A"}
@@ -1009,7 +1048,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 </div>
 
                 {/* Left Panel Summary */}
-                <div className="p-3 border-t border-surface-border bg-slate-100/60 text-[10px] font-mono text-slate-500 flex items-center justify-between shrink-0">
+                <div className="p-3 border-t border-surface-border bg-slate-100/60 text-xs font-mono text-slate-500 flex items-center justify-between shrink-0">
                   <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/9</span>
                   <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/9</span>
                 </div>
@@ -1044,11 +1083,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="arcus"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={arcusEnabled}
-                      onChange={setArcusEnabled}
-                      label={arcusEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="arcus"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={arcusEnabled}
+                      onFallbackChange={setArcusEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1085,11 +1133,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="hyperliquid"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={hlEnabled}
-                      onChange={setHlEnabled}
-                      label={hlEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="hyperliquid"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={hlEnabled}
+                      onFallbackChange={setHlEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1099,20 +1156,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 />
 
                 <div className="space-y-3">
-                  {/* Hyperliquid Multi-Market Option: Spot */}
-                  <div className="p-3 bg-surface-raised border border-surface-border rounded-lg flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-bold font-mono text-slate-900 block">Hyperliquid Spot Market (HyperEVM / L1 Spot)</span>
-                      <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot leg routing alongside perp basis trades</span>
-                    </div>
-                    <ToggleSwitch
-                      checked={hlSpotEnabled}
-                      onChange={setHlSpotEnabled}
-                      size="sm"
-                      label={hlSpotEnabled ? "Spot Enabled" : "Spot Off"}
-                    />
-                  </div>
-
                   <VenueAccountsSection
                     venue="hyperliquid"
                     locked={isVaultLocked}
@@ -1144,11 +1187,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="kalshi"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={kalshiEnabled}
-                      onChange={setKalshiEnabled}
-                      label={kalshiEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="kalshi"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={kalshiEnabled}
+                      onFallbackChange={setKalshiEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1195,7 +1247,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 />
 
                 <div className="space-y-4">
-                  <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg text-[11px] font-mono text-slate-600">
+                  <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs font-mono text-slate-600">
                     💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Toggle each option independently to enter its respective credentials.
                   </div>
 
@@ -1204,15 +1256,23 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
                       <div className="flex items-center space-x-2">
                         <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
-                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
+                        <span className="text-xs font-mono px-1.5 py-0.2 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
                         <AccountLabelControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                       </div>
+                      <AccountCredentialsDelete
+                        venue="kraken_spot"
+                        refreshKey={accountsEpoch}
+                        locked={isVaultLocked}
+                        onChanged={handleAccountsChanged}
+                      />
                       <VenueDefaultControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                      <ToggleSwitch
-                        checked={krakenSpotEnabled}
-                        onChange={setKrakenSpotEnabled}
-                        size="sm"
-                        label={krakenSpotEnabled ? "Spot Enabled" : "Spot Disabled"}
+                      <VenueAccountToggle
+                        venue="kraken_spot"
+                        refreshKey={accountsEpoch}
+                        locked={isVaultLocked}
+                        fallbackEnabled={krakenSpotEnabled}
+                        onFallbackChange={setKrakenSpotEnabled}
+                        onChanged={() => setAccountsEpoch((e) => e + 1)}
                       />
                     </div>
 
@@ -1238,15 +1298,23 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
                       <div className="flex items-center space-x-2">
                         <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
-                        <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
+                        <span className="text-xs font-mono px-1.5 py-0.2 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
                         <AccountLabelControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                       </div>
+                      <AccountCredentialsDelete
+                        venue="kraken_futures"
+                        refreshKey={accountsEpoch}
+                        locked={isVaultLocked}
+                        onChanged={handleAccountsChanged}
+                      />
                       <VenueDefaultControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                      <ToggleSwitch
-                        checked={krakenFuturesEnabled}
-                        onChange={setKrakenFuturesEnabled}
-                        size="sm"
-                        label={krakenFuturesEnabled ? "Futures Enabled" : "Futures Disabled"}
+                      <VenueAccountToggle
+                        venue="kraken_futures"
+                        refreshKey={accountsEpoch}
+                        locked={isVaultLocked}
+                        fallbackEnabled={krakenFuturesEnabled}
+                        onFallbackChange={setKrakenFuturesEnabled}
+                        onChanged={() => setAccountsEpoch((e) => e + 1)}
                       />
                     </div>
 
@@ -1284,11 +1352,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="lighter"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={lighterEnabled}
-                      onChange={setLighterEnabled}
-                      label={lighterEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="lighter"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={lighterEnabled}
+                      onFallbackChange={setLighterEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1298,20 +1375,6 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 />
 
                 <div className="space-y-3">
-                  {/* Lighter Multi-Market Option: Spot */}
-                  <div className="p-3 bg-surface-raised border border-surface-border rounded-lg flex items-center justify-between">
-                    <div>
-                      <span className="text-xs font-bold font-mono text-slate-900 block">Lighter Spot Orderbook</span>
-                      <span className="text-[10px] text-slate-500 font-mono">Enables atomic spot book market orders</span>
-                    </div>
-                    <ToggleSwitch
-                      checked={lighterSpotEnabled}
-                      onChange={setLighterSpotEnabled}
-                      size="sm"
-                      label={lighterSpotEnabled ? "Spot Enabled" : "Spot Off"}
-                    />
-                  </div>
-
                   <VenueAccountsSection
                     venue="lighter"
                     locked={isVaultLocked}
@@ -1344,11 +1407,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="polymarket"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={polymarketEnabled}
-                      onChange={setPolymarketEnabled}
-                      label={polymarketEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="polymarket"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={polymarketEnabled}
+                      onFallbackChange={setPolymarketEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1385,11 +1457,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="popdex"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={popdexEnabled}
-                      onChange={setPopdexEnabled}
-                      label={popdexEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="popdex"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={popdexEnabled}
+                      onFallbackChange={setPopdexEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1426,11 +1507,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="robinhood"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={robinhoodEnabled}
-                      onChange={setRobinhoodEnabled}
-                      label={robinhoodEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="robinhood"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={robinhoodEnabled}
+                      onFallbackChange={setRobinhoodEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1467,11 +1557,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="vanta"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={vantaEnabled}
-                      onChange={setVantaEnabled}
-                      label={vantaEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="vanta"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={vantaEnabled}
+                      onFallbackChange={setVantaEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1508,11 +1607,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="aster"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={asterEnabled}
-                      onChange={setAsterEnabled}
-                      label={asterEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="aster"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={asterEnabled}
+                      onFallbackChange={setAsterEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1549,11 +1657,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="binance"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={binanceEnabled}
-                      onChange={setBinanceEnabled}
-                      label={binanceEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="binance"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={binanceEnabled}
+                      onFallbackChange={setBinanceEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1590,11 +1707,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="coinbase"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={coinbaseEnabled}
-                      onChange={setCoinbaseEnabled}
-                      label={coinbaseEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="coinbase"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={coinbaseEnabled}
+                      onFallbackChange={setCoinbaseEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1631,11 +1757,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="decibel"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={decibelEnabled}
-                      onChange={setDecibelEnabled}
-                      label={decibelEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="decibel"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={decibelEnabled}
+                      onFallbackChange={setDecibelEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1672,11 +1807,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="ibkr"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={ibkrEnabled}
-                      onChange={setIbkrEnabled}
-                      label={ibkrEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="ibkr"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={ibkrEnabled}
+                      onFallbackChange={setIbkrEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1713,11 +1857,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="ig"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={igEnabled}
-                      onChange={setIgEnabled}
-                      label={igEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="ig"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={igEnabled}
+                      onFallbackChange={setIgEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1754,11 +1907,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="okx"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={okxEnabled}
-                      onChange={setOkxEnabled}
-                      label={okxEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="okx"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={okxEnabled}
+                      onFallbackChange={setOkxEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1795,11 +1957,20 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                     <AccountLabelControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
                   </div>
                   <div className="flex items-center space-x-3">
+                    <AccountCredentialsDelete
+                      venue="variational"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      onChanged={handleAccountsChanged}
+                    />
                     <VenueDefaultControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <ToggleSwitch
-                      checked={variationalEnabled}
-                      onChange={setVariationalEnabled}
-                      label={variationalEnabled ? "Active" : undefined}
+                    <VenueAccountToggle
+                      venue="variational"
+                      refreshKey={accountsEpoch}
+                      locked={isVaultLocked}
+                      fallbackEnabled={variationalEnabled}
+                      onFallbackChange={setVariationalEnabled}
+                      onChanged={() => setAccountsEpoch((e) => e + 1)}
                     />
                   </div>
                 </div>
@@ -1852,13 +2023,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                             {isVaultStatusLoading
                               ? "Loading local vault status..."
                               : isVaultInitializing
-                              ? "Create a password to encrypt exchange API credentials"
-                              : "Enter your password to unlock exchange API credentials"}
+                              ? "Create a password to encrypt credentials"
+                              : "Enter your password to unlock credentials"}
                           </p>
                         </div>
 
                         {inlineVaultError && (
-                          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-[11px] font-mono text-red-600">
+                          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600">
                             {inlineVaultError}
                           </div>
                         )}
@@ -1886,7 +2057,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                                   autoComplete="new-password"
                                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
                                 />
-                                <p className="text-[10px] text-slate-500 font-sans leading-relaxed">
+                                <p className="text-xs text-slate-500 font-sans leading-relaxed">
                                   Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer, and this password cannot be recovered.
                                 </p>
                               </>
@@ -1954,7 +2125,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts — currently disabled because authenticated order signing and submission are not implemented yet."}
                 />
               </label>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-xs text-slate-500">
                 {hasApiConnectivity
                   ? "Both modes require exchange API connectivity for market data."
                   : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
@@ -1995,6 +2166,24 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   <span className="font-semibold text-slate-800">Real Trading</span>
                 </label>
               </div>
+
+              <div className="pt-2 border-t border-surface-border">
+                <label className="text-slate-600 block mb-1 font-mono text-xs">
+                  Paper Starting Balance (USD)
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  disabled={loading}
+                  value={paperStartingBalance}
+                  onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400 mt-1">
+                  Virtual equity each paper account starts with. Saving a new value resets all paper accounts and clears open paper positions.
+                </p>
+              </div>
             </div>
 
             {/* Orderbook Fast Warm-up */}
@@ -2007,10 +2196,32 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                   disabled={loading}
                 />
               </div>
-              <p className="text-[11px] text-slate-500">
+              <p className="text-xs text-slate-500">
                 {fastWarmupEnabled
                   ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
                   : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
+              </p>
+            </div>
+
+            {/* Ticker Visibility — undo every per-ticker hide/exemption */}
+            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
+              <div className="flex items-center justify-between">
+                <label className="text-slate-800 font-bold block text-xs">Hidden Tickers</label>
+                <button
+                  type="button"
+                  disabled={revealBusy}
+                  onClick={handleRevealAll}
+                  className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-accent hover:border-accent/40 transition cursor-pointer disabled:opacity-40"
+                >
+                  {revealBusy ? "…" : "Reveal All"}
+                </button>
+              </div>
+              <p className="text-xs text-slate-500">
+                {exemptCount === null
+                  ? "Tickers hidden via their configurator are excluded from the Opportunity Radar and strategy selection."
+                  : exemptCount === 0
+                    ? "No tickers are currently hidden."
+                    : `${exemptCount} ticker${exemptCount === 1 ? "" : "s"} hidden — Reveal All restores every one.`}
               </p>
             </div>
 
@@ -2041,7 +2252,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
                 <Globe className="w-4 h-4 text-accent" />
                 <span>Engine Ports & 24/7 VPS Background Daemon</span>
               </h3>
-              <p className="text-[11px] text-slate-500 font-mono mt-0.5">
+              <p className="text-xs text-slate-500 font-mono mt-0.5">
                 Configure RPC / WebSocket listener ports and deploy headlessly on cloud servers
               </p>
             </div>
@@ -2087,13 +2298,13 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               <h4 className="font-bold text-slate-900 flex items-center space-x-1.5">
                 <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
               </h4>
-              <p className="text-[11px] text-slate-600">
+              <p className="text-xs text-slate-600">
                 To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
-              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-md text-[11px] overflow-x-auto select-text font-mono">
+              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-md text-xs overflow-x-auto select-text font-mono">
                 <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787</code>
               </div>
-              <p className="text-[10px] text-slate-500">
+              <p className="text-xs text-slate-500">
                 The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-sm">systemctl start arbitrager</code>) to auto-restart on server reboot.
               </p>
             </div>
@@ -2175,8 +2386,8 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
               </div>
 
               {/* Legal & Financial Disclaimer */}
-              <div className="p-4 bg-slate-50 border border-surface-border rounded-lg space-y-2 text-[11px] font-mono text-slate-600 leading-relaxed">
-                <div className="flex items-center space-x-1.5 font-bold text-slate-800 text-[10px]">
+              <div className="p-4 bg-slate-50 border border-surface-border rounded-lg space-y-2 text-xs font-mono text-slate-600 leading-relaxed">
+                <div className="flex items-center space-x-1.5 font-bold text-slate-800 text-xs">
                   <Scale className="w-3.5 h-3.5 text-slate-500" />
                   <span>Legal & Financial Risk Disclaimer</span>
                 </div>
@@ -2198,7 +2409,7 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
       <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
         {/* Relocated Trading Mode Indicator on bottom-left */}
         <div
-          className="px-2.5 py-1.5 rounded-md border border-surface-border bg-surface text-slate-700 text-[11px] font-mono flex items-center space-x-1.5 shadow-2xs"
+          className="px-2.5 py-1.5 rounded-md border border-surface-border bg-surface text-slate-700 text-xs font-mono flex items-center space-x-1.5 shadow-2xs"
           title={`Execution mode: ${tradingMode.toUpperCase()}`}
         >
           <span className="text-slate-400 font-normal">Mode:</span>
@@ -2248,4 +2459,4 @@ export const EngineSettings: React.FC<EngineSettingsProps> = ({ systemStatus, on
   />
 </div>
   );
-};
+}, areEngineSettingsPropsEqual);

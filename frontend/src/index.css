@@ -45,6 +45,18 @@
     font-family: 'Geist Mono Variable', 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 
+  /* Hide native number-input spinner buttons everywhere — steppers are
+     visually noisy and fields accept typed values directly. */
+  input::-webkit-outer-spin-button,
+  input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type='number'] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   /* Clean minimalist scrollbar */
   ::-webkit-scrollbar {
     width: 6px;

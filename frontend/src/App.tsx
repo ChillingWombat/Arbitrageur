@@ -4,6 +4,7 @@ import { TickerExplorer } from "./components/TickerExplorer";
 import type { ActiveTab } from "./components/Navigation";
 import { LiveMatrix } from "./components/LiveMatrix";
 import { FundingRadar } from "./components/FundingRadar";
+import { OpportunityRadar } from "./components/OpportunityRadar";
 import { PredictionHub } from "./components/PredictionHub";
 import { StatArbLab } from "./components/StatArbLab";
 import { PortfolioMonitor } from "./components/PortfolioMonitor";
@@ -32,15 +33,18 @@ import type {
 import {
   PERP_TICKERS,
   getDefaultOrderQty,
-  getEnabledConnectedVenueCodes,
+  getAdmittedVenueCodes,
   filterAvailableTickers,
   type PerpTicker,
 } from "./types/tickers";
 
-// Fixed 16:9 design canvas — the app always renders at this size and is
-// uniformly scaled to fit the window; surplus width becomes side whitespace.
+// Fixed design canvas — the app always renders at this size and is uniformly
+// scaled to fit the window. Ratio ~1.88:1 sits just below a maximized 16:9
+// window's usable area (~1.93:1 after the title bar and OS taskbar), so height
+// binds the scale and the surplus becomes a small symmetric side margin rather
+// than letterboxing or full-bleed width.
 const DESIGN_WIDTH = 1920;
-const DESIGN_HEIGHT = 1080;
+const DESIGN_HEIGHT = 1005;
 
 const useFitScale = () => {
   const [scale, setScale] = useState(() =>
@@ -60,7 +64,7 @@ export const App: React.FC = () => {
   const canvasScale = useFitScale();
   const [activeTab, setActiveTab] = useState<ActiveTab>("spatial");
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
-  const [engineSettings, setEngineSettings] = useState<EngineSettingsDto | null>(null);
+  const [, setEngineSettings] = useState<EngineSettingsDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [tickerVolumes, setTickerVolumes] = useState<VenueVolumesDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
@@ -88,7 +92,7 @@ export const App: React.FC = () => {
     });
   };
 
-  const [selectedSymbol, setSelectedSymbol] = useState("BTC-USDC");
+  const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [fundingTradeSize, setFundingTradeSize] = useState(25000);
   const [fundingParams, setFundingParams] = useState({ minAprPct: 8.0, holdingDays: 14 });
   const [spotParams, setSpotParams] = useState({ tradeSizeUsd: 1000, minNetSpreadBps: 15.0, maxSlippageBps: 5.0 });
@@ -130,21 +134,47 @@ export const App: React.FC = () => {
     };
   }, []);
 
-  // Calculate enabled & connected venues and dynamically available tickers
+  // Calculate enabled & connected venues and dynamically available tickers.
+  // Derived from the backend's own admission report (READ_ONLY venues) so
+  // account-level enablement and real adapter support are authoritative —
+  // frontend flag state can be stale.
   const activeVenueCodes = useMemo(() => {
-    return getEnabledConnectedVenueCodes(engineSettings, systemStatus?.is_live_mode);
-  }, [engineSettings, systemStatus?.is_live_mode]);
+    return getAdmittedVenueCodes(systemStatus);
+  }, [systemStatus]);
+
+  // Tickers hidden via their configurator drop out of the explorer and all
+  // strategy selection; System Settings → Reveal All clears the list.
+  const [exemptedTickers, setExemptedTickers] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    let dead = false;
+    const load = () =>
+      api
+        .getExemptedTickers()
+        .then((l) => !dead && setExemptedTickers(new Set(l)))
+        .catch(() => {});
+    load();
+    const id = setInterval(load, 15000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
+  }, []);
 
   const availableTickers: PerpTicker[] = useMemo(() => {
-    return filterAvailableTickers(PERP_TICKERS, activeVenueCodes, 2);
-  }, [activeVenueCodes]);
+    return filterAvailableTickers(PERP_TICKERS, activeVenueCodes, 2).filter(
+      (t) => !exemptedTickers.has(t.base.toUpperCase()),
+    );
+  }, [activeVenueCodes, exemptedTickers]);
 
-  // Fallback selectedSymbol to first available ticker if current selection loses availability
+  // Selection is only ever an explicit user click in the explorer — never
+  // auto-pick a ticker. A stale selection is cleared once real alternatives
+  // exist; when nothing is available, keep it (the remaining venue's book is
+  // still real data).
   useEffect(() => {
-    if (availableTickers.length > 0) {
+    if (selectedSymbol !== null && availableTickers.length > 0) {
       const isAvailable = availableTickers.some((t: PerpTicker) => t.symbol === selectedSymbol);
       if (!isAvailable) {
-        setSelectedSymbol(availableTickers[0].symbol);
+        setSelectedSymbol(null);
       }
     }
   }, [availableTickers, selectedSymbol]);
@@ -153,23 +183,25 @@ export const App: React.FC = () => {
   const refreshAllData = useCallback(async (customQty?: number, customMinBps?: number) => {
     setRefreshing(true);
     try {
-      const ticker = (availableTickers.length > 0 ? availableTickers : PERP_TICKERS).find((t: PerpTicker) => t.symbol === selectedSymbol);
+      const ticker = selectedSymbol
+        ? (availableTickers.length > 0 ? availableTickers : PERP_TICKERS).find((t: PerpTicker) => t.symbol === selectedSymbol)
+        : undefined;
       const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
       const minBps = customMinBps ?? 5.0;
 
       const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot, triangle, tickerPos] = await Promise.all([
         api.getSystemStatus(),
         api.getEngineSettings(),
-        api.fetchOrderbooks(selectedSymbol),
-        api.scanSpatialOpportunities(selectedSymbol, minBps, qty),
-        api.scanFundingOpportunities(selectedSymbol, fundingTradeSize),
+        selectedSymbol ? api.fetchOrderbooks(selectedSymbol) : Promise.resolve([]),
+        selectedSymbol ? api.scanSpatialOpportunities(selectedSymbol, minBps, qty) : Promise.resolve([]),
+        selectedSymbol ? api.scanFundingOpportunities(selectedSymbol, fundingTradeSize) : Promise.resolve([]),
         api.scanPredictionOpportunities(""),
         api.getRiskOverview(),
         api.getExecutionLogs(),
         api.getAllTickerStrategyConfigs(),
         api.scanSpotOpportunities(),
         api.scanTriangleOpportunities(),
-        api.getTickerPositionState(selectedSymbol),
+        selectedSymbol ? api.getTickerPositionState(selectedSymbol) : Promise.resolve(null),
       ]);
 
       setSystemStatus(status);
@@ -210,6 +242,17 @@ export const App: React.FC = () => {
     }, 3000);
     return () => clearInterval(interval);
   }, [refreshAllData]);
+
+  // Stable callbacks for the settings modal — inline closures change
+  // identity every render and defeat EngineSettings' memo.
+  const handleSettingsClose = useCallback(() => setIsSettingsOpen(false), []);
+  const handleSettingsSaved = useCallback(
+    (newSettings: EngineSettingsDto) => {
+      setEngineSettings(newSettings);
+      refreshAllData();
+    },
+    [refreshAllData]
+  );
 
   // 24h volume stats per venue — slow-moving data, polled on a 30s cadence
   // and refetched whenever the connected venue set changes.
@@ -421,7 +464,7 @@ export const App: React.FC = () => {
               onOpenTickerConfig={handleOpenTickerConfig}
               activeVenueCodes={activeVenueCodes}
               availableTickers={availableTickers}
-              isTickerEnabled={enabledTickers.has(selectedSymbol)}
+              isTickerEnabled={selectedSymbol !== null && enabledTickers.has(selectedSymbol)}
               onToggleTicker={handleToggleTicker}
               isPaused={isPaused}
               positionState={tickerPositionState}
@@ -490,6 +533,8 @@ export const App: React.FC = () => {
             />
           )}
 
+          {activeTab === "radar" && <OpportunityRadar />}
+
           {activeTab === "portfolio_monitor" && (
             <PortfolioMonitor
               activeSymbol={selectedSymbol}
@@ -505,12 +550,9 @@ export const App: React.FC = () => {
       {/* Pop-Out Engine Settings Modal */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={handleSettingsClose}
         systemStatus={systemStatus}
-        onSettingsSaved={(newSettings) => {
-          setEngineSettings(newSettings);
-          refreshAllData();
-        }}
+        onSettingsSaved={handleSettingsSaved}
       />
 
       {/* Pop-Out Ticker Strategy Configurator Modal */}

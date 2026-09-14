@@ -88,7 +88,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-[11px] font-mono font-semibold text-slate-600 mb-1">
+            <label className="block text-xs font-mono font-semibold text-slate-600 mb-1">
               Password
             </label>
             <div className="relative">
@@ -112,7 +112,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
           {isInitializing && (
             <div>
-              <label className="block text-[11px] font-mono font-semibold text-slate-600 mb-1">
+              <label className="block text-xs font-mono font-semibold text-slate-600 mb-1">
                 Confirm Password
               </label>
               <input
@@ -122,13 +122,13 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 placeholder="Confirm password..."
                 className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
               />
-              <p className="mt-1.5 text-[10px] text-slate-500 font-mono leading-relaxed">
+              <p className="mt-1.5 text-xs text-slate-500 font-mono leading-relaxed">
                 Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer.
               </p>
             </div>
           )}
 
-          <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-[11px] text-slate-600">
+          <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-xs text-slate-600">
             <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
             <span>
               All API keys are encrypted at rest locally (AES-256-GCM with Argon2id key derivation). Decrypted strictly in-memory during active sessions.
