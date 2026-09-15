@@ -1,5 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Activity,
+  Check,
   Search,
   SlidersHorizontal,
   ChevronDown,
@@ -7,12 +9,15 @@ import {
   EyeOff,
   X,
 } from "lucide-react";
+import { BotLifecycleControls } from "./BotLifecycleControls";
 import type {
   MonitorSnapshotDto,
   MonitorRowDto,
   MonitorConfigDto,
 } from "../types";
 import { api } from "../services/api";
+import { useBotLifecycle } from "../hooks/useBotLifecycle";
+import { EmptyState } from "./EmptyState";
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers — missing data always renders as "—", never 0    */
@@ -79,12 +84,12 @@ const ConfigPanel: React.FC<{
     <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4 select-none animate-in fade-in duration-150">
       <div className="bg-surface rounded-xl border border-surface-border shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-surface-border">
-          <h2 className="text-xs font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
+          <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
             <SlidersHorizontal size={13} className="text-accent" />
             <span>Radar Monitor Configuration</span>
           </h2>
           <button
-            className="p-1 rounded hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
+            className="p-1 rounded-md hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition"
             onClick={onClose}
             title="Close"
           >
@@ -104,7 +109,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Qualification</span>
           <select
-            className="bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5"
+            className="bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5"
             value={draft.qualificationMode}
             onChange={(e) => set("qualificationMode", e.target.value as "auto" | "manual")}
           >
@@ -115,7 +120,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Manual window (h)</span>
           <input
-            className="w-20 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-20 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             min={1}
             value={draft.manualWindowSecs / 3600}
@@ -125,7 +130,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Half-life ×</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             step={0.5}
             min={0.5}
@@ -136,7 +141,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Min window (min)</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             min={5}
             value={draft.minWindowSecs / 60}
@@ -146,7 +151,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Variation ≥ friction ×</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             step={0.1}
             min={0.1}
@@ -157,7 +162,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Capacity tiers ($)</span>
           <input
-            className="w-36 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-36 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             value={draft.capacityTiersUsd.join(",")}
             onChange={(e) =>
               set(
@@ -173,7 +178,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Min win prob</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             step={0.01}
             min={0.5}
@@ -183,9 +188,20 @@ const ConfigPanel: React.FC<{
           />
         </label>
         <label className="flex items-center justify-between gap-2">
+          <span className="text-slate-500">Min exp profit (BPS)</span>
+          <input
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
+            type="number"
+            step={0.5}
+            value={draft.minExpectedProfitBps}
+            onChange={(e) => set("minExpectedProfitBps", num(e.target.value, 0))}
+            title="Radar table floor — rows show only when expected profit exceeds this (0 = positive-only; negative shows all)"
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Execution</span>
           <select
-            className="bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5"
+            className="bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5"
             value={draft.executionMode}
             onChange={(e) => set("executionMode", e.target.value as "one_way" | "two_way")}
           >
@@ -196,7 +212,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">TX reserve</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             step={0.05}
             min={0}
@@ -208,7 +224,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">Watchlist refresh (h)</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             min={1}
             value={draft.watchlistRefreshSecs / 3600}
@@ -218,7 +234,7 @@ const ConfigPanel: React.FC<{
         <label className="flex items-center justify-between gap-2">
           <span className="text-slate-500">History window (h)</span>
           <input
-            className="w-16 bg-surface border border-surface-border text-slate-800 rounded px-1 py-0.5 text-right"
+            className="w-16 bg-surface border border-surface-border text-slate-800 rounded-md px-1 py-0.5 text-right"
             type="number"
             min={1}
             value={draft.historyWindowSecs / 3600}
@@ -229,13 +245,13 @@ const ConfigPanel: React.FC<{
         </div>
         <div className="flex justify-end gap-2 px-4 py-3 border-t border-surface-border bg-surface-raised">
           <button
-            className="px-3 py-1.5 rounded-lg border border-surface-border text-slate-500 hover:text-slate-800 hover:bg-slate-100 text-xs font-mono"
+            className="px-3 py-1.5 rounded-md border border-surface-border text-slate-500 hover:text-slate-800 hover:bg-slate-100 text-xs font-mono"
             onClick={onClose}
           >
             Cancel
           </button>
           <button
-            className="px-3 py-1.5 rounded-lg bg-accent-dim border border-accent-line text-accent hover:bg-blue-100 disabled:opacity-40 text-xs font-mono font-bold"
+            className="px-3 py-1.5 rounded-md bg-accent-dim border border-accent-line text-accent hover:bg-blue-100 disabled:opacity-40 text-xs font-mono font-bold"
             disabled={saving}
             onClick={async () => {
               setSaving(true);
@@ -261,7 +277,7 @@ const ConfigPanel: React.FC<{
 
 const LadderRow: React.FC<{ row: MonitorRowDto }> = ({ row }) => (
   <tr className="bg-surface-raised/70">
-    <td colSpan={16} className="px-6 py-2">
+    <td colSpan={15} className="px-6 py-2">
       <div className="flex items-end gap-3">
         {row.capacityLadder.length === 0 && (
           <span className="text-slate-400">no depth data</span>
@@ -310,11 +326,26 @@ export const OpportunityRadar: React.FC = () => {
   const [cfg, setCfg] = useState<MonitorConfigDto | null>(null);
   const [showConfig, setShowConfig] = useState(false);
   const [search, setSearch] = useState("");
-  const [venueFilter, setVenueFilter] = useState("");
+  const [venueFilters, setVenueFilters] = useState<string[]>([]);
   const [minExpBps, setMinExpBps] = useState("");
   const [minPWin, setMinPWin] = useState("");
+  const [showVenueMenu, setShowVenueMenu] = useState(false);
+  const venueMenuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (venueMenuRef.current && !venueMenuRef.current.contains(event.target as Node)) {
+        setShowVenueMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [executing, setExecuting] = useState<string | null>(null);
+  // Radar executions persist under the "radar" strategy — tracked and
+  // flattened separately from Single Spread ("futures") positions.
+  const bot = useBotLifecycle({ strategyId: "radar" });
   const [execError, setExecError] = useState<string | null>(null);
   const [sizeUsd, setSizeUsd] = useState<Record<string, number>>({});
 
@@ -338,9 +369,8 @@ export const OpportunityRadar: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!showConfig || cfg) return;
     api.getMonitorConfig().then(setCfg).catch(() => {});
-  }, [showConfig, cfg]);
+  }, []);
 
   const venues = useMemo(
     () => Array.from(new Set((snap?.rows ?? []).flatMap((r) => [r.buyVenue, r.sellVenue]))).sort(),
@@ -349,10 +379,14 @@ export const OpportunityRadar: React.FC = () => {
 
   const rows = useMemo(() => {
     let out = snap?.rows ?? [];
+    const floor = cfg?.minExpectedProfitBps ?? 0;
+    out = out.filter((r) => (r.expectedProfitBps ?? -Infinity) > floor);
     const q = search.trim().toUpperCase();
     if (q) out = out.filter((r) => r.symbol.includes(q));
-    if (venueFilter)
-      out = out.filter((r) => r.buyVenue === venueFilter || r.sellVenue === venueFilter);
+    if (venueFilters.length)
+      out = out.filter(
+        (r) => venueFilters.includes(r.buyVenue) || venueFilters.includes(r.sellVenue),
+      );
     const me = Number(minExpBps);
     if (Number.isFinite(me) && minExpBps !== "")
       out = out.filter((r) => (r.expectedProfitBps ?? -Infinity) >= me);
@@ -360,7 +394,7 @@ export const OpportunityRadar: React.FC = () => {
     if (Number.isFinite(mp) && minPWin !== "")
       out = out.filter((r) => (r.pWin ?? -Infinity) >= mp / 100);
     return out;
-  }, [snap, search, venueFilter, minExpBps, minPWin]);
+  }, [snap, search, venueFilters, minExpBps, minPWin, cfg]);
 
   const key = (r: MonitorRowDto) => `${r.symbol}:${r.buyVenue}:${r.sellVenue}`;
 
@@ -391,8 +425,16 @@ export const OpportunityRadar: React.FC = () => {
         />
       )}
 
-      {/* Filters — display-only; none of these affect the monitor or strategy */}
-      <div className="flex items-center gap-2 px-4 py-2 bg-surface rounded-xl border border-surface-border shadow-2xs text-xs font-mono shrink-0">
+      {(execError || bot.lastError) && (
+        <div className="px-4 py-1.5 text-xs font-mono text-rose-700 bg-rose-50 rounded-lg border border-rose-200 shrink-0">
+          {execError ?? bot.lastError}
+        </div>
+      )}
+
+      {/* Radar gadget — filter strip + table in a single card.
+          Filters are display-only; none of these affect the monitor or strategy. */}
+      <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-surface-border text-xs font-mono shrink-0">
         <div
           className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
           title="Display filter — symbol contains"
@@ -402,26 +444,65 @@ export const OpportunityRadar: React.FC = () => {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="bg-transparent w-20 outline-none font-bold text-slate-900 uppercase"
+            className="bg-transparent w-28 outline-none font-bold text-slate-900 uppercase"
           />
         </div>
-        <div
-          className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
-          title="Display filter — shows only rows with this venue on either leg; does not affect the monitor or strategy"
-        >
-          <span className="text-slate-400">Venue</span>
-          <select
-            className="bg-transparent outline-none font-bold text-slate-900 cursor-pointer"
-            value={venueFilter}
-            onChange={(e) => setVenueFilter(e.target.value)}
+        <div className="relative" ref={venueMenuRef}>
+          <button
+            type="button"
+            onClick={() => setShowVenueMenu((v) => !v)}
+            className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5 font-mono transition cursor-pointer hover:border-slate-300"
+            title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
           >
-            <option value="">ALL</option>
-            {venues.map((v) => (
-              <option key={v} value={v}>
-                {VENUE_LABEL[v] ?? v}
-              </option>
-            ))}
-          </select>
+            <span className="text-slate-400">Venue</span>
+            <span className="font-bold text-slate-900">
+              {venueFilters.length === 0
+                ? "ALL"
+                : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
+            </span>
+            <ChevronDown
+              className={`w-3 h-3 text-slate-400 transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+            />
+          </button>
+          {showVenueMenu && (
+            <div className="absolute left-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
+              <button
+                type="button"
+                onClick={() => setVenueFilters([])}
+                className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
+                  venueFilters.length === 0
+                    ? "bg-accent/10 text-accent font-semibold"
+                    : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                }`}
+              >
+                <span>All</span>
+                {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
+              </button>
+              <div className="border-t border-surface-border/60 my-1 -mx-1" />
+              {venues.map((v) => {
+                const on = venueFilters.includes(v);
+                return (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() =>
+                      setVenueFilters((prev) =>
+                        prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
+                      )
+                    }
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
+                      on
+                        ? "bg-accent/10 text-accent font-semibold"
+                        : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                    }`}
+                  >
+                    <span>{VENUE_LABEL[v] ?? v}</span>
+                    {on && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
         <div
           className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
@@ -431,7 +512,7 @@ export const OpportunityRadar: React.FC = () => {
           <input
             value={minExpBps}
             onChange={(e) => setMinExpBps(e.target.value)}
-            className="bg-transparent w-12 outline-none text-right font-bold text-slate-900"
+            className="bg-transparent w-16 outline-none text-right font-bold text-slate-900"
           />
           <span className="text-slate-400">BPS</span>
         </div>
@@ -443,59 +524,48 @@ export const OpportunityRadar: React.FC = () => {
           <input
             value={minPWin}
             onChange={(e) => setMinPWin(e.target.value)}
-            className="bg-transparent w-12 outline-none text-right font-bold text-slate-900"
+            className="bg-transparent w-16 outline-none text-right font-bold text-slate-900"
           />
           <span className="text-slate-400">%</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <span className="text-slate-500">
-            {snap?.watchlist.length ?? 0} tickers · {snap?.rows.length ?? 0} pairs
-          </span>
-          {(snap?.venues ?? []).map((v) => (
-            <span
-              key={v.venue}
-              className={`text-xs px-1.5 py-0.5 rounded border ${
-                v.backingOff
-                  ? "border-rose-300 bg-rose-50 text-rose-600"
-                  : "border-surface-border bg-surface-raised text-slate-600"
-              }`}
-              title={`tier ${v.accountTier} · refresh ${v.refreshIntervalSecs.toFixed(0)}s`}
-            >
-              {VENUE_LABEL[v.venue] ?? v.venue} {v.usedLastMin}/{v.readBudgetPerMin.toFixed(0)}
-              /min{v.backingOff ? " backoff" : ""}
-            </span>
-          ))}
           {(snap?.exempted.length ?? 0) > 0 && (
             <span className="text-slate-500 flex items-center gap-1">
               <EyeOff size={11} /> {snap?.exempted.length} hidden
             </span>
           )}
           <button
-            className="p-1 rounded hover:bg-slate-100 text-slate-500 hover:text-slate-800"
-            title="Monitor configuration"
-            onClick={() => setShowConfig((s) => !s)}
+            type="button"
+            onClick={() => setShowConfig(true)}
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+            title="Configure Spread Radar monitor parameters"
           >
-            <SlidersHorizontal size={13} />
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configure Strategy</span>
           </button>
+          <BotLifecycleControls
+            phase={bot.phase}
+            hasOpenPositions={bot.hasOpenPositions}
+            onStart={bot.start}
+            onPause={bot.pause}
+            onReduceOnly={bot.reduceOnly}
+            onStop={() => void bot.stop()}
+          />
         </div>
       </div>
 
-      {execError && (
-        <div className="px-4 py-1.5 text-xs font-mono text-rose-700 bg-rose-50 rounded-lg border border-rose-200 shrink-0">
-          {execError}
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="flex-1 overflow-auto bg-surface rounded-xl border border-surface-border shadow-2xs min-h-0">
+      <div className="flex-1 overflow-auto min-h-0">
         <table className="w-full text-xs font-mono">
-          <thead className="sticky top-0 bg-surface-raised z-10 shadow-[0_1px_0_#e5e8ed]">
+          <thead className="sticky top-0 z-10 bg-surface-raised text-slate-500 text-xs tracking-wider">
             <tr className="text-slate-600 font-semibold tracking-wider text-left border-b border-surface-border">
               <th className="px-2 py-1.5 w-6" />
               <th className="px-2 py-1.5">Symbol</th>
               <th className="px-2 py-1.5" title="Buy venue → sell venue">Route</th>
-              <th className="px-2 py-1.5 text-right" title="Current executable edge (sell bid − buy ask), before costs">
-                Edge BPS
+              <th className="px-2 py-1.5 text-right" title="Probability-weighted expected profit, basis points">
+                Exp Profit
+              </th>
+              <th className="px-2 py-1.5 text-right" title="Edge after fees and crossing friction">
+                Net Profit
               </th>
               <th className="px-2 py-1.5 text-right" title="Historical baseline (mean) of the pair edge">
                 Baseline BPS
@@ -503,14 +573,8 @@ export const OpportunityRadar: React.FC = () => {
               <th className="px-2 py-1.5 text-right" title="Signed deviation of current edge from baseline">
                 Deviation BPS
               </th>
-              <th className="px-2 py-1.5 text-right" title="Edge after fees and crossing friction">
-                Net Capture BPS
-              </th>
               <th className="px-2 py-1.5 text-right" title="Empirical probability the deviation converges before the stop band">
                 Win %
-              </th>
-              <th className="px-2 py-1.5 text-right" title="Probability-weighted expected profit, basis points">
-                Exp Profit BPS
               </th>
               <th className="px-2 py-1.5 text-right" title="Probability-weighted expected profit, USD">
                 Exp Profit $
@@ -521,14 +585,11 @@ export const OpportunityRadar: React.FC = () => {
               <th className="px-2 py-1.5 text-right" title="Largest size still clearing the minimum win-probability floor">
                 Max Size $
               </th>
-              <th className="px-2 py-1.5 text-right" title="Estimated funding carry over the conservative holding horizon (+ = cost)">
-                Funding BPS
-              </th>
               <th className="px-2 py-1.5 text-right" title="Time since the signal was first observed">
                 Signal Age
               </th>
               <th className="px-2 py-1.5 text-right" title="Expected time for the spread to revert to baseline">
-                Converge ETA
+                Time to Converge
               </th>
               <th className="px-2 py-1.5">Status</th>
               <th className="px-2 py-1.5 text-right">Action</th>
@@ -537,12 +598,14 @@ export const OpportunityRadar: React.FC = () => {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={17} className="px-4 py-8 text-center text-slate-500">
-                  {snap == null
-                    ? "monitor warming up — collecting samples…"
-                    : snap.watchlist.length === 0
-                      ? "no spread-eligible tickers (need ≥2 venues per ticker)"
-                      : "no pairs match the filters"}
+                <td colSpan={15}>
+                  {snap == null ? (
+                    <EmptyState pulse icon={Activity} title="Monitor Warming Up" hint="Collecting spread samples…" />
+                  ) : snap.watchlist.length === 0 ? (
+                    <EmptyState title="No Spread-Eligible Tickers" hint="Requires ≥2 venues per ticker." />
+                  ) : (
+                    <EmptyState plain title="No Opportunity Detected" />
+                  )}
                 </td>
               </tr>
             )}
@@ -573,7 +636,10 @@ export const OpportunityRadar: React.FC = () => {
                         {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
                       </span>
                     </td>
-                    <td className="px-2 py-1.5 text-right">{fmtBps(r.currentEdgeBps)}</td>
+                    <td className="px-2 py-1.5 text-right font-bold text-accent">
+                      {fmtBps(r.expectedProfitBps)}
+                    </td>
+                    <td className="px-2 py-1.5 text-right">{fmtBps(r.netCaptureBps)}</td>
                     <td className="px-2 py-1.5 text-right text-slate-500">
                       {fmtBps(r.baselineBps)}
                     </td>
@@ -584,27 +650,17 @@ export const OpportunityRadar: React.FC = () => {
                     >
                       {fmtBps(r.deviationBps)}
                     </td>
-                    <td className="px-2 py-1.5 text-right">{fmtBps(r.netCaptureBps)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtPct(r.pWin)}</td>
-                    <td className="px-2 py-1.5 text-right font-bold text-accent">
-                      {fmtBps(r.expectedProfitBps)}
-                    </td>
                     <td className="px-2 py-1.5 text-right">{fmtUsd(r.expectedProfitUsd)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtUsd(r.optimalSizeUsd)}</td>
                     <td className="px-2 py-1.5 text-right">{fmtUsd(r.breakevenSizeUsd)}</td>
-                    <td
-                      className="px-2 py-1.5 text-right"
-                      title={r.fundingUnknown ? "funding unknown" : "signed carry, + = cost"}
-                    >
-                      {r.fundingUnknown ? "?" : fmtBps(r.fundingCarryBps)}
-                    </td>
                     <td className="px-2 py-1.5 text-right" title={`first seen ${fmtTs(r.firstSeenMs)}`}>
                       {fmtDur(r.signalAgeSecs)}
                     </td>
                     <td className="px-2 py-1.5 text-right">{fmtDur(r.expectedConvergeSecs)}</td>
                     <td className="px-2 py-1.5">
                       <span
-                        className={`px-1.5 py-0.5 rounded border text-xs ${STATUS_STYLE[r.status]}`}
+                        className={`px-1.5 py-0.5 rounded-sm border text-xs ${STATUS_STYLE[r.status]}`}
                         title={
                           r.status === "collecting"
                             ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
@@ -619,7 +675,7 @@ export const OpportunityRadar: React.FC = () => {
                     <td className="px-2 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1">
                         <input
-                          className="w-14 bg-surface border border-surface-border rounded px-1 py-0.5 text-right text-xs text-slate-800"
+                          className="w-14 bg-surface border border-surface-border rounded-md px-1 py-0.5 text-right text-xs text-slate-800"
                           type="number"
                           min={0}
                           placeholder={fmtUsd(r.optimalSizeUsd ?? 1000)}
@@ -629,7 +685,7 @@ export const OpportunityRadar: React.FC = () => {
                           }
                         />
                         <button
-                          className="px-2 py-0.5 rounded bg-accent-dim border border-accent-line text-accent text-xs hover:bg-blue-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                          className="px-2 py-1 rounded-md bg-accent-dim border border-accent-line text-accent text-xs hover:bg-blue-100 disabled:opacity-30 disabled:cursor-not-allowed"
                           disabled={!r.executable || executing === k}
                           title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
                           onClick={() => handleExecute(r)}
@@ -645,6 +701,7 @@ export const OpportunityRadar: React.FC = () => {
             })}
           </tbody>
         </table>
+      </div>
       </div>
     </div>
   );

@@ -65,21 +65,83 @@ pub struct TickerStrategyConfigDto {
 }
 
 fn default_sliding_window() -> String {
-    "1m".into()
+    "24h".into()
+}
+
+fn default_sliding_window_mode() -> String {
+    "manual".into()
+}
+
+fn default_sliding_window_secs() -> u64 {
+    86_400
+}
+
+/// Universal, strategy-scoped parameters — one record per strategy_id
+/// ("futures" | "funding" | "spot"), shared across all tickers. Per-ticker
+/// contract specifics (unit size in base units, accumulated grid units) stay in
+/// TickerStrategyConfigDto keyed by symbol.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyParamsDto {
+    pub strategy_id: String,
+    // Single Spread (futures)
+    pub target_profit_bps: f64,
+    pub window_percentile: u32,
+    pub sliding_window: String,
+    #[serde(default = "default_sliding_window_mode")]
+    pub sliding_window_mode: String,
+    #[serde(default = "default_sliding_window_secs")]
+    pub sliding_window_secs: u64,
+    pub max_accumulated_units: u32,
+    pub execution_mode: String,
+    /// USD notional per grid unit per leg — converted to base units per ticker.
+    pub unit_size_usd: f64,
+    pub user_target_leverage: u32,
+    // Funding Rate
+    pub funding_trade_size_usd: f64,
+    pub funding_min_apr_pct: f64,
+    pub funding_holding_days: u32,
+    // Spatial (spot)
+    pub spot_trade_size_usd: f64,
+    pub spot_max_slippage_bps: f64,
+    pub spot_min_net_spread_bps: f64,
+}
+
+impl StrategyParamsDto {
+    pub fn defaults_for(strategy_id: &str) -> Self {
+        Self {
+            strategy_id: strategy_id.to_string(),
+            target_profit_bps: 1.0,
+            window_percentile: 50,
+            sliding_window: "24h".into(),
+            sliding_window_mode: "manual".into(),
+            sliding_window_secs: 86_400,
+            max_accumulated_units: 3,
+            execution_mode: "SINGLE_WAY".into(),
+            unit_size_usd: 2500.0,
+            user_target_leverage: 5,
+            funding_trade_size_usd: 25000.0,
+            funding_min_apr_pct: 8.0,
+            funding_holding_days: 14,
+            spot_trade_size_usd: 1000.0,
+            spot_max_slippage_bps: 5.0,
+            spot_min_net_spread_bps: 15.0,
+        }
+    }
 }
 
 impl Default for TickerStrategyConfigDto {
     fn default() -> Self {
         Self {
             symbol: "BTC-USDC".into(),
-            target_profit_bps: 5.0,
+            target_profit_bps: 1.0,
             window_percentile: 50,
             max_accumulated_units: 3,
             current_accumulated_units: 0,
             execution_mode: "SINGLE_WAY".into(),
             unit_size: 0.005,
             user_target_leverage: 5,
-            sliding_window: "1m".into(),
+            sliding_window: "24h".into(),
         }
     }
 }
@@ -106,7 +168,7 @@ fn default_lighter_url() -> String {
     "https://mainnet.zklighter.elliot.ai".into()
 }
 fn default_vanta_url() -> String {
-    "https://api-evm.orderly.org".into()
+    "https://api.orderly.org".into()
 }
 fn default_robinhood_rpc_url() -> String {
     "https://rpc.robinhood.network".into()
@@ -759,6 +821,11 @@ pub struct AppEngineState {
     pub sim_step_counter: RwLock<usize>,
     pub settings: RwLock<EngineSettingsDto>,
     pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
+    /// Universal per-strategy parameters keyed by strategy_id ("futures" |
+    /// "funding" | "spot"). These are the canonical strategy settings — the
+    /// per-symbol strategy_configs map only retains ticker-specific runtime
+    /// state (accumulated units, cached unit size).
+    pub strategy_params: RwLock<std::collections::HashMap<String, StrategyParamsDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
     pub state_store: Arc<crate::state_store::StateStore>,
     pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
@@ -796,8 +863,31 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "robinhood" | "rh" | "robinhood lighter" | "robinhood lighter (read-only)" => {
             Some("robinhood")
         }
+        "vanta" | "vnt" | "vanta.exchange" | "vanta (orderly)" | "vanta (orderly, read-only)" => {
+            Some("vanta")
+        }
         _ => None,
     }
+}
+
+pub(crate) fn load_strategy_params(
+    store: &crate::state_store::StateStore,
+) -> std::collections::HashMap<String, StrategyParamsDto> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(rows) = store.strategy_params_json() {
+        for (id, json) in rows {
+            if !matches!(id.as_str(), "futures" | "funding" | "spot") {
+                continue;
+            }
+            match serde_json::from_str::<StrategyParamsDto>(&json) {
+                Ok(p) if p.strategy_id.eq_ignore_ascii_case(&id) => {
+                    map.insert(id, p);
+                }
+                _ => {}
+            }
+        }
+    }
+    map
 }
 
 impl AppEngineState {
@@ -907,6 +997,7 @@ impl AppEngineState {
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let virtual_ledger =
             RwLock::new(arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new());
+        let strategy_params_map = load_strategy_params(&state_store);
 
         Self {
             ex_hl,
@@ -934,6 +1025,7 @@ impl AppEngineState {
             sim_step_counter: RwLock::new(8),
             settings,
             strategy_configs: RwLock::new(std::collections::HashMap::new()),
+            strategy_params: RwLock::new(strategy_params_map),
             vault,
             state_store,
             virtual_ledger,
@@ -953,10 +1045,11 @@ impl AppEngineState {
         // No synthetic markets are ever seeded or fabricated.
     }
 
-    /// Returns admitted venue adapters. Only Hyperliquid and Lighter are
-    /// exposed as read-only native market-data adapters, and only in paper
-    /// mode; no adapter is admitted while live mode is active. Public
-    /// read-only feeds require enablement, not secrets.
+    /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
+    /// Lighter, and Vanta (Orderly) are exposed as read-only native
+    /// market-data adapters, and only in paper mode; no adapter is admitted
+    /// while live mode is active. Public read-only feeds require enablement,
+    /// not secrets.
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -998,6 +1091,13 @@ impl AppEngineState {
                 self.live_robinhood.clone(),
             ));
         }
+        if s.vanta_enabled || account_enabled("vanta") {
+            list.push((
+                "vanta",
+                "Vanta (Orderly, Read-Only)",
+                self.live_vanta.clone(),
+            ));
+        }
         list
     }
 
@@ -1032,6 +1132,7 @@ impl AppEngineState {
             "hyperliquid" => Some(self.ex_hl.clone()),
             "lighter" => Some(self.ex_lighter.clone()),
             "robinhood" => Some(self.ex_robinhood.clone()),
+            "vanta" => Some(self.ex_vanta.clone()),
             _ => None,
         }
     }
@@ -1052,6 +1153,7 @@ impl AppEngineState {
             ("hyperliquid", self.ex_hl.clone()),
             ("lighter", self.ex_lighter.clone()),
             ("robinhood", self.ex_robinhood.clone()),
+            ("vanta", self.ex_vanta.clone()),
         ]
     }
 }
@@ -1059,6 +1161,38 @@ impl AppEngineState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_load_strategy_params_skips_malformed_and_mismatched_rows() {
+        let store = crate::state_store::StateStore::open_in_memory().unwrap();
+        store
+            .upsert_strategy_params_json("futures", "not json at all")
+            .unwrap();
+        store
+            .upsert_strategy_params_json(
+                "funding",
+                &serde_json::to_string(&StrategyParamsDto::defaults_for("spot")).unwrap(),
+            )
+            .unwrap();
+        let valid = StrategyParamsDto {
+            sliding_window_mode: "auto".into(),
+            sliding_window_secs: 7_200,
+            ..StrategyParamsDto::defaults_for("spot")
+        };
+        store
+            .upsert_strategy_params_json("spot", &serde_json::to_string(&valid).unwrap())
+            .unwrap();
+
+        let loaded = load_strategy_params(&store);
+        assert!(!loaded.contains_key("futures"), "malformed JSON ignored");
+        assert!(
+            !loaded.contains_key("funding"),
+            "payload strategy_id must match the row key"
+        );
+        let spot = loaded.get("spot").expect("valid row loads");
+        assert_eq!(spot.sliding_window_mode, "auto");
+        assert_eq!(spot.sliding_window_secs, 7_200);
+    }
 
     #[tokio::test]
     async fn test_app_state_initialization() {
@@ -1105,15 +1239,16 @@ mod tests {
             s.kalshi_enabled = true;
         }
         let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 3);
+        assert_eq!(venues_paper.len(), 4);
         assert_eq!(venues_paper[0].0, "hyperliquid");
         assert_eq!(venues_paper[1].0, "lighter");
         assert_eq!(venues_paper[2].0, "robinhood");
+        assert_eq!(venues_paper[3].0, "vanta");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
         assert!(state.get_adapter("robinhood").is_some());
-        assert!(state.get_adapter("vanta").is_none());
+        assert!(state.get_adapter("vanta").is_some());
         assert!(state.get_adapter("arcus").is_none());
         assert!(state.get_adapter("popdex").is_none());
         assert!(state.get_adapter("polymarket").is_none());
@@ -1163,7 +1298,7 @@ mod tests {
             "lighter-attacker",
             "my lighter",
             "hyperliquidx",
-            "vanta",
+            "vantax",
             "",
             "hl hl",
         ] {
@@ -1199,7 +1334,7 @@ mod tests {
         assert!(!s.robinhood_router.is_empty());
         assert_eq!(s.hyperliquid_url, "https://api.hyperliquid.xyz");
         assert_eq!(s.lighter_url, "https://mainnet.zklighter.elliot.ai");
-        assert_eq!(s.vanta_url, "https://api-evm.orderly.org");
+        assert_eq!(s.vanta_url, "https://api.orderly.org");
         assert_eq!(s.polymarket_url, "https://clob.polymarket.com");
         assert_eq!(s.kalshi_url, "https://trading-api.kalshi.com");
     }

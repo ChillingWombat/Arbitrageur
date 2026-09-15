@@ -17,19 +17,23 @@ import {
   formatCurrencyPnl,
   getTickerActiveVenues,
   getTickerAvgVolumeUsd,
+  tickerUnavailabilityReason,
   type PerpTicker,
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
 import { SwitchToggle } from "./SwitchToggle";
-import type { ExecutionLogEntry, TickerStrategyConfigDto, SystemStatusDto, RiskOverviewDto, VenueVolumesDto } from "../types";
+import { EmptyState } from "./EmptyState";
+import type { ExecutionLogEntry, TickerStrategyConfigDto, RiskOverviewDto, SystemStatusDto, VenueVolumesDto } from "../types";
 
 interface TickerExplorerProps {
   selectedSymbol: string | null;
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
-  status?: SystemStatusDto | null;
+  /** Universal Single Spread max grid units — strategy params are now global;
+   *  the per-symbol config copy is only a fallback. */
+  futuresMaxUnits?: number;
   riskData?: RiskOverviewDto | null;
   enabledTickers?: Set<string>;
   onToggleTicker?: (symbol: string) => void;
@@ -38,10 +42,12 @@ interface TickerExplorerProps {
   availableTickers?: PerpTicker[];
   activeVenueCodes?: Set<string>;
   tickerVolumes?: VenueVolumesDto[];
-  isPaused?: boolean;
-  onResetCircuitBreaker?: () => void;
-  onOpenPortfolioMonitor?: () => void;
-  isPortfolioActive?: boolean;
+  /** Backend status — drives the empty-state's honest unavailability reason. */
+  systemStatus?: SystemStatusDto | null;
+  /** Pre-computed empty-universe explanation from App, which can see the
+   *  live market-universe response and the pre-exemption intersection —
+   *  the component alone cannot tell "no overlap" from "all hidden". */
+  tickerUnavailableReason?: string;
 }
 
 const formatCompactUsd = (v: number): string => {
@@ -56,7 +62,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   onSelectTicker,
   executionLogs,
   strategyConfigs: _strategyConfigs,
-  status,
+  futuresMaxUnits,
   riskData,
   enabledTickers,
   onToggleTicker,
@@ -65,14 +71,9 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   availableTickers,
   activeVenueCodes,
   tickerVolumes,
-  isPaused: propIsPaused,
-  onResetCircuitBreaker,
-  onOpenPortfolioMonitor,
-  isPortfolioActive,
+  systemStatus,
+  tickerUnavailableReason,
 }) => {
-  const pnl = status?.total_realized_pnl ?? 0;
-  const isTripped = status?.circuit_breaker_tripped ?? false;
-  const isPaused = propIsPaused ?? status?.is_paused ?? false;
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOption, setSortOption] = useState<TickerSortOption>("alpha");
   const [showSortMenu, setShowSortMenu] = useState(false);
@@ -134,7 +135,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         netDelta && (!netDelta.is_neutral || Math.abs(netDelta.net_quantity) > 0.0001)
       );
       const config = _strategyConfigs?.get(t.symbol);
-      const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > config.maxAccumulatedUnits);
+      const maxUnits = futuresMaxUnits ?? config?.maxAccumulatedUnits ?? 3;
+      const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > maxUnits);
       const hasIssue = hasUnbalancedPosition || hasConfigIssue;
       const issueDescription = hasUnbalancedPosition
         ? `Unbalanced Position (Net Δ: ${netDelta?.net_quantity.toFixed(3)} ${t.base})`
@@ -153,7 +155,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         avgVolumeUsd: getTickerAvgVolumeUsd(t.base, tickerVolumes ?? []),
       };
     });
-  }, [availableTickers, executionLogs, riskData, _strategyConfigs, tickerVolumes]);
+  }, [availableTickers, executionLogs, riskData, _strategyConfigs, futuresMaxUnits, tickerVolumes]);
 
   // Filter and sort the tickers
   const processedTickers = useMemo(() => {
@@ -245,24 +247,26 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
   const totalAvailableCount = (availableTickers ?? PERP_TICKERS).length;
 
   return (
-    <aside className="w-72 shrink-0 border-r border-surface-border bg-surface flex flex-col justify-between select-none h-full overflow-hidden">
+    <div className="w-full h-full bg-surface border border-surface-border rounded-lg shadow-2xs flex flex-col select-none overflow-hidden">
       {/* Top Header & Search */}
       <div className="p-3 border-b border-surface-border space-y-2.5">
         <div className="flex items-center justify-between">
-          <div className="text-xs font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
+          <div className="text-[13px] font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
             <span>Tickers</span>
             <span className="text-xs font-normal text-slate-600">({processedTickers.length}/{totalAvailableCount})</span>
           </div>
-          <span
-            className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border transition ${
-              (enabledTickers?.size ?? 0) > 0
-                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                : "bg-slate-100 text-slate-500 border-slate-200"
-            }`}
-            title="Active running ticker bots (manual user activation required)"
-          >
-            {enabledTickers?.size ?? 0} Active Bots
-          </span>
+          <div className="flex items-center space-x-1.5">
+            <span
+              className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border transition ${
+                (enabledTickers?.size ?? 0) > 0
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                  : "bg-slate-100 text-slate-500 border-slate-200"
+              }`}
+              title="Active running ticker bots (manual user activation required)"
+            >
+              {enabledTickers?.size ?? 0} Active Bots
+            </span>
+          </div>
         </div>
 
         {/* Search Bar & Sort Configuration Button */}
@@ -316,8 +320,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
             {/* Floating Popover Menu */}
             {showSortMenu && (
-              <div className="absolute right-0 top-full mt-1.5 w-48 bg-surface border border-surface-border rounded-md shadow-lg py-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
-                <div className="px-2.5 py-1 text-xs font-bold text-slate-600 border-b border-surface-border/60">
+              <div className="absolute right-0 top-full mt-1.5 w-56 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
+                <div className="px-3.5 py-1 -mx-1 text-xs font-bold text-slate-600 border-b border-surface-border/60">
                   Sort Tickers
                 </div>
 
@@ -326,7 +330,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     setSortOption("alpha");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
                     sortOption === "alpha"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -344,7 +348,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     setSortOption("trades");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
                     sortOption === "trades"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -362,7 +366,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     setSortOption("pnl");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
                     sortOption === "pnl"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -380,7 +384,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                     setSortOption("liquidity");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition ${
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
                     sortOption === "liquidity"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -408,25 +412,31 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Scrollable Ticker List */}
       <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-1">
         {processedTickers.length === 0 ? (
-          <div className="py-10 text-center text-xs font-mono text-slate-600 px-4 space-y-2.5">
-            {searchQuery ? (
-              <div>No tickers matching &quot;{searchQuery}&quot;</div>
-            ) : (
-              <>
-                <div className="text-slate-800 font-bold text-sm">No Available Tickers</div>
-                {onOpenSettings && (
-                  <button
-                    type="button"
-                    onClick={onOpenSettings}
-                    className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-md font-medium hover:bg-accent-hover transition cursor-pointer shadow-xs"
-                  >
-                    <Settings className="w-3.5 h-3.5" />
-                    <span>Open System Setting</span>
-                  </button>
-                )}
-              </>
-            )}
-          </div>
+          searchQuery ? (
+            <EmptyState
+              title={<>No tickers matching &quot;{searchQuery}&quot;</>}
+              hint="Adjust or clear the search to list all markets."
+            />
+          ) : (
+            <EmptyState
+              title="No Available Tickers"
+              hint={tickerUnavailableReason ?? tickerUnavailabilityReason(
+                systemStatus,
+                activeVenueCodes ?? new Set<string>()
+              )}
+            >
+              {onOpenSettings && (
+                <button
+                  type="button"
+                  onClick={onOpenSettings}
+                  className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-md font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Open System Setting</span>
+                </button>
+              )}
+            </EmptyState>
+          )
         ) : (
           processedTickers.map((ticker) => {
             const isSelected = selectedSymbol === ticker.symbol;
@@ -451,10 +461,10 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                 className={`w-full px-2.5 py-2 rounded-md border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
                   hasIssue
                     ? "bg-red-50/90 border-red-300 text-red-900 shadow-2xs hover:bg-red-100/90"
+                    : isSelected
+                    ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
                     : !isEnabled
                     ? "opacity-40 grayscale bg-slate-100/60 border-slate-200 hover:opacity-60"
-                    : isSelected
-                    ? "bg-accent-dim/70 border-accent/60 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300"
                 }`}
               >
@@ -470,17 +480,17 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
                       {ticker.base}
                     </span>
                     <span className="text-[8px] px-1 py-0.2 rounded-sm bg-slate-200/70 text-slate-600 font-semibold">
-                      PERP
+                      Perp
                     </span>
                   </div>
                   {hasIssue && (
-                    <span className="text-[8px] font-bold px-1.5 py-0.2 rounded-sm bg-red-100 text-red-700 border border-red-200 uppercase">
-                      ISSUE
+                    <span className="text-[8px] font-bold px-1.5 py-0.2 rounded-sm bg-red-100 text-red-700 border border-red-200">
+                      Issue
                     </span>
                   )}
                   {!isEnabled && (
                     <span className="text-[8px] font-medium px-1 py-0.2 rounded-sm bg-slate-200/60 text-slate-500">
-                      OFF
+                      Off
                     </span>
                   )}
                 </div>
@@ -553,92 +563,6 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         )}
       </div>
 
-      {/* Bottom Control Panel: Net Profit, Risk Indicator & Settings */}
-      <div className="p-3 border-t border-surface-border bg-surface-raised space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="flex flex-col">
-            <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">
-              Net Profit
-            </span>
-            <span
-              className={`font-mono text-xs font-bold ${
-                pnl >= 0 ? "text-profit" : "text-loss"
-              }`}
-            >
-              {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
-            </span>
-          </div>
-
-          {/* Risk Indicator (Replacing Paper indicator) */}
-          <div className="flex items-center space-x-1.5">
-            <div
-              className={`px-2.5 py-1 rounded-md border flex items-center space-x-1.5 text-xs font-mono font-medium ${
-                isTripped
-                  ? "bg-loss-dim border-loss-border text-loss"
-                  : isPaused
-                  ? "bg-warn-dim border-warn-border text-warn"
-                  : "bg-profit-dim border-profit-border text-profit"
-              }`}
-              title={
-                isTripped
-                  ? "Circuit Breaker Tripped: Risk limits breached or Emergency Stop triggered"
-                  : isPaused
-                  ? "Status: Paused (Executions suspended, positions preserved)"
-                  : "Risk: Normal (Margin, drawdown, and delta neutrality healthy)"
-              }
-            >
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isTripped
-                    ? "bg-loss animate-pulse"
-                    : isPaused
-                    ? "bg-warn animate-pulse"
-                    : "bg-profit"
-                }`}
-              />
-              <span>
-                {isTripped ? "CB: Tripped" : isPaused ? "Status: Paused" : "Risk: Normal"}
-              </span>
-            </div>
-
-            {isTripped && onResetCircuitBreaker && (
-              <button
-                type="button"
-                onClick={onResetCircuitBreaker}
-                className="px-1.5 py-1 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium transition cursor-pointer"
-                title="Reset Circuit Breaker"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Access Button for Portfolio Monitor */}
-        <button
-          type="button"
-          onClick={onOpenPortfolioMonitor}
-          className={`w-full py-2 px-3 rounded-md text-xs font-mono font-medium transition shadow-xs flex items-center justify-center space-x-2 cursor-pointer border ${
-            isPortfolioActive
-              ? "bg-accent text-white border-accent shadow-xs font-bold"
-              : "bg-surface hover:bg-slate-100 text-slate-800 hover:text-slate-900 border-surface-border"
-          }`}
-          title="Open Portfolio Monitor (Consolidated DeltaGuard, Margins & Strategy Performance)"
-        >
-          <Activity className={`w-3.5 h-3.5 ${isPortfolioActive ? "text-white" : "text-accent"}`} />
-          <span>Portfolio Monitor</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={onOpenSettings}
-          className="w-full py-1.5 px-3 bg-surface hover:bg-slate-100 text-slate-700 hover:text-slate-900 border border-surface-border rounded-md text-xs font-mono font-medium transition shadow-xs flex items-center justify-center space-x-2 cursor-pointer"
-          title="System Setting & Exchange API Keys"
-        >
-          <Settings className="w-3.5 h-3.5 text-slate-500" />
-          <span>System Setting</span>
-        </button>
-      </div>
-    </aside>
+    </div>
   );
 };

@@ -16,6 +16,7 @@ import type {
   EngineSettingsDto,
   StrategyAccountRouteDto,
 } from "../types";
+import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
 import { ToggleSwitch } from "./ToggleSwitch";
 
 /* ------------------------------------------------------------------ */
@@ -275,7 +276,7 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               placeholder={placeholder}
               onChange={(e) => setValue(f.key, e.target.value)}
               autoComplete="off"
-              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
+              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
             />
             {f.secret && (
               <button
@@ -490,12 +491,12 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
               {venueDisplay(account.venue)} Account {ordinal}
             </span>
             {account.isDefault && (
-              <span className="px-1.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 uppercase tracking-wide shrink-0">
+              <span className="px-1.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 tracking-wide shrink-0">
                 Default
               </span>
             )}
           </div>
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-3 shrink-0">
             <button
               type="button"
               disabled={busy}
@@ -509,7 +510,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
               type="button"
               disabled={busy || account.isDefault}
               onClick={() => void handleSetDefault()}
-              className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+              className="px-3 py-1.5 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
               title={account.isDefault ? "This account is the venue default" : "Set this account as the venue default"}
             >
               Set As Default
@@ -702,7 +703,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
               placeholder={autoLabel}
               onChange={(e) => setLabel(e.target.value)}
               autoFocus
-              className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+              className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
             />
           </div>
         )}
@@ -856,7 +857,7 @@ export const AddAccountSlot: React.FC<{
       type="button"
       onClick={() => setAdding(true)}
       disabled={locked}
-      className="w-full min-h-[118px] border border-dashed border-surface-border rounded-xl bg-transparent hover:bg-surface-raised/60 hover:border-accent-line flex flex-col items-center justify-center gap-1.5 text-slate-400 hover:text-accent transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      className="w-full min-h-[118px] border border-dashed border-surface-border rounded-lg bg-transparent hover:bg-surface-raised/60 hover:border-accent-line flex flex-col items-center justify-center gap-1.5 text-slate-400 hover:text-accent transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
     >
       <Plus className="w-5 h-5" />
       <span className="text-xs font-mono font-semibold">Add Another Account</span>
@@ -920,7 +921,7 @@ export const AccountLabelControl: React.FC<{
         if (e.key === "Enter") account && saveLabel((e.target as HTMLInputElement).value);
         if (e.key === "Escape") setEditing(null);
       }}
-      className="w-40 px-2 py-0.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+      className="w-40 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
     />
   );
 };
@@ -1117,11 +1118,12 @@ export const VenueAccountToggle: React.FC<{
 /* ------------------------------------------------------------------ */
 
 export const STRATEGIES: { id: string; name: string; desc: string }[] = [
-  { id: "futures", name: "Futures / Spatial Arbitrage", desc: "Same-ticker price dislocations across perp venues" },
-  { id: "funding", name: "Funding Rate Carry", desc: "Long/short perp pairs capturing funding differentials" },
-  { id: "spot", name: "Spot Cross-Exchange", desc: "Spot basis vs. perp or spot venues" },
-  { id: "prediction", name: "Prediction Market Parity", desc: "Binary market and cross-venue parity trades" },
-  { id: "stat_arb", name: "Statistical Arbitrage", desc: "Mean-reversion and basket spread strategies" },
+  { id: "futures", name: STRATEGY_DISPLAY_NAMES.futures, desc: "Same-ticker price dislocations across perp venues" },
+  { id: "radar", name: STRATEGY_DISPLAY_NAMES.radar, desc: "Radar-dispatched spatial executions — shares futures venues, tracked separately" },
+  { id: "funding", name: STRATEGY_DISPLAY_NAMES.funding, desc: "Long/short perp pairs capturing funding differentials" },
+  { id: "spot", name: STRATEGY_DISPLAY_NAMES.spot, desc: "Spot basis vs. perp or spot venues" },
+  { id: "prediction", name: STRATEGY_DISPLAY_NAMES.prediction, desc: "Binary market and cross-venue parity trades" },
+  { id: "stat_arb", name: STRATEGY_DISPLAY_NAMES.stat_arb, desc: "Mean-reversion and basket spread strategies" },
 ];
 
 interface RouteLegPickerProps {
@@ -1275,10 +1277,10 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
     accounts.find((a) => a.id === id)?.label ?? fallback;
 
   return (
-    <div className="bg-surface border border-surface-border rounded-xl p-4 space-y-3 shadow-xs">
+    <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div>
-          <h4 className="text-xs font-mono font-bold text-slate-900">{strategy.name}</h4>
+          <h4 className="text-[13px] font-mono font-bold text-slate-900">{strategy.name}</h4>
           <p className="text-xs font-mono text-slate-500 mt-0.5">{strategy.desc}</p>
         </div>
         <button
@@ -1391,7 +1393,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
               type="button"
               disabled={busy || !acctA || !acctB}
               onClick={() => void handleAdd()}
-              className="px-3 py-1 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition disabled:opacity-40 cursor-pointer"
+              className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition disabled:opacity-40 cursor-pointer"
             >
               {busy ? "Adding..." : "Add Route"}
             </button>

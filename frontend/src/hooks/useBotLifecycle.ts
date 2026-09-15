@@ -46,7 +46,7 @@ export function getBotControlAvailability(
 }
 
 interface UseBotLifecycleOptions {
-  /** Ledger strategy id: futures | funding | spot | prediction | stat_arb. */
+  /** Ledger strategy id: futures | radar | funding | spot | prediction | stat_arb. */
   strategyId: string;
   /** Scope positions to one symbol; omit for strategy-wide tracking. */
   symbol?: string | null;

@@ -15,7 +15,8 @@ import {
   ArrowLeftRight,
 } from "lucide-react";
 import { api } from "../services/api";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto } from "../types";
+import { PERP_TICKERS } from "../types/tickers";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
@@ -25,7 +26,8 @@ import { VenueAccountsSection, StrategyRoutingPanel, AddAccountSlot, VenueDefaul
 /** Venue margin/metrics block rendered inside the venue's account zone. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
 const VenueBalancePanel: React.FC<{
   bal: VenueBalanceInfo | null;
-}> = ({ bal }) => (
+  lane?: VenueLaneStatusDto | null;
+}> = ({ bal, lane }) => (
   <div className="space-y-3">
     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
       {/* Metric 1: Equity */}
@@ -85,16 +87,38 @@ const VenueBalancePanel: React.FC<{
       </div>
     </div>
 
+    <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5 flex-wrap gap-y-1">
+      {lane ? (
+        <>
+          <span
+            className={`px-1.5 py-0.5 rounded-sm border font-bold tracking-wider ${
+              lane.backingOff
+                ? "bg-rose-50 border-rose-200 text-rose-600"
+                : "bg-slate-100 border-slate-200 text-slate-600"
+            }`}
+            title="Read requests used in the last minute vs the venue's per-minute budget"
+          >
+            {lane.usedLastMin}/{lane.readBudgetPerMin.toFixed(0)}/min{lane.backingOff ? " backoff" : ""}
+          </span>
+          <span>
+            Rate budget · tier {lane.accountTier} · refresh {lane.refreshIntervalSecs.toFixed(0)}s · {lane.symbols} symbols
+          </span>
+        </>
+      ) : (
+        <span>No monitor lane — venue is not streaming market data.</span>
+      )}
+    </div>
+
     <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
       {bal ? (
         <>
-          <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider uppercase">
+          <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider">
             Paper
           </span>
           <span>Simulated account balance — virtual funds from the paper-trading engine, not your real exchange balance.</span>
         </>
       ) : (
-        <span>No paper account — paper execution is provisioned only for venues with a real market-data adapter (Hyperliquid, Lighter).</span>
+        <span>No paper account — paper execution is provisioned only for venues with a real market-data adapter (Hyperliquid, Lighter, Robinhood Lighter, Vanta).</span>
       )}
     </div>
 
@@ -176,33 +200,51 @@ function areEngineSettingsPropsEqual(p: EngineSettingsProps, n: EngineSettingsPr
 
 export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, onClose, onSettingsSaved }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
+  const [pinging, setPinging] = useState(false);
 
   // Remote HSM
   const [hsmUrl, setHsmUrl] = useState("http://127.0.0.1:8787/sign");
   const [hmacToken, setHmacToken] = useState("");
 
   // Guardrails & Execution Modes
-  const [maxSlippageBps, setMaxSlippageBps] = useState(15.0);
+  const [maxSlippageBps, setMaxSlippageBps] = useState(1.0);
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
   const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
   const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
-  // Ticker visibility: count of hidden/exempted tickers + reveal-all action.
-  const [exemptCount, setExemptCount] = useState<number | null>(null);
+  // Ticker visibility: hidden/exempted tickers + restore/hide/reveal-all.
+  const [exemptList, setExemptList] = useState<string[] | null>(null);
+  const [hideDraft, setHideDraft] = useState("");
   const [revealBusy, setRevealBusy] = useState(false);
   useEffect(() => {
-    api.getExemptedTickers().then((l) => setExemptCount(l.length)).catch(() => {});
+    api.getExemptedTickers().then(setExemptList).catch(() => {});
   }, []);
   const handleRevealAll = async () => {
     setRevealBusy(true);
     try {
       await api.revealAllTickers();
-      setExemptCount(0);
+      setExemptList([]);
     } catch {
-      /* leave the count as-is on failure */
+      /* leave the list as-is on failure */
     } finally {
       setRevealBusy(false);
     }
+  };
+  const handleSetExempted = async (base: string, hidden: boolean) => {
+    try {
+      await api.setTickerExempted(base, hidden);
+      setExemptList((l) =>
+        l == null ? l : hidden ? [...new Set([...l, base])].sort() : l.filter((b) => b !== base),
+      );
+    } catch {
+      /* leave the list as-is on failure */
+    }
+  };
+  const handleHideTicker = () => {
+    const base = hideDraft.trim().toUpperCase();
+    if (!base) return;
+    void handleSetExempted(base, true);
+    setHideDraft("");
   };
 
   // Networking & VPS
@@ -238,7 +280,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [vantaAccountId, setVantaAccountId] = useState("");
   const [vantaOrderlyKey, setVantaOrderlyKey] = useState("");
   const [vantaOrderlySecret, setVantaOrderlySecret] = useState("");
-  const [vantaUrl, setVantaUrl] = useState("https://api-evm.orderly.org");
+  const [vantaUrl, setVantaUrl] = useState("https://api.orderly.org");
   const [vantaSubaccountIndex, setVantaSubaccountIndex] = useState<string>("");
 
   // Robinhood EVM
@@ -357,6 +399,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
+  const [venueLanes, setVenueLanes] = useState<VenueLaneStatusDto[]>([]);
   const [accountsEpoch, setAccountsEpoch] = useState(0);
   // All account profiles — drives sidebar enable/configured badges so they
   // reflect account-level state, not just the legacy venue flags.
@@ -413,12 +456,30 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     );
   };
 
+  // Spread-monitor rate lane for this venue (read budget usage), when streaming.
+  const getVenueLane = (id: string): VenueLaneStatusDto | null => {
+    return (
+      venueLanes.find((l) => l.venue.toLowerCase() === id.toLowerCase()) ?? null
+    );
+  };
+
   // Measured round-trip to the venue API, from the live system status poll.
   const getVenueLatency = (id: string): number | null => {
     return (
       liveVenues.find((v) => v.id.toLowerCase() === id.toLowerCase())?.latency_ms ?? null
     );
   };
+
+  // Backend admission status for this venue — OFFLINE (not enabled),
+  // READ_ONLY (admitted, streaming market data) or UNSUPPORTED (enabled but
+  // no market-data adapter; contributes nothing to ticker availability).
+  const getVenueStatus = (id: string): string | null => {
+    return (
+      liveVenues.find((v) => v.id.toLowerCase() === id.toLowerCase())?.status ?? null
+    );
+  };
+
+  const streamingCount = liveVenues.filter((v) => v.status === "READ_ONLY").length;
 
   const latencyClass = (ms: number): string =>
     ms < 100 ? "text-emerald-600" : ms < 300 ? "text-amber-500" : "text-red-500";
@@ -448,7 +509,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setConfiguredVenues(s.configured_venues || []);
         setHsmUrl(s.hsm_url || "http://127.0.0.1:8787/sign");
         setHmacToken(s.hmac_token || "");
-        setMaxSlippageBps(s.max_slippage_bps ?? 15.0);
+        setMaxSlippageBps(s.max_slippage_bps ?? 1.0);
         setMinDepthRatio(s.min_depth_ratio ?? 3.0);
 
         setEngineRpcPort(s.engine_rpc_port ?? 8787);
@@ -473,7 +534,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setVantaAccountId(s.vanta_account_id || "");
         setVantaOrderlyKey(s.vanta_orderly_key || "");
         setVantaOrderlySecret(s.vanta_orderly_secret || "");
-        setVantaUrl(s.vanta_url || "https://api-evm.orderly.org");
+        setVantaUrl(s.vanta_url || "https://api.orderly.org");
         setVantaSubaccountIndex(s.vanta_subaccount_index?.toString() ?? "");
 
         setRobinhoodWallet(s.robinhood_wallet || "");
@@ -548,6 +609,26 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     loadSettings();
     loadVaultStatus();
     loadVenueBalances();
+  }, []);
+
+  // Venue read-budget lanes stream from the spread monitor — poll lightly
+  // while the settings page is mounted.
+  useEffect(() => {
+    let dead = false;
+    const tick = async () => {
+      try {
+        const s = await api.getMonitorSnapshot();
+        if (!dead && s) setVenueLanes(s.venues);
+      } catch {
+        /* monitor engine not running — lanes stay empty */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 5000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
   }, []);
 
   useEffect(() => {
@@ -946,7 +1027,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           {/* Active Tab Subheader */}
           <div className="px-6 py-3 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
             <div>
-              <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-1.5">
+              <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-1.5">
                 <span>
                   {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
                   {activeTab === "exchanges" && "Exchange Accounts, API Credentials & Margins"}
@@ -976,10 +1057,30 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <div className="relative flex-1 flex flex-row min-h-0 overflow-hidden">
               {/* Left Panel: Exchanges Selector in Alphabetical Order */}
               <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
-                <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center shrink-0">
+                <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center justify-between shrink-0">
                   <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
                     Exchanges ({EXCHANGES_ALPHABETICAL.length})
                   </span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      setPinging(true);
+                      try {
+                        const status = await api.refreshVenueLatencies();
+                        if (status.active_venues) setLiveVenues(status.active_venues);
+                      } catch (err: unknown) {
+                        setErrorMsg(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setPinging(false);
+                      }
+                    }}
+                    disabled={pinging}
+                    title="Measure HTTP round-trip to all enabled venue API endpoints now"
+                    className="px-2 py-1 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-md text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${pinging ? "animate-spin" : ""}`} />
+                    <span>Ping</span>
+                  </button>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 space-y-1">
@@ -988,6 +1089,17 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     const isEnabled = isExchangeEnabled(ex.id);
                     const bal = getVenueBalance(ex.id);
                     const latency = getVenueLatency(ex.id);
+                    // Backend admission status is authoritative — an enabled
+                    // venue without an adapter shows an amber dot, not a
+                    // green "connected" dot.
+                    const vStatus = getVenueStatus(ex.id);
+                    const isStreaming = vStatus === "READ_ONLY";
+                    const noAdapter = vStatus === "UNSUPPORTED";
+                    const statusLabel = !isEnabled
+                      ? "Off"
+                      : latency != null
+                      ? `${latency} ms`
+                      : "No response";
                     return (
                       <button
                         key={ex.id}
@@ -995,7 +1107,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                         onClick={() => setSelectedExchange(ex.id)}
                         className={`w-full text-left p-2.5 rounded-lg text-xs font-mono transition flex items-center justify-between group cursor-pointer border ${
                           isSelected
-                            ? "bg-accent text-white border-accent shadow-xs"
+                            ? "bg-accent text-white border-accent shadow-2xs"
                             : "bg-surface hover:bg-slate-100/80 text-slate-700 border-surface-border/60 hover:border-surface-border"
                         }`}
                       >
@@ -1003,14 +1115,25 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                           <div className="flex items-center space-x-2">
                             <span
                               className={`w-2 h-2 rounded-full shrink-0 ${
-                                isEnabled
-                                  ? isSelected
+                                isSelected
+                                  ? isStreaming || noAdapter
                                     ? "bg-white ring-2 ring-white/30"
-                                    : "bg-emerald-500"
-                                  : isSelected
-                                  ? "bg-white/40"
+                                    : "bg-white/40"
+                                  : isStreaming
+                                  ? "bg-emerald-500"
+                                  : noAdapter
+                                  ? "bg-amber-400"
                                   : "bg-slate-300"
                               }`}
+                              title={
+                                isStreaming
+                                  ? "Market quotes are integrated and active"
+                                  : noAdapter
+                                  ? "Enabled, but market quotes are not integrated"
+                                  : vStatus === "OFFLINE"
+                                  ? "Not enabled"
+                                  : undefined
+                              }
                             />
                             <span className={`font-semibold truncate ${isSelected ? "text-white font-bold" : "text-slate-900"}`}>
                               {ex.name}
@@ -1019,27 +1142,44 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                         </div>
                         <div className="text-right shrink-0">
                           <span
-                            className={`text-xs font-mono block font-semibold ${
+                            className={`text-[11px] font-mono block font-semibold ${
                               isSelected
                                 ? "text-blue-100"
-                                : !isEnabled
+                                : noAdapter
+                                ? "text-amber-500"
+                                : statusLabel === "Off" || statusLabel === "No response"
                                 ? "text-slate-400"
                                 : latency != null
                                 ? latencyClass(latency)
                                 : "text-slate-400"
                             }`}
                             title={
-                              isEnabled && latency != null
-                                ? `Round-trip to the venue market-data endpoint: ${latency} ms`
+                              !isEnabled
+                                ? "Not enabled"
+                                : isStreaming
+                                ? latency != null
+                                  ? `Market data active · measured API round-trip: ${latency} ms`
+                                  : "Market data active"
+                                : noAdapter
+                                ? latency != null
+                                  ? `API reachable (${latency} ms), but market quotes are not integrated`
+                                  : "Market quotes are not integrated and the API probe returned no response"
                                 : undefined
                             }
                           >
-                            {!isEnabled ? "OFF" : latency != null ? `${latency} ms` : "N/A"}
+                            {statusLabel}
                           </span>
-                          <span className={`text-xs font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}>
+                          <span
+                            className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}
+                            title={
+                              bal
+                                ? "Simulated paper equity, not live exchange equity"
+                                : "No paper execution account for this venue"
+                            }
+                          >
                             {bal
-                              ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                              : "N/A"}
+                              ? `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                              : "No paper"}
                           </span>
                         </div>
                       </button>
@@ -1049,13 +1189,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 {/* Left Panel Summary */}
                 <div className="p-3 border-t border-surface-border bg-slate-100/60 text-xs font-mono text-slate-500 flex items-center justify-between shrink-0">
-                  <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/9</span>
-                  <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/9</span>
+                  <span>Streaming: <strong className="text-emerald-600 font-bold">{streamingCount}</strong></span>
+                  <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
+                  <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
                 </div>
               </div>
 
               {/* Right Content Pane: Single Selected Exchange */}
-              <div className="flex-1 overflow-y-auto p-6 space-y-5 min-w-0">
+              <div className="flex-1 overflow-y-auto p-4 space-y-4 min-w-0">
                 {errorMsg && (
                   <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
                     <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1074,10 +1215,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Arcus DEX */}
             {selectedExchange === "arcus" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Arcus #1
                     </h3>
                     <AccountLabelControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1103,6 +1244,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("arcus")}
+                  lane={getVenueLane("arcus")}
                 />                  <VenueAccountsSection
                     venue="arcus"
                     locked={isVaultLocked}
@@ -1124,10 +1266,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 1: Hyperliquid */}
             {selectedExchange === "hyperliquid" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Hyperliquid #1
                     </h3>
                     <AccountLabelControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1153,6 +1295,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("hyperliquid")}
+                  lane={getVenueLane("hyperliquid")}
                 />
 
                 <div className="space-y-3">
@@ -1178,10 +1321,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 7: Kalshi */}
             {selectedExchange === "kalshi" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Kalshi #1
                     </h3>
                     <AccountLabelControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1207,6 +1350,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("kalshi")}
+                  lane={getVenueLane("kalshi")}
                 />                  <VenueAccountsSection
                     venue="kalshi"
                     locked={isVaultLocked}
@@ -1226,10 +1370,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
             {/* Exchange 5: Kraken (Spot & Futures Multi-Market) */}
             {selectedExchange === "kraken" && (
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Kraken #1
                     </h3>
                   </div>
@@ -1244,6 +1388,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("kraken")}
+                  lane={getVenueLane("kraken")}
                 />
 
                 <div className="space-y-4">
@@ -1343,10 +1488,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 2: Lighter */}
             {selectedExchange === "lighter" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Lighter #1
                     </h3>
                     <AccountLabelControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1372,6 +1517,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("lighter")}
+                  lane={getVenueLane("lighter")}
                 />
 
                 <div className="space-y-3">
@@ -1398,10 +1544,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 6: Polymarket */}
             {selectedExchange === "polymarket" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Polymarket #1
                     </h3>
                     <AccountLabelControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1427,6 +1573,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("polymarket")}
+                  lane={getVenueLane("polymarket")}
                 />                  <VenueAccountsSection
                     venue="polymarket"
                     locked={isVaultLocked}
@@ -1448,10 +1595,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: PopDEX */}
             {selectedExchange === "popdex" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       PopDEX #1
                     </h3>
                     <AccountLabelControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1477,6 +1624,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("popdex")}
+                  lane={getVenueLane("popdex")}
                 />                  <VenueAccountsSection
                     venue="popdex"
                     locked={isVaultLocked}
@@ -1498,10 +1646,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 4: Robinhood EVM */}
             {selectedExchange === "robinhood" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Robinhood Lighter #1
                     </h3>
                     <AccountLabelControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1527,6 +1675,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("robinhood")}
+                  lane={getVenueLane("robinhood")}
                 />                  <VenueAccountsSection
                     venue="robinhood"
                     locked={isVaultLocked}
@@ -1548,10 +1697,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange 3: Vanta */}
             {selectedExchange === "vanta" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Vanta #1
                     </h3>
                     <AccountLabelControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1577,6 +1726,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("vanta")}
+                  lane={getVenueLane("vanta")}
                 />
 
                 <VenueAccountsSection
@@ -1598,10 +1748,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Aster */}
             {selectedExchange === "aster" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Aster #1
                     </h3>
                     <AccountLabelControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1627,6 +1777,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("aster")}
+                  lane={getVenueLane("aster")}
                 />
 
                 <VenueAccountsSection
@@ -1648,10 +1799,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Binance */}
             {selectedExchange === "binance" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Binance #1
                     </h3>
                     <AccountLabelControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1677,6 +1828,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("binance")}
+                  lane={getVenueLane("binance")}
                 />
 
                 <VenueAccountsSection
@@ -1698,10 +1850,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Coinbase */}
             {selectedExchange === "coinbase" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Coinbase #1
                     </h3>
                     <AccountLabelControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1727,6 +1879,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("coinbase")}
+                  lane={getVenueLane("coinbase")}
                 />
 
                 <VenueAccountsSection
@@ -1748,10 +1901,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Decibel */}
             {selectedExchange === "decibel" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Decibel #1
                     </h3>
                     <AccountLabelControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1777,6 +1930,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("decibel")}
+                  lane={getVenueLane("decibel")}
                 />
 
                 <VenueAccountsSection
@@ -1798,10 +1952,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Interactive Brokers */}
             {selectedExchange === "ibkr" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Interactive Brokers #1
                     </h3>
                     <AccountLabelControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1827,6 +1981,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("ibkr")}
+                  lane={getVenueLane("ibkr")}
                 />
 
                 <VenueAccountsSection
@@ -1848,10 +2003,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: IG Trading */}
             {selectedExchange === "ig" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       IG Trading #1
                     </h3>
                     <AccountLabelControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1877,6 +2032,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("ig")}
+                  lane={getVenueLane("ig")}
                 />
 
                 <VenueAccountsSection
@@ -1898,10 +2054,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: OKX */}
             {selectedExchange === "okx" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       OKX #1
                     </h3>
                     <AccountLabelControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1927,6 +2083,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("okx")}
+                  lane={getVenueLane("okx")}
                 />
 
                 <VenueAccountsSection
@@ -1948,10 +2105,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             {/* Exchange: Variational */}
             {selectedExchange === "variational" && (
               <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-3">
+              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
                   <div className="flex items-center space-x-2">
-                    <h3 className="text-xs font-mono font-bold text-slate-900">
+                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
                       Variational #1
                     </h3>
                     <AccountLabelControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
@@ -1977,6 +2134,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 <VenueBalancePanel
                   bal={getVenueBalance("variational")}
+                  lane={getVenueLane("variational")}
                 />
 
                 <VenueAccountsSection
@@ -2002,7 +2160,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               {isVaultLocked && (
                 <div className="absolute inset-0 z-40 bg-slate-100 flex items-center justify-center p-4 animate-in fade-in duration-150">
                   <div className="bg-white rounded-xl p-6 shadow-2xl w-80 text-center space-y-4 border border-slate-200 animate-in zoom-in-95 duration-150">
-                    <div className="w-12 h-12 rounded-xl bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
+                    <div className="w-12 h-12 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
                       {api.isTauri && isVaultInitializing ? (
                         <Key className="w-5 h-5 text-accent" />
                       ) : (
@@ -2012,7 +2170,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     {api.isTauri ? (
                       <>
                         <div>
-                          <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                          <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
                             {isVaultStatusLoading
                               ? "Checking Secure Vault"
                               : isVaultInitializing
@@ -2044,7 +2202,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                               placeholder={isVaultInitializing ? "Create password..." : "Enter password..."}
                               autoComplete={isVaultInitializing ? "new-password" : "current-password"}
                               autoFocus
-                              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-accent"
                             />
                             {isVaultInitializing && (
                               <>
@@ -2055,7 +2213,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                                   onKeyDown={handleInlineVaultKeyDown}
                                   placeholder="Confirm password..."
                                   autoComplete="new-password"
-                                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-center focus:outline-none focus:ring-2 focus:ring-accent"
+                                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-accent"
                                 />
                                 <p className="text-xs text-slate-500 font-sans leading-relaxed">
                                   Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer, and this password cannot be recovered.
@@ -2066,7 +2224,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                               type="button"
                               onClick={() => void handleInlineVaultSubmit()}
                               disabled={inlineUnlocking || !vaultStatus || !inlinePassword || (isVaultInitializing && !inlineConfirmPassword)}
-                              className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-lg transition shadow-xs disabled:opacity-50 cursor-pointer"
+                              className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-md transition shadow-2xs disabled:opacity-50 cursor-pointer"
                             >
                               {inlineUnlocking
                                 ? isVaultInitializing ? "Creating Vault..." : "Unlocking..."
@@ -2077,7 +2235,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       </>
                     ) : (
                       <div>
-                        <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">Desktop Application Required</h4>
+                        <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">Desktop Application Required</h4>
                         <p className="text-xs text-slate-500 font-sans mt-1">
                           Secure credential storage is available only in the desktop application.
                         </p>
@@ -2088,7 +2246,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               )}
             </div>
           ) : (
-            <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {errorMsg && (
                 <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
@@ -2115,60 +2273,62 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
         {/* =================================================================== */}
         {activeTab === "execution" && (
-          <div className="max-w-4xl mx-auto w-full grid grid-cols-1 md:grid-cols-2 gap-4 text-xs font-mono">
+          <div className="max-w-4xl mx-auto w-full space-y-4 text-xs font-mono">
             {/* Trading Mode */}
-            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
-              <label className="text-slate-800 font-bold text-xs flex items-center">
-                Trading Mode
-                <InfoTooltip
-                  position="bottom"
-                  text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts — currently disabled because authenticated order signing and submission are not implemented yet."}
-                />
-              </label>
-              <p className="text-xs text-slate-500">
-                {hasApiConnectivity
-                  ? "Both modes require exchange API connectivity for market data."
-                  : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
-              </p>
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="space-y-2 min-w-0">
+                <label className="text-slate-800 font-bold text-xs flex items-center">
+                  Trading Mode
+                  <InfoTooltip
+                    position="bottom"
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts — currently disabled because authenticated order signing and submission are not implemented yet."}
+                  />
+                </label>
+                <p className="text-xs text-slate-500">
+                  {hasApiConnectivity
+                    ? "Both modes require exchange API connectivity for market data."
+                    : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
+                </p>
 
-              <div className="flex items-center space-x-3 pt-1">
-                <label
-                  className={`flex items-center space-x-2 ${hasApiConnectivity ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
-                  title={hasApiConnectivity ? undefined : "Requires at least one connected exchange API for market data"}
-                >
-                  <input
-                    type="radio"
-                    name="trading_mode"
-                    value="paper"
-                    checked={tradingMode === "paper"}
-                    onChange={() => setTradingMode("paper")}
-                    disabled={!hasApiConnectivity}
-                    className="text-accent focus:ring-accent"
-                  />
-                  <span className="font-semibold text-slate-800">Paper Trading</span>
-                </label>
-                <label
-                  className="flex items-center space-x-2 cursor-not-allowed opacity-60"
-                  title={
-                    hasApiConnectivity
-                      ? "Authenticated order signing and submission is not implemented yet"
-                      : "Requires at least one connected exchange API for market data"
-                  }
-                >
-                  <input
-                    type="radio"
-                    name="trading_mode"
-                    value="real"
-                    checked={tradingMode === "real"}
-                    disabled
-                    className="text-accent focus:ring-accent"
-                  />
-                  <span className="font-semibold text-slate-800">Real Trading</span>
-                </label>
+                <div className="flex items-center space-x-3 pt-1">
+                  <label
+                    className={`flex items-center space-x-2 ${hasApiConnectivity ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
+                    title={hasApiConnectivity ? undefined : "Requires at least one connected exchange API for market data"}
+                  >
+                    <input
+                      type="radio"
+                      name="trading_mode"
+                      value="paper"
+                      checked={tradingMode === "paper"}
+                      onChange={() => setTradingMode("paper")}
+                      disabled={!hasApiConnectivity}
+                      className="text-accent focus:ring-accent"
+                    />
+                    <span className="font-semibold text-slate-800">Paper Trading</span>
+                  </label>
+                  <label
+                    className="flex items-center space-x-2 cursor-not-allowed opacity-60"
+                    title={
+                      hasApiConnectivity
+                        ? "Authenticated order signing and submission is not implemented yet"
+                        : "Requires at least one connected exchange API for market data"
+                    }
+                  >
+                    <input
+                      type="radio"
+                      name="trading_mode"
+                      value="real"
+                      checked={tradingMode === "real"}
+                      disabled
+                      className="text-accent focus:ring-accent"
+                    />
+                    <span className="font-semibold text-slate-800">Real Trading</span>
+                  </label>
+                </div>
               </div>
 
-              <div className="pt-2 border-t border-surface-border">
-                <label className="text-slate-600 block mb-1 font-mono text-xs">
+              <div className="space-y-1 pt-3 border-t border-surface-border">
+                <label className="text-slate-600 block font-mono text-xs">
                   Paper Starting Balance (USD)
                 </label>
                 <input
@@ -2178,65 +2338,115 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={paperStartingBalance}
                   onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
-                <p className="text-xs text-slate-400 mt-1">
-                  Virtual equity each paper account starts with. Saving a new value resets all paper accounts and clears open paper positions.
+                <p className="text-xs text-slate-400 leading-snug">
+                  Virtual equity per paper account. Saving resets paper accounts and clears open positions.
                 </p>
               </div>
             </div>
 
             {/* Orderbook Fast Warm-up */}
-            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
-              <div className="flex items-center justify-between">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs flex items-center justify-between gap-4">
+              <div className="space-y-1 min-w-0">
                 <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
-                <ToggleSwitch
-                  checked={fastWarmupEnabled}
-                  onChange={setFastWarmupEnabled}
-                  disabled={loading}
-                />
+                <p className="text-xs text-slate-500">
+                  {fastWarmupEnabled
+                    ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
+                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
+                </p>
               </div>
-              <p className="text-xs text-slate-500">
-                {fastWarmupEnabled
-                  ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
-                  : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
-              </p>
+              <ToggleSwitch
+                checked={fastWarmupEnabled}
+                onChange={setFastWarmupEnabled}
+                disabled={loading}
+              />
             </div>
 
-            {/* Ticker Visibility — undo every per-ticker hide/exemption */}
-            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
-              <div className="flex items-center justify-between">
-                <label className="text-slate-800 font-bold block text-xs">Hidden Tickers</label>
+            {/* Ticker Visibility — global hide/exemption management (was per-ticker configurator) */}
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="flex items-center justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                  <label className="text-slate-800 font-bold block text-xs">Hidden Tickers</label>
+                  <p className="text-xs text-slate-500">
+                    {exemptList === null
+                      ? "Hidden tickers are excluded from the Opportunity Radar and strategy selection."
+                      : exemptList.length === 0
+                        ? "No tickers are currently hidden."
+                        : `${exemptList.length} ticker${exemptList.length === 1 ? "" : "s"} hidden.`}
+                  </p>
+                </div>
                 <button
                   type="button"
-                  disabled={revealBusy}
+                  disabled={revealBusy || !exemptList?.length}
                   onClick={handleRevealAll}
-                  className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-accent hover:border-accent/40 transition cursor-pointer disabled:opacity-40"
+                  className="px-3 py-1.5 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-accent hover:border-accent/40 transition cursor-pointer disabled:opacity-40 shrink-0"
                 >
                   {revealBusy ? "…" : "Reveal All"}
                 </button>
               </div>
-              <p className="text-xs text-slate-500">
-                {exemptCount === null
-                  ? "Tickers hidden via their configurator are excluded from the Opportunity Radar and strategy selection."
-                  : exemptCount === 0
-                    ? "No tickers are currently hidden."
-                    : `${exemptCount} ticker${exemptCount === 1 ? "" : "s"} hidden — Reveal All restores every one.`}
-              </p>
+              {exemptList && exemptList.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {exemptList.map((base) => (
+                    <button
+                      key={base}
+                      type="button"
+                      onClick={() => void handleSetExempted(base, false)}
+                      title={`Un-hide ${base}`}
+                      className="flex items-center gap-1 px-2 py-1 rounded-sm border border-surface-border bg-surface-raised text-xs font-mono font-bold text-slate-600 hover:text-accent hover:border-accent/40 transition cursor-pointer"
+                    >
+                      {base}
+                      <span className="text-slate-400">×</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={hideDraft}
+                  onChange={(e) => setHideDraft(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleHideTicker()}
+                  placeholder="Hide ticker (e.g. BTC)"
+                  list="engine-hidden-ticker-options"
+                  className="w-44 px-2.5 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <datalist id="engine-hidden-ticker-options">
+                  {PERP_TICKERS.map((t) => (
+                    <option key={t.symbol} value={t.symbol.replace(/-PERP$|PERP$/i, "")} />
+                  ))}
+                </datalist>
+                <button
+                  type="button"
+                  onClick={handleHideTicker}
+                  disabled={!hideDraft.trim()}
+                  className="px-2.5 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-accent hover:border-accent/40 transition cursor-pointer disabled:opacity-40"
+                >
+                  Hide
+                </button>
+              </div>
             </div>
 
             {/* Max Slippage */}
-            <div className="p-4 bg-surface border border-surface-border rounded-lg space-y-2 shadow-xs">
-              <label className="text-slate-800 font-bold block text-xs">Max Slippage Tolerance (BPS)</label>
-              <input
-                type="number"
-                step="1"
-                min="1"
-                disabled={loading}
-                value={maxSlippageBps}
-                onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 15)}
-                className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-              />
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs flex items-center justify-between gap-4">
+              <div className="space-y-1 min-w-0">
+                <label className="text-slate-800 font-bold block text-xs">Max Slippage Tolerance</label>
+                <p className="text-xs text-slate-500">
+                  Worst-case VWAP slippage accepted on either leg before an order is refused.
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  disabled={loading}
+                  value={maxSlippageBps}
+                  onChange={(e) => setMaxSlippageBps(parseFloat(e.target.value) || 1)}
+                  className="w-24 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-slate-900 text-right focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <span className="text-slate-400">BPS</span>
+              </div>
             </div>
 
           </div>
@@ -2246,9 +2456,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
         {activeTab === "network" && (
-          <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-4 shadow-xs">
-            <div className="border-b border-surface-border pb-3">
-              <h3 className="text-xs font-mono font-bold text-slate-900 flex items-center space-x-2">
+          <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+            <div className="border-b border-surface-border pb-2.5">
+              <h3 className="text-[13px] font-mono font-bold text-slate-900 flex items-center space-x-2">
                 <Globe className="w-4 h-4 text-accent" />
                 <span>Engine Ports & 24/7 VPS Background Daemon</span>
               </h3>
@@ -2265,7 +2475,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={engineRpcPort}
                   onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -2276,7 +2486,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={engineWsPort}
                   onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -2288,7 +2498,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   value={bindAddress}
                   placeholder="127.0.0.1 or 0.0.0.0"
                   onChange={(e) => setBindAddress(e.target.value)}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                 />
               </div>
             </div>
@@ -2316,14 +2526,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* =================================================================== */}
         {activeTab === "about" && (
           <div className="space-y-4">
-            <div className="bg-surface border border-surface-border rounded-xl p-6 shadow-xs space-y-5">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
+            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-2.5">
                 <div className="flex items-center space-x-3">
                   <div className="w-10 h-10 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
                     <ArbitragerLogo size={22} className="text-accent" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                    <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
                       About Arbitrager ({version})
                     </h3>
                   </div>
@@ -2334,7 +2544,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-md text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
@@ -2344,7 +2554,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     href={gitRepo}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-xs"
+                    className="px-3.5 py-1.5 bg-surface hover:bg-surface-raised border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
                   >
                     <span>Git Repository</span>
                     <ExternalLink className="w-3.5 h-3.5" />
@@ -2360,15 +2570,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               )}
 
               {/* Sponsor Card: Buy me a SOLO */}
-              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-xs">
+              <div className="p-5 bg-gradient-to-r from-amber-50/80 via-yellow-50/50 to-amber-50/80 border border-amber-200 rounded-lg flex flex-col sm:flex-row items-center justify-between gap-4 shadow-2xs">
                 <div className="flex items-center space-x-4">
                   <img
                     src="/solo_can.jpg"
                     alt="Can of Australian SOLO Lemon Soda"
-                    className="w-14 h-14 object-contain rounded-lg shadow-xs border border-amber-200 bg-white"
+                    className="w-14 h-14 object-contain rounded-lg shadow-2xs border border-amber-200 bg-white"
                   />
                   <div>
-                    <h4 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                    <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
                       Enjoying The Tool? Buy Me A SOLO!
                     </h4>
                   </div>
@@ -2378,7 +2588,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   href={sponsorLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-lg transition shadow-xs flex items-center space-x-2 shrink-0"
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-lg transition shadow-2xs flex items-center space-x-2 shrink-0"
                 >
                   <span>Buy me a SOLO ($5)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
@@ -2413,7 +2623,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           title={`Execution mode: ${tradingMode.toUpperCase()}`}
         >
           <span className="text-slate-400 font-normal">Mode:</span>
-          <span className="font-bold text-accent">{tradingMode}</span>
+          <span className="font-bold text-accent">{tradingMode.charAt(0).toUpperCase() + tradingMode.slice(1)}</span>
         </div>
 
         <div className="flex items-center space-x-2.5">
@@ -2421,7 +2631,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-lg transition shadow-xs cursor-pointer"
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-md transition shadow-2xs cursor-pointer"
             >
               Cancel
             </button>
@@ -2429,7 +2639,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-xs disabled:opacity-50 cursor-pointer"
+            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-md transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
           >
             {saving ? (
               <span>Saving...</span>

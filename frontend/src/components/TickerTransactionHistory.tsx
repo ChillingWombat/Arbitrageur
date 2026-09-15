@@ -1,12 +1,12 @@
 import React, { useState, useMemo } from "react";
 import {
-  History,
   ArrowRight,
   Layers,
   Search,
 } from "lucide-react";
 import type { ExecutionLogEntry, TickerStrategyConfigDto } from "../types";
 import { formatCurrencyPnl } from "../types/tickers";
+import { EmptyState } from "./EmptyState";
 
 interface TickerTransactionHistoryProps {
   symbol: string;
@@ -58,28 +58,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
   }, [logs, symbol, filterStatus, filterDirection, searchQuery]);
 
   return (
-    <div className="bg-surface border border-surface-border rounded-lg p-5 shadow-xs transition mb-8">
+    <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs transition">
       {/* Header Bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between pb-4 border-b border-surface-border gap-3">
-        <div className="flex items-center space-x-2.5">
-          <div className="p-2 rounded-md bg-blue-50 border border-blue-200 text-accent">
-            <History className="w-4 h-4" />
-          </div>
-          <div>
-            <div className="flex items-center space-x-2">
-              <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900">
-                Bot Execution History
-              </h3>
-              <span className="px-2 py-0.5 rounded-sm bg-surface-raised border border-surface-border text-xs font-mono font-medium text-slate-700">
-                {symbol}
-              </span>
-            </div>
-            <p className="text-xs text-slate-500 mt-0.5 font-sans">
-              Executed orders recorded by the bot for this ticker
-            </p>
-          </div>
-        </div>
-
+      <div className="flex flex-col md:flex-row md:items-center justify-end pb-2.5 border-b border-surface-border gap-3">
         {/* Filter & Search Bar */}
         <div className="flex items-center space-x-2">
           <div className="relative">
@@ -96,24 +77,24 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <div className="flex items-center bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs font-mono">
             <button
               onClick={() => setFilterStatus("ALL")}
-              className={`px-2 py-1 rounded-sm transition ${
-                filterStatus === "ALL" ? "bg-accent text-white font-medium" : "text-slate-600 hover:text-slate-900"
+              className={`px-2 py-1 rounded transition ${
+                filterStatus === "ALL" ? "bg-accent text-white shadow-2xs" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               All ({tickerLogs.length})
             </button>
             <button
               onClick={() => setFilterStatus("FILLED")}
-              className={`px-2 py-1 rounded-sm transition ${
-                filterStatus === "FILLED" ? "bg-emerald-600 text-white font-medium" : "text-slate-600 hover:text-slate-900"
+              className={`px-2 py-1 rounded transition ${
+                filterStatus === "FILLED" ? "bg-emerald-600 text-white font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               Filled
             </button>
             <button
               onClick={() => setFilterStatus("FAILED")}
-              className={`px-2 py-1 rounded-sm transition ${
-                filterStatus === "FAILED" ? "bg-rose-600 text-white font-medium" : "text-slate-600 hover:text-slate-900"
+              className={`px-2 py-1 rounded transition ${
+                filterStatus === "FAILED" ? "bg-rose-600 text-white font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               Failed
@@ -153,8 +134,11 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <tbody className="divide-y divide-surface-border">
             {tickerLogs.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-slate-400 font-sans text-xs">
-                  No execution transactions found for <span className="font-mono font-medium text-slate-600">{symbol}</span> matching the active filters.
+                <td colSpan={9}>
+                  <EmptyState
+                    title="No Transactions Found"
+                    hint={<>No execution records for <span className="font-medium text-slate-700">{symbol}</span> matching the active filters.</>}
+                  />
                 </td>
               </tr>
             ) : (

@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 5] =
-    ["futures", "funding", "spot", "prediction", "stat_arb"];
+pub const ALLOWED_STRATEGY_IDS: [&str; 6] =
+    ["futures", "radar", "funding", "spot", "prediction", "stat_arb"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +194,163 @@ pub struct VenueSampleEntry {
     pub mid: f64,
     pub best_bid: f64,
     pub best_ask: f64,
+}
+
+/// One venue's signed net filled quantity inside an aggregated open position.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PositionVenueDto {
+    pub venue: String,
+    /// Positive = net long (buy side), negative = net short (sell side).
+    pub net_qty: f64,
+}
+
+/// Aggregated current open position for one signal-type identity:
+/// (strategy, symbol/event, venue set). Built from every signal execution
+/// that still counts as open; partial-flatten children net against their
+/// parents because they share the same grouping key.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenPositionDto {
+    /// Stable grouping identity: `strategy_id|symbol|venue_a+venue_b`.
+    pub key: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub signal_count: usize,
+    /// Per-venue signed net quantity; long (positive) rows first.
+    pub venues: Vec<PositionVenueDto>,
+    /// Sum of entry-time expected net USD where signals carried an estimate.
+    pub expected_net_usd: Option<f64>,
+    /// Mark-to-market PnL minus recorded fees. `None` whenever any filled leg
+    /// lacks an entry fill price or a fresh venue mark — never fabricated.
+    pub unrealized_pnl_usd: Option<f64>,
+    pub fees_usd: f64,
+    /// Gross entry notional across filled legs; `None` when any filled leg
+    /// lacks an entry price.
+    pub notional_usd: Option<f64>,
+    /// Earliest signal creation time in the group.
+    pub opened_at: String,
+}
+
+/// Group open signal executions into per-(strategy, symbol, venue-set)
+/// positions. `mark` supplies a fresh current mid for (venue, symbol); when it
+/// returns `None` for a filled leg the group's unrealized PnL stays `None`
+/// rather than being marked at a stale or invented price.
+pub fn aggregate_open_positions(
+    signals: &[SignalExecution],
+    mark: &dyn Fn(&str, &str) -> Option<f64>,
+) -> Vec<OpenPositionDto> {
+    use std::collections::BTreeMap;
+
+    const EPS: f64 = 1e-9;
+    let mut groups: BTreeMap<(String, String, String), Vec<&SignalExecution>> = BTreeMap::new();
+    for s in signals {
+        if !s.status.counts_as_open() {
+            continue;
+        }
+        let mut venues: Vec<String> =
+            s.legs.iter().map(|l| l.venue.to_lowercase()).collect();
+        venues.sort();
+        venues.dedup();
+        let venue_key = venues.join("+");
+        groups
+            .entry((s.strategy_id.to_lowercase(), s.symbol.clone(), venue_key))
+            .or_default()
+            .push(s);
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for ((strategy_id, symbol, venue_key), members) in groups {
+        let mut nets: BTreeMap<String, f64> = BTreeMap::new();
+        let mut fees = 0.0f64;
+        let mut expected_sum = 0.0f64;
+        let mut expected_any = false;
+        let mut pnl = Some(0.0f64);
+        let mut notional = Some(0.0f64);
+        let mut opened_at = String::new();
+
+        for s in &members {
+            fees += s.fees_usd;
+            if let Some(e) = s.expected_net_usd {
+                expected_sum += e;
+                expected_any = true;
+            }
+            if opened_at.is_empty() || s.created_at < opened_at {
+                opened_at = s.created_at.clone();
+            }
+            for leg in &s.legs {
+                if leg.filled_qty.abs() <= EPS {
+                    continue;
+                }
+                let signed = match leg.side {
+                    LegSide::Long => leg.filled_qty,
+                    LegSide::Short => -leg.filled_qty,
+                };
+                *nets.entry(leg.venue.clone()).or_insert(0.0) += signed;
+
+                match (leg.fill_price, mark(&leg.venue, &s.symbol)) {
+                    (Some(entry), Some(mid)) => {
+                        if let Some(p) = pnl.as_mut() {
+                            *p += (mid - entry) * signed;
+                        }
+                    }
+                    _ => pnl = None,
+                }
+                match leg.fill_price {
+                    Some(entry) => {
+                        if let Some(n) = notional.as_mut() {
+                            *n += leg.filled_qty * entry;
+                        }
+                    }
+                    None => notional = None,
+                }
+            }
+        }
+
+        // Zero-net rows (a venue flattened to flat by an offsetting child
+        // signal) carry no current exposure — drop them; if the whole group
+        // nets flat (e.g. unfilled in-flight signal) keep the venues at zero.
+        let mut venue_rows: Vec<PositionVenueDto> = nets
+            .iter()
+            .filter(|(_, q)| q.abs() > EPS)
+            .map(|(v, q)| PositionVenueDto {
+                venue: v.clone(),
+                net_qty: *q,
+            })
+            .collect();
+        if venue_rows.is_empty() {
+            venue_rows = venue_key
+                .split('+')
+                .map(|v| PositionVenueDto {
+                    venue: v.to_string(),
+                    net_qty: 0.0,
+                })
+                .collect();
+        }
+        // Long (positive) rows on top, short (negative) rows below.
+        venue_rows.sort_by(|a, b| {
+            b.net_qty
+                .signum()
+                .partial_cmp(&a.net_qty.signum())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.venue.cmp(&b.venue))
+        });
+
+        out.push(OpenPositionDto {
+            key: format!("{strategy_id}|{symbol}|{venue_key}"),
+            strategy_id,
+            symbol,
+            signal_count: members.len(),
+            venues: venue_rows,
+            expected_net_usd: expected_any.then_some(expected_sum),
+            unrealized_pnl_usd: pnl.map(|p| p - fees),
+            fees_usd: fees,
+            notional_usd: notional,
+            opened_at,
+        });
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
 }
 
 /// One persisted pair-signal lifecycle row (monitor_signals table).
@@ -413,6 +570,16 @@ CREATE TABLE monitor_signals (
 PRAGMA user_version = 5;
 COMMIT;";
 
+const MIGRATION_V6_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE strategy_params (
+  strategy_id TEXT PRIMARY KEY COLLATE NOCASE CHECK(strategy_id IN ('futures','funding','spot')),
+  params_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+PRAGMA user_version = 6;
+COMMIT;";
+
 /// Durable, non-secret account/route metadata store. Contains no credential
 /// material; secrets remain exclusively in the encrypted vault.
 pub struct StateStore {
@@ -624,7 +791,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 5 {
+        if version > 6 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -653,6 +820,12 @@ impl StateStore {
         }
         if version <= 4 {
             if let Err(err) = conn.execute_batch(MIGRATION_V5_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 5 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V6_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -1340,6 +1513,34 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         )? == 1)
     }
 
+    pub fn upsert_strategy_params_json(
+        &self,
+        strategy_id: &str,
+        params_json: &str,
+    ) -> anyhow::Result<()> {
+        let id = normalize_id(strategy_id)?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO strategy_params (strategy_id, params_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(strategy_id) DO UPDATE SET params_json = ?2, updated_at = ?3",
+            params![id, params_json, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn strategy_params_json(&self) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT strategy_id, params_json FROM strategy_params ORDER BY strategy_id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     /* ------------------------------------------------------------------ */
     /* Spread samples (durable dislocation signal history)                   */
     /* ------------------------------------------------------------------ */
@@ -1651,7 +1852,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 5);
+            assert_eq!(version, 6);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -1668,6 +1869,42 @@ mod tests {
             assert_eq!(dir_mode, 0o700);
             let file_mode = fs::metadata(&file).unwrap().permissions().mode() & 0o777;
             assert_eq!(file_mode, 0o600);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_strategy_params_json_roundtrip_and_reopen() {
+        let (dir, file) = temp_store_path("strategy_params");
+        {
+            let store = StateStore::open(&file).unwrap();
+            store
+                .upsert_strategy_params_json("futures", "{\"strategyId\":\"futures\"}")
+                .unwrap();
+            store
+                .upsert_strategy_params_json("futures", "{\"strategyId\":\"futures\",\"v\":2}")
+                .unwrap();
+            store
+                .upsert_strategy_params_json("spot", "{\"strategyId\":\"spot\"}")
+                .unwrap();
+            assert!(
+                store.upsert_strategy_params_json("bogus", "{}").is_err(),
+                "unknown strategy id must fail the CHECK constraint"
+            );
+        }
+        {
+            let reopened = StateStore::open(&file).unwrap();
+            let rows = reopened.strategy_params_json().unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    (
+                        "futures".to_string(),
+                        "{\"strategyId\":\"futures\",\"v\":2}".to_string()
+                    ),
+                    ("spot".to_string(), "{\"strategyId\":\"spot\"}".to_string()),
+                ]
+            );
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -2236,5 +2473,128 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ts_ms, 8_000);
         assert_eq!(rows[1].ts_ms, 9_000);
+    }
+
+    /* ------------------ open-position aggregation ------------------ */
+
+    #[allow(clippy::too_many_arguments)]
+    fn filled_two_leg(
+        store: &StateStore,
+        id: &str,
+        symbol: &str,
+        strategy: &str,
+        long_venue: &str,
+        short_venue: &str,
+        qty: f64,
+        long_px: f64,
+        short_px: f64,
+    ) {
+        let mut sig = two_leg_signal(id, symbol, None, None);
+        sig.strategy_id = strategy.to_string();
+        sig.legs[0].venue = long_venue.to_string();
+        sig.legs[1].venue = short_venue.to_string();
+        sig.legs[0].intended_qty = qty;
+        sig.legs[1].intended_qty = qty;
+        store.record_signal_execution(&sig).unwrap();
+        store
+            .apply_leg_fill(id, LegSide::Long, qty, long_px, 0.5, None)
+            .unwrap();
+        store
+            .apply_leg_fill(id, LegSide::Short, qty, short_px, 0.5, None)
+            .unwrap();
+        store
+            .update_signal_status(id, SignalStatus::Balanced, None)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_aggregate_open_positions_groups_by_venue_pair() {
+        let store = StateStore::open_in_memory().unwrap();
+        // BTC traded twice on hyperliquid-vs-lighter, once on
+        // hyperliquid-vs-arcus: two cards, first aggregates both signals.
+        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 60000.0, 60100.0);
+        filled_two_leg(&store, "s2", "BTC-USDC", "futures", "hyperliquid", "lighter", 0.5, 60000.0, 60100.0);
+        filled_two_leg(&store, "s3", "BTC-USDC", "futures", "hyperliquid", "arcus", 1.0, 60000.0, 60100.0);
+
+        let signals = store.list_signals(None, None).unwrap();
+        let positions = aggregate_open_positions(&signals, &|_, _| None);
+        assert_eq!(positions.len(), 2, "A-vs-B merges, A-vs-C stays separate");
+
+        let hl_lt = positions
+            .iter()
+            .find(|p| p.venues.len() == 2 && p.venues[1].venue == "lighter")
+            .unwrap();
+        assert_eq!(hl_lt.signal_count, 2);
+        assert_eq!(hl_lt.symbol, "BTC-USDC");
+        // Long row on top (+1.5 on hyperliquid), short row below.
+        assert_eq!(hl_lt.venues[0].venue, "hyperliquid");
+        assert!((hl_lt.venues[0].net_qty - 1.5).abs() < 1e-9);
+        assert_eq!(hl_lt.venues[1].venue, "lighter");
+        assert!((hl_lt.venues[1].net_qty + 1.5).abs() < 1e-9);
+        // No marks supplied -> PnL honestly unavailable, not fabricated zero.
+        assert!(hl_lt.unrealized_pnl_usd.is_none());
+        assert!(hl_lt.notional_usd.is_some());
+        assert_eq!(hl_lt.expected_net_usd, Some(25.0));
+    }
+
+    #[test]
+    fn test_aggregate_open_positions_marks_to_market_and_filters() {
+        let store = StateStore::open_in_memory().unwrap();
+        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 100.0, 105.0);
+        filled_two_leg(&store, "s2", "ETH-USDC", "funding", "hyperliquid", "lighter", 2.0, 10.0, 10.0);
+        // A closed signal must not contribute.
+        filled_two_leg(&store, "s3", "SOL-USDC", "futures", "hyperliquid", "lighter", 5.0, 1.0, 1.0);
+        store
+            .update_signal_status("s3", SignalStatus::Closed, None)
+            .unwrap();
+
+        let signals = store.list_signals(None, None).unwrap();
+        // Marks: both venues at 110 -> long +10, short loses (110-105)*1 = -5.
+        let positions = aggregate_open_positions(&signals, &|_, _| Some(110.0));
+        assert_eq!(positions.len(), 2, "closed signals drop out");
+
+        let btc = positions.iter().find(|p| p.symbol == "BTC-USDC").unwrap();
+        // gross = +10 - 5 = 5; minus fees (2 legs * 0.5 = 1.0) => 4.0
+        let pnl = btc.unrealized_pnl_usd.expect("all legs markable");
+        assert!((pnl - 4.0).abs() < 1e-9, "unexpected pnl {pnl}");
+
+        // Strategy scoping: the funding signal is a separate group.
+        let funding: Vec<_> = positions
+            .iter()
+            .filter(|p| p.strategy_id == "funding")
+            .collect();
+        assert_eq!(funding.len(), 1);
+        assert_eq!(funding[0].symbol, "ETH-USDC");
+    }
+
+    #[test]
+    fn test_aggregate_open_positions_partial_flatten_nets_residual() {
+        let store = StateStore::open_in_memory().unwrap();
+        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 100.0, 100.0);
+        // Partial flatten child: opposite-side legs on the same venues,
+        // still open (unresolved) -> nets the group to residual 0.4.
+        let mut child = two_leg_signal("flat-s1-0001", "BTC-USDC", None, None);
+        child.legs[0].side = LegSide::Short;
+        child.legs[1].side = LegSide::Long;
+        child.legs[0].intended_qty = 0.6;
+        child.legs[1].intended_qty = 0.6;
+        store.record_signal_execution(&child).unwrap();
+        store
+            .apply_leg_fill("flat-s1-0001", LegSide::Short, 0.6, 100.0, 0.0, None)
+            .unwrap();
+        store
+            .apply_leg_fill("flat-s1-0001", LegSide::Long, 0.6, 100.0, 0.0, None)
+            .unwrap();
+        store
+            .update_signal_status("flat-s1-0001", SignalStatus::Unresolved, None)
+            .unwrap();
+
+        let signals = store.list_signals(None, None).unwrap();
+        let positions = aggregate_open_positions(&signals, &|_, _| None);
+        assert_eq!(positions.len(), 1, "flatten child joins the same group");
+        let p = &positions[0];
+        assert!((p.venues[0].net_qty - 0.4).abs() < 1e-9);
+        assert!((p.venues[1].net_qty + 0.4).abs() < 1e-9);
+        assert_eq!(p.signal_count, 2);
     }
 }

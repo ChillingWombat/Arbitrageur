@@ -3,6 +3,7 @@ import { SlidersHorizontal } from "lucide-react";
 import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
 import { formatCurrencyPnl } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
+import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface FundingRadarProps {
@@ -88,9 +89,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   return (
     <div className="p-4 space-y-4 overflow-y-auto h-full">
       {/* Strategy Ribbon — read-only params left, configurator + toggle right */}
-      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs">
+      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
+          <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
           {/* Active symbol + strategy telemetry */}
@@ -149,13 +150,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
-          {/* Configure Strategy Button */}
+          {/* Configure Strategy Button — universal params, no ticker required */}
           <button
             type="button"
-            onClick={() => symbol && onOpenConfig?.(symbol, "funding")}
-            disabled={!symbol}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-            title={symbol ? `Configure ${symbol} Funding Carry Parameters` : "Select a ticker in the explorer first"}
+            onClick={() => onOpenConfig?.(symbol || "BTC-USDC", "funding")}
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+            title="Configure Funding Rate strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
             <span>Configure Strategy</span>
@@ -180,21 +180,21 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       </div>
 
       {/* Evaluated Carry Opportunities Table */}
-      <div className="bg-surface rounded-lg border border-surface-border p-5 shadow-xs">
-        <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 mb-4">
+      <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs">
+        <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 mb-4">
           Ranked Delta-Neutral Carry Opportunities
         </h3>
 
         {opportunities.length === 0 ? (
-          <div className="text-center py-12 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-md">
-            No funding rate spreads currently exceeding positive carry threshold.
+          <div className="border border-dashed border-surface-border rounded-md">
+            <EmptyState plain title="No Opportunity Detected" />
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             {opportunities.map((opp, idx) => (
               <div
                 key={opp.id}
-                className="bg-surface border border-surface-border hover:border-slate-300 rounded-lg p-5 flex flex-col justify-between space-y-4 transition shadow-xs"
+                className="bg-surface border border-surface-border hover:border-slate-300 rounded-lg p-4 flex flex-col justify-between space-y-3 transition shadow-2xs"
               >
                 <div>
                   {/* Badge & Rank */}
@@ -256,7 +256,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                     <button
                       onClick={() => handleExecute(opp)}
                       disabled={executingId === opp.id}
-                      className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white rounded-md text-xs font-mono font-medium transition flex items-center shadow-xs"
+                      className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white rounded-md text-xs font-mono font-medium transition flex items-center shadow-2xs"
                     >
                       <span>{executingId === opp.id ? "Opening..." : "Open Carry"}</span>
                     </button>
@@ -269,8 +269,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       </div>
 
       {/* Interactive Holding Duration Yield Simulator */}
-      <div className="bg-surface rounded-lg border border-surface-border p-5 shadow-xs">
-        <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs">
+        <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
           <span>Carry Yield Amortization Simulator</span>
           <span className="text-accent font-semibold font-mono text-xs">{holdingDays} Days Target</span>
         </h3>

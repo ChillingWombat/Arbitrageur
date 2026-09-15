@@ -39,8 +39,8 @@ export default {
       },
       fontFamily: {
         mono: [
-          '"Geist Mono Variable"',
-          '"Geist Mono"',
+          '"Roboto Mono Variable"',
+          '"Roboto Mono"',
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",
@@ -49,13 +49,11 @@ export default {
           "monospace"
         ],
         sans: [
-          '"Geist Variable"',
-          '"Geist"',
-          "Inter",
+          '"Roboto Variable"',
+          '"Roboto"',
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",
-          "Roboto",
           "sans-serif"
         ]
       }

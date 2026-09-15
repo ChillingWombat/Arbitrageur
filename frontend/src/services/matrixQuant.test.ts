@@ -4,12 +4,17 @@ import {
   RollingSpreadTracker,
   buildCrossVenueMatrix,
   buildCrossTickerMatrix,
+  clampWindowValue,
+  durationParts,
+  durationSeconds,
+  formatDuration,
   getMatrixCellVisuals,
   getVenueFeeBps,
+  parseDuration,
   WINDOW_SECONDS,
   type TickerMarketQuote,
 } from "./matrixQuant.ts";
-import type { VenueOrderBookDto } from "../types/index.ts";
+import type { SpatialOpportunityDto, VenueOrderBookDto } from "../types/index.ts";
 import type { PerpTicker } from "../types/tickers.ts";
 
 test("WINDOW_SECONDS and getVenueFeeBps return expected configurations", () => {
@@ -401,4 +406,345 @@ test("buildCrossVenueMatrix incorporates target profit, nominal hurdle, and Doub
   const unwindVisuals = getMatrixCellVisuals(cellDouble, 5.0);
   assert.ok(unwindVisuals.bgClass.includes("blue"));
   assert.ok(unwindVisuals.highlightRing.includes("blue"));
+});
+
+test("duration helpers decompose, convert, format, and parse canonical durations", () => {
+  assert.deepEqual(durationParts(86_400), { value: 1, unit: "days" });
+  assert.deepEqual(durationParts(21_600), { value: 6, unit: "hours" });
+  assert.deepEqual(durationParts(1_800), { value: 30, unit: "minutes" });
+  assert.deepEqual(durationParts(300), { value: 5, unit: "minutes" });
+
+  assert.equal(durationSeconds(6, "hours"), 21_600);
+  assert.equal(durationSeconds(2, "days"), 172_800);
+  assert.equal(durationSeconds(30, "minutes"), 1_800);
+  assert.ok(Number.isNaN(durationSeconds(NaN, "hours")));
+  assert.ok(Number.isNaN(durationSeconds(Infinity, "days")));
+
+  assert.equal(formatDuration(86_400), "1d");
+  assert.equal(formatDuration(21_600), "6h");
+  assert.equal(formatDuration(1_800), "30m");
+  assert.equal(formatDuration(10), "10s");
+  assert.equal(formatDuration(90), "90s");
+
+  assert.equal(parseDuration("24h"), 86_400);
+  assert.equal(parseDuration("30m"), 1_800);
+  assert.equal(parseDuration("10s"), 10);
+  assert.equal(parseDuration("2d"), 172_800);
+  assert.equal(parseDuration("99x"), null);
+  assert.equal(parseDuration("1.5h"), null);
+  assert.equal(parseDuration(""), null);
+});
+
+test("clampWindowValue clamps the displayed field to per-unit bounds", () => {
+  assert.equal(clampWindowValue(999, "days"), 30);
+  assert.equal(clampWindowValue(0, "days"), 1);
+  assert.equal(clampWindowValue(3, "minutes"), 5);
+  assert.equal(clampWindowValue(50_000, "minutes"), 43_200);
+  assert.equal(clampWindowValue(721, "hours"), 720);
+  assert.equal(clampWindowValue(0.9, "hours"), 1);
+  assert.equal(clampWindowValue(2.7, "days"), 2);
+  assert.equal(clampWindowValue(NaN, "minutes"), 5);
+});
+
+function venueBook(venueId: string, bid: number, ask: number): VenueOrderBookDto {
+  return {
+    venue_id: venueId,
+    venue_name: venueId,
+    symbol: "BTC-USDC",
+    best_bid: bid,
+    best_ask: ask,
+    spread: ask - bid,
+    spread_bps: ((ask - bid) / ((ask + bid) / 2)) * 10_000,
+    mid_price: (ask + bid) / 2,
+    total_bid_depth: 50,
+    total_ask_depth: 50,
+    vwap_bid: bid,
+    vwap_ask: ask,
+    funding_rate_8h_pct: 0.01,
+    bids: [[bid, 5]],
+    asks: [[ask, 5]],
+  };
+}
+
+test("buildCrossVenueMatrix prefers durable baselines over tracker history", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.05), venueBook("lighter", 100.30, 100.35)];
+  const tracker = new RollingSpreadTracker();
+
+  const durable = [
+    {
+      buy_venue: "hyperliquid",
+      sell_venue: "lighter",
+      mean_gross_bps: 12.0,
+      percentile_gross_bps: 30.0,
+      sample_count: 250,
+      history_span_secs: 86_400,
+    },
+  ];
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    books,
+    60,
+    0.5,
+    5.0,
+    { windowPercentile: 90 },
+    tracker,
+    durable
+  );
+  const cell = grid[0][1];
+  assert.equal(cell.baselineReady, true);
+  assert.equal(cell.sampleCount, 250);
+  // Friction conversion: meanNet = meanGross - feeBps - closingFriction
+  const expectedBaselineNet = 12.0 - cell.feeBps - cell.closingFrictionBps;
+  assert.ok(Math.abs(cell.baselineMeanBps - expectedBaselineNet) < 0.05);
+  assert.ok(Math.abs(cell.deltaBps - (cell.netSpreadBps - expectedBaselineNet)) < 0.1);
+  // Percentile hurdle stays in gross bps
+  assert.equal(cell.percentileHurdleBps, 30.0);
+  // The tracker must not have been consulted or recorded into.
+  const probe = tracker.getStats("venue:BTC-USDC:hyperliquid:lighter", 0, 60, 50, Date.now());
+  assert.equal(probe.sampleCount, 1, "no durable-mode observations recorded");
+});
+
+test("buildCrossVenueMatrix fails closed when durable baseline is missing", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.01), venueBook("lighter", 102.0, 102.01)];
+  const tracker = new RollingSpreadTracker();
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    books,
+    60,
+    0.5,
+    5.0,
+    { windowPercentile: 90, currentAccumulatedUnits: 0, maxAccumulatedUnits: 3 },
+    tracker,
+    []
+  );
+  const cell = grid[0][1];
+  // A large authentic current spread cannot execute without a baseline.
+  assert.ok(cell.grossSpreadBps > 100);
+  assert.equal(cell.baselineReady, false);
+  assert.equal(cell.sampleCount, 0);
+  assert.equal(cell.isExecutable, false);
+});
+
+test("buildCrossVenueMatrix keeps convergence unwind without baseline but blocks divergence", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.01), venueBook("lighter", 102.0, 102.01)];
+  const tracker = new RollingSpreadTracker();
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    books,
+    60,
+    0.5,
+    5.0,
+    {
+      windowPercentile: 90,
+      currentAccumulatedUnits: 1,
+      maxAccumulatedUnits: 3,
+      executionMode: "DOUBLE_WAY",
+    },
+    tracker,
+    [
+      {
+        buy_venue: "hyperliquid",
+        sell_venue: "lighter",
+        mean_gross_bps: null,
+        percentile_gross_bps: null,
+        sample_count: 7,
+        history_span_secs: 1_200,
+      },
+    ]
+  );
+  const cell = grid[0][1];
+  assert.equal(cell.baselineReady, false);
+  assert.equal(cell.sampleCount, 7, "truthful pair count is preserved");
+  assert.equal(cell.isExecutable, false, "wide spread cannot unwind: not converged, divergence blocked");
+
+  // Converged spread + held units -> unwind still permitted without baseline.
+  const tight = [venueBook("hyperliquid", 100.0, 100.01), venueBook("lighter", 100.01, 100.02)];
+  const res2 = buildCrossVenueMatrix(
+    "BTC-USDC",
+    tight,
+    60,
+    0.5,
+    5.0,
+    {
+      windowPercentile: 90,
+      currentAccumulatedUnits: 1,
+      maxAccumulatedUnits: 3,
+      executionMode: "DOUBLE_WAY",
+    },
+    tracker,
+    []
+  );
+  assert.equal(res2.grid[0][1].isConvergenceUnwind, true);
+  assert.equal(res2.grid[0][1].isExecutable, true);
+});
+
+function routeOpp(
+  buyVenue: string,
+  sellVenue: string,
+  overrides: Partial<SpatialOpportunityDto> = {}
+): SpatialOpportunityDto {
+  return {
+    id: `BTC-${buyVenue}-${sellVenue}`,
+    symbol: "BTC-USDC",
+    buy_venue: buyVenue,
+    sell_venue: sellVenue,
+    buy_price: 100.05,
+    sell_price: 100.3,
+    gross_spread: 0.25,
+    gross_spread_bps: 24.9,
+    fee_bps: 3.5,
+    net_spread_bps: 10.0,
+    order_qty: 0.5,
+    estimated_profit_usd: 5.0,
+    is_executable: true,
+    buy_venue_id: buyVenue,
+    sell_venue_id: sellVenue,
+    buy_fee_bps: 2.0,
+    sell_fee_bps: 1.5,
+    round_trip_commission_bps: 7.0,
+    entry_slippage_bps: 0.5,
+    exit_slippage_bps: 0.5,
+    closing_spread_bps: 2.0,
+    expected_friction_bps: 10.0,
+    required_gross_bps: 11.0,
+    slippage_ok: true,
+    depth_ok: true,
+    ...overrides,
+  };
+}
+
+test("buildCrossVenueMatrix uses backend route economics when provided", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.05), venueBook("lighter", 100.3, 100.35)];
+  const durable = [
+    {
+      buy_venue: "hyperliquid",
+      sell_venue: "lighter",
+      mean_gross_bps: 20.0,
+      percentile_gross_bps: 18.0,
+      sample_count: 100,
+      history_span_secs: 86_400,
+    },
+  ];
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    books,
+    60,
+    0.5,
+    1.0,
+    { windowPercentile: 50 },
+    new RollingSpreadTracker(),
+    durable,
+    [routeOpp("HyperLiquid", "LIGHTER")]
+  );
+  const cell = grid[0][1];
+  assert.equal(cell.costReady, true);
+  assert.ok(Math.abs(cell.grossSpreadBps - 24.9) < 0.01);
+  assert.equal(cell.netSpreadBps, 10.0);
+  assert.equal(cell.feeBps, 7.0);
+  assert.equal(cell.roundTripCommissionBps, 7.0);
+  assert.equal(cell.closingFrictionBps, 2.0);
+  assert.equal(cell.entrySlippageBps, 0.5);
+  assert.equal(cell.exitSlippageBps, 0.5);
+  assert.equal(cell.expectedFrictionBps, 10.0);
+  assert.equal(cell.requiredGrossBps, 11.0);
+  assert.equal(cell.nominalHurdleBps, 11.0);
+  assert.equal(cell.slippageOk, true);
+  assert.equal(cell.depthOk, true);
+  assert.equal(cell.estProfitUsd, 5.0);
+  // Durable gross baselines convert to net via backend expected friction.
+  assert.ok(Math.abs(cell.baselineMeanBps - (20.0 - 10.0)) < 0.05);
+  assert.equal(cell.percentileHurdleBps, 18.0);
+  // gross 24.9 >= required 11 && net 10 >= percentile net 8 -> executable
+  assert.equal(cell.isExecutable, true);
+});
+
+test("buildCrossVenueMatrix fails closed when route economics are missing", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.01), venueBook("lighter", 102.0, 102.01)];
+  const durable = [
+    {
+      buy_venue: "hyperliquid",
+      sell_venue: "lighter",
+      mean_gross_bps: 20.0,
+      percentile_gross_bps: 18.0,
+      sample_count: 100,
+      history_span_secs: 86_400,
+    },
+  ];
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    books,
+    60,
+    0.5,
+    1.0,
+    { windowPercentile: 50 },
+    new RollingSpreadTracker(),
+    durable,
+    []
+  );
+  const cell = grid[0][1];
+  assert.ok(cell.grossSpreadBps > 100, "observable gross spread is still shown");
+  assert.equal(cell.costReady, false);
+  assert.equal(cell.isExecutable, false);
+  assert.equal(cell.requiredGrossBps, undefined);
+  const visuals = getMatrixCellVisuals(cell, 1.0);
+  assert.equal(visuals.highlightRing, "");
+  assert.ok(visuals.textClass.includes("slate-400"));
+});
+
+test("buildCrossVenueMatrix honors backend slippage, depth, and required-gross gates", () => {
+  const books = [venueBook("hyperliquid", 100.0, 100.05), venueBook("lighter", 100.3, 100.35)];
+  const durable = [
+    {
+      buy_venue: "hyperliquid",
+      sell_venue: "lighter",
+      mean_gross_bps: 20.0,
+      percentile_gross_bps: 18.0,
+      sample_count: 100,
+      history_span_secs: 86_400,
+    },
+  ];
+  const cfg = { windowPercentile: 50, currentAccumulatedUnits: 0, maxAccumulatedUnits: 3 };
+
+  const slipBlocked = buildCrossVenueMatrix(
+    "BTC-USDC", books, 60, 0.5, 1.0, cfg, new RollingSpreadTracker(), durable,
+    [routeOpp("hyperliquid", "lighter", { slippage_ok: false })]
+  );
+  assert.equal(slipBlocked.grid[0][1].costReady, true);
+  assert.equal(slipBlocked.grid[0][1].isExecutable, false);
+
+  const depthBlocked = buildCrossVenueMatrix(
+    "BTC-USDC", books, 60, 0.5, 1.0, cfg, new RollingSpreadTracker(), durable,
+    [routeOpp("hyperliquid", "lighter", { depth_ok: false })]
+  );
+  assert.equal(depthBlocked.grid[0][1].isExecutable, false);
+
+  const hurdleBlocked = buildCrossVenueMatrix(
+    "BTC-USDC", books, 60, 0.5, 1.0, cfg, new RollingSpreadTracker(), durable,
+    [routeOpp("hyperliquid", "lighter", { required_gross_bps: 30.0 })]
+  );
+  assert.equal(hurdleBlocked.grid[0][1].isExecutable, false);
+});
+
+test("buildCrossVenueMatrix allows convergence unwind without route economics", () => {
+  const tight = [venueBook("hyperliquid", 100.0, 100.01), venueBook("lighter", 100.01, 100.02)];
+  const { grid } = buildCrossVenueMatrix(
+    "BTC-USDC",
+    tight,
+    60,
+    0.5,
+    1.0,
+    {
+      windowPercentile: 50,
+      currentAccumulatedUnits: 1,
+      maxAccumulatedUnits: 3,
+      executionMode: "DOUBLE_WAY",
+    },
+    new RollingSpreadTracker(),
+    [],
+    []
+  );
+  const cell = grid[0][1];
+  assert.equal(cell.costReady, false);
+  assert.equal(cell.isConvergenceUnwind, true);
+  assert.equal(cell.isExecutable, true);
 });

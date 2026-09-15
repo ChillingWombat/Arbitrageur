@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Filter, ShieldAlert } from "lucide-react";
+import { Filter } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
 import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
 import { BotLifecycleControls } from "./BotLifecycleControls";
+import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface PredictionHubProps {
@@ -64,9 +65,9 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   return (
     <div className="p-4 space-y-4 overflow-y-auto h-full">
       {/* Strategy Ribbon — venue params left, search + toggle right */}
-      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs">
+      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-          <span className="text-xs font-mono font-bold tracking-wider text-slate-900 pr-1">
+          <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
           {(["polymarket", "kalshi"] as const).map((vid) => {
@@ -114,7 +115,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             </div>
             <button
               type="submit"
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition shadow-xs"
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition shadow-2xs"
             >
               Filter
             </button>
@@ -140,16 +141,15 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
 
       {/* Opportunities List */}
       {opportunities.length === 0 ? (
-        <div className="bg-surface rounded-xl border border-surface-border p-12 text-center flex flex-col items-center justify-center space-y-3 shadow-xs">
-          <ShieldAlert className="w-9 h-9 text-slate-300" />
-          <p className="font-mono text-sm font-bold text-slate-800">No Prediction Market Arbitrage Detected</p>
+        <div className="bg-surface rounded-lg border border-dashed border-surface-border shadow-2xs">
+          <EmptyState plain title="No Opportunity Detected" />
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {opportunities.map((opp) => (
             <div
               key={opp.id}
-              className="bg-surface border border-surface-border hover:border-slate-300 rounded-lg p-5 flex flex-col justify-between space-y-4 transition shadow-xs"
+              className="bg-surface border border-surface-border hover:border-slate-300 rounded-lg p-4 flex flex-col justify-between space-y-3 transition shadow-2xs"
             >
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -166,7 +166,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <span className="px-1.5 py-0.5 rounded-sm bg-profit-dim text-profit border border-profit-border font-semibold text-xs">
-                        BUY YES
+                        Buy Yes
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_yes_venue}</span>
                     </div>
@@ -176,7 +176,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <span className="px-1.5 py-0.5 rounded-sm bg-loss-dim text-loss border border-loss-border font-semibold text-xs">
-                        BUY NO
+                        Buy No
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_no_venue}</span>
                     </div>
@@ -230,7 +230,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   <button
                     onClick={() => handleExecute(opp)}
                     disabled={executingId === opp.id}
-                    className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-md text-xs font-mono transition flex items-center shadow-xs"
+                    className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium rounded-md text-xs font-mono transition flex items-center shadow-2xs"
                   >
                     <span>{executingId === opp.id ? "Routing..." : "Execute Parity"}</span>
                   </button>

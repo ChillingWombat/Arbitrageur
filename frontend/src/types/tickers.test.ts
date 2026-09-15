@@ -2,10 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert";
 import {
   PERP_TICKERS,
+  getAdmittedVenueCodes,
   getEnabledConnectedVenueCodes,
   getTickerActiveVenues,
   getTickerAvgVolumeUsd,
   filterAvailableTickers,
+  applyMarketUniverse,
+  tickerUnavailabilityReason,
   type PerpTicker,
   type VenueSettingsFilter,
 } from "./tickers.ts";
@@ -15,7 +18,7 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH in paper mode", () => {
+test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT in paper mode", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
@@ -31,7 +34,7 @@ test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH in paper mode
     kalshi_enabled: true,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT", "RH"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT", "RH", "VNT"]);
 });
 
 test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {
@@ -136,4 +139,172 @@ test("getTickerActiveVenues returns only active venue subset", () => {
   const activeCodes = new Set(["HL", "RH"]);
   const activeVenues = getTickerActiveVenues(ticker, activeCodes);
   assert.deepStrictEqual(activeVenues, ["HL", "RH"]);
+});
+
+test("getAdmittedVenueCodes counts only READ_ONLY venues — UNSUPPORTED and OFFLINE are not admitted", () => {
+  const status = {
+    active_venues: [
+      { id: "hyperliquid", status: "OFFLINE" },
+      { id: "lighter", status: "READ_ONLY" },
+      { id: "robinhood", status: "READ_ONLY" },
+      { id: "vanta", status: "UNSUPPORTED" },
+      { id: "binance", status: "UNSUPPORTED" },
+    ],
+  };
+  const codes = getAdmittedVenueCodes(status);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["LGT", "RH"]);
+  // Two admitted venues unlock the RH-eligible ticker universe.
+  assert.ok(filterAvailableTickers(PERP_TICKERS, codes, 2).length > 0);
+});
+
+test("getAdmittedVenueCodes admits nothing when the backend marks every venue UNSUPPORTED", () => {
+  const status = {
+    active_venues: [
+      { id: "lighter", status: "UNSUPPORTED" },
+      { id: "robinhood", status: "UNSUPPORTED" },
+    ],
+  };
+  assert.strictEqual(getAdmittedVenueCodes(status).size, 0);
+  assert.strictEqual(getAdmittedVenueCodes(null).size, 0);
+  assert.strictEqual(getAdmittedVenueCodes(undefined).size, 0);
+});
+
+test("tickerUnavailabilityReason names the real cause of an empty universe", () => {
+  const mk = (venues: { id: string; status: string }[], live = false) => ({
+    is_live_mode: live,
+    active_venues: venues,
+  });
+
+  // Engine unreachable / no status at all.
+  assert.match(tickerUnavailabilityReason(null, new Set()), /Engine status unavailable/);
+  assert.match(tickerUnavailabilityReason(undefined, new Set()), /Engine status unavailable/);
+
+  // Live mode: read-only lanes are not admitted.
+  assert.match(
+    tickerUnavailabilityReason(mk([{ id: "lighter", status: "UNSUPPORTED" }], true), new Set()),
+    /Real Trading mode/
+  );
+
+  // Venues enabled but none admitted (UNSUPPORTED ≠ stream-capable).
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([
+        { id: "binance", status: "UNSUPPORTED" },
+        { id: "decibel", status: "UNSUPPORTED" },
+      ]),
+      new Set()
+    ),
+    /not providing an overlapping market universe/
+  );
+
+  // Nothing enabled at all — original guidance.
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([{ id: "lighter", status: "OFFLINE" }]),
+      new Set()
+    ),
+    /Enable markets in System Settings/
+  );
+
+  // Exactly one admitted venue — cross-venue spreads need two.
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([
+        { id: "lighter", status: "READ_ONLY" },
+        { id: "robinhood", status: "OFFLINE" },
+      ]),
+      new Set(["LGT"])
+    ),
+    /Only LGT is streaming.*at least 2/
+  );
+
+  // Two+ admitted, universe has venue rows but no overlapping catalog market.
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([
+        { id: "lighter", status: "READ_ONLY" },
+        { id: "robinhood", status: "READ_ONLY" },
+      ]),
+      new Set(["LGT", "RH"]),
+      true,
+      false
+    ),
+    /do not currently report any overlapping catalog markets/
+  );
+
+  // Two+ admitted but the market-universe response has not arrived yet.
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([
+        { id: "lighter", status: "READ_ONLY" },
+        { id: "robinhood", status: "READ_ONLY" },
+      ]),
+      new Set(["LGT", "RH"]),
+      false,
+      false
+    ),
+    /not providing an overlapping market universe yet/
+  );
+
+  // Two+ admitted, intersection non-empty but every row exempted — hidden.
+  assert.match(
+    tickerUnavailabilityReason(
+      mk([
+        { id: "lighter", status: "READ_ONLY" },
+        { id: "robinhood", status: "READ_ONLY" },
+      ]),
+      new Set(["LGT", "RH"]),
+      true,
+      true
+    ),
+    /All tickers are hidden/
+  );
+});
+
+test("applyMarketUniverse replaces stale catalog venue claims with actual reporting venues", () => {
+  const catalog: PerpTicker[] = [
+    { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 70000 },
+    { symbol: "KAS-USDC", base: "KAS", quote: "USDC", name: "Kaspa", venues: ["HL", "LGT"], basePrice: 0.15 },
+  ];
+  const universe = [
+    { venue_id: "hyperliquid", symbols: ["BTC-USDC", "KAS-USDC"] },
+    { venue_id: "vanta", symbols: ["BTC-USDC"] },
+  ];
+  const out = applyMarketUniverse(catalog, universe);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].symbol, "BTC-USDC");
+  assert.deepStrictEqual(out[0].venues.sort(), ["HL", "VNT"]);
+});
+
+test("applyMarketUniverse drops a ticker when only one venue really reports it", () => {
+  const catalog: PerpTicker[] = [
+    { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT"], basePrice: 70000 },
+  ];
+  const out = applyMarketUniverse(catalog, [
+    { venue_id: "hyperliquid", symbols: ["BTC-USDC"] },
+  ]);
+  assert.strictEqual(out.length, 0);
+});
+
+test("applyMarketUniverse ignores unknown venue ids and non-catalog symbols", () => {
+  const catalog: PerpTicker[] = [
+    { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT"], basePrice: 70000 },
+  ];
+  const out = applyMarketUniverse(catalog, [
+    { venue_id: "mysterydex", symbols: ["BTC-USDC", "FAKE-USDC"] },
+    { venue_id: "lighter", symbols: ["BTC-USDC", "NOTREAL-USDC"] },
+  ]);
+  assert.strictEqual(out.length, 0);
+});
+
+test("applyMarketUniverse admits a ticker listed by two real venues", () => {
+  const catalog: PerpTicker[] = [
+    { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT"], basePrice: 3000 },
+  ];
+  const out = applyMarketUniverse(catalog, [
+    { venue_id: "hyperliquid", symbols: ["eth-usdc"] },
+    { venue_id: "robinhood", symbols: ["ETH-USDC"] },
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.deepStrictEqual(out[0].venues.sort(), ["HL", "RH"]);
 });

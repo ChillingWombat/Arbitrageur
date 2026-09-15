@@ -84,6 +84,18 @@ export interface SpatialOpportunityDto {
   order_qty: number;
   estimated_profit_usd: number;
   is_executable: boolean;
+  buy_venue_id: string;
+  sell_venue_id: string;
+  buy_fee_bps: number;
+  sell_fee_bps: number;
+  round_trip_commission_bps: number;
+  entry_slippage_bps: number;
+  exit_slippage_bps: number;
+  closing_spread_bps: number;
+  expected_friction_bps: number;
+  required_gross_bps: number;
+  slippage_ok: boolean;
+  depth_ok: boolean;
   direction?: string;
   trigger_spread_bps?: number;
   baseline_mean_spread_bps?: number;
@@ -93,7 +105,9 @@ export interface SpatialOpportunityDto {
 }
 
 export type MatrixMode = "cross-venue" | "cross-ticker";
-export type SlidingWindowOption = "10s" | "30s" | "1m" | "5m" | "15m";
+/** Legacy canonical duration string ("10s","30m","24h","7d"); arbitrary
+ *  integer s|m|h|d values are valid — the fixed presets are gone. */
+export type SlidingWindowOption = string;
 export type ArbitrageExecutionMode = "SINGLE_WAY" | "DOUBLE_WAY";
 
 export interface TickerStrategyConfigDto {
@@ -116,6 +130,31 @@ export interface TickerStrategyConfigDto {
   sliding_window?: string;
 }
 
+/** Universal strategy parameters — one record per strategyId ("futures" |
+ * "funding" | "spot"), shared across all tickers. Per-ticker contract/runtime
+ * state stays in TickerStrategyConfigDto. */
+export interface StrategyParamsDto {
+  strategyId: string;
+  // Single Spread (futures)
+  targetProfitBps: number;
+  windowPercentile: number;
+  slidingWindow: string;
+  slidingWindowMode: "manual" | "auto";
+  slidingWindowSecs: number;
+  maxAccumulatedUnits: number;
+  executionMode: ArbitrageExecutionMode;
+  unitSizeUsd: number; // USD notional per grid unit per leg — converted to base units per ticker
+  userTargetLeverage: number;
+  // Funding Rate
+  fundingTradeSizeUsd: number;
+  fundingMinAprPct: number;
+  fundingHoldingDays: number;
+  // Spatial (spot)
+  spotTradeSizeUsd: number;
+  spotMaxSlippageBps: number;
+  spotMinNetSpreadBps: number;
+}
+
 export interface MatrixCellDto {
   rowId: string;
   colId: string;
@@ -131,9 +170,18 @@ export interface MatrixCellDto {
   baselineMeanBps: number;
   deltaBps: number;
   sampleCount: number;
+  baselineReady?: boolean;
   orderQty: number;
   estProfitUsd: number;
   isExecutable: boolean;
+  costReady?: boolean;
+  roundTripCommissionBps?: number;
+  entrySlippageBps?: number;
+  exitSlippageBps?: number;
+  expectedFrictionBps?: number;
+  requiredGrossBps?: number;
+  slippageOk?: boolean;
+  depthOk?: boolean;
   nominalHurdleBps?: number;
   targetProfitBps?: number;
   percentileHurdleBps?: number;
@@ -152,6 +200,33 @@ export interface CrossTickerExecutionParams {
   orderQty: number;
   estProfitUsd: number;
   netSpreadBps: number;
+}
+
+export interface VenueMarketUniverseDto {
+  venue_id: string;
+  symbols: string[];
+}
+
+export interface PairBaselineDto {
+  buy_venue: string;
+  sell_venue: string;
+  mean_gross_bps: number | null;
+  percentile_gross_bps: number | null;
+  sample_count: number;
+  history_span_secs: number;
+}
+
+export interface MatrixBaselineSnapshotDto {
+  symbol: string;
+  mode: string;
+  manual_window_secs: number;
+  effective_window_secs: number;
+  auto_window_secs: number | null;
+  median_half_life_secs: number | null;
+  qualifying_pair_count: number;
+  max_history_span_secs: number;
+  using_manual_fallback: boolean;
+  pairs: PairBaselineDto[];
 }
 
 export interface TickerMarketQuoteDto {
@@ -538,6 +613,32 @@ export interface SignalExecutionDto {
   closedAt: string | null;
 }
 
+/** One venue's signed net filled quantity inside an aggregated position.
+ *  Positive = net long (buy side), negative = net short (sell side). */
+export interface PositionVenueDto {
+  venue: string;
+  netQty: number;
+}
+
+/** Aggregated current open position for one signal-type identity
+ *  (strategy + symbol/event + venue set), derived from all signal
+ *  executions that still count as open. `unrealizedPnlUsd` is null when
+ *  mark-to-market is impossible — never fabricated. */
+export interface OpenPositionDto {
+  /** Stable grouping identity: `strategyId|symbol|venueA+venueB`. */
+  key: string;
+  strategyId: string;
+  symbol: string;
+  signalCount: number;
+  /** Per-venue signed net quantity; long (positive) rows first. */
+  venues: PositionVenueDto[];
+  expectedNetUsd: number | null;
+  unrealizedPnlUsd: number | null;
+  feesUsd: number;
+  notionalUsd: number | null;
+  openedAt: string;
+}
+
 /** One candidate in a synchronized batch — per symbol only the highest
  *  expected-profit candidate dispatches. */
 export interface SpatialCandidateInput {
@@ -768,6 +869,7 @@ export interface MonitorConfigDto {
   historyWindowSecs: number;
   maxSymbolIntervalSecs: number;
   minSymbolIntervalSecs: number;
+  minExpectedProfitBps: number;
 }
 
 export * from "./tickers";

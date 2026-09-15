@@ -93,13 +93,13 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
 
   const phaseLabel =
     phase === "reduce_only"
-      ? "REDUCE-ONLY"
+      ? "Reduce-Only"
       : phase === "stopping"
-      ? "STOPPING"
+      ? "Stopping"
       : null;
 
   return (
-    <div className="flex items-center space-x-1.5 px-2 py-1 bg-surface border border-surface-border rounded-md shadow-2xs">
+    <div className="flex items-center space-x-1.5 px-1.5 py-1 bg-surface border border-surface-border rounded-md shadow-2xs">
       <div className="flex items-center gap-1">
         {buttons.map((b) => (
           <button
@@ -108,7 +108,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
             title={b.title}
             disabled={!b.enabled}
             onClick={b.onClick}
-            className={`flex items-center space-x-1 px-2 py-1 rounded border text-xs font-mono font-bold uppercase tracking-wide transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+            className={`flex items-center space-x-1 px-2 py-1 rounded-md border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
               b.enabled ? b.activeClass : "text-slate-400 border-surface-border bg-surface-raised/40"
             }`}
           >
@@ -118,7 +118,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
         ))}
       </div>
       {phaseLabel && (
-        <span className="text-xs font-mono font-bold px-1.5 py-0.5 rounded-sm bg-amber-50 text-amber-700 border border-amber-200 uppercase">
+        <span className="text-xs font-mono font-bold px-1.5 py-0.5 rounded-sm bg-amber-50 text-amber-700 border border-amber-200">
           {phaseLabel}
         </span>
       )}

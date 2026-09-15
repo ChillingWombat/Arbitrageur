@@ -66,9 +66,12 @@ test("api.deleteExchangeCredentials rejects without the desktop application", as
 
 const REGISTERED_NATIVE_COMMANDS = [
   "get_system_status",
+  "refresh_venue_latencies",
+  "get_market_universe",
   "fetch_orderbooks",
   "get_ticker_volumes",
   "get_signal_series",
+  "get_matrix_baselines",
   "scan_spatial_opportunities",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
@@ -125,15 +128,27 @@ test("normalizeTickerStrategyConfig preserves the backend sliding window", () =>
     normalizeTickerStrategyConfig({ sliding_window: "30s" }).slidingWindow,
     "30s",
   );
+  assert.equal(
+    normalizeTickerStrategyConfig({ slidingWindow: "6h" }).slidingWindow,
+    "6h",
+  );
+  assert.equal(
+    normalizeTickerStrategyConfig({ slidingWindow: "2d" }).slidingWindow,
+    "2d",
+  );
 });
 
-test("normalizeTickerStrategyConfig defaults unknown windows to 1m", () => {
+test("normalizeTickerStrategyConfig defaults unknown windows to 24h", () => {
   assert.equal(
     normalizeTickerStrategyConfig({ slidingWindow: "99x" }).slidingWindow,
-    "1m",
+    "24h",
   );
-  assert.equal(normalizeTickerStrategyConfig(null).slidingWindow, "1m");
-  assert.equal(normalizeTickerStrategyConfig({}).slidingWindow, "1m");
+  assert.equal(
+    normalizeTickerStrategyConfig({ slidingWindow: "1.5h" }).slidingWindow,
+    "24h",
+  );
+  assert.equal(normalizeTickerStrategyConfig(null).slidingWindow, "24h");
+  assert.equal(normalizeTickerStrategyConfig({}).slidingWindow, "24h");
 });
 
 test("triangle scan and execution fail closed in desktop mode", async () => {

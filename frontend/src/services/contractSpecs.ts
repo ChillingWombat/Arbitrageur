@@ -198,6 +198,26 @@ export function getMinCompatibleSize(
 }
 
 /**
+ * Converts a universal USD-notional unit size into this ticker's base-unit
+ * quantity: rounded up to the compatible step size and clamped to the
+ * venue-compatible minimum lot.
+ */
+export function deriveUnitSize(
+  symbol: string,
+  venues: string[],
+  basePrice: number,
+  unitSizeUsd: number
+): number {
+  const { minCompatibleSize, stepSize } = getMinCompatibleSize(symbol, venues, basePrice);
+  if (basePrice <= 0 || !Number.isFinite(unitSizeUsd) || unitSizeUsd <= 0) {
+    return minCompatibleSize;
+  }
+  const step = stepSize || 0.0001;
+  const rounded = Math.ceil(unitSizeUsd / basePrice / step) * step;
+  return Math.max(minCompatibleSize, Math.round(rounded * 1e6) / 1e6);
+}
+
+/**
  * Automatically computes the safe effective leverage ratio across venues when entering an arbitrage position.
  * Takes the minimum allowable leverage among participating venues and ensures safe liquidation buffers.
  */

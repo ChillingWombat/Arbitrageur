@@ -24,11 +24,11 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
   const margin = riskData.margin_health;
 
   return (
-    <div className="p-6 space-y-6 overflow-y-auto h-full">
+    <div className="p-4 space-y-4 overflow-y-auto h-full">
       {/* Top Banner */}
-      <div className="bg-surface p-5 rounded-lg border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-xs">
+      <div className="bg-surface p-5 rounded-lg border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-2xs">
         <div>
-          <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+          <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
             DeltaGuard & Enterprise Risk Engine Controls
           </h2>
           <p className="text-xs text-slate-500 mt-1">
@@ -40,14 +40,14 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-xs"
+              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-2xs"
             >
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-xs"
+              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-md text-xs font-mono font-medium flex items-center transition shadow-2xs"
             >
               <span>Trigger Manual Trip</span>
             </button>
@@ -58,7 +58,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       {/* 3 Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Card 1: Circuit Breaker */}
-        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-2xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Circuit Breaker</span>
             <span
@@ -94,7 +94,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 2: Margin Monitor */}
-        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-2xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Margin Proximity</span>
             <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-semibold bg-profit-dim text-profit border border-profit-border">
@@ -124,7 +124,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         </div>
 
         {/* Card 3: Portfolio Capital */}
-        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-xs">
+        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-3 shadow-2xs">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Portfolio Capital</span>
             <span className="text-xs font-mono text-accent font-semibold">Consolidated</span>
@@ -153,8 +153,8 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       </div>
 
       {/* DeltaGuard Net Exposure Table */}
-      <div className="bg-surface rounded-lg border border-surface-border p-5 shadow-xs">
-        <h3 className="text-xs font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
+      <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs">
+        <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
           <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
           <span className="text-slate-400 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
         </h3>

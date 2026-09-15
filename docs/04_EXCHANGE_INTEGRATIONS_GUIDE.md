@@ -83,25 +83,26 @@ Order submissions require native Starknet / Poseidon curve signatures generated 
 ## 3. Vanta Exchange (`vanta.exchange`)
 
 ### 3.1 Network Architecture
-Vanta is an onchain perpetual DEX for crypto, equities, and commodities powered by the **Orderly Network** broker protocol.
+Vanta is an onchain perpetual DEX for crypto, equities, and commodities powered by the **Orderly Network** broker protocol. Vanta does not host a separate public API — per Vanta's docs its perpetual API is Orderly's.
 
-- **REST API:** `https://api-evm.orderly.org` (or `https://api.vanta.exchange`)
-- **WebSocket:** `wss://ws-evm.orderly.org/ws/v2`
+- **REST API:** `https://api.orderly.org` (Orderly-hosted mainnet)
+- **WebSocket:** `wss://ws.orderly.org` (Orderly-hosted)
 
 ### 3.2 Key Endpoints & Conventions
 1. **Symbol Formatting:** All perpetual instruments follow the format `PERP_{BASE}_USDC` (e.g. `PERP_BTC_USDC`, `PERP_ETH_USDC`).
-2. **Market Info:**
+2. **Public read-only queries** go through a single endpoint, `POST /v1/public/query`, unauthenticated:
    ```bash
-   GET /v1/public/info
+   POST /v1/public/query
+   {"type": "marketSummary"}
    ```
+   returns `data.markets` with decimal-string `symbol`, `bid_price`, `ask_price`, `mark_price`, `last_funding_rate`, `est_funding_rate`, `next_funding_time`, `min_notional`, `quote_tick`, `base_tick`.
 3. **Orderbook Snapshot:**
    ```bash
-   GET /v1/orderbook/PERP_BTC_USDC
+   POST /v1/public/query
+   {"type": "orderbook", "symbol": "PERP_BTC_USDC", "max_level": 100}
    ```
-4. **Funding Rate History:**
-   ```bash
-   GET /v1/public/funding_rate/history?symbol=PERP_BTC_USDC
-   ```
+   returns `data.asks`/`data.bids` with decimal-string `price`/`quantity`. Empty sides are valid.
+4. **Lightweight probe:** `{"type": "rateLimitStatus"}` (weight 0).
 
 ### 3.3 Signing Protocol
 Orderly Network uses Ed25519 authentication keys. Requests require the headers:

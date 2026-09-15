@@ -1,6 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
-  Terminal,
   Search,
   Trash2,
   Activity,
@@ -8,6 +7,7 @@ import {
 import type { ExecutionLogEntry, TickerStrategyConfigDto, VenueOrderBookDto } from "../types";
 import { formatCurrencyPnl, formatCurrencyPrice } from "../types/tickers";
 import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
+import { EmptyState } from "./EmptyState";
 
 export interface LogItem {
   id: string;
@@ -34,7 +34,7 @@ interface TickerLogMonitorProps {
 
 export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   symbol,
-  strategyName = "Futures Convergence",
+  strategyName = "Single Spread",
   config,
   executionLogs = [],
   orderbooks = [],
@@ -144,7 +144,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
     const bidFee = feeBpsFor(bestBidVenue);
     const estFees = askFee !== null && bidFee !== null ? askFee + bidFee : null;
     const netSpreadBps = estFees !== null ? grossSpreadBps - estFees : grossSpreadBps;
-    const hurdleBps = (config?.targetProfitBps ?? 5.0) + (estFees ?? 0);
+    const hurdleBps = (config?.targetProfitBps ?? 1.0) + (estFees ?? 0);
     const spreadNote =
       estFees !== null
         ? `Net spread: ${netSpreadBps.toFixed(1)} BPS (hurdle: ${hurdleBps.toFixed(1)} BPS)`
@@ -160,14 +160,14 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         message: `Trading currently PAUSED. Strategy executions suspended. All positions and margin preserved safely.`,
         status: "WARNING",
       });
-    } else if (estFees !== null && netSpreadBps >= (config?.targetProfitBps || 5.0)) {
+    } else if (estFees !== null && netSpreadBps >= (config?.targetProfitBps ?? 1.0)) {
       newEntries.push({
         id: `eval-${epochMs}`,
         timestamp,
         epochMs,
         level: autoBotEnabled ? "TRIGGER" : "EVAL",
         source: autoBotEnabled ? "AutoBot" : "Signal Evaluator",
-        message: `Hurdle breached! Net spread +${netSpreadBps.toFixed(1)} BPS exceeded target +${(config?.targetProfitBps ?? 5.0).toFixed(1)} BPS (Hurdle: ${hurdleBps.toFixed(1)} BPS). ${
+        message: `Hurdle breached! Net spread +${netSpreadBps.toFixed(1)} BPS exceeded target +${(config?.targetProfitBps ?? 1.0).toFixed(1)} BPS (Hurdle: ${hurdleBps.toFixed(1)} BPS). ${
           autoBotEnabled ? "Evaluating order execution." : "Entries disabled — monitoring only."
         }`,
         route: `${bestAskVenue} ➔ ${bestBidVenue}`,
@@ -271,29 +271,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   return (
     <div className="space-y-3 font-mono text-xs select-none">
       {/* 1. Control Header: Strategy Pill, Filters, Search & Clear */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2 border-b border-surface-border">
-        {/* Left: Scope indicator */}
-        <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-md border border-surface-border">
-            <Terminal className="w-3.5 h-3.5 text-accent" />
-            <span className="font-bold text-slate-900">{symbol}</span>
-          </div>
-
-          <div className="flex items-center space-x-1.5 text-xs text-slate-500">
-            <span
-              className={`w-1.5 h-1.5 rounded-full ${
-                orderbooks.length > 0 ? "bg-profit animate-pulse" : "bg-slate-300"
-              }`}
-            />
-            <span>{orderbooks.length > 0 ? "Live Feed" : "Awaiting Market Data"}</span>
-            {isPaused && (
-              <span className="px-1.5 py-0.2 rounded-sm bg-amber-50 text-amber-700 border border-amber-200 font-semibold">
-                PAUSED
-              </span>
-            )}
-          </div>
-        </div>
-
+      <div className="flex flex-wrap items-center justify-end gap-3 pb-2.5 border-b border-surface-border">
         {/* Right: Controls (Level Filters, Search, Clear) */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Level Filter Chips */}
@@ -303,13 +281,13 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                 key={lvl}
                 type="button"
                 onClick={() => setLevelFilter(lvl)}
-                className={`px-2 py-0.5 rounded-sm font-medium transition cursor-pointer ${
+                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
                   levelFilter === lvl
-                    ? "bg-surface text-accent font-bold shadow-2xs border border-surface-border"
+                    ? "bg-accent text-white shadow-2xs"
                     : "text-slate-500 hover:text-slate-900"
                 }`}
               >
-                {lvl}
+                {lvl.charAt(0) + lvl.slice(1).toLowerCase()}
               </button>
             ))}
           </div>
@@ -359,10 +337,12 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
       {/* 2. Log Stream Table */}
       <div className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs">
         {filteredLogs.length === 0 ? (
-          <div className="py-12 text-center text-slate-400 font-mono text-xs px-4 space-y-2">
-            <Activity className="w-6 h-6 mx-auto text-slate-300 animate-pulse" />
-            <div className="font-semibold text-slate-700">No telemetry logs recorded for {symbol}</div>
-          </div>
+          <EmptyState
+            icon={Activity}
+            pulse
+            title="No Telemetry Logs"
+            hint={`No logs recorded for ${symbol || "this ticker"} yet.`}
+          />
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
             <table className="w-full text-left font-mono text-xs">
@@ -391,7 +371,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                             item.level
                           )}`}
                         >
-                          {item.level}
+                          {item.level.charAt(0) + item.level.slice(1).toLowerCase()}
                         </span>
                       </td>
 

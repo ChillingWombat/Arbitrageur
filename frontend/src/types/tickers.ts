@@ -1,3 +1,5 @@
+import type { VenueMarketUniverseDto } from "./index";
+
 export interface PerpTicker {
   symbol: string;         // e.g. "BTC-USDC"
   base: string;           // e.g. "BTC"
@@ -64,6 +66,25 @@ export function getDefaultOrderQty(basePrice: number): number {
 }
 
 // Venue Identifiers & Short Code Mappings
+/** Canonical strategy display names — keyed by the persisted strategy_id
+ *  values the backend allows (ALLOWED_STRATEGY_IDS), plus "triangle" for the
+ *  intra-venue path that never persists signal_executions. Keep these aligned
+ *  with the Navigation tab labels; they are the single vocabulary used across
+ *  panels, monitors, and the positions scope toggle. */
+export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
+  futures: "Single Spread",
+  radar: "Spread Radar",
+  funding: "Funding Rate",
+  spot: "Spatial",
+  prediction: "Prediction Market",
+  stat_arb: "Statistical",
+  triangle: "Triangle",
+};
+
+/** Display name for a persisted strategy id; falls back to the raw id. */
+export const formatStrategyName = (id: string): string =>
+  STRATEGY_DISPLAY_NAMES[id] ?? id;
+
 export const VENUE_ID_TO_CODE: Record<string, string> = {
   hyperliquid: "HL",
   lighter: "LGT",
@@ -121,10 +142,14 @@ export interface VenueSettingsFilter {
 
 /**
  * Determines the set of natively connected venue codes from sanitized engine settings.
- * Only Hyperliquid ("HL") and Lighter ("LGT") expose read-only native market-data
- * adapters in this phase, and only outside live trading mode. Public read-only
- * feeds require the venue's enable toggle, not secrets; connectivity is never
- * inferred from credential-looking strings.
+ * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), and Vanta/Orderly
+ * ("VNT") expose read-only native market-data adapters in this phase, and only
+ * outside live trading mode.
+ * Public read-only feeds require the venue's enable toggle, not secrets; connectivity
+ * is never inferred from credential-looking strings.
+ *
+ * Prefer getAdmittedVenueCodes(systemStatus) — the backend's own admission report —
+ * over this flag-based approximation; it cannot drift from what get_venues admits.
  */
 export function getEnabledConnectedVenueCodes(
   settings?: VenueSettingsFilter | null,
@@ -143,6 +168,9 @@ export function getEnabledConnectedVenueCodes(
   }
   if (settings.robinhood_enabled === true) {
     active.add("RH");
+  }
+  if (settings.vanta_enabled === true) {
+    active.add("VNT");
   }
 
   return active;
@@ -203,6 +231,83 @@ export function getTickerActiveVenues(
   activeVenueCodes: Set<string>
 ): string[] {
   return ticker.venues.filter((v) => activeVenueCodes.has(v));
+}
+
+/**
+ * Honest explanation for an empty ticker universe, used by the explorer
+ * empty state. Distinguishes the real causes instead of always blaming
+ * venue enablement: unreachable engine, live mode (no read-only lanes),
+ * enabled-but-unadmitted venues, single-venue admission, no overlapping
+ * markets across the venues' actual reported universes, or all tickers
+ * hidden via exemptions.
+ *
+ * `hasMarketUniverseRows` is true once at least one venue row has arrived
+ * from get_market_universe; `hasMarketUniverseIntersection` is the
+ * pre-exemption `applyMarketUniverse` result being non-empty. Both are
+ * needed because admitted-venue count alone cannot tell "no overlap" from
+ * "all hidden".
+ */
+export function tickerUnavailabilityReason(
+  status: { is_live_mode?: boolean; active_venues?: VenueStatusLike[] } | null | undefined,
+  activeVenueCodes: Set<string>,
+  hasMarketUniverseRows = false,
+  hasMarketUniverseIntersection = false
+): string {
+  if (!status) {
+    return "Engine status unavailable — start the desktop app so venue lanes can report.";
+  }
+  if (status.is_live_mode) {
+    return "Real Trading mode has no read-only market lanes — switch to Paper mode to stream venue quotes.";
+  }
+  if (activeVenueCodes.size === 0) {
+    const enabled = (status.active_venues ?? []).filter(
+      (v) => v.status !== "OFFLINE"
+    );
+    if (enabled.length > 0) {
+      return "Enabled venues are not providing an overlapping market universe yet.";
+    }
+    return "Enable markets in System Settings to stream live venue quotes.";
+  }
+  if (activeVenueCodes.size === 1) {
+    const code = [...activeVenueCodes][0];
+    return `Only ${code} is streaming — a cross-venue spread needs quotes from at least 2 admitted venues.`;
+  }
+  if (hasMarketUniverseIntersection) {
+    return "All tickers are hidden — reveal them in System Settings → Hidden Tickers.";
+  }
+  if (hasMarketUniverseRows) {
+    return "Enabled venues do not currently report any overlapping catalog markets.";
+  }
+  return "Enabled venues are not providing an overlapping market universe yet.";
+}
+
+/**
+ * Filters the static catalog against the venues' actual reported market
+ * universes: a ticker is available only when at least 2 venues really list
+ * its symbol. Each surviving row's `venues` is replaced by the venue codes
+ * that report the market — the catalog's static venue claims are ignored.
+ */
+export function applyMarketUniverse(
+  catalog: PerpTicker[],
+  universe: VenueMarketUniverseDto[]
+): PerpTicker[] {
+  const symbolVenues = new Map<string, string[]>();
+  for (const entry of universe) {
+    const code = VENUE_ID_TO_CODE[entry.venue_id.toLowerCase()];
+    if (!code) continue;
+    for (const sym of entry.symbols) {
+      const key = sym.toUpperCase();
+      const list = symbolVenues.get(key) ?? [];
+      if (!list.includes(code)) list.push(code);
+      symbolVenues.set(key, list);
+    }
+  }
+  return catalog
+    .map((t) => ({
+      ...t,
+      venues: symbolVenues.get(t.symbol.toUpperCase()) ?? [],
+    }))
+    .filter((t) => t.venues.length >= 2);
 }
 
 /**

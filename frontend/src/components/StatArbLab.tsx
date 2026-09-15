@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { AlertCircle, RefreshCw } from "lucide-react";
 import type { StatArbStepResultDto, BertramThresholdDto, OuFitDto, TickerMarketQuoteDto } from "../types";
+import { EmptyState } from "./EmptyState";
 
 interface StatArbLabProps {
   onRunStep: (step: number, py: number, px: number) => Promise<StatArbStepResultDto>;
@@ -142,10 +143,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
       {/* Grid: 2D Kalman Filter & Bertram Solver */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Module 1: 2D Online Kalman Filter */}
-        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-4 shadow-xs">
-          <div className="flex items-center justify-between border-b border-surface-border pb-3">
+        <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+          <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <div>
-              <h3 className="text-xs font-mono font-bold text-slate-900">
+              <h3 className="text-[13px] font-mono font-bold text-slate-900">
                 2D Online Kalman Filter (BTC vs ETH)
               </h3>
             </div>
@@ -160,7 +161,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </button>
               <button
                 onClick={handleStep}
-                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition flex items-center shadow-xs"
+                className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition flex items-center shadow-2xs"
               >
                 <span>Step Iteration</span>
               </button>
@@ -173,16 +174,16 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               <span className="text-xs text-slate-500">Input Mode:</span>
               <button
                 onClick={() => setIsManual(false)}
-                className={`px-2 py-0.5 rounded-sm text-xs transition ${
-                  !isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                className={`px-2 py-1 rounded-sm text-xs transition ${
+                  !isManual ? "bg-accent text-white shadow-2xs" : "text-slate-500 hover:text-slate-900"
                 }`}
               >
                 Live Quotes
               </button>
               <button
                 onClick={() => setIsManual(true)}
-                className={`px-2 py-0.5 rounded-sm text-xs transition ${
-                  isManual ? "bg-accent text-white font-semibold shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                className={`px-2 py-1 rounded-sm text-xs transition ${
+                  isManual ? "bg-accent text-white shadow-2xs" : "text-slate-500 hover:text-slate-900"
                 }`}
               >
                 Manual Prices
@@ -308,10 +309,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
         </div>
 
         {/* Module 2: Bertram Optimal Analytic Thresholds */}
-        <div className="bg-surface border border-surface-border rounded-lg p-5 space-y-4 shadow-xs">
-          <div className="flex items-center justify-between border-b border-surface-border pb-3">
+        <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+          <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <div>
-              <h3 className="text-xs font-mono font-bold text-slate-900">
+              <h3 className="text-[13px] font-mono font-bold text-slate-900">
                 Bertram (2010) Optimal Thresholds
               </h3>
               <span className="text-xs text-slate-500 font-mono">Analytic solver maximizing return per unit time</span>
@@ -319,7 +320,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
             <button
               onClick={handleSolveBertram}
-              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition shadow-xs"
+              className="px-3 py-1.5 bg-accent hover:bg-accent-hover text-white font-medium text-xs font-mono rounded-md transition shadow-2xs"
             >
               Solve Optimal
             </button>
@@ -401,8 +402,11 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </div>
             </div>
           ) : (
-            <div className="text-center py-6 text-slate-400 font-mono text-xs border border-dashed border-surface-border rounded-md">
-              Click "Solve Optimal" to calculate Bertram-style threshold levels.
+            <div className="border border-dashed border-surface-border rounded-md">
+              <EmptyState
+                plain
+                title='Click "Solve Optimal" to calculate Bertram-style threshold levels.'
+              />
             </div>
           )}
 
@@ -410,7 +414,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           <div className="pt-2">
             <button
               onClick={handleFitOu}
-              className="w-full py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-700 font-mono text-xs font-medium rounded-md transition flex items-center justify-center space-x-2 shadow-xs"
+              className="w-full py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-700 font-mono text-xs font-medium rounded-md transition flex items-center justify-center space-x-2 shadow-2xs"
             >
               <RefreshCw className="w-3.5 h-3.5 text-accent" />
               <span>Fit Ornstein-Uhlenbeck Parameters (AR(1) MLE)</span>

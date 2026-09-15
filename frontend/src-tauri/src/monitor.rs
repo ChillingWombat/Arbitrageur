@@ -96,6 +96,11 @@ pub struct MonitorConfigDto {
     /// Minimum per-symbol refresh interval, seconds (default 5s).
     #[serde(default = "d_min_interval")]
     pub min_symbol_interval_secs: u64,
+    /// Display floor for the radar table: rows are shown only when expected
+    /// profit exceeds this many bps (default 0 = positive-only). A negative
+    /// value relaxes the filter to include losing rows.
+    #[serde(default)]
+    pub min_expected_profit_bps: f64,
 }
 
 fn d_true() -> bool {
@@ -166,6 +171,7 @@ impl Default for MonitorConfigDto {
             history_window_secs: d_hist_window(),
             max_symbol_interval_secs: d_max_interval(),
             min_symbol_interval_secs: d_min_interval(),
+            min_expected_profit_bps: 0.0,
         }
     }
 }
@@ -545,6 +551,7 @@ impl SpreadMonitorEngine {
         cfg.participation_cap = cfg.participation_cap.clamp(0.0001, 0.5);
         cfg.tx_reserve_pct = cfg.tx_reserve_pct.clamp(0.0, 0.9);
         cfg.min_episodes = cfg.min_episodes.clamp(1, 500);
+        cfg.min_expected_profit_bps = cfg.min_expected_profit_bps.clamp(-10_000.0, 10_000.0);
         cfg.capacity_tiers_usd = cfg
             .capacity_tiers_usd
             .iter()
@@ -937,22 +944,10 @@ impl SpreadMonitorEngine {
                 })
                 .collect()
         };
-        // Per-venue taker fee incl. the Lighter Plus tier's documented
-        // +0.5bps. Uses the shared venue fee map so the monitor and the
-        // scan paths price friction identically.
         let fee_map: HashMap<String, f64> = lane_meta
             .iter()
-            .map(|(v, _, _, _, _, tier)| {
-                let base: f64 = crate::commands::venue_fee_bps(v)
-                    .to_string()
-                    .parse()
-                    .unwrap_or(2.0);
-                let plus_adj = if (v == "lighter" || v == "robinhood") && tier == "plus" {
-                    0.5
-                } else {
-                    0.0
-                };
-                (v.clone(), base + plus_adj)
+            .map(|(v, _, _, _, _, _)| {
+                (v.clone(), crate::commands::effective_venue_fee_bps(state, v))
             })
             .collect();
         let lanes_used: Vec<usize> = {

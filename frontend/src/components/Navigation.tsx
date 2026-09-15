@@ -90,7 +90,7 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             key={t.id}
             onClick={() => onSelectTab(t.id)}
-            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-xs xl:text-xs font-mono transition select-none group cursor-pointer ${
+            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-[13px] font-mono transition select-none group cursor-pointer ${
               isActive
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/50 font-medium"

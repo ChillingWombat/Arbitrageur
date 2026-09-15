@@ -2,7 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Activity, LineChart } from "lucide-react";
 import type { SignalSeriesDto } from "../types";
 import { api } from "../services/api";
+import { formatDuration } from "../services/matrixQuant";
 import { InfoTooltip } from "./InfoTooltip";
+import { EmptyState } from "./EmptyState";
 
 interface SignalTrendGadgetProps {
   symbol: string;
@@ -21,8 +23,7 @@ const shortVenueName = (name: string) => name.split("(")[0].trim() || name;
 const fmtBps = (v: number, signed = true) =>
   `${signed && v > 0 ? "+" : ""}${v.toFixed(1)}`;
 
-const fmtWindow = (s: number) =>
-  s < 60 ? `${s}s` : s < 3600 ? `${s / 60}m` : s < 86400 ? `${s / 3600}h` : `${s / 86400}d`;
+const fmtWindow = formatDuration;
 
 /** Span-aware x-axis labels: sub-hour -> clock, multi-day -> date+time. */
 const fmtTick = (t: number, spanMs: number) => {
@@ -46,17 +47,14 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
   const [failed, setFailed] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  // The bot's trailing window leads the preset list; extended horizons let
-  // the dislocation regime be inspected over hours and days.
   const windowOptions = useMemo(() => {
-    const opts = [{ s: botWindowSec, label: `BOT ${fmtWindow(botWindowSec)}` }];
+    const opts = [{ s: botWindowSec, label: fmtWindow(botWindowSec) }];
     for (const s of [300, 900, 3600, 14400, 86400, 259200, 604800]) {
       if (!opts.some((o) => o.s === s)) opts.push({ s, label: fmtWindow(s) });
     }
     return opts;
   }, [botWindowSec]);
 
-  // Reset to the bot window when the ticker changes.
   useEffect(() => {
     setWindowSec(botWindowSec);
     setSeries(null);
@@ -244,13 +242,13 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
   return (
     <div className="space-y-3 font-mono text-xs select-none">
       {/* Header: title, dislocation badge, controls */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 pb-2 border-b border-surface-border">
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-2.5 border-b border-surface-border">
         <div className="flex items-center space-x-2">
           <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-md border border-surface-border">
             <LineChart className="w-3.5 h-3.5 text-accent" />
             <span className="font-bold text-slate-900">{symbol}</span>
           </div>
-          <span className="text-xs text-slate-500 flex items-center">
+          <span className="text-sm text-slate-900 flex items-center">
             Venue deviation from baseline
             <InfoTooltip
               position="bottom"
@@ -284,13 +282,13 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                     ? "Baseline = volume-weighted mean of venue mids"
                     : "Baseline = most-liquid venue's mid (anchored at 0)"
                 }
-                className={`px-2 py-0.5 rounded-sm font-medium transition cursor-pointer ${
+                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
                   baselineMode === m
-                    ? "bg-surface text-accent font-bold shadow-2xs border border-surface-border"
+                    ? "bg-accent text-white shadow-2xs"
                     : "text-slate-500 hover:text-slate-900"
                 }`}
               >
-                {m === "consensus" ? "CONSENSUS" : "LEADER"}
+                {m === "consensus" ? "Consensus" : "Leader"}
               </button>
             ))}
           </div>
@@ -306,9 +304,9 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                     ? `Bot's configured trailing window (${fmtWindow(w.s)})`
                     : `${fmtWindow(w.s)} of recorded history`
                 }
-                className={`px-2 py-0.5 rounded-sm font-medium transition cursor-pointer ${
+                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
                   windowSec === w.s
-                    ? "bg-surface text-accent font-bold shadow-2xs border border-surface-border"
+                    ? "bg-accent text-white shadow-2xs"
                     : "text-slate-500 hover:text-slate-900"
                 }`}
               >
@@ -345,12 +343,12 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                 </span>
                 {isSell && (
                   <span className="px-1 rounded-sm bg-loss-dim text-loss border border-loss-border font-bold text-xs">
-                    SELL
+                    Sell
                   </span>
                 )}
                 {isBuy && (
                   <span className="px-1 rounded-sm bg-profit-dim text-profit border border-profit-border font-bold text-xs">
-                    BUY
+                    Buy
                   </span>
                 )}
               </span>
@@ -362,24 +360,26 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
       {/* Chart */}
       <div className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs relative">
         {failed ? (
-          <div className="py-12 text-center text-slate-400 font-mono text-xs px-4 space-y-2">
-            <Activity className="w-6 h-6 mx-auto text-slate-300" />
-            <div className="font-semibold text-slate-700">
-              Signal series unavailable for {symbol}
-            </div>
-          </div>
+          <EmptyState
+            icon={Activity}
+            title="Signal Series Unavailable"
+            hint={symbol ? `No series data for ${symbol}.` : "No series data available."}
+          />
         ) : !hasSeries ? (
-          <div className="py-12 text-center text-slate-400 font-mono text-xs px-4 space-y-2">
-            <Activity className="w-6 h-6 mx-auto text-slate-300 animate-pulse" />
-            <div className="font-semibold text-slate-700">
-              {series && series.sample_count === 0
-                ? `No recorded samples for ${symbol} in this window`
-                : "Collecting signal samples…"}
-            </div>
-            <div className="text-xs text-slate-400">
-              History accumulates while this ticker's order books are polled.
-            </div>
-          </div>
+          <EmptyState
+            icon={Activity}
+            pulse
+            title={
+              series && series.sample_count === 0
+                ? "No Recorded Samples"
+                : "Collecting Signal Samples…"
+            }
+            hint={
+              series && series.sample_count === 0
+                ? `No samples for ${symbol} in this window — history accumulates while this ticker's order books are polled.`
+                : "History accumulates while this ticker's order books are polled."
+            }
+          />
         ) : (
           <svg
             viewBox={`0 0 ${W} ${H}`}
@@ -423,7 +423,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                     textAnchor="end"
                     className="fill-slate-400"
                     fontSize="9"
-                    fontFamily="'Geist Mono Variable', monospace"
+                    fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
                   >
                     {isZero ? "0" : fmtBps(dev)}
                   </text>
@@ -487,7 +487,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                   textAnchor="middle"
                   className="fill-slate-400"
                   fontSize="9"
-                  fontFamily="'Geist Mono Variable', monospace"
+                  fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
                 >
                   {fmtTick(series.ts_ms[i], spanMs)}
                 </text>
@@ -497,8 +497,8 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
 
         {/* Hover tooltip */}
         {hoverIdx !== null && series && hoverDevs.length > 0 && (
-          <div className="absolute top-2 right-2 bg-slate-900/95 text-white rounded-md shadow-xl border border-slate-700/80 px-2.5 py-2 text-xs font-mono pointer-events-none backdrop-blur-xs">
-            <div className="text-slate-300 mb-1">
+          <div className="absolute top-2 right-2 bg-accent-dim/95 text-slate-700 rounded-md shadow-xl border border-accent-line px-2.5 py-2 text-xs font-mono pointer-events-none backdrop-blur-xs">
+            <div className="text-slate-500 mb-1">
               {fmtTick(series.ts_ms[hoverIdx], spanMs)}
             </div>
             {hoverDevs.map((r) => (

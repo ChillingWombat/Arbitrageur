@@ -50,7 +50,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <SettingsIcon className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900 leading-tight">
+              <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 leading-tight">
                 System Setting
               </h2>
             </div>

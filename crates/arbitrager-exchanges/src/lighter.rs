@@ -136,9 +136,9 @@ impl ExchangeAdapter for LighterAdapter {
                 .map(|t| t.eq_ignore_ascii_case("spot"))
                 .unwrap_or(false);
             let symbol = if is_spot {
-                Symbol::spot(symbol_str, "USD")
+                Symbol::spot(symbol_str, "USDC")
             } else {
-                Symbol::perp(symbol_str, "USD")
+                Symbol::perp(symbol_str, "USDC")
             };
             markets.push(MarketMetadata {
                 symbol,
@@ -273,7 +273,7 @@ impl ExchangeAdapter for LighterAdapter {
                 let rate = Decimal::try_from(rate_f).unwrap_or(dec!(0));
                 out.push(FundingRate {
                     venue: self.venue_id.clone(),
-                    symbol: Symbol::perp(base, "USD").canonical(),
+                    symbol: Symbol::perp(base, "USDC").canonical(),
                     rate,
                     predicted_rate: None,
                     interval_hours: 1, // Lighter funding accrues hourly

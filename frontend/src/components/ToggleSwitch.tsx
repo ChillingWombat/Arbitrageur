@@ -31,11 +31,11 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
         className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
-          checked ? "bg-emerald-500 border border-emerald-600 shadow-xs" : "bg-white border border-slate-300 shadow-xs"
+          checked ? "bg-emerald-500 border border-emerald-600 shadow-2xs" : "bg-white border border-slate-300 shadow-2xs"
         }`}
       >
         <span
-          className={`inline-block rounded-full shadow-xs transform transition-transform ${
+          className={`inline-block rounded-full shadow-2xs transform transition-transform ${
             checked ? "bg-white" : "bg-slate-400"
           } ${
             isSm

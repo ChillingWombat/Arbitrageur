@@ -13,6 +13,7 @@ import {
   Sigma,
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
+import { formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
 import type { StrategyMetrics, WfoOptimizationResult } from "../types";
 
@@ -68,11 +69,11 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
   const getStrategyIcon = (id: string) => {
     switch (id) {
-      case "spatial_spread":
+      case "futures":
         return <SpreadGapIcon className="w-4 h-4 text-blue-600" />;
-      case "funding_rate":
+      case "funding":
         return <Percent className="w-4 h-4 text-emerald-600" />;
-      case "prediction_parity":
+      case "prediction":
         return <Target className="w-4 h-4 text-purple-600" />;
       case "stat_arb":
         return <Sigma className="w-4 h-4 text-indigo-600" />;
@@ -81,25 +82,10 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
     }
   };
 
-  const formatStrategyName = (id: string) => {
-    switch (id) {
-      case "spatial_spread":
-        return "Spatial Spread Dislocation Arb";
-      case "stat_arb":
-        return "Statistical Cointegration Spread (OU/Kalman)";
-      case "funding_rate":
-        return "Perpetual Funding Rate Carry & Basis";
-      case "prediction_parity":
-        return "Synthetic Outcome Parity (Polymarket / Kalshi)";
-      default:
-        return id;
-    }
-  };
-
   return (
-    <div className="space-y-6 pb-12 select-none">
+    <div className="space-y-4 pb-12 select-none">
       {/* Top Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-2.5">
         <div>
           <div className="flex items-center space-x-2">
             <TrendingUp className="w-5 h-5 text-accent" />
@@ -114,7 +100,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           <button
             onClick={loadMetrics}
             disabled={loading}
-            className="px-3 py-1.5 bg-surface border border-surface-border hover:bg-surface-raised text-slate-700 rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+            className="px-3 py-1.5 bg-surface border border-surface-border hover:bg-surface-raised text-slate-700 rounded-md text-xs font-mono font-medium transition shadow-2xs flex items-center space-x-1.5"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
             <span>Refresh Telemetry</span>
@@ -125,7 +111,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
       {/* Aggregate Portfolio KPI Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
         {/* Total Realized PnL */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Total Realized PnL</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
             <span className={`text-base font-bold font-mono ${totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
@@ -136,7 +122,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         </div>
 
         {/* Win Rate */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Win Rate</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
             <span className="text-base font-bold font-mono text-slate-900">{overallWinRate.toFixed(1)}%</span>
@@ -146,7 +132,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         </div>
 
         {/* Closed Cycles */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Cycles Completed</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
             <span className="text-base font-bold font-mono text-slate-900">{totalCompleted}</span>
@@ -156,7 +142,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         </div>
 
         {/* Sharpe Ratio */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Sharpe Ratio</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
             <span className="text-base font-bold font-mono text-accent">{avgSharpe.toFixed(2)}</span>
@@ -166,7 +152,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         </div>
 
         {/* Max Drawdown */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Max Drawdown</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
             <span className="text-base font-bold font-mono text-amber-600">
@@ -177,7 +163,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         </div>
 
         {/* APR / APY */}
-        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-xs">
+        <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Est. APR / APY</span>
           <div className="mt-1 flex items-baseline space-x-1">
             <span className="text-base font-bold font-mono text-slate-900">{avgApr.toFixed(0)}%</span>
@@ -189,7 +175,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
       {/* Strategy Breakdown Cards */}
       <div className="space-y-3">
-        <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
+        <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
           <BarChart2 className="w-4 h-4 text-accent" />
           <span>Strategy Breakdown & Virtual Lots Ledger</span>
         </h3>
@@ -198,7 +184,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           {metrics.map((s) => (
             <div
               key={s.strategy_id}
-              className="p-4 bg-surface border border-surface-border rounded-lg shadow-xs space-y-3 hover:border-accent-line/80 transition"
+              className="p-4 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 hover:border-accent-line/80 transition"
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center space-x-2.5">
@@ -206,7 +192,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
                     {getStrategyIcon(s.strategy_id)}
                   </div>
                   <div>
-                    <h4 className="text-xs font-bold font-mono tracking-wider text-slate-900">{formatStrategyName(s.strategy_id)}</h4>
+                    <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">{formatStrategyName(s.strategy_id)}</h4>
                     <span className="text-xs text-slate-400 font-mono tracking-wider">
                       Strategy ID: {s.strategy_id}
                     </span>
@@ -214,7 +200,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
                 </div>
 
                 <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-bold bg-profit-dim text-profit border border-profit-border">
-                  ACTIVE
+                  Active
                 </span>
               </div>
 
@@ -250,15 +236,15 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
       </div>
 
       {/* Built-in Algorithmic Calibration Toolkit (WFO) */}
-      <div className="p-5 bg-surface border border-surface-border rounded-xl shadow-xs space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-surface-border pb-3">
+      <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-surface-border pb-2.5">
           <div className="flex items-center space-x-2.5">
             <div className="p-2 rounded-lg bg-accent-dim border border-accent-line text-accent">
               <Cpu className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h3 className="text-sm font-bold font-mono tracking-wider text-slate-900">
+                <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
                   Algorithmic Walk-Forward Calibration Toolkit
                 </h3>
                 <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-semibold bg-blue-50 text-accent border border-blue-200">
@@ -275,7 +261,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
             onClick={runCalibration}
             disabled
             title="Native WFO requires recorded quote history — not yet available"
-            className="px-4 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0"
+            className="px-4 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-md text-xs font-mono font-medium transition shadow-2xs flex items-center space-x-2 shrink-0"
           >
             <Sliders className={`w-3.5 h-3.5 ${calibrating ? "animate-spin" : ""}`} />
             <span>
@@ -324,7 +310,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs font-mono text-left">
-                  <thead className="bg-slate-50 text-slate-500 border-b border-surface-border text-xs">
+                  <thead className="bg-surface-raised text-xs text-slate-500 tracking-wider border-b border-surface-border">
                     <tr>
                       <th className="px-4 py-2 font-semibold">Estimator Variant</th>
                       <th className="px-3 py-2 font-semibold">Window (Ticks)</th>

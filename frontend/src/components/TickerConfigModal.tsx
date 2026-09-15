@@ -4,21 +4,28 @@ import {
   X,
   Check,
   RotateCcw,
-  Info,
+
   ShieldCheck,
   TrendingUp,
-  Percent,
   Coins,
   Layers,
-  Sparkles,
 } from "lucide-react";
-import { SpreadGapIcon } from "./icons";
-import type { TickerStrategyConfigDto, ArbitrageExecutionMode, SlidingWindowOption } from "../types";
+import type { TickerStrategyConfigDto, StrategyParamsDto, ArbitrageExecutionMode, MatrixBaselineSnapshotDto } from "../types";
 import {
   PERP_TICKERS,
+  formatStrategyName,
   type PerpTicker,
 } from "../types/tickers";
 import { getMinCompatibleSize, computeSafeLeverage } from "../services/contractSpecs";
+import {
+  clampWindowValue,
+  durationParts,
+  durationSeconds,
+  formatDuration,
+  parseDuration,
+  WINDOW_UNIT_BOUNDS,
+  type DurationUnit,
+} from "../services/matrixQuant";
 import { api } from "../services/api";
 import { InfoTooltip } from "./InfoTooltip";
 import { SwitchToggle } from "./SwitchToggle";
@@ -29,26 +36,32 @@ export interface SpotStrategyParams {
   maxSlippageBps: number;
 }
 
-export interface FundingStrategyParams {
-  tradeSizeUsd: number;
-  minAprPct: number;
-  holdingDays: number;
-}
-
 export interface TickerConfigModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Reference ticker for contract-spec previews (min lot, margin, grid state).
+   * The strategy parameters themselves are universal across tickers. */
   tickerSymbol: string;
   initialStrategy?: "futures" | "funding" | "spot" | string;
-  strategyConfig?: TickerStrategyConfigDto;
-  isEnabled?: boolean;
-  onToggleEnabled?: (enabled: boolean) => void;
-  onSaveConfig?: (newConfig: TickerStrategyConfigDto) => Promise<void> | void;
-  spotParams?: SpotStrategyParams;
-  onSpotParamsChange?: (params: SpotStrategyParams) => void;
-  fundingParams?: FundingStrategyParams;
-  onFundingParamsChange?: (params: FundingStrategyParams) => void;
+  onSaveConfig?: (params: StrategyParamsDto) => Promise<void> | void;
 }
+
+type SectionIcon = React.ComponentType<{ className?: string }>;
+
+/** Settings sections per strategy — the left panel navigates these, not strategies. */
+const STRATEGY_SECTIONS: Record<string, { id: string; label: string; tooltip: string; icon: SectionIcon }[]> = {
+  futures: [
+    { id: "hurdle", label: "Signal Trigger", tooltip: "Configure the target profit, historical baseline window, percentile trigger, and execution behavior.", icon: TrendingUp },
+    { id: "sizing", label: "Sizing & Grid", tooltip: "Configure notional per leg, grid capacity, accumulated units, and cross-venue lot compatibility.", icon: Layers },
+    { id: "leverage", label: "Leverage & Margin", tooltip: "Review target leverage, effective safe leverage, margin requirements, and liquidation buffer.", icon: ShieldCheck },
+  ],
+  funding: [
+    { id: "carry", label: "Carry Settings", tooltip: "Configure funding-carry trade size, minimum net APR, and holding horizon.", icon: Coins },
+  ],
+  spot: [
+    { id: "spatial", label: "Spatial Parameters", tooltip: "Configure spot trade size, maximum slippage, and minimum net spread.", icon: Layers },
+  ],
+};
 
 const PERCENTILE_OPTIONS = [
   { value: 50, label: "50% (Median - Minimum)" },
@@ -67,58 +80,32 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   onClose,
   tickerSymbol,
   initialStrategy = "futures",
-  strategyConfig,
-  isEnabled,
-  onToggleEnabled,
   onSaveConfig,
-  spotParams,
-  onSpotParamsChange,
-  fundingParams,
-  onFundingParamsChange,
 }) => {
-  // Strategy Tab State
+  // Strategy scope is fixed by the page that opened the modal — no switching.
   const [activeStrategyTab, setActiveStrategyTab] = useState<"futures" | "funding" | "spot">("futures");
-
-  // Ticker visibility/exemption (monitor + strategy selection)
-  const [exempted, setExempted] = useState(false);
-  const [exemptBusy, setExemptBusy] = useState(false);
-  const tickerBase = useMemo(
-    () => tickerSymbol.split(/[-_/]/)[0].toUpperCase(),
-    [tickerSymbol],
+  const [activeSection, setActiveSection] = useState<string>(
+    STRATEGY_SECTIONS.futures[0].id,
   );
+
+  // Sync active tab + reset to the strategy's first section when opening
   useEffect(() => {
     if (!isOpen) return;
-    api
-      .getExemptedTickers()
-      .then((list) => setExempted(list.includes(tickerBase)))
-      .catch(() => {});
-  }, [isOpen, tickerBase]);
-  const handleToggleExempt = async () => {
-    setExemptBusy(true);
-    try {
-      await api.setTickerExempted(tickerBase, !exempted);
-      setExempted(!exempted);
-    } catch {
-      /* leave state unchanged on failure */
-    } finally {
-      setExemptBusy(false);
-    }
-  };
-
-  // Sync active tab with initialStrategy when opening
-  useEffect(() => {
-    if (initialStrategy === "funding" || initialStrategy === "spot" || initialStrategy === "futures") {
-      setActiveStrategyTab(initialStrategy);
-    } else {
-      setActiveStrategyTab("futures");
-    }
+    const s =
+      initialStrategy === "funding" || initialStrategy === "spot" || initialStrategy === "futures"
+        ? initialStrategy
+        : "futures";
+    setActiveStrategyTab(s);
+    setActiveSection((STRATEGY_SECTIONS[s] ?? STRATEGY_SECTIONS.futures)[0].id);
   }, [initialStrategy, isOpen]);
+
+  const sections = STRATEGY_SECTIONS[activeStrategyTab] ?? STRATEGY_SECTIONS.futures;
 
   // Find ticker metadata
   const ticker: PerpTicker = useMemo(() => {
     return (
       PERP_TICKERS.find((t) => t.symbol === tickerSymbol) || {
-        symbol: tickerSymbol,
+        symbol: tickerSymbol || "—",
         base: tickerSymbol.split(/[-_/]/)[0] || "BTC",
         quote: tickerSymbol.split(/[-_/]/)[1] || "USDC",
         name: tickerSymbol,
@@ -129,13 +116,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   }, [tickerSymbol]);
 
   // Form State for Futures Basis Strategy
-  const [targetProfitBps, setTargetProfitBps] = useState<number>(5.0);
+  const [targetProfitBps, setTargetProfitBps] = useState<number>(1.0);
   const [windowPercentile, setWindowPercentile] = useState<number>(50);
-  const [slidingWindow, setSlidingWindow] = useState<SlidingWindowOption>("1m");
+  const [slidingWindowMode, setSlidingWindowMode] = useState<"manual" | "auto">("manual");
+  const [windowValue, setWindowValue] = useState<number>(1);
+  const [windowUnit, setWindowUnit] = useState<DurationUnit>("days");
+  const [baselineSnapshot, setBaselineSnapshot] = useState<MatrixBaselineSnapshotDto | null>(null);
   const [maxAccumulatedUnits, setMaxAccumulatedUnits] = useState<number>(3);
   const [currentAccumulatedUnits, setCurrentAccumulatedUnits] = useState<number>(0);
   const [executionMode, setExecutionMode] = useState<ArbitrageExecutionMode>("SINGLE_WAY");
-  const [unitSize, setUnitSize] = useState<number>(0.005);
+  const [unitSizeUsd, setUnitSizeUsd] = useState<number>(2500);
   const [userTargetLeverage, setUserTargetLeverage] = useState<number>(5);
 
   // Form State for Funding Carry Strategy
@@ -152,56 +142,109 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Sync state with strategyConfig or fetch from API
+  // Load universal strategy params + the context ticker's grid state on open
   useEffect(() => {
     if (!isOpen) return;
 
-    if (strategyConfig) {
-      setTargetProfitBps(Number(strategyConfig.targetProfitBps ?? 5.0));
-      setWindowPercentile(Number(strategyConfig.windowPercentile ?? 50));
-      setSlidingWindow(((strategyConfig.slidingWindow || strategyConfig.sliding_window || "1m") as SlidingWindowOption));
-      setMaxAccumulatedUnits(Number(strategyConfig.maxAccumulatedUnits ?? 3));
-      setCurrentAccumulatedUnits(Number(strategyConfig.currentAccumulatedUnits ?? 0));
-      setExecutionMode(strategyConfig.executionMode || "SINGLE_WAY");
-      setUnitSize(Number(strategyConfig.unitSize ?? 0.005));
-      setUserTargetLeverage(Number(strategyConfig.userTargetLeverage ?? 5));
-    } else {
-      // Fetch from API
-      api
-        .getTickerStrategyConfig(tickerSymbol)
-        .then((cfg) => {
-          if (cfg) {
-            setTargetProfitBps(Number(cfg.targetProfitBps ?? 5.0));
-            setWindowPercentile(Number(cfg.windowPercentile ?? 50));
-            setSlidingWindow(((cfg.slidingWindow || cfg.sliding_window || "1m") as SlidingWindowOption));
-            setMaxAccumulatedUnits(Number(cfg.maxAccumulatedUnits ?? 3));
-            setCurrentAccumulatedUnits(Number(cfg.currentAccumulatedUnits ?? 0));
-            setExecutionMode(cfg.executionMode || "SINGLE_WAY");
-            setUnitSize(Number(cfg.unitSize ?? 0.005));
-            setUserTargetLeverage(Number(cfg.userTargetLeverage ?? 5));
-          }
-        })
-        .catch((err) => {
-          console.warn("Failed to load ticker strategy config in modal:", err);
-        });
-    }
+    api
+      .getStrategyParams(activeStrategyTab)
+      .then((p) => {
+        setTargetProfitBps(Number(p.targetProfitBps ?? 1.0));
+        setWindowPercentile(Number(p.windowPercentile ?? 50));
+        setSlidingWindowMode(p.slidingWindowMode === "auto" ? "auto" : "manual");
+        const secs =
+          Number.isFinite(p.slidingWindowSecs) &&
+          p.slidingWindowSecs >= 300 &&
+          p.slidingWindowSecs <= 2_592_000
+            ? p.slidingWindowSecs
+            : parseDuration(p.slidingWindow ?? "") ?? 86_400;
+        const parts = durationParts(secs);
+        setWindowValue(parts.value);
+        setWindowUnit(parts.unit);
+        setMaxAccumulatedUnits(Number(p.maxAccumulatedUnits ?? 3));
+        setExecutionMode((p.executionMode || "SINGLE_WAY") as ArbitrageExecutionMode);
+        setUnitSizeUsd(Number(p.unitSizeUsd ?? 2500));
+        setUserTargetLeverage(Number(p.userTargetLeverage ?? 5));
+        setFundingTradeSizeUsd(Number(p.fundingTradeSizeUsd ?? 25000));
+        setFundingMinAprPct(Number(p.fundingMinAprPct ?? 8.0));
+        setFundingHoldingDays(Number(p.fundingHoldingDays ?? 14));
+        setSpotTradeSizeUsd(Number(p.spotTradeSizeUsd ?? 1000));
+        setSpotMaxSlippageBps(Number(p.spotMaxSlippageBps ?? 5.0));
+        setSpotMinNetSpreadBps(Number(p.spotMinNetSpreadBps ?? 15.0));
+      })
+      .catch((err) => {
+        console.warn("Failed to load strategy params in modal:", err);
+      });
 
-    if (spotParams) {
-      setSpotTradeSizeUsd(spotParams.tradeSizeUsd);
-      setSpotMaxSlippageBps(spotParams.maxSlippageBps);
-      setSpotMinNetSpreadBps(spotParams.minNetSpreadBps);
+    // Per-ticker runtime grid state (accumulated units) for the context symbol
+    api
+      .getTickerStrategyConfig(tickerSymbol)
+      .then((cfg) => {
+        if (cfg) setCurrentAccumulatedUnits(Number(cfg.currentAccumulatedUnits ?? 0));
+      })
+      .catch((err) => {
+        console.warn("Failed to load ticker grid state in modal:", err);
+      });
+  }, [isOpen, tickerSymbol, activeStrategyTab]);
+
+  const manualWindowSecs = useMemo(() => {
+    const secs = durationSeconds(windowValue, windowUnit);
+    if (!Number.isFinite(secs)) return 86_400;
+    return Math.min(Math.max(Math.round(secs), 300), 2_592_000);
+  }, [windowValue, windowUnit]);
+
+  const windowUnitBounds = WINDOW_UNIT_BOUNDS[windowUnit];
+
+  const switchWindowUnit = (u: DurationUnit) => {
+    const secs = durationSeconds(windowValue, windowUnit);
+    const mult = u === "days" ? 86_400 : u === "hours" ? 3_600 : 60;
+    setWindowUnit(u);
+    setWindowValue(clampWindowValue(Math.round(secs / mult), u));
+  };
+
+  useEffect(() => {
+    if (!isOpen || activeStrategyTab !== "futures") {
+      setBaselineSnapshot(null);
+      return;
     }
-    if (fundingParams) {
-      setFundingTradeSizeUsd(fundingParams.tradeSizeUsd);
-      setFundingMinAprPct(fundingParams.minAprPct);
-      setFundingHoldingDays(fundingParams.holdingDays);
-    }
-  }, [isOpen, tickerSymbol, strategyConfig]);
+    let stopped = false;
+    const t = setTimeout(() => {
+      api
+        .getMatrixBaselines(tickerSymbol, slidingWindowMode, manualWindowSecs, windowPercentile)
+        .then((snap) => {
+          if (!stopped) setBaselineSnapshot(snap);
+        })
+        .catch(() => {
+          if (!stopped) setBaselineSnapshot(null);
+        });
+    }, 300);
+    return () => {
+      stopped = true;
+      clearTimeout(t);
+    };
+  }, [isOpen, activeStrategyTab, tickerSymbol, slidingWindowMode, manualWindowSecs, windowPercentile]);
+
+  const windowStatusLine =
+    slidingWindowMode === "manual"
+      ? `Manual trailing baseline · ${formatDuration(manualWindowSecs)}`
+      : baselineSnapshot && baselineSnapshot.auto_window_secs != null
+        ? `Auto-selected ${formatDuration(baselineSnapshot.effective_window_secs)} from ${baselineSnapshot.qualifying_pair_count} qualified venue pairs · median half-life ${formatDuration(Math.round(baselineSnapshot.median_half_life_secs ?? 0))}`
+        : `Collecting sufficient history · using manual fallback ${formatDuration(manualWindowSecs)}`;
 
   // Contract specs and minimum compatible lot size
   const minCompatible = useMemo(() => {
     return getMinCompatibleSize(ticker.symbol, ticker.venues, ticker.basePrice);
   }, [ticker]);
+
+  // Universal sizing is USD notional per leg; derive the context ticker's
+  // base-unit quantity (clamped to the venue-compatible minimum lot).
+  const unitSize = useMemo(() => {
+    if (ticker.basePrice <= 0) return minCompatible.minCompatibleSize;
+    const raw = unitSizeUsd / ticker.basePrice;
+    const step = minCompatible.stepSize || 0.0001;
+    const rounded = Math.ceil(raw / step) * step;
+    return Math.max(minCompatible.minCompatibleSize, Math.round(rounded * 1e6) / 1e6);
+  }, [unitSizeUsd, ticker.basePrice, minCompatible]);
 
   // Compute safe leverage and margin
   const safeLeverage = useMemo(() => {
@@ -215,9 +258,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   }, [ticker, unitSize, userTargetLeverage]);
 
   // Nominal hurdle calculations (fees + closing friction + target profit)
-  const avgFeeBps = 7.0;
-  const avgSpreadBps = 0.6;
-  const nominalHurdleBps = Math.round((avgFeeBps + avgSpreadBps + targetProfitBps) * 100) / 100;
 
   // Handle Escape key to close modal
   useEffect(() => {
@@ -236,40 +276,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Preset Handlers
-  const applyPreset = (type: "conservative" | "balanced" | "aggressive") => {
-    if (type === "conservative") {
-      setTargetProfitBps(8.0);
-      setWindowPercentile(80);
-      setSlidingWindow("5m");
-      setMaxAccumulatedUnits(2);
-      setUserTargetLeverage(5);
-      setExecutionMode("DOUBLE_WAY");
-    } else if (type === "balanced") {
-      setTargetProfitBps(5.0);
-      setWindowPercentile(60);
-      setSlidingWindow("1m");
-      setMaxAccumulatedUnits(3);
-      setUserTargetLeverage(5);
-      setExecutionMode("DOUBLE_WAY");
-    } else if (type === "aggressive") {
-      setTargetProfitBps(2.5);
-      setWindowPercentile(50);
-      setSlidingWindow("30s");
-      setMaxAccumulatedUnits(5);
-      setUserTargetLeverage(5);
-      setExecutionMode("SINGLE_WAY");
-    }
-  };
-
   const handleResetDefaults = () => {
-    setTargetProfitBps(5.0);
+    setTargetProfitBps(1.0);
     setWindowPercentile(50);
-    setSlidingWindow("1m");
+    setSlidingWindowMode("manual");
+    setWindowValue(1);
+    setWindowUnit("days");
     setMaxAccumulatedUnits(3);
     setCurrentAccumulatedUnits(0);
     setExecutionMode("SINGLE_WAY");
-    setUnitSize(minCompatible.minCompatibleSize);
+    setUnitSizeUsd(2500);
     setUserTargetLeverage(5);
     setFundingTradeSizeUsd(25000);
     setFundingMinAprPct(8.0);
@@ -283,41 +299,53 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setIsSaving(true);
     setSaveSuccess(false);
 
-    const updatedConfig: TickerStrategyConfigDto = {
-      symbol: ticker.symbol,
+    const canonicalWindow = formatDuration(manualWindowSecs);
+    const updatedParams: StrategyParamsDto = {
+      strategyId: activeStrategyTab,
       targetProfitBps,
       windowPercentile,
-      slidingWindow,
-      sliding_window: slidingWindow,
+      slidingWindow: canonicalWindow,
+      slidingWindowMode,
+      slidingWindowSecs: manualWindowSecs,
       maxAccumulatedUnits,
-      currentAccumulatedUnits,
       executionMode,
-      unitSize: Math.max(minCompatible.minCompatibleSize, unitSize),
+      unitSizeUsd,
       userTargetLeverage,
+      fundingTradeSizeUsd,
+      fundingMinAprPct,
+      fundingHoldingDays,
+      spotTradeSizeUsd,
+      spotMaxSlippageBps,
+      spotMinNetSpreadBps,
     };
 
     try {
-      await api.saveTickerStrategyConfig(updatedConfig);
+      await api.saveStrategyParams(updatedParams);
+      const tickerConfig: TickerStrategyConfigDto = {
+        symbol: ticker.symbol,
+        targetProfitBps,
+        windowPercentile,
+        slidingWindow: canonicalWindow,
+        sliding_window: canonicalWindow,
+        maxAccumulatedUnits,
+        currentAccumulatedUnits,
+        executionMode,
+        unitSize,
+        userTargetLeverage,
+      };
+      await api.saveTickerStrategyConfig(tickerConfig).catch((err) => {
+        console.warn("Failed to persist ticker grid state:", err);
+      });
       if (onSaveConfig) {
-        await onSaveConfig(updatedConfig);
+        await onSaveConfig(updatedParams);
       }
-      onSpotParamsChange?.({
-        tradeSizeUsd: spotTradeSizeUsd,
-        minNetSpreadBps: spotMinNetSpreadBps,
-        maxSlippageBps: spotMaxSlippageBps,
-      });
-      onFundingParamsChange?.({
-        tradeSizeUsd: fundingTradeSizeUsd,
-        minAprPct: fundingMinAprPct,
-        holdingDays: fundingHoldingDays,
-      });
       setSaveSuccess(true);
       setTimeout(() => {
         setSaveSuccess(false);
         onClose();
       }, 400);
     } catch (err) {
-      console.error("Failed to save ticker strategy config:", err);
+      console.error("Failed to save strategy params:", err);
     } finally {
       setIsSaving(false);
     }
@@ -336,48 +364,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
               <SlidersHorizontal className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-sm font-bold font-mono tracking-wider text-slate-900 leading-tight">
-                {ticker.symbol} Strategy Configurator
+              <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 leading-tight">
+                {formatStrategyName(activeStrategyTab)} Configurator
               </h2>
             </div>
           </div>
 
           <div className="flex items-center space-x-3">
-            {onToggleEnabled && (
-              <div className="flex items-center space-x-2 mr-1">
-                <span className="text-xs font-mono text-slate-600 font-medium">Strategy</span>
-                <SwitchToggle
-                  checked={isEnabled ?? false}
-                  onChange={onToggleEnabled}
-                  size="sm"
-                  showStatusText={true}
-                />
-              </div>
-            )}
-            {/* Hide/exempt from the monitor + all strategy selection.
-                Durable on the backend; reversed globally via System
-                Settings → Reveal All Tickers. */}
-            <button
-              type="button"
-              disabled={exemptBusy}
-              onClick={handleToggleExempt}
-              className={`px-2.5 py-1 rounded-md border text-xs font-mono font-semibold transition cursor-pointer ${
-                exempted
-                  ? "bg-rose-50 text-rose-600 border-rose-200 hover:bg-rose-100"
-                  : "text-slate-500 border-surface-border hover:text-slate-700 hover:bg-surface-raised"
-              }`}
-              title={
-                exempted
-                  ? "Hidden from the Opportunity Radar and strategy selection — click to restore"
-                  : "Hide this ticker from the Opportunity Radar and strategy selection"
-              }
-            >
-              {exempted ? "Hidden" : "Hide"}
-            </button>
             <button
               type="button"
               onClick={onClose}
@@ -396,234 +393,143 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <div className="space-y-3">
               <div className="px-2 pt-1 flex items-center justify-between">
                 <span className="text-xs font-mono font-bold tracking-wider text-slate-400">
-                  Strategies
+                  Settings
                 </span>
               </div>
 
               <div className="space-y-1">
-                <button
-                  type="button"
-                  onClick={() => setActiveStrategyTab("futures")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
-                    activeStrategyTab === "futures"
-                      ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
-                  }`}
-                >
-                  <SpreadGapIcon className={`w-4 h-4 shrink-0 ${activeStrategyTab === "futures" ? "text-blue-600" : "text-slate-400"}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">Single Spread</div>
-                    <div className="text-xs font-normal text-slate-400 truncate">Basis & Dislocation</div>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActiveStrategyTab("funding")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
-                    activeStrategyTab === "funding"
-                      ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
-                  }`}
-                >
-                  <Percent className={`w-4 h-4 shrink-0 ${activeStrategyTab === "funding" ? "text-blue-600" : "text-slate-400"}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">Funding Rate</div>
-                    <div className="text-xs font-normal text-slate-400 truncate">Rate Arbitrage</div>
-                  </div>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setActiveStrategyTab("spot")}
-                  className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
-                    activeStrategyTab === "spot"
-                      ? "bg-white text-blue-600 font-bold shadow-xs border border-slate-200/80"
-                      : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
-                  }`}
-                >
-                  <Coins className={`w-4 h-4 shrink-0 ${activeStrategyTab === "spot" ? "text-blue-600" : "text-slate-400"}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate">Spatial</div>
-                    <div className="text-xs font-normal text-slate-400 truncate">Atomic Flash</div>
-                  </div>
-                </button>
+                {sections.map((s) => {
+                  const Icon = s.icon;
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      onClick={() => setActiveSection(s.id)}
+                      className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-xs transition cursor-pointer text-left ${
+                        activeSection === s.id
+                          ? "bg-accent text-white font-bold shadow-2xs border border-accent"
+                          : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
+                      }`}
+                    >
+                      <Icon className={`w-4 h-4 shrink-0 ${activeSection === s.id ? "text-white" : "text-slate-400"}`} />
+                      <div className="min-w-0 flex-1 flex items-center">
+                        <span className="truncate">{s.label}</span>
+                        <InfoTooltip
+                          text={s.tooltip}
+                          iconClassName={activeSection === s.id ? "text-blue-100 hover:text-white" : undefined}
+                        />
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
-            {/* Left Sidebar Bottom Ticker Quick Telemetry Card */}
-            <div className="p-2.5 bg-surface border border-surface-border rounded-lg space-y-1.5 font-mono text-xs">
-              <div className="flex items-center justify-between text-slate-500 text-xs font-bold">
-                <span>Asset Telemetry</span>
-                <span className="text-accent">{safeLeverage.effectiveLeverage}x Lev</span>
-              </div>
-              <div className="flex justify-between text-slate-700">
-                <span>Min Lot:</span>
-                <span className="font-semibold text-slate-900">{minCompatible.minCompatibleSize} {ticker.base}</span>
-              </div>
-              <div className="flex justify-between text-slate-700">
-                <span>Margin/u:</span>
-                <span className="font-semibold text-slate-900">${safeLeverage.totalMarginRequiredUsd.toFixed(0)}</span>
-              </div>
-              <div className="flex justify-between text-slate-700">
-                <span>Venues:</span>
-                <span className="font-semibold text-slate-900">{ticker.venues.length} Active</span>
-              </div>
-            </div>
           </div>
 
           {/* Right Main Content Area */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 bg-surface">
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-surface">
             {/* TAB 1: Futures Spread Convergence */}
             {activeStrategyTab === "futures" && (
               <div className="space-y-5">
-                {/* Presets Bar */}
-                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-surface-raised rounded-lg border border-surface-border">
-                  <div className="flex items-center space-x-1.5 text-xs text-slate-600">
-                    <Sparkles className="w-3.5 h-3.5 text-accent" />
-                    <span className="font-semibold text-slate-800">Quick Configuration Presets:</span>
-                  </div>
-                  <div className="flex items-center space-x-1.5 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => applyPreset("conservative")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
-                      title="Conservative: TP 8 bps, 80% percentile, 2 units, 5x lev"
-                    >
-                      Conservative
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyPreset("balanced")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
-                      title="Balanced: TP 5 bps, 60% percentile, 3 units, 5x lev"
-                    >
-                      Balanced
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyPreset("aggressive")}
-                      className="px-2.5 py-1 bg-surface hover:bg-slate-100 text-slate-700 rounded-md border border-surface-border transition cursor-pointer shadow-2xs"
-                      title="Aggressive: TP 2.5 bps, 50% percentile, 5 units, 5x lev"
-                    >
-                      Aggressive
-                    </button>
+              {activeSection === "hurdle" && (
+              <div className="space-y-3">
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span className="flex items-center">
+                      Target Profit (BPS)
+                      <InfoTooltip text="Net profit cushion locked in per round-trip after deducting taker fees and closing spread." />
+                    </span>
+                  </label>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="number"
+                      step="0.5"
+                      min="0.1"
+                      max="100"
+                      value={targetProfitBps}
+                      onChange={(e) => setTargetProfitBps(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                    />
+                    <span className="text-xs text-slate-500 font-semibold">bps</span>
                   </div>
                 </div>
-              {/* Section: Profit Hurdle & Dislocation Filters */}
-              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
-                    <TrendingUp className="w-3.5 h-3.5 text-accent" />
-                    <span>Hurdle Rate & Dislocation Triggers</span>
-                    <InfoTooltip text="Calculates minimum statistical spread needed for atomic entry." />
-                  </h3>
-                </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  {/* Target Profit Input */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
-                      <span className="flex items-center">
-                        Target Profit (BPS)
-                        <InfoTooltip text="Net profit cushion locked in per round-trip after deducting taker fees and closing spread." />
-                      </span>
-                    </label>
-                    <div className="flex items-center space-x-2">
-                      <input
-                        type="number"
-                        step="0.5"
-                        min="0.1"
-                        max="100"
-                        value={targetProfitBps}
-                        onChange={(e) => setTargetProfitBps(Math.max(0.1, parseFloat(e.target.value) || 0.1))}
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
-                      />
-                      <span className="text-xs text-slate-500 font-semibold">bps</span>
-                    </div>
-                  </div>
-
-                  {/* Rolling Sliding Window */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
-                      <span className="flex items-center">
-                        Sliding Window
-                        <InfoTooltip text="Time duration for calculating historical mean spread baseline and statistical percentile thresholds." />
-                      </span>
-                      <span className="text-xs text-slate-400">Baseline</span>
-                    </label>
-                    <div className="grid grid-cols-5 gap-1 bg-surface-raised p-1 rounded-md border border-surface-border h-[38px] items-center">
-                      {(["10s", "30s", "1m", "5m", "15m"] as SlidingWindowOption[]).map((w) => (
-                        <button
-                          key={w}
-                          type="button"
-                          onClick={() => setSlidingWindow(w)}
-                          className={`h-7 rounded-sm text-xs font-mono transition cursor-pointer flex items-center justify-center ${
-                            slidingWindow === w
-                              ? "bg-accent text-white font-bold shadow-2xs"
-                              : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
-                          }`}
-                        >
-                          {w}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Window Percentile Filter */}
-                  <div className="space-y-1.5">
-                    <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
-                      <span className="flex items-center">
-                        Window Percentile
-                        <InfoTooltip text="Strictly filters entries to spreads at or above this percentile of the rolling sliding window." />
-                      </span>
-                      <span className="text-xs text-slate-400">Min 50%</span>
-                    </label>
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span className="flex items-center">
+                      Sliding Window
+                      <InfoTooltip text="Trailing duration for the mean-spread baseline and percentile trigger, computed from persisted historical venue spreads. Auto derives the window per ticker from mean-reversion half-life; the manual duration stays as the explicit fallback." />
+                    </span>
+                    <SwitchToggle
+                      size="sm"
+                      label="Auto from history"
+                      checked={slidingWindowMode === "auto"}
+                      onChange={(v) => setSlidingWindowMode(v ? "auto" : "manual")}
+                    />
+                  </label>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="number"
+                      step="1"
+                      min={windowUnitBounds.min}
+                      max={windowUnitBounds.max}
+                      value={windowValue}
+                      onChange={(e) => {
+                        const v = Math.floor(parseFloat(e.target.value));
+                        if (Number.isFinite(v)) setWindowValue(clampWindowValue(v, windowUnit));
+                      }}
+                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                    />
                     <select
-                      value={windowPercentile}
-                      onChange={(e) => setWindowPercentile(Math.max(50, parseInt(e.target.value, 10)))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                      value={windowUnit}
+                      onChange={(e) => switchWindowUnit(e.target.value as DurationUnit)}
+                      className="w-32 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
                     >
-                      {PERCENTILE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
+                      <option value="minutes">Minutes</option>
+                      <option value="hours">Hours</option>
+                      <option value="days">Days</option>
                     </select>
                   </div>
+                  <div className="text-xs text-slate-500">{windowStatusLine}</div>
                 </div>
 
-                {/* Nominal Hurdle Visual Breakdown */}
-                <div className="bg-blue-50/70 border border-blue-200 rounded-md p-3 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs text-blue-900">
-                  <div className="flex items-center space-x-2">
-                    <Info className="w-4 h-4 text-blue-600 shrink-0" />
-                    <div>
-                      <span className="font-bold text-blue-800">Nominal Hurdle:</span>{" "}
-                      <strong className="text-blue-700 text-sm">{nominalHurdleBps.toFixed(1)} BPS</strong>
-                      <span className="text-xs text-slate-500 ml-2">
-                        ({avgFeeBps.toFixed(1)} fee + {avgSpreadBps.toFixed(1)} friction + {targetProfitBps.toFixed(1)} target profit)
-                      </span>
-                    </div>
-                  </div>
-                  <span className="text-xs font-medium bg-white px-2 py-0.5 rounded-sm border border-blue-200 text-blue-800 shrink-0">
-                    Gross spread must exceed {nominalHurdleBps.toFixed(1)} BPS
-                  </span>
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
+                    <span className="flex items-center">
+                      Window Percentile
+                      <InfoTooltip text="Strictly filters entries to spreads at or above this percentile of the rolling sliding window." />
+                    </span>
+                    <span className="text-xs text-slate-400">Min 50%</span>
+                  </label>
+                  <select
+                    value={windowPercentile}
+                    onChange={(e) => setWindowPercentile(Math.max(50, parseInt(e.target.value, 10)))}
+                    className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]"
+                  >
+                    {PERCENTILE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
-                {/* Execution Mode */}
-                <div className="pt-2 border-t border-surface-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                  <div className="flex items-center">
-                    <span className="text-xs font-semibold text-slate-800">Execution Mode</span>
-                    <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Double-Way) or maintain inventory until manual rebalancing (Single-Way)." />
-                  </div>
-                  <div className="flex items-center space-x-1.5 bg-surface-raised p-1 rounded-md border border-surface-border text-xs">
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-xs text-slate-700 font-medium flex items-center">
+                    <span className="flex items-center">
+                      Execution Mode
+                      <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Double-Way) or maintain inventory until manual rebalancing (Single-Way)." />
+                    </span>
+                  </label>
+                  <div className="grid grid-cols-2 gap-1.5 bg-surface-raised p-1 rounded-md border border-surface-border text-xs">
                     <button
                       type="button"
                       onClick={() => setExecutionMode("SINGLE_WAY")}
-                      className={`px-3 py-1 rounded transition cursor-pointer ${
+                      className={`w-full px-3 py-1.5 rounded-sm transition cursor-pointer ${
                         executionMode === "SINGLE_WAY"
-                          ? "bg-surface text-accent font-semibold shadow-xs border border-surface-border"
-                          : "text-slate-600 hover:text-slate-900"
+                          ? "bg-accent text-white shadow-2xs"
+                          : "text-slate-500 hover:text-slate-900"
                       }`}
                       title="Single-Way: Enter on wide divergence only"
                     >
@@ -632,10 +538,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     <button
                       type="button"
                       onClick={() => setExecutionMode("DOUBLE_WAY")}
-                      className={`px-3 py-1 rounded transition cursor-pointer ${
+                      className={`w-full px-3 py-1.5 rounded-sm transition cursor-pointer ${
                         executionMode === "DOUBLE_WAY"
-                          ? "bg-surface text-accent font-semibold shadow-xs border border-surface-border"
-                          : "text-slate-600 hover:text-slate-900"
+                          ? "bg-accent text-white shadow-2xs"
+                          : "text-slate-500 hover:text-slate-900"
                       }`}
                       title="Double-Way: Enter on divergence and automatically unwind when spread converges to 0"
                     >
@@ -645,92 +551,80 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </div>
               </div>
 
-              {/* Section: Sizing, Grid Scaling & Cross-Venue Contract Compatibility */}
-              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-accent" />
-                    <span>Position Sizing & Grid Accumulation</span>
-                    <InfoTooltip text="Cross-exchange compatible lot sizing, maximum accumulated grid units, and position clearing." />
-                  </h3>
-                </div>
+              )}
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                  {/* Unit Size */}
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium flex items-center justify-between">
-                      <span>Unit Size ({ticker.base})</span>
-                      <span className="text-xs text-slate-400">Per Leg</span>
-                    </label>
-                    <input
-                      type="number"
-                      step={minCompatible.stepSize}
-                      min={minCompatible.minCompatibleSize}
-                      value={unitSize}
-                      onChange={(e) =>
-                        setUnitSize(Math.max(minCompatible.minCompatibleSize, parseFloat(e.target.value) || minCompatible.minCompatibleSize))
-                      }
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <div className="text-xs text-slate-500">
-                      Notional: ~${(unitSize * ticker.basePrice).toFixed(2)} USD
-                    </div>
-                  </div>
-
-                  {/* Max Grid Units */}
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium flex items-center justify-between">
-                      <span>Max Grid Units</span>
-                      <span className="text-xs text-slate-400">1 - 20 Units</span>
-                    </label>
-                    <input
-                      type="number"
-                      step="1"
-                      min="1"
-                      max="20"
-                      value={maxAccumulatedUnits}
-                      onChange={(e) => setMaxAccumulatedUnits(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <div className="text-xs text-slate-500">
-                      Max Exposure: ~${(maxAccumulatedUnits * unitSize * ticker.basePrice).toFixed(2)} USD
-                    </div>
-                  </div>
-
-                  {/* Accumulated Units Reset */}
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium flex items-center justify-between">
-                      <span>Accumulated Units</span>
-                      <span className="text-xs text-slate-400">Currently Filled</span>
-                    </label>
-                    <div className="flex items-center space-x-2">
-                      <div className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-800 font-bold text-center">
-                        {currentAccumulatedUnits} / {maxAccumulatedUnits}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setCurrentAccumulatedUnits(0)}
-                        className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-md text-xs transition cursor-pointer"
-                        title="Clear accumulated units back to 0"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
-                      </button>
-                    </div>
-                    <div className="text-xs text-slate-500">
-                      {currentAccumulatedUnits >= maxAccumulatedUnits ? (
-                        <span className="text-amber-700 font-semibold">Grid Capacity Full</span>
-                      ) : (
-                        <span>Available: {maxAccumulatedUnits - currentAccumulatedUnits} units</span>
-                      )}
-                    </div>
+              {activeSection === "sizing" && (
+              <div className="space-y-3 text-xs">
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-slate-700 font-medium flex items-center justify-between">
+                    <span>Unit Size (USD)</span>
+                    <span className="text-xs text-slate-400">Notional / Leg</span>
+                  </label>
+                  <input
+                    type="number"
+                    step={100}
+                    min={10}
+                    value={unitSizeUsd}
+                    onChange={(e) =>
+                      setUnitSizeUsd(Math.max(10, parseFloat(e.target.value) || 2500))
+                    }
+                    className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                  />
+                  <div className="text-xs text-slate-500">
+                    ≈ {unitSize} {ticker.base} on {ticker.symbol}
                   </div>
                 </div>
 
-                {/* Compatibility Info Bar */}
-                <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border flex items-center justify-between text-xs text-slate-600">
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-slate-700 font-medium flex items-center justify-between">
+                    <span>Max Grid Units</span>
+                    <span className="text-xs text-slate-400">1 - 20 Units</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="1"
+                    max="20"
+                    value={maxAccumulatedUnits}
+                    onChange={(e) => setMaxAccumulatedUnits(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
+                    className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                  />
+                  <div className="text-xs text-slate-500">
+                    Max Exposure: ~${(maxAccumulatedUnits * unitSizeUsd).toFixed(0)} USD
+                  </div>
+                </div>
+
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-slate-700 font-medium flex items-center justify-between">
+                    <span>Accumulated Units ({ticker.base})</span>
+                    <span className="text-xs text-slate-400">This ticker only</span>
+                  </label>
                   <div className="flex items-center space-x-2">
-                    <span className="font-semibold text-slate-800">Minimum Compatible Lot:</span>
-                    <span className="bg-surface px-2 py-0.5 rounded-sm border border-surface-border font-bold text-slate-900">
+                    <div className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-800 font-bold text-center">
+                      {currentAccumulatedUnits} / {maxAccumulatedUnits}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCurrentAccumulatedUnits(0)}
+                      className="px-2.5 py-2 bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border rounded-md text-xs transition cursor-pointer"
+                      title="Clear accumulated units back to 0"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
+                    </button>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    {currentAccumulatedUnits >= maxAccumulatedUnits ? (
+                      <span className="text-amber-700 font-semibold">Grid Capacity Full</span>
+                    ) : (
+                      <span>Available: {maxAccumulatedUnits - currentAccumulatedUnits} units</span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border shadow-2xs flex items-center justify-between text-xs text-slate-600">
+                  <div className="flex items-center space-x-2">
+                    <span className="font-semibold text-slate-800">Minimum Compatible Lot ({ticker.base}):</span>
+                    <span className="bg-surface-raised px-2 py-0.5 rounded-sm border border-surface-border font-bold text-slate-900">
                       {minCompatible.minCompatibleSize} {ticker.base}
                     </span>
                     <span className="text-slate-500">across ({ticker.venues.join(", ")})</span>
@@ -739,169 +633,140 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 </div>
               </div>
 
-              {/* Section: Safe Futures Leverage & Margin Risk Calculator */}
-              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-3.5 shadow-xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Safe Effective Leverage & Margin Requirement</span>
-                    <InfoTooltip text="Calculates minimum safe leverage ratio and margin requirements across enabled exchanges." />
-                  </h3>
-                </div>
+              )}
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Target Leverage</label>
-                    <div className="flex items-center space-x-1.5">
-                      <input
-                        type="number"
-                        step="1"
-                        min="1"
-                        max="5"
-                        value={userTargetLeverage}
-                        onChange={(e) =>
-                          setUserTargetLeverage(Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 5)))
-                        }
-                        className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                      />
-                      <span className="text-slate-500 font-semibold">x</span>
-                    </div>
-                  </div>
-
-                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-xs text-slate-500 font-semibold">Effective Safe Leverage</span>
-                    <div className="text-sm font-bold text-blue-700">{safeLeverage.effectiveLeverage}x</div>
-                    <span className="text-xs text-slate-400">Max venue: {safeLeverage.maxVenueLeverage}x</span>
-                  </div>
-
-                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-xs text-slate-500 font-semibold">Margin / Unit (USD)</span>
-                    <div className="text-sm font-bold text-slate-900">
-                      ${safeLeverage.totalMarginRequiredUsd.toFixed(2)}
-                    </div>
-                    <span className="text-xs text-slate-400">${safeLeverage.marginPerLegUsd.toFixed(2)} / leg</span>
-                  </div>
-
-                  <div className="bg-surface-raised p-2.5 rounded-md border border-surface-border space-y-0.5">
-                    <span className="text-xs text-slate-500 font-semibold">Liquidation Buffer</span>
-                    <div className="text-sm font-bold text-emerald-700">
-                      {safeLeverage.liquidationBufferPct.toFixed(1)}%
-                    </div>
-                    <span className="text-xs text-slate-400">Dual-leg safety margin</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: Funding Carry Radar */}
-          {activeStrategyTab === "funding" && (
-            <div className="space-y-4">
-              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
-                <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
-                    <Coins className="w-3.5 h-3.5 text-accent" />
-                    <span>Delta-Neutral Perpetual Funding Carry Settings</span>
-                  </h3>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Trade Size (USD)</label>
-                    <input
-                      type="number"
-                      step="1000"
-                      min="1000"
-                      value={fundingTradeSizeUsd}
-                      onChange={(e) => setFundingTradeSizeUsd(Math.max(100, parseFloat(e.target.value) || 1000))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <p className="text-xs text-slate-400">Notional Per Leg</p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Min APR Hurdle (%)</label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="1"
-                      value={fundingMinAprPct}
-                      onChange={(e) => setFundingMinAprPct(Math.max(0.1, parseFloat(e.target.value) || 1))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <p className="text-xs text-slate-400">Ignore opportunities below this net APR</p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Holding Horizon (Days)</label>
+              {activeSection === "leverage" && (
+              <div className="space-y-3 text-xs">
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <label className="text-slate-700 font-medium">Target Leverage</label>
+                  <div className="flex items-center space-x-1.5">
                     <input
                       type="number"
                       step="1"
                       min="1"
-                      max="365"
-                      value={fundingHoldingDays}
-                      onChange={(e) => setFundingHoldingDays(Math.max(1, parseInt(e.target.value, 10) || 14))}
+                      max="5"
+                      value={userTargetLeverage}
+                      onChange={(e) =>
+                        setUserTargetLeverage(Math.max(1, Math.min(5, parseInt(e.target.value, 10) || 5)))
+                      }
                       className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
                     />
-                    <p className="text-xs text-slate-400">Projected Carry Amortization Duration</p>
+                    <span className="text-slate-500 font-semibold">x</span>
                   </div>
                 </div>
+
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <span className="text-xs text-slate-500 font-semibold">Effective Safe Leverage</span>
+                  <div className="text-sm font-bold text-blue-700">{safeLeverage.effectiveLeverage}x</div>
+                  <span className="text-xs text-slate-400">Max venue: {safeLeverage.maxVenueLeverage}x</span>
+                </div>
+
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <span className="text-xs text-slate-500 font-semibold">Margin / Unit (USD)</span>
+                  <div className="text-sm font-bold text-slate-900">
+                    ${safeLeverage.totalMarginRequiredUsd.toFixed(2)}
+                  </div>
+                  <span className="text-xs text-slate-400">${safeLeverage.marginPerLegUsd.toFixed(2)} / leg</span>
+                </div>
+
+                <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                  <span className="text-xs text-slate-500 font-semibold">Liquidation Buffer</span>
+                  <div className="text-sm font-bold text-emerald-700">
+                    {safeLeverage.liquidationBufferPct.toFixed(1)}%
+                  </div>
+                  <span className="text-xs text-slate-400">Dual-leg safety margin</span>
+                </div>
+              </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: Funding Carry Radar */}
+          {activeStrategyTab === "funding" && activeSection === "carry" && (
+            <div className="space-y-3 text-xs">
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Trade Size (USD)</label>
+                <input
+                  type="number"
+                  step="1000"
+                  min="1000"
+                  value={fundingTradeSizeUsd}
+                  onChange={(e) => setFundingTradeSizeUsd(Math.max(100, parseFloat(e.target.value) || 1000))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Notional Per Leg</p>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Min APR Hurdle (%)</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="1"
+                  value={fundingMinAprPct}
+                  onChange={(e) => setFundingMinAprPct(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Ignore opportunities below this net APR</p>
+              </div>
+
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Holding Horizon (Days)</label>
+                <input
+                  type="number"
+                  step="1"
+                  min="1"
+                  max="365"
+                  value={fundingHoldingDays}
+                  onChange={(e) => setFundingHoldingDays(Math.max(1, parseInt(e.target.value, 10) || 14))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Projected Carry Amortization Duration</p>
               </div>
             </div>
           )}
 
           {/* TAB 3: Spot Arbitrage */}
-          {activeStrategyTab === "spot" && (
-            <div className="space-y-4">
-              <div className="bg-surface p-4 rounded-lg border border-surface-border space-y-4 shadow-xs">
-                <div className="border-b border-surface-border pb-2">
-                  <h3 className="text-xs font-bold font-mono text-slate-900 tracking-wider flex items-center space-x-1.5">
-                    <Layers className="w-3.5 h-3.5 text-accent" />
-                    <span>Cross-Exchange Spatial Arbitrage Parameters</span>
-                  </h3>
-                </div>
+          {activeStrategyTab === "spot" && activeSection === "spatial" && (
+            <div className="space-y-3 text-xs">
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Trade Size (USD)</label>
+                <input
+                  type="number"
+                  step="100"
+                  min="100"
+                  value={spotTradeSizeUsd}
+                  onChange={(e) => setSpotTradeSizeUsd(Math.max(10, parseFloat(e.target.value) || 500))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Capital deployed per flash cycle</p>
+              </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Trade Size (USD)</label>
-                    <input
-                      type="number"
-                      step="100"
-                      min="100"
-                      value={spotTradeSizeUsd}
-                      onChange={(e) => setSpotTradeSizeUsd(Math.max(10, parseFloat(e.target.value) || 500))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <p className="text-xs text-slate-400">Capital deployed per flash cycle</p>
-                  </div>
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Max Slippage (BPS)</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0.5"
+                  max="50"
+                  value={spotMaxSlippageBps}
+                  onChange={(e) => setSpotMaxSlippageBps(Math.max(0.1, parseFloat(e.target.value) || 5))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Orderbook Tolerance Limit</p>
+              </div>
 
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Max Slippage (BPS)</label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.5"
-                      max="50"
-                      value={spotMaxSlippageBps}
-                      onChange={(e) => setSpotMaxSlippageBps(Math.max(0.1, parseFloat(e.target.value) || 5))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <p className="text-xs text-slate-400">Orderbook Tolerance Limit</p>
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="text-slate-700 font-medium">Min Net Spread (BPS)</label>
-                    <input
-                      type="number"
-                      step="0.5"
-                      min="0.1"
-                      value={spotMinNetSpreadBps}
-                      onChange={(e) => setSpotMinNetSpreadBps(Math.max(0.1, parseFloat(e.target.value) || 1))}
-                      className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <p className="text-xs text-slate-400">Net spread required to auto-execute</p>
-                  </div>
-                </div>
+              <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+                <label className="text-slate-700 font-medium">Min Net Spread (BPS)</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  min="0.1"
+                  value={spotMinNetSpreadBps}
+                  onChange={(e) => setSpotMinNetSpreadBps(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+                <p className="text-xs text-slate-400">Net spread required to auto-execute</p>
               </div>
             </div>
           )}
@@ -933,7 +798,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               type="button"
               onClick={handleSave}
               disabled={isSaving}
-              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-md font-semibold transition shadow-xs cursor-pointer ${
+              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-md font-semibold transition shadow-2xs cursor-pointer ${
                 saveSuccess
                   ? "bg-profit text-white border border-profit-border"
                   : "bg-accent hover:bg-blue-600 text-white"

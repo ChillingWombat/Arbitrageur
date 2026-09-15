@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Header } from "./components/Header";
 import { TickerExplorer } from "./components/TickerExplorer";
+import { PositionsPanel } from "./components/PositionsPanel";
 import type { ActiveTab } from "./components/Navigation";
 import { LiveMatrix } from "./components/LiveMatrix";
 import { FundingRadar } from "./components/FundingRadar";
@@ -17,6 +18,7 @@ import type {
   SystemStatusDto,
   VenueOrderBookDto,
   VenueVolumesDto,
+  VenueMarketUniverseDto,
   SpatialOpportunityDto,
   SpotOpportunityDto,
   TriangleOpportunityDto,
@@ -25,18 +27,22 @@ import type {
   RiskOverviewDto,
   ExecutionLogEntry,
   TickerStrategyConfigDto,
+  StrategyParamsDto,
   EngineSettingsDto,
   SpatialCandidateInput,
   TickerPositionState,
+  OpenPositionDto,
 } from "./types";
 
 import {
   PERP_TICKERS,
-  getDefaultOrderQty,
   getAdmittedVenueCodes,
-  filterAvailableTickers,
+  applyMarketUniverse,
+  tickerUnavailabilityReason,
   type PerpTicker,
+  STRATEGY_DISPLAY_NAMES,
 } from "./types/tickers";
+import { deriveUnitSize } from "./services/contractSpecs";
 
 // Fixed design canvas — the app always renders at this size and is uniformly
 // scaled to fit the window. Ratio ~1.88:1 sits just below a maximized 16:9
@@ -45,6 +51,23 @@ import {
 // than letterboxing or full-bleed width.
 const DESIGN_WIDTH = 1920;
 const DESIGN_HEIGHT = 1005;
+
+/** Which persisted strategy each page's executions belong to — the sidebar's
+ *  "current strategy" scope keys off this. Radar executions dispatch through
+ *  the spatial pipeline but persist under the separate `radar` strategy so
+ *  the two bots' positions stay separable. Tabs with no single-strategy
+ *  identity (portfolio monitor, triangle — which has no persisted execution
+ *  path) map to null and can only show "all". */
+const TAB_STRATEGY: Record<ActiveTab, { id: string | null; label: string }> = {
+  spatial: { id: "futures", label: STRATEGY_DISPLAY_NAMES.futures },
+  radar: { id: "radar", label: STRATEGY_DISPLAY_NAMES.radar },
+  funding: { id: "funding", label: STRATEGY_DISPLAY_NAMES.funding },
+  spot_arb: { id: "spot", label: STRATEGY_DISPLAY_NAMES.spot },
+  prediction: { id: "prediction", label: STRATEGY_DISPLAY_NAMES.prediction },
+  statarb: { id: "stat_arb", label: STRATEGY_DISPLAY_NAMES.stat_arb },
+  triangle: { id: null, label: STRATEGY_DISPLAY_NAMES.triangle },
+  portfolio_monitor: { id: null, label: "Portfolio" },
+};
 
 const useFitScale = () => {
   const [scale, setScale] = useState(() =>
@@ -63,10 +86,25 @@ const useFitScale = () => {
 export const App: React.FC = () => {
   const canvasScale = useFitScale();
   const [activeTab, setActiveTab] = useState<ActiveTab>("spatial");
+  const prevTabRef = useRef<ActiveTab>("spatial");
+  const handleSelectTab = useCallback((tab: ActiveTab) => {
+    setActiveTab((cur) => {
+      if (cur !== tab) prevTabRef.current = cur;
+      return tab;
+    });
+  }, []);
+  const handleTogglePortfolio = useCallback(() => {
+    setActiveTab((cur) => {
+      if (cur === "portfolio_monitor") return prevTabRef.current;
+      prevTabRef.current = cur;
+      return "portfolio_monitor";
+    });
+  }, []);
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
   const [, setEngineSettings] = useState<EngineSettingsDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [tickerVolumes, setTickerVolumes] = useState<VenueVolumesDto[]>([]);
+  const [marketUniverse, setMarketUniverse] = useState<VenueMarketUniverseDto[]>([]);
   const [spatialOpps, setSpatialOpps] = useState<SpatialOpportunityDto[]>([]);
   const [spotOpps, setSpotOpps] = useState<SpotOpportunityDto[]>([]);
   const [triangleOpps, setTriangleOpps] = useState<TriangleOpportunityDto[]>([]);
@@ -75,7 +113,11 @@ export const App: React.FC = () => {
   const [riskData, setRiskData] = useState<RiskOverviewDto | null>(null);
   const [executionLogs, setExecutionLogs] = useState<ExecutionLogEntry[]>([]);
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(new Map());
+  // Universal per-strategy parameters (shared across tickers), keyed by strategy id.
+  const [strategyParams, setStrategyParams] = useState<Map<string, StrategyParamsDto>>(new Map());
   const [tickerPositionState, setTickerPositionState] = useState<TickerPositionState | null>(null);
+  const [openPositions, setOpenPositions] = useState<OpenPositionDto[]>([]);
+  const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => new Set());
   const [isPaused, setIsPaused] = useState(false);
 
@@ -93,9 +135,20 @@ export const App: React.FC = () => {
   };
 
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
-  const [fundingTradeSize, setFundingTradeSize] = useState(25000);
-  const [fundingParams, setFundingParams] = useState({ minAprPct: 8.0, holdingDays: 14 });
-  const [spotParams, setSpotParams] = useState({ tradeSizeUsd: 1000, minNetSpreadBps: 15.0, maxSlippageBps: 5.0 });
+  // Funding/Spatial params come from the universal per-strategy store —
+  // defaults apply until a saved record exists.
+  const fundingParamsDto = strategyParams.get("funding");
+  const spotParamsDto = strategyParams.get("spot");
+  const fundingTradeSize = fundingParamsDto?.fundingTradeSizeUsd ?? 25000;
+  const fundingParams = {
+    minAprPct: fundingParamsDto?.fundingMinAprPct ?? 8.0,
+    holdingDays: fundingParamsDto?.fundingHoldingDays ?? 14,
+  };
+  const spotParams = {
+    tradeSizeUsd: spotParamsDto?.spotTradeSizeUsd ?? 1000,
+    minNetSpreadBps: spotParamsDto?.spotMinNetSpreadBps ?? 15.0,
+    maxSlippageBps: spotParamsDto?.spotMaxSlippageBps ?? 5.0,
+  };
   const [refreshing, setRefreshing] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [tickerConfigModal, setTickerConfigModal] = useState<{
@@ -160,11 +213,25 @@ export const App: React.FC = () => {
     };
   }, []);
 
+  // Pre-exemption intersection — needed so the empty-state copy can tell
+  // "no overlapping markets" apart from "everything hidden".
+  const universeTickers: PerpTicker[] = useMemo(
+    () => applyMarketUniverse(PERP_TICKERS, marketUniverse),
+    [marketUniverse],
+  );
+
   const availableTickers: PerpTicker[] = useMemo(() => {
-    return filterAvailableTickers(PERP_TICKERS, activeVenueCodes, 2).filter(
+    return universeTickers.filter(
       (t) => !exemptedTickers.has(t.base.toUpperCase()),
     );
-  }, [activeVenueCodes, exemptedTickers]);
+  }, [universeTickers, exemptedTickers]);
+
+  const tickerUnavailableReason = tickerUnavailabilityReason(
+    systemStatus,
+    activeVenueCodes,
+    marketUniverse.length > 0,
+    universeTickers.length > 0,
+  );
 
   // Selection is only ever an explicit user click in the explorer — never
   // auto-pick a ticker. A stale selection is cleared once real alternatives
@@ -186,10 +253,20 @@ export const App: React.FC = () => {
       const ticker = selectedSymbol
         ? (availableTickers.length > 0 ? availableTickers : PERP_TICKERS).find((t: PerpTicker) => t.symbol === selectedSymbol)
         : undefined;
-      const qty = customQty ?? (ticker ? getDefaultOrderQty(ticker.basePrice) : 0.5);
-      const minBps = customMinBps ?? 5.0;
+      const futuresParams = strategyParams.get("futures");
+      const qty =
+        customQty ??
+        (ticker
+          ? deriveUnitSize(
+              ticker.symbol,
+              ticker.venues,
+              ticker.basePrice,
+              futuresParams?.unitSizeUsd ?? 2500.0
+            )
+          : 0.5);
+      const minBps = customMinBps ?? (futuresParams?.targetProfitBps ?? 1.0);
 
-      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, spot, triangle, tickerPos] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions] = await Promise.all([
         api.getSystemStatus(),
         api.getEngineSettings(),
         selectedSymbol ? api.fetchOrderbooks(selectedSymbol) : Promise.resolve([]),
@@ -199,9 +276,11 @@ export const App: React.FC = () => {
         api.getRiskOverview(),
         api.getExecutionLogs(),
         api.getAllTickerStrategyConfigs(),
+        api.getAllStrategyParams().catch(() => [] as StrategyParamsDto[]),
         api.scanSpotOpportunities(),
         api.scanTriangleOpportunities(),
         selectedSymbol ? api.getTickerPositionState(selectedSymbol) : Promise.resolve(null),
+        api.getOpenPositions().catch(() => []),
       ]);
 
       setSystemStatus(status);
@@ -218,6 +297,7 @@ export const App: React.FC = () => {
       setSpotOpps(spot);
       setTriangleOpps(triangle);
       setTickerPositionState(tickerPos);
+      setOpenPositions(positions);
 
       if (configs && configs.length > 0) {
         setStrategyConfigs((prev) => {
@@ -228,12 +308,22 @@ export const App: React.FC = () => {
           return next;
         });
       }
+
+      if (allParams && allParams.length > 0) {
+        setStrategyParams((prev) => {
+          const next = new Map(prev);
+          for (const p of allParams) {
+            next.set(p.strategyId, p);
+          }
+          return next;
+        });
+      }
     } catch (err) {
       console.error("Failed to refresh market data:", err);
     } finally {
       setRefreshing(false);
     }
-  }, [selectedSymbol, fundingTradeSize, availableTickers]);
+  }, [selectedSymbol, fundingTradeSize, availableTickers, strategyParams]);
 
   useEffect(() => {
     refreshAllData();
@@ -254,9 +344,37 @@ export const App: React.FC = () => {
     [refreshAllData]
   );
 
+  const venueKey = useMemo(() => [...activeVenueCodes].sort().join(","), [activeVenueCodes]);
+
+  // Actual market universe per admitted venue — the catalog's static venue
+  // claims are not trusted; availability is the live intersection. Reloads
+  // immediately when the admitted venue set changes, then every 30s.
+  useEffect(() => {
+    if (venueKey === "") {
+      setMarketUniverse([]);
+      return;
+    }
+    let cancelled = false;
+    const load = () => {
+      api
+        .getMarketUniverse()
+        .then((u) => {
+          if (!cancelled) setMarketUniverse(u);
+        })
+        .catch(() => {
+          if (!cancelled) setMarketUniverse([]);
+        });
+    };
+    load();
+    const interval = setInterval(load, 30000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [venueKey]);
+
   // 24h volume stats per venue — slow-moving data, polled on a 30s cadence
   // and refetched whenever the connected venue set changes.
-  const venueKey = useMemo(() => [...activeVenueCodes].sort().join(","), [activeVenueCodes]);
   useEffect(() => {
     if (activeVenueCodes.size === 0) {
       setTickerVolumes([]);
@@ -373,16 +491,17 @@ export const App: React.FC = () => {
   const handleOpenTickerConfig = (symbol: string, strategy?: string) => {
     setTickerConfigModal({
       isOpen: true,
-      symbol,
+      // Context ticker for contract-spec previews — strategy params themselves
+      // are universal across tickers.
+      symbol: symbol || "BTC-USDC",
       strategy: strategy || (activeTab === "funding" ? "funding" : activeTab === "spot_arb" ? "spot" : "futures"),
     });
   };
 
-  const handleSaveTickerConfig = async (newConfig: TickerStrategyConfigDto) => {
-    await api.saveTickerStrategyConfig(newConfig);
-    setStrategyConfigs((prev) => {
+  const handleSaveStrategyParams = async (params: StrategyParamsDto) => {
+    setStrategyParams((prev) => {
       const next = new Map(prev);
-      next.set(newConfig.symbol, newConfig);
+      next.set(params.strategyId, params);
       return next;
     });
     await refreshAllData();
@@ -419,7 +538,7 @@ export const App: React.FC = () => {
         onOpenSettings={() => setIsSettingsOpen(true)}
         refreshing={refreshing}
         activeTab={activeTab}
-        onSelectTab={setActiveTab}
+        onSelectTab={handleSelectTab}
         spatialCount={spatialOpps.filter((o) => o.is_executable).length}
         fundingCount={fundingOpps.length}
         spotCount={spotOpps.filter((o) => o.is_executable).length}
@@ -428,26 +547,27 @@ export const App: React.FC = () => {
       />
 
       {/* Main Workspace Body */}
-      <div className="flex flex-1 overflow-hidden">
-        {/* Left Ticker Explorer Panel (Union of Perp DEX Tickers >= 2 Venues) */}
-        <TickerExplorer
-          selectedSymbol={selectedSymbol}
-          onSelectTicker={setSelectedSymbol}
-          executionLogs={executionLogs}
-          strategyConfigs={strategyConfigs}
+      <div className="relative flex flex-1 overflow-hidden">
+        {/* Left Aggregated Positions Panel — symbol selection is
+            strategy-specific, so the ticker explorer lives inside the
+            Single Spread page rather than the universal sidebar. */}
+        <PositionsPanel
+          positions={openPositions}
+          currentStrategyId={TAB_STRATEGY[activeTab].id}
+          currentStrategyLabel={TAB_STRATEGY[activeTab].label}
+          selectedPositionKey={selectedPositionKey}
+          onSelectPosition={(pos) => {
+            setSelectedPositionKey(pos.key);
+            const ticker = (availableTickers.length > 0 ? availableTickers : PERP_TICKERS)
+              .find((t: PerpTicker) => t.symbol === pos.symbol);
+            if (ticker) setSelectedSymbol(ticker.symbol);
+          }}
           status={systemStatus}
-          riskData={riskData}
-          enabledTickers={enabledTickers}
-          onToggleTicker={handleToggleTicker}
-          onOpenSettings={() => setIsSettingsOpen(true)}
-          onOpenTickerConfig={handleOpenTickerConfig}
-          availableTickers={availableTickers}
-          activeVenueCodes={activeVenueCodes}
-          tickerVolumes={tickerVolumes}
           isPaused={isPaused}
           onResetCircuitBreaker={handleResetCircuitBreaker}
-          onOpenPortfolioMonitor={() => setActiveTab("portfolio_monitor")}
+          onOpenPortfolioMonitor={handleTogglePortfolio}
           isPortfolioActive={activeTab === "portfolio_monitor"}
+          onOpenSettings={() => setIsSettingsOpen(true)}
         />
 
         {/* Workspace Content Pane */}
@@ -468,6 +588,26 @@ export const App: React.FC = () => {
               onToggleTicker={handleToggleTicker}
               isPaused={isPaused}
               positionState={tickerPositionState}
+              futuresParams={strategyParams.get("futures") ?? null}
+              tickerExplorer={
+                <TickerExplorer
+                  selectedSymbol={selectedSymbol}
+                  onSelectTicker={setSelectedSymbol}
+                  executionLogs={executionLogs}
+                  strategyConfigs={strategyConfigs}
+                  futuresMaxUnits={strategyParams.get("futures")?.maxAccumulatedUnits}
+                  riskData={riskData}
+                  enabledTickers={enabledTickers}
+                  onToggleTicker={handleToggleTicker}
+                  onOpenSettings={() => setIsSettingsOpen(true)}
+                  onOpenTickerConfig={handleOpenTickerConfig}
+                  availableTickers={availableTickers}
+                  activeVenueCodes={activeVenueCodes}
+                  tickerVolumes={tickerVolumes}
+                  systemStatus={systemStatus}
+                  tickerUnavailableReason={tickerUnavailableReason}
+                />
+              }
             />
           )}
 
@@ -502,7 +642,6 @@ export const App: React.FC = () => {
             <TriangularArbitrage
               executionLogs={executionLogs}
               onRefreshAll={refreshAllData}
-              onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
             />
@@ -555,23 +694,13 @@ export const App: React.FC = () => {
         onSettingsSaved={handleSettingsSaved}
       />
 
-      {/* Pop-Out Ticker Strategy Configurator Modal */}
+      {/* Pop-Out Strategy Configurator Modal — universal per-strategy params */}
       <TickerConfigModal
         isOpen={tickerConfigModal.isOpen}
         onClose={() => setTickerConfigModal((prev) => ({ ...prev, isOpen: false }))}
         tickerSymbol={tickerConfigModal.symbol}
         initialStrategy={tickerConfigModal.strategy}
-        strategyConfig={strategyConfigs.get(tickerConfigModal.symbol)}
-        isEnabled={enabledTickers.has(tickerConfigModal.symbol)}
-        onToggleEnabled={(enabled) => handleToggleTicker(tickerConfigModal.symbol, enabled)}
-        onSaveConfig={handleSaveTickerConfig}
-        spotParams={spotParams}
-        onSpotParamsChange={setSpotParams}
-        fundingParams={{ tradeSizeUsd: fundingTradeSize, ...fundingParams }}
-        onFundingParamsChange={(p) => {
-          setFundingTradeSize(p.tradeSizeUsd);
-          setFundingParams({ minAprPct: p.minAprPct, holdingDays: p.holdingDays });
-        }}
+        onSaveConfig={handleSaveStrategyParams}
       />
         </div>
       </div>

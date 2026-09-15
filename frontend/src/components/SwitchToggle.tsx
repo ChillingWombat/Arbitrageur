@@ -38,7 +38,7 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
           checked
-            ? "bg-emerald-500 border border-emerald-600 shadow-xs"
+            ? "bg-emerald-500 border border-emerald-600 shadow-2xs"
             : "bg-white border border-slate-300 hover:border-slate-400 shadow-2xs"
         }`}
         title={label ? `${label}: ${checked ? "ON" : "OFF"}` : checked ? "ON" : "OFF"}

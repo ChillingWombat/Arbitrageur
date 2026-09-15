@@ -38,7 +38,7 @@ class RootErrorBoundary extends Component<Props, State> {
           background: "#fff1f2",
           color: "#991b1b",
           padding: "32px",
-          fontFamily: "monospace",
+          fontFamily: "'Roboto Mono Variable', 'Roboto Mono', monospace",
           overflow: "auto",
           zIndex: 999999,
         }}>

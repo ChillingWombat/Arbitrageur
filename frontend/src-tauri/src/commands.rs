@@ -1,5 +1,5 @@
 use crate::state::{
-    AppEngineState, EngineSettingsDto, ExecutionLogEntry, TickerStrategyConfigDto, VenueBalanceInfo,
+    AppEngineState, EngineSettingsDto, ExecutionLogEntry, StrategyParamsDto, TickerStrategyConfigDto, VenueBalanceInfo,
 };
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
@@ -14,7 +14,7 @@ use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSa
 use arbitrager_math::funding_carry::evaluate_funding_carry;
 use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrager_math::ou_process::OuModelParams;
-use arbitrager_math::spatial_spread::evaluate_spatial_spread;
+
 use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,12 @@ pub struct VenueVolumesDto {
     pub volumes: HashMap<String, f64>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct VenueMarketUniverseDto {
+    pub venue_id: String,
+    pub symbols: Vec<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VenueOrderBookDto {
     pub venue_id: String,
@@ -95,6 +101,18 @@ pub struct SpatialOpportunityDto {
     pub order_qty: f64,
     pub estimated_profit_usd: f64,
     pub is_executable: bool,
+    pub buy_venue_id: String,
+    pub sell_venue_id: String,
+    pub buy_fee_bps: f64,
+    pub sell_fee_bps: f64,
+    pub round_trip_commission_bps: f64,
+    pub entry_slippage_bps: f64,
+    pub exit_slippage_bps: f64,
+    pub closing_spread_bps: f64,
+    pub expected_friction_bps: f64,
+    pub required_gross_bps: f64,
+    pub slippage_ok: bool,
+    pub depth_ok: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -274,6 +292,182 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
     }
 }
 
+pub(crate) fn effective_venue_fee_bps(state: &AppEngineState, venue: &str) -> f64 {
+    let base: f64 = venue_fee_bps(venue).to_string().parse().unwrap_or(2.0);
+    let plus = matches!(venue.to_ascii_lowercase().as_str(), "lighter" | "robinhood")
+        && state
+            .state_store
+            .default_account(venue)
+            .ok()
+            .flatten()
+            .is_some_and(|a| a.account_tier == "plus");
+    if plus { base + 0.5 } else { base }
+}
+
+fn dec_opt_f64(v: Decimal) -> Option<f64> {
+    let f: f64 = v.to_string().parse().ok()?;
+    if f.is_finite() { Some(f) } else { None }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteEconomics {
+    buy_fee_bps: f64,
+    sell_fee_bps: f64,
+    round_trip_commission_bps: f64,
+    entry_slippage_bps: f64,
+    exit_slippage_bps: f64,
+    closing_spread_bps: f64,
+    expected_friction_bps: f64,
+    top_gross_bps: f64,
+    expected_net_bps: f64,
+    required_gross_bps: f64,
+    estimated_profit_usd: f64,
+}
+
+fn compute_route_economics(
+    book_buy: &OrderBook,
+    book_sell: &OrderBook,
+    qty: Decimal,
+    buy_fee_bps: f64,
+    sell_fee_bps: f64,
+    target_profit_bps: f64,
+) -> Option<RouteEconomics> {
+    let buy_best_ask = dec_opt_f64(book_buy.best_ask_price()?).filter(|p| *p > 0.0)?;
+    let sell_best_bid = dec_opt_f64(book_sell.best_bid_price()?).filter(|p| *p > 0.0)?;
+    let buy_best_bid = dec_opt_f64(book_buy.best_bid_price()?).filter(|p| *p > 0.0)?;
+    let sell_best_ask = dec_opt_f64(book_sell.best_ask_price()?).filter(|p| *p > 0.0)?;
+
+    let (buy_entry, rem, _) = book_buy.buy_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let (sell_entry, rem, _) = book_sell.sell_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let (buy_exit, rem, _) = book_buy.sell_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let (sell_exit, rem, _) = book_sell.buy_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let buy_entry_vwap = dec_opt_f64(buy_entry)?;
+    let sell_entry_vwap = dec_opt_f64(sell_entry)?;
+    let buy_exit_vwap = dec_opt_f64(buy_exit)?;
+    let sell_exit_vwap = dec_opt_f64(sell_exit)?;
+    let qty_f = dec_opt_f64(qty)?;
+
+    let top_gross_bps = (sell_best_bid - buy_best_ask) / buy_best_ask * 10_000.0;
+    let entry_slippage_bps =
+        ((buy_entry_vwap - buy_best_ask) / buy_best_ask * 10_000.0).max(0.0)
+            + ((sell_best_bid - sell_entry_vwap) / sell_best_bid * 10_000.0).max(0.0);
+    let exit_slippage_bps =
+        ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
+            + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
+    let buy_spread_bps =
+        (buy_best_ask - buy_best_bid) / ((buy_best_ask + buy_best_bid) / 2.0) * 10_000.0;
+    let sell_spread_bps =
+        (sell_best_ask - sell_best_bid) / ((sell_best_ask + sell_best_bid) / 2.0) * 10_000.0;
+    let closing_spread_bps = buy_spread_bps + sell_spread_bps;
+    let round_trip_commission_bps = 2.0 * (buy_fee_bps + sell_fee_bps);
+    let expected_friction_bps = round_trip_commission_bps
+        + entry_slippage_bps
+        + exit_slippage_bps
+        + closing_spread_bps;
+    let expected_net_bps = top_gross_bps - expected_friction_bps;
+    let required_gross_bps = expected_friction_bps + target_profit_bps;
+    let notional = ((buy_entry_vwap + sell_entry_vwap) / 2.0) * qty_f;
+    let estimated_profit_usd = expected_net_bps / 10_000.0 * notional;
+
+    if ![
+        top_gross_bps,
+        entry_slippage_bps,
+        exit_slippage_bps,
+        closing_spread_bps,
+        expected_friction_bps,
+        expected_net_bps,
+        required_gross_bps,
+        estimated_profit_usd,
+    ]
+    .iter()
+    .all(|v| v.is_finite())
+    {
+        return None;
+    }
+
+    Some(RouteEconomics {
+        buy_fee_bps,
+        sell_fee_bps,
+        round_trip_commission_bps,
+        entry_slippage_bps,
+        exit_slippage_bps,
+        closing_spread_bps,
+        expected_friction_bps,
+        top_gross_bps,
+        expected_net_bps,
+        required_gross_bps,
+        estimated_profit_usd,
+    })
+}
+
+fn route_execution_gates(
+    book_buy: &OrderBook,
+    book_sell: &OrderBook,
+    qty: Decimal,
+    max_slippage_bps: Decimal,
+    min_depth_ratio: Decimal,
+) -> (bool, bool) {
+    let router = SmartOrderRouter::new(max_slippage_bps);
+    let (Some(buy_ref), Some(sell_ref)) = (
+        book_buy.best_ask_price(),
+        book_sell.best_bid_price(),
+    ) else {
+        return (false, false);
+    };
+    let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
+    let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
+    let mut entry_buy = book_buy.clone();
+    entry_buy.asks.retain(|l| l.price <= buy_limit);
+    let mut entry_sell = book_sell.clone();
+    entry_sell.bids.retain(|l| l.price >= sell_limit);
+
+    let slippage_ok = arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        &entry_buy,
+        Side::Buy,
+        qty,
+        max_slippage_bps,
+    )
+    .is_ok()
+        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+            &entry_sell,
+            Side::Sell,
+            qty,
+            max_slippage_bps,
+        )
+        .is_ok()
+        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+            book_buy,
+            Side::Sell,
+            qty,
+            max_slippage_bps,
+        )
+        .is_ok()
+        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+            book_sell,
+            Side::Buy,
+            qty,
+            max_slippage_bps,
+        )
+        .is_ok();
+
+    let required = qty * min_depth_ratio;
+    let buy_depth: Decimal = entry_buy.asks.iter().map(|l| l.size).sum();
+    let sell_depth: Decimal = entry_sell.bids.iter().map(|l| l.size).sum();
+    (slippage_ok, buy_depth >= required && sell_depth >= required)
+}
+
 fn validate_market_symbol(symbol: &str) -> Result<(), String> {
     if symbol.is_empty() || symbol.len() > 64 {
         return Err("Invalid market symbol: must be 1-64 characters".into());
@@ -379,12 +573,23 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
 struct PublicProbe {
     url: &'static str,
     accept_4xx: bool,
+    post_body: Option<&'static str>,
 }
 
 fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
-    let p = |url: &'static str, accept_4xx: bool| Some(PublicProbe { url, accept_4xx });
+    let p = |url: &'static str, accept_4xx: bool| {
+        Some(PublicProbe {
+            url,
+            accept_4xx,
+            post_body: None,
+        })
+    };
     match vid {
-        "vanta" => p("https://api-evm.orderly.org/v1/public/system_info", false),
+        "vanta" => Some(PublicProbe {
+            url: "https://api.orderly.org/v1/public/query",
+            accept_4xx: false,
+            post_body: Some(r#"{"type":"rateLimitStatus"}"#),
+        }),
         "arcus" => p("https://api.arcus.xyz/health", false),
         "kraken" => p("https://api.kraken.com/0/public/Time", false),
         "polymarket" => p("https://clob.polymarket.com/time", false),
@@ -407,9 +612,11 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
 }
 
 /// HTTP probe for venues without an adapter: GET the venue's public
-/// endpoint; success = the server demonstrably responded (2xx, or 4xx for
-/// `accept_4xx` endpoints whose error is app-level JSON). A timeout or
-/// connection failure yields Err → the EMA drops and the UI shows N/A.
+/// endpoint, or POST `post_body` for endpoints that only accept POST (e.g.
+/// Orderly's public query). Success = the server demonstrably responded
+/// (2xx, or 4xx for `accept_4xx` endpoints whose error is app-level JSON).
+/// A timeout or connection failure yields Err → the EMA drops and the UI
+/// shows N/A.
 async fn probe_http(spec: PublicProbe) -> Result<(), String> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = CLIENT.get_or_init(|| {
@@ -418,11 +625,14 @@ async fn probe_http(spec: PublicProbe) -> Result<(), String> {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     });
-    let resp = client
-        .get(spec.url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let req = match spec.post_body {
+        Some(body) => client
+            .post(spec.url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body),
+        None => client.get(spec.url),
+    };
+    let resp = req.send().await.map_err(|e| e.to_string())?;
     let code = resp.status().as_u16();
     if resp.status().is_success() || (spec.accept_4xx && (400..500).contains(&code)) {
         Ok(())
@@ -455,10 +665,19 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .has_enabled_account(venue)
             .unwrap_or(false)
     };
-    let venue_status = |enabled: bool, supported: bool| -> &str {
+    // Admission is authoritative for the `supported` leg: a venue reports
+    // READ_ONLY iff get_venues() actually admits it (enabled + real adapter).
+    // A hardcoded per-venue bool previously let robinhood report UNSUPPORTED
+    // while get_venues admitted it with a live adapter.
+    let admitted = state.get_venues();
+    let admitted_map: HashMap<&str, &Arc<dyn ExchangeAdapter>> = admitted
+        .iter()
+        .map(|(vid, _, a)| (*vid, a))
+        .collect();
+    let venue_status = |vid: &str, enabled: bool| -> &str {
         if !enabled {
             "OFFLINE"
-        } else if supported {
+        } else if admitted_map.contains_key(vid) {
             "READ_ONLY"
         } else {
             "UNSUPPORTED"
@@ -477,11 +696,6 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     // probe drops the average so the UI shows N/A rather than a stale
     // number.
     const LATENCY_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
-    let admitted = state.get_venues();
-    let admitted_map: HashMap<&str, &Arc<dyn ExchangeAdapter>> = admitted
-        .iter()
-        .map(|(vid, _, a)| (*vid, a))
-        .collect();
     let enabled_ids: Vec<String> = venue_enabled_ids(state, &s);
     let mut probes = Vec::new();
     {
@@ -566,8 +780,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             },
             market_type: "Perpetual CLOB".into(),
             status: venue_status(
+                "hyperliquid",
                 s.hyperliquid_enabled || account_enabled("hyperliquid"),
-                true,
             )
             .into(),
             latency_ms: probe_ms("hyperliquid"),
@@ -577,7 +791,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "lighter".into(),
             name: "Lighter (zkDEX)".into(),
             market_type: "zk-Rollup CLOB".into(),
-            status: venue_status(s.lighter_enabled || account_enabled("lighter"), true).into(),
+            status: venue_status("lighter", s.lighter_enabled || account_enabled("lighter")).into(),
             latency_ms: probe_ms("lighter"),
             fee_bps: 1.5,
         },
@@ -585,7 +799,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "vanta".into(),
             name: "Vanta.exchange".into(),
             market_type: "Omnichain Perps".into(),
-            status: venue_status(s.vanta_enabled || account_enabled("vanta"), false).into(),
+            status: venue_status("vanta", s.vanta_enabled || account_enabled("vanta")).into(),
             latency_ms: probe_ms("vanta"),
             fee_bps: 3.0,
         },
@@ -593,7 +807,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "arcus".into(),
             name: "Arcus DEX".into(),
             market_type: "Fast CLOB".into(),
-            status: venue_status(s.arcus_enabled || account_enabled("arcus"), false).into(),
+            status: venue_status("arcus", s.arcus_enabled || account_enabled("arcus")).into(),
             latency_ms: probe_ms("arcus"),
             fee_bps: 1.5,
         },
@@ -601,7 +815,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "popdex".into(),
             name: "PopDEX".into(),
             market_type: "Lighter Hybrid".into(),
-            status: venue_status(s.popdex_enabled || account_enabled("popdex"), false).into(),
+            status: venue_status("popdex", s.popdex_enabled || account_enabled("popdex")).into(),
             latency_ms: probe_ms("popdex"),
             fee_bps: 2.0,
         },
@@ -609,7 +823,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "robinhood".into(),
             name: "Robinhood EVM".into(),
             market_type: "EVM DEX Aggregator".into(),
-            status: venue_status(s.robinhood_enabled || account_enabled("robinhood"), false).into(),
+            status: venue_status(
+                "robinhood",
+                s.robinhood_enabled || account_enabled("robinhood"),
+            )
+            .into(),
             latency_ms: probe_ms("robinhood"),
             fee_bps: 2.5,
         },
@@ -618,12 +836,12 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             name: "Kraken".into(),
             market_type: "Spot & Futures CLOB".into(),
             status: venue_status(
+                "kraken",
                 s.kraken_enabled
                     || s.kraken_spot_enabled
                     || s.kraken_futures_enabled
                     || account_enabled("kraken_spot")
                     || account_enabled("kraken_futures"),
-                false,
             )
             .into(),
             latency_ms: probe_ms("kraken"),
@@ -633,8 +851,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "polymarket".into(),
             name: "Polymarket (CTF CLOB)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.polymarket_enabled || account_enabled("polymarket"), false)
-                .into(),
+            status: venue_status(
+                "polymarket",
+                s.polymarket_enabled || account_enabled("polymarket"),
+            )
+            .into(),
             latency_ms: probe_ms("polymarket"),
             fee_bps: 0.0,
         },
@@ -642,7 +863,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "kalshi".into(),
             name: "Kalshi (CFTC)".into(),
             market_type: "Prediction Market".into(),
-            status: venue_status(s.kalshi_enabled || account_enabled("kalshi"), false).into(),
+            status: venue_status("kalshi", s.kalshi_enabled || account_enabled("kalshi")).into(),
             latency_ms: probe_ms("kalshi"),
             fee_bps: 10.0,
         },
@@ -650,7 +871,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "decibel".into(),
             name: "Decibel".into(),
             market_type: "Aptos Perp DEX".into(),
-            status: venue_status(s.decibel_enabled || account_enabled("decibel"), false).into(),
+            status: venue_status("decibel", s.decibel_enabled || account_enabled("decibel")).into(),
             latency_ms: probe_ms("decibel"),
             fee_bps: 2.5,
         },
@@ -658,7 +879,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "aster".into(),
             name: "Aster".into(),
             market_type: "Multi-Chain Perp DEX".into(),
-            status: venue_status(s.aster_enabled || account_enabled("aster"), false).into(),
+            status: venue_status("aster", s.aster_enabled || account_enabled("aster")).into(),
             latency_ms: probe_ms("aster"),
             fee_bps: 3.5,
         },
@@ -666,7 +887,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "binance".into(),
             name: "Binance".into(),
             market_type: "CEX Spot & Perp".into(),
-            status: venue_status(s.binance_enabled || account_enabled("binance"), false).into(),
+            status: venue_status("binance", s.binance_enabled || account_enabled("binance")).into(),
             latency_ms: probe_ms("binance"),
             fee_bps: 7.5,
         },
@@ -674,7 +895,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "coinbase".into(),
             name: "Coinbase".into(),
             market_type: "CEX Spot & Perp".into(),
-            status: venue_status(s.coinbase_enabled || account_enabled("coinbase"), false).into(),
+            status: venue_status(
+                "coinbase",
+                s.coinbase_enabled || account_enabled("coinbase"),
+            )
+            .into(),
             latency_ms: probe_ms("coinbase"),
             fee_bps: 8.0,
         },
@@ -682,7 +907,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "okx".into(),
             name: "OKX".into(),
             market_type: "CEX Spot & Perp".into(),
-            status: venue_status(s.okx_enabled || account_enabled("okx"), false).into(),
+            status: venue_status("okx", s.okx_enabled || account_enabled("okx")).into(),
             latency_ms: probe_ms("okx"),
             fee_bps: 8.0,
         },
@@ -690,7 +915,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "ibkr".into(),
             name: "Interactive Brokers".into(),
             market_type: "TradFi Broker".into(),
-            status: venue_status(s.ibkr_enabled || account_enabled("ibkr"), false).into(),
+            status: venue_status("ibkr", s.ibkr_enabled || account_enabled("ibkr")).into(),
             latency_ms: probe_ms("ibkr"),
             fee_bps: 1.0,
         },
@@ -698,7 +923,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "ig".into(),
             name: "IG Trading".into(),
             market_type: "TradFi Broker".into(),
-            status: venue_status(s.ig_enabled || account_enabled("ig"), false).into(),
+            status: venue_status("ig", s.ig_enabled || account_enabled("ig")).into(),
             latency_ms: probe_ms("ig"),
             fee_bps: 5.0,
         },
@@ -706,8 +931,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             id: "variational".into(),
             name: "Variational".into(),
             market_type: "Perp DEX (Read-Only)".into(),
-            status: venue_status(s.variational_enabled || account_enabled("variational"), false)
-                .into(),
+            status: venue_status(
+                "variational",
+                s.variational_enabled || account_enabled("variational"),
+            )
+            .into(),
             latency_ms: probe_ms("variational"),
             fee_bps: 0.0,
         },
@@ -749,6 +977,49 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         consecutive_failures: cb.consecutive_errors(),
         active_venues: venues,
     })
+}
+
+pub async fn refresh_venue_latencies_impl(state: &AppEngineState) -> Result<SystemStatusDto, String> {
+    state.latency_probe_at.lock().clear();
+    get_system_status_impl(state).await
+}
+
+pub async fn get_market_universe_impl(
+    state: &AppEngineState,
+) -> Result<Vec<VenueMarketUniverseDto>, String> {
+    let mut tasks = Vec::new();
+    for (vid, _, adapter) in state.get_venues() {
+        let vid = vid.to_string();
+        tasks.push(tokio::spawn(async move { (vid, adapter.fetch_markets().await) }));
+    }
+    let mut out = Vec::new();
+    for h in tasks {
+        if let Ok((vid, Ok(markets))) = h.await {
+            let mut symbols: Vec<String> = markets
+                .iter()
+                .filter(|m| {
+                    m.is_active
+                        && m.symbol.market_type
+                            == arbitrager_core::market::MarketType::Perpetual
+                })
+                .map(|m| {
+                    format!(
+                        "{}-{}",
+                        m.symbol.base.to_uppercase(),
+                        m.symbol.quote.to_uppercase()
+                    )
+                })
+                .collect();
+            symbols.sort();
+            symbols.dedup();
+            out.push(VenueMarketUniverseDto {
+                venue_id: vid,
+                symbols,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.venue_id.cmp(&b.venue_id));
+    Ok(out)
 }
 
 pub async fn fetch_orderbooks_impl(
@@ -1056,7 +1327,7 @@ pub async fn scan_spatial_opportunities_impl(
         if validate_adapter_book(&book, &venue_id, symbol).is_err() {
             continue;
         }
-        books.push((*vid, *vname, book, venue_fee_bps(vid)));
+        books.push((*vid, *vname, book, effective_venue_fee_bps(state, vid)));
     }
 
     if books.len() < 2 {
@@ -1073,8 +1344,6 @@ pub async fn scan_spatial_opportunities_impl(
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
     let min_depth_dec = Decimal::from_f64_retain(min_depth_ratio)
         .ok_or_else(|| "Invalid min depth ratio setting".to_string())?;
-    let router = SmartOrderRouter::new(max_slip_dec);
-    let required_depth = target_qty_dec * min_depth_dec;
     let mut opps = Vec::new();
 
     for i in 0..books.len() {
@@ -1085,22 +1354,14 @@ pub async fn scan_spatial_opportunities_impl(
             let (buy_id, buy_name, ref book_buy, buy_fee) = books[i];
             let (sell_id, sell_name, ref book_sell, sell_fee) = books[j];
 
-            if let Some(opp) =
-                evaluate_spatial_spread(book_buy, book_sell, buy_fee, sell_fee, target_qty_dec)
-            {
-                let gross_spread_f = opp.gross_spread.to_string().parse::<f64>().unwrap_or(0.0);
-                let gross_spread_bps_f = opp
-                    .gross_spread_bps
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(0.0);
-                let net_spread_bps_f = opp.net_profit_bps.to_string().parse::<f64>().unwrap_or(0.0);
-                let est_profit_f = opp
-                    .total_net_profit_usd
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(0.0);
-
+            if let Some(econ) = compute_route_economics(
+                book_buy,
+                book_sell,
+                target_qty_dec,
+                buy_fee,
+                sell_fee,
+                min_bps,
+            ) {
                 let best_ask = book_buy
                     .best_ask_price()
                     .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
@@ -1110,36 +1371,15 @@ pub async fn scan_spatial_opportunities_impl(
                     .map(|p| p.to_string().parse::<f64>().unwrap_or(0.0))
                     .unwrap_or(0.0);
 
-                let is_executable = net_spread_bps_f >= min_bps
-                    && match (book_buy.best_ask_price(), book_sell.best_bid_price()) {
-                        (Some(buy_ref), Some(sell_ref)) => {
-                            let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
-                            let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
-                            let mut bv = book_buy.clone();
-                            bv.asks.retain(|l| l.price <= buy_limit);
-                            let mut sv = book_sell.clone();
-                            sv.bids.retain(|l| l.price >= sell_limit);
-                            let buy_depth: Decimal = bv.asks.iter().map(|l| l.size).sum();
-                            let sell_depth: Decimal = sv.bids.iter().map(|l| l.size).sum();
-                            arbitrager_risk::safety_guards::verify_pre_execution_slippage(
-                                &bv,
-                                Side::Buy,
-                                target_qty_dec,
-                                max_slip_dec,
-                            )
-                            .is_ok()
-                                && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
-                                    &sv,
-                                    Side::Sell,
-                                    target_qty_dec,
-                                    max_slip_dec,
-                                )
-                                .is_ok()
-                                && buy_depth >= required_depth
-                                && sell_depth >= required_depth
-                        }
-                        _ => false,
-                    };
+                let (slippage_ok, depth_ok) = route_execution_gates(
+                    book_buy,
+                    book_sell,
+                    target_qty_dec,
+                    max_slip_dec,
+                    min_depth_dec,
+                );
+                let is_executable =
+                    econ.expected_net_bps >= min_bps && slippage_ok && depth_ok;
 
                 opps.push(SpatialOpportunityDto {
                     id: format!("{}-{}-{}", symbol, buy_id, sell_id),
@@ -1148,20 +1388,25 @@ pub async fn scan_spatial_opportunities_impl(
                     sell_venue: sell_name.to_string(),
                     buy_price: best_ask,
                     sell_price: best_bid,
-                    gross_spread: gross_spread_f,
-                    gross_spread_bps: gross_spread_bps_f,
-                    fee_bps: (buy_fee + sell_fee)
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0),
-                    net_spread_bps: net_spread_bps_f,
-                    order_qty: opp
-                        .executable_qty
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(order_qty),
-                    estimated_profit_usd: est_profit_f,
+                    gross_spread: best_bid - best_ask,
+                    gross_spread_bps: econ.top_gross_bps,
+                    fee_bps: econ.buy_fee_bps + econ.sell_fee_bps,
+                    net_spread_bps: econ.expected_net_bps,
+                    order_qty,
+                    estimated_profit_usd: econ.estimated_profit_usd,
                     is_executable,
+                    buy_venue_id: buy_id.to_string(),
+                    sell_venue_id: sell_id.to_string(),
+                    buy_fee_bps: econ.buy_fee_bps,
+                    sell_fee_bps: econ.sell_fee_bps,
+                    round_trip_commission_bps: econ.round_trip_commission_bps,
+                    entry_slippage_bps: econ.entry_slippage_bps,
+                    exit_slippage_bps: econ.exit_slippage_bps,
+                    closing_spread_bps: econ.closing_spread_bps,
+                    expected_friction_bps: econ.expected_friction_bps,
+                    required_gross_bps: econ.required_gross_bps,
+                    slippage_ok,
+                    depth_ok,
                 });
             }
         }
@@ -1587,6 +1832,7 @@ pub async fn execute_spatial_arbitrage_impl(
         max_units,
         nominal_hurdle_bps,
         None,
+        "futures",
         state,
     )
     .await
@@ -1605,6 +1851,7 @@ async fn execute_spatial_arbitrage_inner(
     max_units: Option<u32>,
     nominal_hurdle_bps: Option<f64>,
     route_id: Option<&str>,
+    strategy_id: &str,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if !order_qty.is_finite() || order_qty <= 0.0 {
@@ -1617,16 +1864,11 @@ async fn execute_spatial_arbitrage_inner(
         return Err("Buy and sell venues must be distinct".into());
     }
     validate_market_symbol(symbol)?;
-    let hurdle_dec = match nominal_hurdle_bps {
-        Some(h) if !h.is_finite() || h < 0.0 => {
+    if let Some(h) = nominal_hurdle_bps {
+        if !h.is_finite() || h < 0.0 {
             return Err("nominal_hurdle_bps must be finite and nonnegative".into());
         }
-        Some(h) => Some(
-            Decimal::from_f64_retain(h)
-                .ok_or("nominal_hurdle_bps is outside supported decimal range")?,
-        ),
-        None => None,
-    };
+    }
 
     let _execution_guard = state.execution_lock.lock().await;
 
@@ -1789,6 +2031,30 @@ async fn execute_spatial_arbitrage_inner(
             sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
+    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        &book_buy,
+        Side::Sell,
+        qty_dec,
+        max_slip_dec,
+    )
+    .map_err(|v| {
+        format!(
+            "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+            buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+        )
+    })?;
+    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        &book_sell,
+        Side::Buy,
+        qty_dec,
+        max_slip_dec,
+    )
+    .map_err(|v| {
+        format!(
+            "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+            sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+        )
+    })?;
 
     let buy_depth: Decimal = book_buy_exec.asks.iter().map(|l| l.size).sum();
     let sell_depth: Decimal = book_sell_exec.bids.iter().map(|l| l.size).sum();
@@ -1810,29 +2076,35 @@ async fn execute_spatial_arbitrage_inner(
         return Err("Requested quantity exceeds executable book depth within IOC limits".into());
     }
 
-    let fee_buy = buy_vwap * qty_dec * venue_fee_bps(buy_vid.as_str()) / dec!(10000);
-    let fee_sell = sell_vwap * qty_dec * venue_fee_bps(sell_vid.as_str()) / dec!(10000);
-    let expected_net = (sell_vwap - buy_vwap) * qty_dec - fee_buy - fee_sell;
-    let notional = ((buy_vwap + sell_vwap) / dec!(2)) * qty_dec;
-    let net_bps = if notional > dec!(0) {
-        (expected_net / notional) * dec!(10000)
-    } else {
-        dec!(0)
-    };
-    if expected_net <= dec!(0) {
+    let target_profit_bps = state
+        .strategy_params
+        .read()
+        .get("futures")
+        .map(|p| p.target_profit_bps)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(1.0);
+    let econ = compute_route_economics(
+        &book_buy,
+        &book_sell,
+        qty_dec,
+        effective_venue_fee_bps(state, buy_vid.as_str()),
+        effective_venue_fee_bps(state, sell_vid.as_str()),
+        target_profit_bps,
+    )
+    .ok_or_else(|| {
+        format!(
+            "Route economics unavailable on {}/{}: the full quantity cannot be priced on all four legs",
+            buy_venue, sell_venue
+        )
+    })?;
+    if econ.expected_net_bps < target_profit_bps {
         return Err(format!(
-            "Spread is not profitable after fees: expected net {} USD",
-            expected_net
+            "Expected net spread {} BPS after route friction is below the {} BPS target",
+            econ.expected_net_bps, target_profit_bps
         ));
     }
-    if let Some(h) = hurdle_dec {
-        if net_bps < h {
-            return Err(format!(
-                "Calculated net spread {} BPS is below nominal hurdle {} BPS",
-                net_bps, h
-            ));
-        }
-    }
+    let net_bps_f = econ.expected_net_bps;
+    let expected_net_usd = econ.estimated_profit_usd;
 
     state
         .delta_guard
@@ -1871,11 +2143,21 @@ async fn execute_spatial_arbitrage_inner(
             _ => {}
         }
     }
+    // Universal Single Spread params are canonical for leverage; the per-symbol
+    // record is a legacy fallback for configs written before strategy params
+    // existed in this session.
     let target_leverage = state
-        .strategy_configs
+        .strategy_params
         .read()
-        .get(symbol)
-        .map(|c| c.user_target_leverage)
+        .get("futures")
+        .map(|p| p.user_target_leverage)
+        .or_else(|| {
+            state
+                .strategy_configs
+                .read()
+                .get(symbol)
+                .map(|c| c.user_target_leverage)
+        })
         .unwrap_or(5);
     if !(1..=5).contains(&target_leverage) {
         return Err(format!(
@@ -1956,7 +2238,7 @@ async fn execute_spatial_arbitrage_inner(
     // the signal's own legs reconcile.
     let accounts = resolve_signal_accounts(
         state,
-        "futures",
+        strategy_id,
         buy_vid.as_str(),
         sell_vid.as_str(),
         route_id,
@@ -1970,10 +2252,10 @@ async fn execute_spatial_arbitrage_inner(
         .state_store
         .record_signal_execution(&crate::state_store::NewSignalExecution {
             id: signal_id.clone(),
-            strategy_id: "futures".into(),
+            strategy_id: strategy_id.to_string(),
             symbol: symbol.to_string(),
             route_id: accounts.route_id,
-            expected_net_usd: expected_net.to_string().parse::<f64>().ok(),
+            expected_net_usd: Some(expected_net_usd),
             note: None,
             legs: vec![
                 crate::state_store::NewSignalLeg {
@@ -1998,7 +2280,6 @@ async fn execute_spatial_arbitrage_inner(
         .execute_two_leg(&buy_exec, order_buy, &sell_exec, order_sell)
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
-    let net_bps_f = net_bps.to_string().parse::<f64>().unwrap_or(0.0);
 
     let mut equity_after = dec!(0);
     for (_, paper) in state.paper_exchanges() {
@@ -2046,7 +2327,7 @@ async fn execute_spatial_arbitrage_inner(
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0);
-            let expected_capture_f = expected_net.to_string().parse::<f64>().unwrap_or(0.0);
+            let expected_capture_f = expected_net_usd;
 
             let cycle_id = format!("paper-spatial-{}", cycle);
             state.virtual_ledger.write().open_cycle(
@@ -2363,6 +2644,7 @@ pub async fn execute_spatial_candidates_impl(
             None,
             None,
             winner.route_id.as_deref(),
+            "futures",
             state,
         )
         .await;
@@ -2415,6 +2697,39 @@ pub async fn get_ticker_position_state(
         "blockingSignalIds": blocking.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
         "netPositionQty": net,
     }))
+}
+
+/// Aggregated current open positions across signal executions, grouped by
+/// strategy + symbol + venue set. `unrealizedPnlUsd` is mark-to-market only
+/// when every filled leg has an entry price and a fresh venue book; otherwise
+/// `null` — never fabricated. `strategyId` scopes to one strategy.
+#[tauri::command]
+pub async fn get_open_positions(
+    strategy_id: Option<String>,
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<crate::state_store::OpenPositionDto>, String> {
+    let sid = match strategy_id.as_deref() {
+        Some(raw) => Some(
+            crate::state_store::normalize_strategy_id(raw).map_err(|e| e.to_string())?,
+        ),
+        None => None,
+    };
+    let mut signals = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+    if let Some(sid) = sid {
+        signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
+    }
+    let hub = &state.market_data_hub;
+    Ok(crate::state_store::aggregate_open_positions(
+        &signals,
+        &|venue, symbol| {
+            hub.get_valid_orderbook(&VenueId::from(venue), symbol, None)
+                .and_then(|b| b.mid_price())
+                .and_then(|m| dec_to_f64(m, "mark mid").ok())
+        },
+    ))
 }
 
 #[tauri::command]
@@ -3430,6 +3745,20 @@ pub async fn get_system_status(
 }
 
 #[tauri::command]
+pub async fn refresh_venue_latencies(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SystemStatusDto, String> {
+    refresh_venue_latencies_impl(&state).await
+}
+
+#[tauri::command]
+pub async fn get_market_universe(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<VenueMarketUniverseDto>, String> {
+    get_market_universe_impl(&state).await
+}
+
+#[tauri::command]
 pub async fn fetch_orderbooks(
     symbol: String,
     state: State<'_, Arc<AppEngineState>>,
@@ -3513,7 +3842,7 @@ pub async fn get_signal_series_impl(
     state: &AppEngineState,
 ) -> Result<SignalSeriesDto, String> {
     validate_market_symbol(symbol)?;
-    let window_secs = window_secs.clamp(10, 7 * 86_400); // 10s..7d
+    let window_secs = window_secs.clamp(10, 30 * 86_400); // 10s..30d (persisted retention)
     let max_points = 500usize;
     // Bucket granularity: ~poll cadence for short windows, coarser for
     // hour/day horizons so long slices stay renderable.
@@ -3612,6 +3941,251 @@ pub async fn get_signal_series(
         &state,
     )
     .await
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PairBaselineDto {
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub mean_gross_bps: Option<f64>,
+    pub percentile_gross_bps: Option<f64>,
+    pub sample_count: u64,
+    pub history_span_secs: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct MatrixBaselineSnapshotDto {
+    pub symbol: String,
+    pub mode: String,
+    pub manual_window_secs: u64,
+    pub effective_window_secs: u64,
+    pub auto_window_secs: Option<u64>,
+    pub median_half_life_secs: Option<f64>,
+    pub qualifying_pair_count: u32,
+    pub max_history_span_secs: u64,
+    pub using_manual_fallback: bool,
+    pub pairs: Vec<PairBaselineDto>,
+}
+
+const BASELINE_MIN_WINDOW_OBS: usize = 20;
+const BASELINE_SPAN_COVERAGE: f64 = 0.9;
+const OU_MIN_OBS: usize = 40;
+const OU_MIN_SPAN_SECS: f64 = 1_800.0;
+const OU_MIN_R2: f64 = 0.6;
+const AUTO_WINDOW_FLOOR_SECS: u64 = 1_800;
+const AUTO_WINDOW_CAP_SECS: u64 = 604_800;
+const PAIR_ALIGN_GAP_MS: i64 = 30_000;
+const BASELINE_RETENTION_MS: i64 = 30 * 86_400_000;
+
+fn compute_matrix_baselines(
+    symbol: &str,
+    mode: &str,
+    manual_window_secs: u64,
+    percentile: u32,
+    samples: &[crate::state_store::SpreadSample],
+    now_ms: i64,
+) -> MatrixBaselineSnapshotDto {
+    let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    for s in samples {
+        if s.mid.is_finite() && s.mid > 0.0 {
+            mids_by_venue
+                .entry(s.venue_id.clone())
+                .or_default()
+                .push((s.ts_ms, s.mid));
+        }
+    }
+    let mut venue_ids: Vec<String> = mids_by_venue.keys().cloned().collect();
+    venue_ids.sort();
+
+    struct PairEval {
+        buy: String,
+        sell: String,
+        series: Vec<arbitrager_math::pair_monitor::PairObservation>,
+        span_secs: u64,
+        half_life_secs: Option<f64>,
+        recommendation_secs: Option<u64>,
+    }
+
+    let mut evals: Vec<PairEval> = Vec::new();
+    for buy_v in &venue_ids {
+        for sell_v in &venue_ids {
+            if buy_v == sell_v {
+                continue;
+            }
+            let a = &mids_by_venue[buy_v];
+            let b = &mids_by_venue[sell_v];
+            let series = arbitrager_math::pair_monitor::build_pair_series(a, b, PAIR_ALIGN_GAP_MS);
+            let n = series.len();
+            let span_ms = if n >= 2 {
+                series[n - 1].ts_ms - series[0].ts_ms
+            } else {
+                0
+            };
+            let span_secs = (span_ms / 1000).max(0) as u64;
+            let ou = if n >= OU_MIN_OBS && span_secs as f64 >= OU_MIN_SPAN_SECS {
+                let dt = span_ms as f64 / 1000.0 / (n - 1) as f64;
+                if dt.is_finite() && dt > 0.0 {
+                    let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
+                    OuModelParams::fit(&vals, dt).filter(|p| {
+                        p.half_life.is_finite() && p.half_life > 0.0 && p.r_squared >= OU_MIN_R2
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            evals.push(PairEval {
+                buy: buy_v.clone(),
+                sell: sell_v.clone(),
+                series,
+                span_secs,
+                half_life_secs: ou.map(|p| p.half_life),
+                recommendation_secs: ou.map(|p| {
+                    ((2.0 * p.half_life).round().max(0.0) as u64)
+                        .clamp(AUTO_WINDOW_FLOOR_SECS, AUTO_WINDOW_CAP_SECS)
+                }),
+            });
+        }
+    }
+
+    let mut recommendations: Vec<u64> = evals
+        .iter()
+        .filter_map(|e| e.recommendation_secs)
+        .collect();
+    recommendations.sort_unstable();
+    let mut half_lives: Vec<f64> = evals.iter().filter_map(|e| e.half_life_secs).collect();
+    half_lives.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let qualifying_pair_count = recommendations.len() as u32;
+    let auto_window_secs = if mode == "auto" && !recommendations.is_empty() {
+        Some(recommendations[recommendations.len() / 2])
+    } else {
+        None
+    };
+    let median_half_life_secs = if half_lives.is_empty() {
+        None
+    } else {
+        Some(half_lives[half_lives.len() / 2])
+    };
+    let effective_window_secs = auto_window_secs.unwrap_or(manual_window_secs);
+    let using_manual_fallback = mode == "auto" && auto_window_secs.is_none();
+    let max_history_span_secs = evals.iter().map(|e| e.span_secs).max().unwrap_or(0);
+
+    let cutoff_ms = now_ms - (effective_window_secs as i64) * 1000;
+    let required_span_secs = BASELINE_SPAN_COVERAGE * effective_window_secs as f64;
+    let mut pairs = Vec::with_capacity(evals.len());
+    for e in &evals {
+        let windowed: Vec<&arbitrager_math::pair_monitor::PairObservation> = e
+            .series
+            .iter()
+            .filter(|o| o.ts_ms >= cutoff_ms)
+            .collect();
+        let window_span_secs = if windowed.len() >= 2 {
+            (windowed[windowed.len() - 1].ts_ms - windowed[0].ts_ms) as f64 / 1000.0
+        } else {
+            0.0
+        };
+        let sufficient =
+            windowed.len() >= BASELINE_MIN_WINDOW_OBS && window_span_secs >= required_span_secs;
+        let (mean_gross_bps, percentile_gross_bps) = if sufficient {
+            let mut vals: Vec<f64> = windowed.iter().map(|o| o.spread_bps).collect();
+            let mean = vals.iter().sum::<f64>() / vals.len() as f64;
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = (((percentile as f64 / 100.0) * vals.len() as f64).ceil() as usize)
+                .clamp(1, vals.len())
+                - 1;
+            (Some(mean), Some(vals[idx]))
+        } else {
+            (None, None)
+        };
+        pairs.push(PairBaselineDto {
+            buy_venue: e.buy.clone(),
+            sell_venue: e.sell.clone(),
+            mean_gross_bps,
+            percentile_gross_bps,
+            sample_count: windowed.len() as u64,
+            history_span_secs: window_span_secs.max(0.0).floor() as u64,
+        });
+    }
+
+    MatrixBaselineSnapshotDto {
+        symbol: symbol.to_string(),
+        mode: mode.to_string(),
+        manual_window_secs,
+        effective_window_secs,
+        auto_window_secs,
+        median_half_life_secs,
+        qualifying_pair_count,
+        max_history_span_secs,
+        using_manual_fallback,
+        pairs,
+    }
+}
+
+pub async fn get_matrix_baselines_impl(
+    symbol: &str,
+    mode: &str,
+    manual_window_secs: u64,
+    percentile: u32,
+    state: &AppEngineState,
+) -> Result<MatrixBaselineSnapshotDto, String> {
+    validate_market_symbol(symbol)?;
+    if !matches!(mode, "manual" | "auto") {
+        return Err(format!("mode must be 'manual' or 'auto', got '{mode}'"));
+    }
+    if !(300..=2_592_000).contains(&manual_window_secs) {
+        return Err(format!(
+            "manual_window_secs must be within 300..=2592000 (5m-30d), got {manual_window_secs}"
+        ));
+    }
+    if !(50..=99).contains(&percentile) {
+        return Err(format!("percentile must be within 50..=99, got {percentile}"));
+    }
+
+    let base = symbol
+        .split(['-', '/', '_'])
+        .next()
+        .unwrap_or(symbol)
+        .to_ascii_uppercase();
+    let keys = [base.clone(), format!("{base}-USDC"), format!("{base}-USD")];
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms - BASELINE_RETENTION_MS;
+    let store = state.state_store.clone();
+    let sym = symbol.to_string();
+    let mode_owned = mode.to_string();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        let mut all = Vec::new();
+        for k in &keys {
+            if let Ok(mut rows) = store.spread_samples(k, since_ms, now_ms) {
+                all.append(&mut rows);
+            }
+        }
+        all.sort_by(|a, b| (a.ts_ms, a.venue_id.as_str()).cmp(&(b.ts_ms, b.venue_id.as_str())));
+        all.dedup_by(|a, b| a.ts_ms == b.ts_ms && a.venue_id == b.venue_id);
+        compute_matrix_baselines(
+            &sym,
+            &mode_owned,
+            manual_window_secs,
+            percentile,
+            &all,
+            now_ms,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+pub async fn get_matrix_baselines(
+    symbol: String,
+    mode: String,
+    manual_window_secs: u64,
+    percentile: u32,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<MatrixBaselineSnapshotDto, String> {
+    get_matrix_baselines_impl(&symbol, &mode, manual_window_secs, percentile, &state).await
 }
 
 #[tauri::command]
@@ -3907,6 +4481,139 @@ pub async fn get_all_ticker_strategy_configs(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<TickerStrategyConfigDto>, String> {
     get_all_ticker_strategy_configs_impl(&state)
+}
+
+// ── Universal strategy parameters ────────────────────────────────────────────
+// One record per strategy_id ("futures" | "funding" | "spot"), shared across
+// all tickers. The per-symbol strategy_configs map only retains ticker-specific
+// runtime state (accumulated grid units, cached unit size).
+
+const KNOWN_STRATEGY_IDS: [&str; 3] = ["futures", "funding", "spot"];
+
+pub fn get_strategy_params_impl(
+    strategy_id: &str,
+    state: &AppEngineState,
+) -> Result<StrategyParamsDto, String> {
+    if !KNOWN_STRATEGY_IDS.contains(&strategy_id) {
+        return Err(format!("unknown strategy_id '{strategy_id}'"));
+    }
+    let params = state.strategy_params.read();
+    Ok(params
+        .get(strategy_id)
+        .cloned()
+        .unwrap_or_else(|| StrategyParamsDto::defaults_for(strategy_id)))
+}
+
+fn canonical_sliding_window(secs: u64) -> String {
+    if secs % 86_400 == 0 {
+        format!("{}d", secs / 86_400)
+    } else if secs % 3_600 == 0 {
+        format!("{}h", secs / 3_600)
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+pub fn save_strategy_params_impl(
+    mut params: StrategyParamsDto,
+    state: &AppEngineState,
+) -> Result<(), String> {
+    if !KNOWN_STRATEGY_IDS.contains(&params.strategy_id.as_str()) {
+        return Err(format!("unknown strategy_id '{}'", params.strategy_id));
+    }
+    if !matches!(params.sliding_window_mode.as_str(), "manual" | "auto") {
+        return Err(format!(
+            "sliding_window_mode must be 'manual' or 'auto', got '{}'",
+            params.sliding_window_mode
+        ));
+    }
+    if !(300..=2_592_000).contains(&params.sliding_window_secs) {
+        return Err(format!(
+            "sliding_window_secs must be within 300..=2592000 (5m-30d), got {}",
+            params.sliding_window_secs
+        ));
+    }
+    params.sliding_window = canonical_sliding_window(params.sliding_window_secs);
+    if !params.target_profit_bps.is_finite() || params.target_profit_bps <= 0.0 {
+        return Err("target_profit_bps must be finite and positive".into());
+    }
+    if params.window_percentile < 50 {
+        return Err("window_percentile must be at least 50%".into());
+    }
+    if params.max_accumulated_units < 1 {
+        return Err("max_accumulated_units must be at least 1".into());
+    }
+    if !(1..=5).contains(&params.user_target_leverage) {
+        return Err("user_target_leverage must be between 1 and 5".into());
+    }
+    if !params.unit_size_usd.is_finite() || params.unit_size_usd <= 0.0 {
+        return Err("unit_size_usd must be finite and positive".into());
+    }
+    if !params.funding_trade_size_usd.is_finite() || params.funding_trade_size_usd <= 0.0 {
+        return Err("funding_trade_size_usd must be finite and positive".into());
+    }
+    if !params.funding_min_apr_pct.is_finite() || params.funding_min_apr_pct < 0.0 {
+        return Err("funding_min_apr_pct must be finite and non-negative".into());
+    }
+    if params.funding_holding_days < 1 {
+        return Err("funding_holding_days must be at least 1".into());
+    }
+    if !params.spot_trade_size_usd.is_finite() || params.spot_trade_size_usd <= 0.0 {
+        return Err("spot_trade_size_usd must be finite and positive".into());
+    }
+    if !params.spot_max_slippage_bps.is_finite() || params.spot_max_slippage_bps <= 0.0 {
+        return Err("spot_max_slippage_bps must be finite and positive".into());
+    }
+    if !params.spot_min_net_spread_bps.is_finite() || params.spot_min_net_spread_bps <= 0.0 {
+        return Err("spot_min_net_spread_bps must be finite and positive".into());
+    }
+    let params_json = serde_json::to_string(&params).map_err(|e| e.to_string())?;
+    state
+        .state_store
+        .upsert_strategy_params_json(&params.strategy_id, &params_json)
+        .map_err(|e| e.to_string())?;
+    let mut map = state.strategy_params.write();
+    map.insert(params.strategy_id.clone(), params);
+    Ok(())
+}
+
+pub fn get_all_strategy_params_impl(
+    state: &AppEngineState,
+) -> Result<Vec<StrategyParamsDto>, String> {
+    let map = state.strategy_params.read();
+    Ok(KNOWN_STRATEGY_IDS
+        .iter()
+        .map(|id| {
+            map.get(*id)
+                .cloned()
+                .unwrap_or_else(|| StrategyParamsDto::defaults_for(id))
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn get_strategy_params(
+    strategy_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<StrategyParamsDto, String> {
+    get_strategy_params_impl(&strategy_id, &state)
+}
+
+#[tauri::command]
+pub async fn save_strategy_params(
+    params: StrategyParamsDto,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    save_strategy_params_impl(params, &state)
+}
+
+#[tauri::command]
+pub async fn get_all_strategy_params(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<StrategyParamsDto>, String> {
+    get_all_strategy_params_impl(&state)
 }
 
 pub fn get_vault_status_impl(state: &AppEngineState) -> VaultStatus {
@@ -5011,7 +5718,9 @@ pub async fn execute_monitor_opportunity(
         .filter(|p| *p > 0.0)
         .ok_or_else(|| "no ask on buy-side book".to_string())?;
     let qty = size_usd / ask;
-    execute_spatial_arbitrage_impl(
+    // Radar-dispatched fills persist under the "radar" strategy so the
+    // Spread Radar page scopes positions separately from Single Spread.
+    execute_spatial_arbitrage_inner(
         &sym,
         &buy_venue,
         &sell_venue,
@@ -5022,6 +5731,8 @@ pub async fn execute_monitor_opportunity(
         None,
         None,
         None,
+        None,
+        "radar",
         &state,
     )
     .await
@@ -5150,6 +5861,56 @@ mod tests {
                 .count(),
             1
         );
+
+        // Robinhood is admitted by get_venues with its Lighter-protocol
+        // adapter — an enabled account must report READ_ONLY, not
+        // UNSUPPORTED (regression: the status table once hardcoded it
+        // unsupported, which silently emptied the admitted-venue set the
+        // ticker universe derives from).
+        upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "robinhood".into(),
+                label: "RH".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create robinhood account");
+
+        let status = get_system_status_impl(&state).await.expect("status");
+        let robinhood = status
+            .active_venues
+            .iter()
+            .find(|v| v.id == "robinhood")
+            .expect("robinhood row");
+        assert_eq!(robinhood.status, "READ_ONLY");
+
+        // Venues with an enabled account but no admitted adapter remain
+        // UNSUPPORTED — enabled is not the same as stream-capable.
+        upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                id: None,
+                venue: "binance".into(),
+                label: "B".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create binance account");
+        let status = get_system_status_impl(&state).await.expect("status");
+        let binance = status
+            .active_venues
+            .iter()
+            .find(|v| v.id == "binance")
+            .expect("binance row");
+        assert_eq!(binance.status, "UNSUPPORTED");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5289,8 +6050,10 @@ mod tests {
             dec!(64205.0),
         );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64210.0), dec!(64215.0));
+        seed_test_book(&state, "vanta", "BTC-USDC", dec!(64220.0), dec!(64225.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
+        seed_test_funding(&state, "vanta", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
@@ -5340,6 +6103,7 @@ mod tests {
         };
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
+        seed_test_funding(&state, "vanta", "BTC-USDC");
 
         let opps_btc = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
             .await
@@ -5437,8 +6201,8 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Three seeded paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 300000.0);
+        // Four seeded paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 400000.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
@@ -5478,7 +6242,7 @@ mod tests {
             min_depth_ratio: 4.0,
             hyperliquid_url: "https://api.hyperliquid.xyz".into(),
             lighter_url: "https://mainnet.zklighter.elliot.ai".into(),
-            vanta_url: "https://api-evm.orderly.org".into(),
+            vanta_url: "https://api.orderly.org".into(),
             robinhood_rpc_url: "https://rpc.robinhood.network".into(),
             robinhood_router: "0x1111".into(),
             polymarket_url: "https://clob.polymarket.com".into(),
@@ -6149,8 +6913,10 @@ mod tests {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "AVAX-USDC", dec!(28.5), dec!(28.6));
         seed_test_book(&state, "lighter", "AVAX-USDC", dec!(28.55), dec!(28.65));
+        seed_test_book(&state, "vanta", "AVAX-USDC", dec!(28.58), dec!(28.68));
         seed_test_funding(&state, "hyperliquid", "AVAX-USDC");
         seed_test_funding(&state, "lighter", "AVAX-USDC");
+        seed_test_funding(&state, "vanta", "AVAX-USDC");
 
         let books_avax = fetch_orderbooks_impl("AVAX-USDC", &state)
             .await
@@ -6186,6 +6952,7 @@ mod tests {
         };
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
+        seed_test_funding(&state, "vanta", "AVAX-USDC");
 
         let opps_avax = scan_funding_opportunities_impl("AVAX-USDC", 10000.0, &state)
             .await
@@ -6234,7 +7001,7 @@ mod tests {
     async fn test_paper_execution_against_live_depth() {
         let state = setup_test_state_with_venues();
         seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.40), dec!(4.42));
-        seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.45), dec!(4.47));
+        seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.47), dec!(4.49));
 
         let exec_res = execute_spatial_arbitrage_impl(
             "DOT-USDC",
@@ -6514,7 +7281,8 @@ mod tests {
             "expected slippage error"
         );
 
-        // Non-profitable spread: sell VWAP below buy VWAP
+        // Non-profitable spread: sell VWAP below buy VWAP; route economics
+        // put expected net far below the backend target.
         seed_test_book(
             &state,
             "hyperliquid",
@@ -6539,9 +7307,18 @@ mod tests {
         .await;
         assert!(res
             .expect_err("negative spread must reject")
-            .contains("not profitable"));
+            .contains("below the"));
 
-        // Profitable but below the caller's nominal hurdle
+        // The backend futures target — not the caller's hurdle — gates
+        // admission: raise it above the route's expected net.
+        {
+            let mut params = state.strategy_params.write();
+            let mut p = params.get("futures").cloned().unwrap_or_else(|| {
+                StrategyParamsDto::defaults_for("futures")
+            });
+            p.target_profit_bps = 50.0;
+            params.insert("futures".to_string(), p);
+        }
         seed_test_book(
             &state,
             "hyperliquid",
@@ -6564,10 +7341,231 @@ mod tests {
             &state,
         )
         .await;
-        assert!(res.expect_err("hurdle must reject").contains("hurdle"));
+        assert!(res.expect_err("target must reject").contains("below the"));
 
         assert!(state.virtual_ledger.read().lots.is_empty());
         assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
+    }
+
+    fn mk_route_book(venue: &str, bids: &[(f64, f64)], asks: &[(f64, f64)]) -> OrderBook {
+        let mut book = OrderBook::new(
+            VenueId::new(venue),
+            "BTC-USDC".to_string(),
+        );
+        for (p, s) in bids {
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                Decimal::from_f64_retain(*p).unwrap(),
+                Decimal::from_f64_retain(*s).unwrap(),
+            ));
+        }
+        for (p, s) in asks {
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                Decimal::from_f64_retain(*p).unwrap(),
+                Decimal::from_f64_retain(*s).unwrap(),
+            ));
+        }
+        book.timestamp = Utc::now();
+        book
+    }
+
+    #[test]
+    fn test_route_economics_exact_values() {
+        let book_buy = mk_route_book(
+            "hyperliquid",
+            &[(64200.0, 5.0), (64190.0, 10.0)],
+            &[(64205.0, 5.0), (64215.0, 10.0)],
+        );
+        let book_sell = mk_route_book(
+            "lighter",
+            &[(64300.0, 5.0), (64290.0, 10.0)],
+            &[(64305.0, 5.0), (64315.0, 10.0)],
+        );
+        let econ = compute_route_economics(
+            &book_buy,
+            &book_sell,
+            dec!(5.0),
+            2.0,
+            1.5,
+            1.0,
+        )
+        .expect("route economics");
+
+        assert!((econ.round_trip_commission_bps - 7.0).abs() < 1e-9);
+        assert!((econ.top_gross_bps - 14.7964).abs() < 1e-3);
+        assert_eq!(econ.entry_slippage_bps, 0.0);
+        assert_eq!(econ.exit_slippage_bps, 0.0);
+        assert!((econ.closing_spread_bps - 1.5564).abs() < 1e-3);
+        assert!((econ.expected_friction_bps - 8.5564).abs() < 1e-3);
+        assert!((econ.expected_net_bps - 6.2400).abs() < 1e-3);
+        assert!((econ.required_gross_bps - 9.5564).abs() < 1e-3);
+        assert!((econ.estimated_profit_usd - 200.5).abs() < 0.5);
+    }
+
+    #[test]
+    fn test_route_economics_walks_multi_level_vwap() {
+        let book_buy = mk_route_book(
+            "hyperliquid",
+            &[(64200.0, 10.0)],
+            &[(64205.0, 5.0), (64215.0, 10.0)],
+        );
+        let book_sell = mk_route_book(
+            "lighter",
+            &[(64300.0, 5.0), (64290.0, 10.0)],
+            &[(64305.0, 10.0)],
+        );
+        let econ = compute_route_economics(
+            &book_buy,
+            &book_sell,
+            dec!(6.0),
+            2.0,
+            1.5,
+            1.0,
+        )
+        .expect("route economics");
+
+        let buy_entry: f64 = (5.0 * 64205.0 + 1.0 * 64215.0) / 6.0;
+        let sell_entry: f64 = (5.0 * 64300.0 + 1.0 * 64290.0) / 6.0;
+        let expected_entry_slip =
+            ((buy_entry - 64205.0) / 64205.0 * 10_000.0f64).max(0.0)
+                + ((64300.0 - sell_entry) / 64300.0 * 10_000.0f64).max(0.0);
+        assert!((econ.entry_slippage_bps - expected_entry_slip).abs() < 1e-6);
+        assert!(econ.entry_slippage_bps > 0.0);
+    }
+
+    #[test]
+    fn test_route_economics_fails_closed_on_incomplete_depth() {
+        let book_buy = mk_route_book(
+            "hyperliquid",
+            &[(64200.0, 1.0)],
+            &[(64205.0, 10.0)],
+        );
+        let book_sell = mk_route_book(
+            "lighter",
+            &[(64300.0, 10.0)],
+            &[(64305.0, 10.0)],
+        );
+        assert!(compute_route_economics(&book_buy, &book_sell, dec!(5.0), 2.0, 1.5, 1.0).is_none());
+
+        let no_asks = mk_route_book("hyperliquid", &[(64200.0, 10.0)], &[]);
+        assert!(compute_route_economics(&no_asks, &book_sell, dec!(5.0), 2.0, 1.5, 1.0).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_effective_venue_fee_bps_uses_default_account_tier() {
+        let (state, _dir) = test_state_with_vault("fee-tier");
+        assert_eq!(effective_venue_fee_bps(&state, "lighter"), 1.5);
+        assert_eq!(effective_venue_fee_bps(&state, "LIGHTER"), 1.5);
+        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 2.0);
+
+        upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: Some("plus".into()),
+                id: None,
+                venue: "lighter".into(),
+                label: "L1".into(),
+                enabled: true,
+                make_default: true,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create account");
+        assert_eq!(effective_venue_fee_bps(&state, "lighter"), 2.0);
+        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 2.0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_spatial_route_economics_gating() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64300.0), dec!(64305.0));
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("hl->lighter route");
+        assert!(opp.slippage_ok);
+        assert!(opp.depth_ok);
+        assert!(opp.is_executable);
+        assert!((opp.fee_bps - 3.5).abs() < 1e-9);
+        assert!((opp.round_trip_commission_bps - 7.0).abs() < 1e-9);
+        assert!((opp.required_gross_bps - (opp.expected_friction_bps + 1.0)).abs() < 1e-9);
+        assert!((opp.net_spread_bps - (opp.gross_spread_bps - opp.expected_friction_bps)).abs() < 1e-9);
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 50.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("route still reported for diagnostics");
+        assert!(!opp.is_executable);
+
+        // Thin reverse exit: buy venue bids cannot absorb the unwind, so the
+        // route is not costable and disappears from results entirely.
+        {
+            let mut thin = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC".to_string(),
+            );
+            thin.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64200.0),
+                dec!(0.1),
+            ));
+            thin.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64205.0),
+                dec!(10.0),
+            ));
+            thin.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(thin);
+        }
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        assert!(opps
+            .iter()
+            .all(|o| !(o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")));
+
+        // Exit-side slippage gate: deep but stale-priced reverse book keeps
+        // the route visible while blocking execution.
+        {
+            let mut book = arbitrager_core::quote::OrderBook::new(
+                arbitrager_core::types::VenueId::new("hyperliquid"),
+                "BTC-USDC".to_string(),
+            );
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64200.0),
+                dec!(0.4),
+            ));
+            book.bids.push(arbitrager_core::quote::BookLevel::new(
+                dec!(60000.0),
+                dec!(50.0),
+            ));
+            book.asks.push(arbitrager_core::quote::BookLevel::new(
+                dec!(64205.0),
+                dec!(10.0),
+            ));
+            book.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(book);
+        }
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("route present but blocked");
+        assert!(!opp.slippage_ok);
+        assert!(!opp.is_executable);
     }
 
     #[tokio::test]
@@ -6919,6 +7917,9 @@ mod tests {
             dec!(3452.0),
         );
         seed_test_book(&state, "hyperliquid", "SOL-USDC", dec!(152.0), dec!(152.2));
+        seed_test_book(&state, "vanta", "BTC-USDC", dec!(64201.0), dec!(64206.0));
+        seed_test_book(&state, "vanta", "ETH-USDC", dec!(3450.5), dec!(3452.5));
+        seed_test_book(&state, "vanta", "SOL-USDC", dec!(152.1), dec!(152.3));
 
         let symbols = vec![
             "BTC-USDC".to_string(),
@@ -6946,7 +7947,7 @@ mod tests {
         // 1. Initial query for non-existing returns default with correct symbol
         let def = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("default config");
         assert_eq!(def.symbol, "BTC-USDC");
-        assert_eq!(def.target_profit_bps, 5.0);
+        assert_eq!(def.target_profit_bps, 1.0);
         assert_eq!(def.window_percentile, 50);
         assert_eq!(def.execution_mode, "SINGLE_WAY");
         assert_eq!(def.user_target_leverage, 5);
@@ -7010,10 +8011,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_save_strategy_params_persists_to_state_store() {
+        let state = AppEngineState::new();
+        let params = StrategyParamsDto {
+            sliding_window_mode: "auto".into(),
+            sliding_window_secs: 43_200,
+            ..StrategyParamsDto::defaults_for("futures")
+        };
+        save_strategy_params_impl(params, &state).expect("save");
+
+        let rows = state.state_store.strategy_params_json().expect("rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "futures");
+        let persisted: StrategyParamsDto = serde_json::from_str(&rows[0].1).expect("valid json");
+        assert_eq!(persisted.sliding_window_mode, "auto");
+        assert_eq!(persisted.sliding_window_secs, 43_200);
+        assert_eq!(persisted.sliding_window, "12h");
+
+        let reloaded = crate::state::load_strategy_params(&state.state_store);
+        assert_eq!(reloaded["futures"].sliding_window_mode, "auto");
+        assert_eq!(reloaded["futures"].sliding_window_secs, 43_200);
+    }
+
+    #[tokio::test]
+    async fn test_save_strategy_params_rejects_invalid_and_leaves_memory() {
+        let state = AppEngineState::new();
+        let mut bad = StrategyParamsDto::defaults_for("futures");
+        bad.sliding_window_secs = 60;
+        assert!(save_strategy_params_impl(bad, &state).is_err());
+        bad = StrategyParamsDto::defaults_for("futures");
+        bad.sliding_window_mode = "sometimes".into();
+        assert!(save_strategy_params_impl(bad, &state).is_err());
+        bad = StrategyParamsDto::defaults_for("futures");
+        bad.sliding_window_secs = 3_000_000;
+        assert!(save_strategy_params_impl(bad, &state).is_err());
+        assert!(state.strategy_params.read().is_empty());
+        assert!(state
+            .state_store
+            .strategy_params_json()
+            .expect("rows")
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn test_venue_balances_report_paper_account() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
-        assert_eq!(balances.len(), 3);
+        assert_eq!(balances.len(), 4);
+        assert!(balances.iter().any(|b| b.venue == "vanta"));
         for b in &balances {
             assert!(b.available_margin_usd > 0.0);
             assert!(b.equity_usd > 0.0);
@@ -7339,8 +8384,8 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 300000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 300000.0);
+        assert_eq!(before.total_portfolio_value_usd, 400000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 400000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -7414,7 +8459,7 @@ mod tests {
         }
         assert_eq!(
             *state.total_realized_profit.read(),
-            equity_sum - dec!(300000)
+            equity_sum - state.paper_baseline_equity()
         );
         // Fees are real outflow; the position open is not marked as profit
         assert!(*state.total_realized_profit.read() < dec!(0));
@@ -7969,21 +9014,25 @@ mod tests {
             dec!(64360.0),
             dec!(64365.0),
         );
+        seed_test_book(&state, "vanta", "BTC-USDC", dec!(64360.0), dec!(64365.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
+        seed_test_funding(&state, "vanta", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
             .expect("books");
-        assert_eq!(books.len(), 2);
+        assert_eq!(books.len(), 3);
         assert_eq!(books[0].venue_id, "lighter");
         assert_eq!(books[1].venue_id, "robinhood");
+        assert_eq!(books[2].venue_id, "vanta");
 
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state)
             .await
             .expect("scan");
-        // The malformed hyperliquid book must not participate; lighter and
-        // robinhood share identical seeded prices so any pair is non-executable.
+        // The malformed hyperliquid book must not participate; lighter,
+        // robinhood and vanta share identical seeded prices so any pair is
+        // non-executable.
         assert!(opps.iter().all(|o| !o.is_executable));
         assert!(opps
             .iter()
@@ -8012,12 +9061,12 @@ mod tests {
             None,
             None,
             None,
-            Some(f64::MAX),
+            Some(f64::NAN),
             &state,
         )
         .await;
-        let err = res.expect_err("f64::MAX hurdle must reject");
-        assert!(err.contains("decimal range"), "unexpected err: {}", err);
+        let err = res.expect_err("NaN hurdle must reject");
+        assert!(err.contains("finite"), "unexpected err: {}", err);
 
         let res = scan_spatial_opportunities_impl("BTC-USDC", 5.0, f64::MAX, &state).await;
         let err = res.expect_err("f64::MAX order_qty must reject");
@@ -8068,6 +9117,7 @@ mod tests {
         ));
         deep.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(deep);
+        seed_test_book(&state, "vanta", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 2.0, &state)
             .await
@@ -8089,6 +9139,7 @@ mod tests {
             dec!(3401.0),
         );
         seed_test_book(&state, "lighter", "ETH-USDC", dec!(3410.0), dec!(3411.0));
+        seed_test_book(&state, "vanta", "ETH-USDC", dec!(3410.0), dec!(3411.0));
         let opps = scan_spatial_opportunities_impl("ETH-USDC", 5.0, 0.1, &state)
             .await
             .expect("scan eth");
@@ -8102,13 +9153,13 @@ mod tests {
     #[tokio::test]
     async fn test_risk_overview_drawdown_pct_uses_day_start() {
         let state = setup_test_state_with_venues();
-        state.circuit_breaker.update_equity(dec!(400000.0));
+        state.circuit_breaker.update_equity(dec!(500000.0));
         state.circuit_breaker.reset();
-        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(400000.0));
+        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(500000.0));
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
         assert_eq!(risk.current_drawdown_usd, 100000.0);
-        assert_eq!(risk.drawdown_pct, 25.0);
+        assert_eq!(risk.drawdown_pct, 20.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();
@@ -8241,19 +9292,21 @@ mod tests {
             dec!(60120.0),
             dec!(60125.0),
         );
+        seed_test_book(&state, "vanta", "BTC-USDC", dec!(60120.0), dec!(60125.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
+        seed_test_funding(&state, "vanta", "BTC-USDC");
 
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
             .expect("books");
-        assert_eq!(books.len(), 3);
+        assert_eq!(books.len(), 4);
 
         let rows = state
             .state_store
             .spread_samples("BTC-USDC", 0, i64::MAX)
             .expect("samples");
-        assert_eq!(rows.len(), 3, "one row per reporting venue per poll");
+        assert_eq!(rows.len(), 4, "one row per reporting venue per poll");
         let hl = rows.iter().find(|r| r.venue_id == "hyperliquid").unwrap();
         assert_eq!(hl.mid, 60002.5);
         assert_eq!(hl.best_bid, 60000.0);
@@ -8578,5 +9631,223 @@ mod tests {
         }
         assert_eq!(res.residual_signals, 0);
         assert_eq!(res.signals_closed, 1);
+    }
+
+    fn baseline_sample(venue: &str, ts_ms: i64, mid: f64) -> crate::state_store::SpreadSample {
+        crate::state_store::SpreadSample {
+            symbol: "BTC".into(),
+            venue_id: venue.to_string(),
+            ts_ms,
+            mid,
+            best_bid: mid - 0.5,
+            best_ask: mid + 0.5,
+        }
+    }
+
+    /// Two venues sampled together every `dt_ms`; the aaa->bbb pair spread
+    /// follows a deterministic AR(1) driven by an LCG so OU fitting recovers
+    /// a finite half-life with high R².
+    fn ar1_samples(
+        n: usize,
+        dt_ms: i64,
+        now_ms: i64,
+        coef: f64,
+        amp: f64,
+    ) -> Vec<crate::state_store::SpreadSample> {
+        let mut samples = Vec::with_capacity(n * 2);
+        let mut x = 0.0;
+        let mut seed: u64 = 0x9E37_79B9;
+        for k in 0..n {
+            let ts = now_ms - (n - 1 - k) as i64 * dt_ms;
+            samples.push(baseline_sample("aaa", ts, 100.0));
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let eps = (((seed >> 33) % 1000) as f64 / 1000.0 - 0.5) * amp;
+            x = coef * x + eps;
+            samples.push(baseline_sample("bbb", ts, 100.0 * (1.0 + x / 10_000.0)));
+        }
+        samples
+    }
+
+    #[test]
+    fn test_matrix_baselines_manual_sufficient_returns_stats() {
+        let now = 1_800_000_000_000i64;
+        let mut samples = Vec::new();
+        for k in 0..120i64 {
+            let ts = now - 7_200_000 + k * 60_000;
+            samples.push(baseline_sample("aaa", ts, 100.0));
+            let x = 5.0 + (k % 3) as f64; // spread 5,6,7 repeating
+            samples.push(baseline_sample("bbb", ts, 100.0 * (1.0 + x / 10_000.0)));
+        }
+        let snap = compute_matrix_baselines("BTC", "manual", 7_200, 90, &samples, now);
+        assert_eq!(snap.effective_window_secs, 7_200);
+        assert_eq!(snap.auto_window_secs, None);
+        assert!(!snap.using_manual_fallback);
+        assert_eq!(snap.pairs.len(), 2);
+        let p = &snap.pairs[0];
+        assert_eq!(p.buy_venue, "aaa");
+        assert_eq!(p.sell_venue, "bbb");
+        assert_eq!(p.sample_count, 120);
+        assert!((p.mean_gross_bps.unwrap() - 6.0).abs() < 1e-9);
+        // 90th nearest-rank of {5,6,7}*~40 -> top bucket
+        assert!((p.percentile_gross_bps.unwrap() - 7.0).abs() < 1e-9);
+        assert!(p.history_span_secs >= 7_000);
+        assert_eq!(snap.max_history_span_secs, p.history_span_secs);
+    }
+
+    #[test]
+    fn test_matrix_baselines_manual_insufficient_span_returns_none_stats() {
+        let now = 1_800_000_000_000i64;
+        let mut samples = Vec::new();
+        for k in 0..30i64 {
+            let ts = now - 1_000_000 + k * 34_000;
+            samples.push(baseline_sample("aaa", ts, 100.0));
+            samples.push(baseline_sample("bbb", ts, 100.05));
+        }
+        let snap = compute_matrix_baselines("BTC", "manual", 3_600, 90, &samples, now);
+        let p = &snap.pairs[0];
+        assert_eq!(p.sample_count, 30, "windowed count stays truthful");
+        assert!(p.mean_gross_bps.is_none());
+        assert!(p.percentile_gross_bps.is_none());
+        assert!(p.history_span_secs < 3_600);
+    }
+
+    #[test]
+    fn test_matrix_baselines_auto_uses_ou_half_life_median() {
+        let now = 1_800_000_000_000i64;
+        let samples = ar1_samples(240, 60_000, now, 0.9, 0.3); // 4h, 240 obs
+        let snap = compute_matrix_baselines("BTC", "auto", 86_400, 90, &samples, now);
+        assert!(snap.qualifying_pair_count >= 1);
+        let auto = snap.auto_window_secs.expect("auto window selected");
+        assert_eq!(snap.effective_window_secs, auto);
+        assert!(!snap.using_manual_fallback);
+        assert!(snap.median_half_life_secs.unwrap() > 0.0);
+
+        // Recompute the per-pair recommendations with the same math helpers
+        // and verify the snapshot carries their upper median.
+        let mut expected_recs = Vec::new();
+        for (buy, sell) in [("aaa", "bbb"), ("bbb", "aaa")] {
+            let ma: Vec<(i64, f64)> = samples
+                .iter()
+                .filter(|s| s.venue_id == buy)
+                .map(|s| (s.ts_ms, s.mid))
+                .collect();
+            let mb: Vec<(i64, f64)> = samples
+                .iter()
+                .filter(|s| s.venue_id == sell)
+                .map(|s| (s.ts_ms, s.mid))
+                .collect();
+            let series =
+                arbitrager_math::pair_monitor::build_pair_series(&ma, &mb, PAIR_ALIGN_GAP_MS);
+            let n = series.len();
+            let span_ms = series[n - 1].ts_ms - series[0].ts_ms;
+            let dt = span_ms as f64 / 1000.0 / (n - 1) as f64;
+            let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
+            if let Some(p) = OuModelParams::fit(&vals, dt)
+                .filter(|p| p.half_life > 0.0 && p.r_squared >= OU_MIN_R2)
+            {
+                expected_recs.push(
+                    ((2.0 * p.half_life).round() as u64)
+                        .clamp(AUTO_WINDOW_FLOOR_SECS, AUTO_WINDOW_CAP_SECS),
+                );
+            }
+        }
+        expected_recs.sort_unstable();
+        assert_eq!(snap.qualifying_pair_count as usize, expected_recs.len());
+        assert_eq!(
+            auto,
+            expected_recs[expected_recs.len() / 2],
+            "auto window is the upper median of 2x OU half-life recommendations"
+        );
+        // a=0.9 at 60s cadence -> half-life ~395s -> 2x hits the 30m floor
+        assert_eq!(auto, AUTO_WINDOW_FLOOR_SECS);
+    }
+
+    #[test]
+    fn test_matrix_baselines_auto_falls_back_when_unqualified() {
+        let now = 1_800_000_000_000i64;
+        let samples = ar1_samples(10, 60_000, now, 0.9, 0.3); // only 10 obs
+        let snap = compute_matrix_baselines("BTC", "auto", 7_200, 90, &samples, now);
+        assert_eq!(snap.auto_window_secs, None);
+        assert_eq!(snap.effective_window_secs, 7_200);
+        assert!(snap.using_manual_fallback);
+        assert_eq!(snap.qualifying_pair_count, 0);
+        assert_eq!(snap.median_half_life_secs, None);
+
+        let empty = compute_matrix_baselines("BTC", "auto", 86_400, 90, &[], now);
+        assert_eq!(empty.effective_window_secs, 86_400);
+        assert!(empty.using_manual_fallback);
+        assert!(empty.pairs.is_empty());
+        assert_eq!(empty.max_history_span_secs, 0);
+    }
+
+    #[tokio::test]
+    async fn test_get_matrix_baselines_validation_and_alias_merge() {
+        let state = setup_test_state_with_venues();
+        assert!(get_matrix_baselines_impl("BTC-USDC", "sideways", 86_400, 90, &state)
+            .await
+            .is_err());
+        assert!(get_matrix_baselines_impl("BTC-USDC", "manual", 60, 90, &state)
+            .await
+            .is_err());
+        assert!(
+            get_matrix_baselines_impl("BTC-USDC", "manual", 3_000_000, 90, &state)
+                .await
+                .is_err()
+        );
+        assert!(get_matrix_baselines_impl("BTC-USDC", "manual", 86_400, 40, &state)
+            .await
+            .is_err());
+        assert!(get_matrix_baselines_impl("BTC\u{0}-USDC", "manual", 86_400, 90, &state)
+            .await
+            .is_err());
+
+        // No history: auto falls back to the manual window, nothing fabricated.
+        let snap = get_matrix_baselines_impl("BTC-USDC", "auto", 86_400, 90, &state)
+            .await
+            .expect("empty history still returns a snapshot");
+        assert_eq!(snap.auto_window_secs, None);
+        assert_eq!(snap.effective_window_secs, 86_400);
+        assert!(snap.using_manual_fallback);
+        assert_eq!(snap.qualifying_pair_count, 0);
+        assert!(snap.pairs.is_empty());
+
+        // Same venue+ts recorded under both the base alias and the UI symbol
+        // must merge/dedup into one observation.
+        let now_ms = Utc::now().timestamp_millis();
+        for key in ["BTC", "BTC-USDC"] {
+            state
+                .state_store
+                .record_spread_samples(
+                    key,
+                    now_ms,
+                    &[
+                        crate::state_store::VenueSampleEntry {
+                            venue_id: "aaa".into(),
+                            mid: 100.0,
+                            best_bid: 99.5,
+                            best_ask: 100.5,
+                        },
+                        crate::state_store::VenueSampleEntry {
+                            venue_id: "bbb".into(),
+                            mid: 100.05,
+                            best_bid: 99.55,
+                            best_ask: 100.55,
+                        },
+                    ],
+                )
+                .expect("record");
+        }
+        let snap = get_matrix_baselines_impl("BTC-USDC", "manual", 86_400, 90, &state)
+            .await
+            .expect("snapshot");
+        let p = snap
+            .pairs
+            .iter()
+            .find(|p| p.buy_venue == "aaa" && p.sell_venue == "bbb")
+            .expect("pair row");
+        assert_eq!(p.sample_count, 1, "duplicate alias rows deduplicated");
+        assert!(p.mean_gross_bps.is_none(), "one obs is not a baseline");
     }
 }

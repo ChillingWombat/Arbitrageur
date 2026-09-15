@@ -98,7 +98,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 onChange={(e) => setPassword(e.target.value)}
                 autoFocus
                 placeholder={isInitializing ? "Create password..." : "Enter password..."}
-                className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition pr-10"
+                className="w-full bg-surface-raised border border-surface-border rounded-md px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent/30 focus:border-accent transition pr-10"
               />
               <button
                 type="button"
@@ -120,7 +120,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Confirm password..."
-                className="w-full bg-surface-raised border border-surface-border rounded-lg px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent transition"
+                className="w-full bg-surface-raised border border-surface-border rounded-md px-3.5 py-2.5 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent/30 focus:border-accent transition"
               />
               <p className="mt-1.5 text-xs text-slate-500 font-mono leading-relaxed">
                 Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer.
@@ -139,14 +139,14 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-mono font-medium transition"
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-md text-xs font-mono font-medium transition"
             >
               Cancel
             </button>
             <button
               type="submit"
               disabled={loading || password.length === 0}
-              className="px-5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5"
+              className="px-5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-md text-xs font-mono font-medium transition shadow-2xs flex items-center space-x-1.5"
             >
               {loading ? (
                 <span className="animate-pulse">Processing...</span>

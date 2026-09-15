@@ -87,7 +87,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
           <button
             onClick={() => onTogglePause?.(!isPaused)}
-            className={`px-2.5 py-1 rounded-md text-xs font-mono font-medium transition flex items-center space-x-1.5 cursor-pointer shadow-xs ${
+            className={`px-2 py-1 rounded-md text-xs font-mono font-medium transition flex items-center space-x-1.5 cursor-pointer shadow-2xs ${
               isPaused
                 ? "bg-amber-500 hover:bg-amber-600 text-white animate-pulse"
                 : "bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border"
@@ -101,12 +101,12 @@ export const Header: React.FC<HeaderProps> = ({
             {isPaused ? (
               <>
                 <Play className="w-3.5 h-3.5 fill-current" />
-                <span>CONTINUE ALL</span>
+                <span>Continue All</span>
               </>
             ) : (
               <>
                 <Pause className="w-3.5 h-3.5" />
-                <span>PAUSE ALL</span>
+                <span>Pause All</span>
               </>
             )}
           </button>
@@ -114,10 +114,10 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="px-2.5 py-1 bg-loss hover:bg-red-700 text-white rounded-md text-xs font-mono font-medium transition shadow-xs cursor-pointer"
+            className="px-2 py-1 bg-loss hover:bg-red-700 text-white rounded-md text-xs font-mono font-medium transition shadow-2xs cursor-pointer"
             title="Emergency Killswitch: Stop All Trading"
           >
-            STOP ALL
+            Stop All
           </button>
         </div>
       </header>
@@ -144,7 +144,7 @@ export const Header: React.FC<HeaderProps> = ({
                   onEmergencyKillswitch();
                   setShowKillModal(false);
                 }}
-                className="px-4 py-2 bg-loss hover:bg-red-700 text-white font-medium rounded-md text-sm font-mono transition shadow-xs"
+                className="px-4 py-2 bg-loss hover:bg-red-700 text-white font-medium rounded-md text-sm font-mono transition shadow-2xs"
               >
                 Confirm Stop
               </button>

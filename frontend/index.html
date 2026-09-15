@@ -14,7 +14,7 @@
           if (!el) {
             el = document.createElement("div");
             el.id = "fatal-error-overlay";
-            el.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:#fff1f2;color:#991b1b;padding:32px;font-family:monospace;font-size:15px;z-index:9999999;overflow:auto;border:4px solid #f43f5e;";
+            el.style.cssText = "position:fixed;top:0;left:0;right:0;bottom:0;background:#fff1f2;color:#991b1b;padding:32px;font-family:'Roboto Mono Variable','Roboto Mono',monospace;font-size:15px;z-index:9999999;overflow:auto;border:4px solid #f43f5e;";
             document.body ? document.body.appendChild(el) : document.documentElement.appendChild(el);
           }
           el.innerHTML = "<h2 style='color:#e11d48;font-size:20px;font-weight:bold;margin-bottom:12px;'>" + title + "</h2>" +

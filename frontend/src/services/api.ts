@@ -1,8 +1,10 @@
 import type {
   SystemStatusDto,
+  VenueMarketUniverseDto,
   VenueOrderBookDto,
   VenueVolumesDto,
   SignalSeriesDto,
+  MatrixBaselineSnapshotDto,
   SpatialOpportunityDto,
   SpotOpportunityDto,
   SpotExecutionParams,
@@ -20,6 +22,7 @@ import type {
   CrossTickerExecutionParams,
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
+  StrategyParamsDto,
   VaultStatus,
   VenueBalanceInfo,
   StrategyMetrics,
@@ -32,6 +35,7 @@ import type {
   SpatialCandidateInput,
   CandidateOutcomeDto,
   SignalExecutionDto,
+  OpenPositionDto,
   TickerPositionState,
   FlattenResultDto,
   MonitorSnapshotDto,
@@ -68,9 +72,12 @@ export async function invokeDesktop<T>(
 // coordinator exists, so those API methods fail closed on desktop.
 const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_system_status",
+  "refresh_venue_latencies",
+  "get_market_universe",
   "fetch_orderbooks",
   "get_ticker_volumes",
   "get_signal_series",
+  "get_matrix_baselines",
   "scan_spatial_opportunities",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
@@ -95,6 +102,9 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_ticker_strategy_config",
   "save_ticker_strategy_config",
   "get_all_ticker_strategy_configs",
+  "get_strategy_params",
+  "save_strategy_params",
+  "get_all_strategy_params",
   "get_vault_status",
   "initialize_vault",
   "unlock_vault",
@@ -117,6 +127,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "execute_spatial_candidates",
   "list_signal_executions",
   "get_ticker_position_state",
+  "get_open_positions",
 ]);
 
 export function nativeCommandAvailable(command: string): boolean {
@@ -125,13 +136,12 @@ export function nativeCommandAvailable(command: string): boolean {
 
 export function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
   const rawWindow = c?.slidingWindow ?? c?.sliding_window;
-  const slidingWindow = (["10s", "30s", "1m", "5m", "15m"] as const).includes(rawWindow)
-    ? rawWindow
-    : "1m";
+  const slidingWindow =
+    typeof rawWindow === "string" && /^\d+[smhd]$/.test(rawWindow) ? rawWindow : "24h";
   if (!c) {
     return {
       symbol: "BTC-USDC",
-      targetProfitBps: 5.0,
+      targetProfitBps: 1.0,
       windowPercentile: 50,
       maxAccumulatedUnits: 3,
       currentAccumulatedUnits: 0,
@@ -143,7 +153,7 @@ export function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
   }
   return {
     symbol: c.symbol || "BTC-USDC",
-    targetProfitBps: Number(c.targetProfitBps ?? c.target_profit_bps ?? 5.0),
+    targetProfitBps: Number(c.targetProfitBps ?? c.target_profit_bps ?? 1.0),
     windowPercentile: Number(c.windowPercentile ?? c.window_percentile ?? 50),
     maxAccumulatedUnits: Number(c.maxAccumulatedUnits ?? c.max_accumulated_units ?? 3),
     currentAccumulatedUnits: Number(c.currentAccumulatedUnits ?? c.current_accumulated_units ?? 0),
@@ -163,6 +173,14 @@ export const api = {
     return invokeDesktop<SystemStatusDto>("get_system_status");
   },
 
+  async refreshVenueLatencies(): Promise<SystemStatusDto> {
+    return invokeDesktop<SystemStatusDto>("refresh_venue_latencies");
+  },
+
+  async getMarketUniverse(): Promise<VenueMarketUniverseDto[]> {
+    return invokeDesktop<VenueMarketUniverseDto[]>("get_market_universe");
+  },
+
   async fetchOrderbooks(symbol: string): Promise<VenueOrderBookDto[]> {
     return invokeDesktop("fetch_orderbooks", { symbol });
   },
@@ -177,6 +195,20 @@ export const api = {
     windowSecs: number,
   ): Promise<SignalSeriesDto> {
     return invokeDesktop("get_signal_series", { symbol, mode, windowSecs });
+  },
+
+  async getMatrixBaselines(
+    symbol: string,
+    mode: "manual" | "auto",
+    manualWindowSecs: number,
+    percentile: number,
+  ): Promise<MatrixBaselineSnapshotDto> {
+    return invokeDesktop<MatrixBaselineSnapshotDto>("get_matrix_baselines", {
+      symbol,
+      mode,
+      manualWindowSecs,
+      percentile,
+    });
   },
 
   async scanSpatialOpportunities(symbol: string, minBps: number, orderQty: number): Promise<SpatialOpportunityDto[]> {
@@ -348,6 +380,18 @@ export const api = {
     return (res || []).map(normalizeTickerStrategyConfig);
   },
 
+  async getStrategyParams(strategyId: string): Promise<StrategyParamsDto> {
+    return invokeDesktop<StrategyParamsDto>("get_strategy_params", { strategyId });
+  },
+
+  async saveStrategyParams(params: StrategyParamsDto): Promise<void> {
+    return invokeDesktop<void>("save_strategy_params", { params });
+  },
+
+  async getAllStrategyParams(): Promise<StrategyParamsDto[]> {
+    return invokeDesktop<StrategyParamsDto[]>("get_all_strategy_params");
+  },
+
   async getVaultStatus(): Promise<VaultStatus> {
     return invokeDesktop<VaultStatus>("get_vault_status");
   },
@@ -427,6 +471,12 @@ export const api = {
 
   async getTickerPositionState(symbol: string): Promise<TickerPositionState> {
     return invokeDesktop<TickerPositionState>("get_ticker_position_state", { symbol });
+  },
+
+  async getOpenPositions(strategyId?: string | null): Promise<OpenPositionDto[]> {
+    return invokeDesktop<OpenPositionDto[]>("get_open_positions", {
+      strategyId: strategyId ?? null,
+    });
   },
 
   async flattenTickerPositions(

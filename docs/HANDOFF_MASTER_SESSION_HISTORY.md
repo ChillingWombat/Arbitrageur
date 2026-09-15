@@ -288,7 +288,7 @@ The gadget is now backend-driven end to end; no frontend math.
 
 **Gadget** (`SignalTrendGadget.tsx`, rewritten)
 - Polls `api.getSignalSeries` — 3s cadence for ≤15m windows, 15s beyond.
-- **Default window = the bot's configured trailing window** (`BOT Xm` chip, `botWindowSec` prop fed by `WINDOW_SECONDS[windowOption]`); presets extend to **5m/15m/1h/4h/1d/3d/7d**.
+- **Default window = the bot's configured trailing window** (first chip shows the formatted duration only — the `BOT` prefix was removed in 9.16; tooltip still explains it mirrors the strategy's window); presets extend to **5m/15m/1h/4h/1d/3d/7d**.
 - Per-venue lines break across null buckets (gaps stay gaps); band renders only where ≥2 venues observed; span-aware x labels (clock → date+time for multi-day); hover crosshair; legend chips rich→cheap with BUY/SELL extremes; `Spread X / hurdle Y BPS` badge.
 - Honest states: `No recorded samples for {symbol} in this window` / `Collecting signal samples…` / `Signal series unavailable` on invoke failure; footer reports `N venue samples in window · Xh/Xd history recorded` + active baseline mode.
 
@@ -374,5 +374,167 @@ git diff --check                    # clean
 - **Not done / next**: (1) the autonomous opportunities bot consuming `qualified_opportunities()` — spec'd seam only; (2) depth-dependent *exit* walk for two-way mode (current exit estimate is a top-of-book floor); (3) live `sendTx` remains unimplemented everywhere — monitor execution is paper-only and the execute gate hard-blocks live mode; (4) monitor's lane budget doesn't count requests the *UI itself* issues to the same Lighter IP — `txReservePct` is the mitigation, revisit if WAF pressure reappears; (5) no PR/merge state — local working tree only.
 - Rebuild the desktop binary (`cargo build --release --bin arbitrager-desktop` or the debug `cargo build -p arbitrager-desktop`) before relaunching — last-pass fixes landed after the running binary was built.
 
+---
+
+## 9. Session Handoff — 2026-09-14 (Consolidated Positions, System-Wide Style Canon, Universal Strategy Configurators)
+
+### 9.1 Theme
+Three workstreams: (a) the **consolidated Positions panel** and Portfolio Monitor navigation toggle; (b) a **system-wide style canon** — one spacing/radius/selected-state scale across every page and modal; (c) the **universal per-strategy configurator** refactor — `StrategyParamsDto` keyed by strategy id replaces per-ticker authoring, with global concerns (ticker visibility) moved to System Settings. Fail-closed/paper-only posture unchanged throughout.
+
+### 9.2 Consolidated Positions Panel
+- `PositionsPanel.tsx` aggregates open positions by pair/event with signed per-venue nets, mark-to-market PnL, transaction aggregation, sort (name/PnL/size), and selected-position highlighting.
+- **Strategy scoping**: Single Spread positions carry `strategy_id = "futures"`, Spread Radar `"radar"` — signals/execution/Stop-flattening are scoped independently.
+- Scope toggle: **All** / **{current strategy}**; the scope button uses a short label map (`Prediction Market` → `Prediction`) while tooltips/empty-states keep full names.
+- `get_open_positions` IPC + `OpenPositionDto` — backend aggregation in `state_store.rs` with honest nulls.
+
+### 9.3 Style Canon (system-wide sweep)
+- Canonical scale now enforced: page `p-4 space-y-4`; gadget cards `rounded-lg border shadow-2xs p-3.5`; card inner stacks `space-y-3`; nested panels `p-3 space-y-2`; gadget header dividers `pb-2.5`; one table-header recipe (`bg-surface-raised text-xs text-slate-500 tracking-wider`); `ring-1` focus; `shadow-2xs` chips.
+- **Selected-state convention unified**: `bg-accent text-white shadow-2xs` active / `text-slate-500 hover:text-slate-900` inactive across all segmented controls and toggles (was three competing treatments: raised white chip, accent-dim tint, plain). Semantic FILLED/FAILED colors kept.
+- Modals deliberately keep `rounded-xl p-6` + heavier shadows; micro-gaps and badge paddings kept.
+- **Obscura caveat learned**: the privacy browser spoofs `getComputedStyle` for layout metrics (padding/gap/radius report 0px while rendering correctly) — verify layout claims with `offsetHeight` or the served stylesheet, not computed styles.
+- Signal Trend extracted into a standalone gadget above the quotes grid; TickerTelemetry's doubled vertical padding (`p-3.5` card + `py-4` grid) fixed.
+- Typography normalized to local Roboto / Roboto Mono variable fonts.
+
+### 9.4 Portfolio Monitor — nav toggle + style normalization
+- `App.tsx` keeps `prevTabRef`: entering Portfolio Monitor records the prior strategy tab; clicking the button again returns to it (`handleTogglePortfolio`). Verified live (Funding Rate → Monitor → back to Funding Rate).
+- Full style pass to main-page conventions: compact `p-3.5` KPI cards, `rounded-md` nested panels, `text-xs` flat typography, standard thead recipe, `py-0.5 rounded-sm` badges.
+
+### 9.5 Opportunity Radar — columns, filters, header parity
+- Table columns reordered/renamed: Symbol | Route | **Exp Profit** (3rd) | **Net Profit** (4th) | Baseline BPS | Deviation BPS | Win % | Exp Profit $ | Opt Size $ | Max Size $ | Signal Age | **Time to Converge** | Status | Action. Edge BPS and Funding BPS removed from the outer table; `colSpan`s updated.
+- `{n} tickers · {n} pairs` counter removed from the filter strip.
+- **Venue filter → dropdown multi-selector**: trigger shows `Venue ⌄ ALL` or joined selection (`LGT+RH`); ALL row clears; rows toggle with `✓`; closes on outside click; matches when either leg hits any selected venue.
+- **`+Exp Profit` toggle removed** — the filter is built-in. New persisted config field `min_expected_profit_bps` on `MonitorConfigDto` (serde default `0.0`, clamped ±10,000, editable in the radar configurator); rows filter `expectedProfitBps > floor` unconditionally; `0` = positive-only, negative reveals losing rows.
+- Header now carries the standard control set: labeled **Configure Strategy** + shared `BotLifecycleControls` (radar-scoped `useBotLifecycle({strategyId: "radar"})`); gear sits left of Stop.
+- **Venue rate-budget chips moved off the page** → System Settings → Exchanges → per-venue `VenueBalancePanel` gains a `lane` prop rendering `used/budget /min`, tier, refresh interval, backoff state — fed by a 5s `get_monitor_snapshot` poll inside EngineSettings, with a truthful "no monitor lane" fallback.
+
+### 9.6 EngineSettings
+- **Max Slippage Tolerance default 15 → 1 BPS** (initial state, load fallback, empty-input fallback; backend floor is 0.1). Previously saved values still load — default change only.
+- Trading Mode card restructured 1×2 → **2×1 stacked** (mode row, then Paper Starting Balance below a `border-t`).
+- **Hidden Tickers upgraded to a full manager**: hidden-ticker chips with per-ticker restore (×), a hide-new input backed by the `PERP_TICKERS` datalist, Reveal All — replacing the count + Reveal-All-only row. This is now the *only* surface for ticker visibility (was previously also inside the per-ticker modal).
+
+### 9.7 Universal Strategy Configurators — the headline change
+**Problem**: the shared `{ticker} Strategy Configurator` modal mixed three axes — strategy switching from any page, per-ticker persistence (configuring BTC left ETH untouched), and a global hide-ticker control inside a strategy surface. Funding/Spatial params lived only in React state — unpersisted.
+
+**New canonical store** — `StrategyParamsDto` (`state.rs`), flat record keyed by `strategy_id` ∈ `{futures, funding, spot}`:
+- futures: `target_profit_bps`, `window_percentile`, `sliding_window`, `max_accumulated_units`, `execution_mode`, **`unit_size_usd`**, `user_target_leverage`
+- funding: `funding_trade_size_usd`, `funding_min_apr_pct`, `funding_holding_days`
+- spot: `spot_trade_size_usd`, `spot_max_slippage_bps`, `spot_min_net_spread_bps`
+- `AppEngineState.strategy_params: HashMap<String, StrategyParamsDto>` — **in-memory**, same durability as `strategy_configs` (session store; persistence is a deliberate follow-up).
+- Commands `get/save/get_all_strategy_params` (+ `_impl`s) with full-field validation and a `KNOWN_STRATEGY_IDS` whitelist; `get_all` always returns all three with defaults. Registered in `main.rs` + `NATIVE_COMMANDS`.
+- The futures execute path's leverage check now reads universal params first, per-symbol record as legacy fallback, then default 5.
+
+**Universal sizing semantic**: `unit_size_usd` is the authored field; `deriveUnitSize(symbol, venues, basePrice, usd)` in `contractSpecs.ts` converts to base units — ceil to max step size, clamped to the venue-compatible min lot. LiveMatrix `orderQty`, matrix-quant, and modal previews all consume the derived value. Per-symbol `TickerStrategyConfigDto` shrinks to runtime state (`current_accumulated_units` + cached unit size).
+
+**`TickerConfigModal`**: props `{isOpen, onClose, tickerSymbol (context only), initialStrategy (fixed), isEnabled?, onToggleEnabled?, onSaveConfig(params)}`; title is `{StrategyName} Configurator`; left panel = `STRATEGY_SECTIONS` nav within the active strategy (Hurdle & Triggers / Sizing & Grid / Leverage & Margin for futures; Carry Settings for funding; Spatial Parameters for spot); Unit Size input is USD notional with `≈ N BASE on SYMBOL` preview; accumulated-units reset explicitly labeled per-ticker; `On {base}` toggle + `{base} Preview` card render **only for futures** (they're meaningless elsewhere). Save = `save_strategy_params` (primary) + best-effort per-symbol grid-state write. Fail-closed: a rejected/unreachable save leaves the modal open with no fake "Saved!".
+
+**Pages**: Configure Strategy buttons no longer gated on ticker selection (universal params need none); `handleOpenTickerConfig` defaults context symbol to `BTC-USDC`. Funding/Spatial params are derived from `strategyParams` map in App (replacing React-local `fundingTradeSize`/`fundingParams`/`spotParams`). TickerExplorer's max-units check reads universal `maxAccumulatedUnits`. **Triangle's two modal entry points removed** — `"triangle"` isn't a known strategy id and its inline Cycle Guardrails card is the real configurator.
+
+### 9.8 Published Spec
+- **GitHub Issue #6** — *Spec: Universal Per-Strategy Configurators — strategy-scoped params shared across all tickers* (`ready-for-agent`). Captures the full design contract, user stories, test seam (the strategy-params command boundary), and out-of-scope items (durable persistence, per-ticker overrides, other-strategy configurators).
+
+### 9.9 Verification (all green at handoff)
+```bash
+cd frontend/src-tauri && cargo check      # clean
+cargo test -p arbitrager-desktop          # strategy tests pass (incl. config CRUD)
+cd frontend && npx tsc --noEmit           # clean
+npm test                                  # 48 pass (node:test)
+```
+Live-verified via Obscura: all three configurators render strategy-scoped (Single Spread: 3 sections + BTC Preview + On-BTC toggle; Funding: Carry Settings only; Spatial: Spatial Parameters only); save fails closed in the browser session (no Tauri runtime → modal stays open, no fake success); Hidden Tickers manager renders in System Settings.
+
+### 9.10 Working tree state & open items
+- **Everything uncommitted** — diff spans `frontend/src-tauri` (state.rs, commands.rs, main.rs, monitor.rs, state_store.rs) and `frontend/src` (~20 components + api.ts, types, contractSpecs).
+- **Not done / next**: (1) **strategy params are session-only** — `strategy_params` and `strategy_configs` are both in-memory; durable persistence needs a state-store schema migration (spec'd as follow-up in issue #6); (2) `unit_size_usd`→base derivation uses the static reference `basePrice` — consider live-price normalization later; (3) per-ticker parameter overrides are rejected by design — would be a new seam if ever wanted; (4) Prediction/Statistical have no params record; Spread Radar keeps its own monitor configurator; (5) the modal's `isEnabled`/`onToggleEnabled` for futures toggles the *context* ticker's enable flag — a per-ticker gate, kept deliberately; (6) no PR/merge state — local working tree only.
+- Rebuild the desktop binary before relaunching to pick up the new commands (`cargo build -p arbitrager-desktop`).
+
+### 9.11 Bugfix — "connected accounts but no tickers" (venue status/admission drift)
+
+**Symptom**: user had enabled accounts on lighter, robinhood, vanta, binance, decibel — yet `No Available Tickers`.
+
+**Root cause**: `get_system_status_impl` emitted each venue's `supported` flag as a **hardcoded per-venue bool** while `get_venues()` is the real admission source. `get_venues` admits `robinhood` (Lighter-protocol adapter at `api.rh.lighter.xyz`) when enabled, but the status table hardcoded `supported=false` → robinhood reported `UNSUPPORTED` → `getAdmittedVenueCodes` (READ_ONLY-only) dropped it → `activeVenueCodes = {LGT}` → every ticker needs ≥2 admitted venues → empty universe. Enabled accounts on vanta/binance/decibel legitimately remain UNSUPPORTED — enabled ≠ stream-capable.
+
+**Fix** (`commands.rs`): `venue_status(vid, enabled)` now looks up `admitted_map` (built from `get_venues()`) — `READ_ONLY` iff the venue is actually admitted. Structurally impossible to drift again. In live mode `get_venues` returns empty → all enabled venues report UNSUPPORTED → fail-closed (no read-only lanes in live mode).
+
+**UI truth pass**:
+- `TickerExplorer` empty state now names the real cause via `tickerUnavailabilityReason(status, activeVenueCodes)` (`tickers.ts`): engine unreachable / live mode / enabled-but-no-adapter / only-one-venue-streaming / all-hidden.
+- `EngineSettings` exchange list: dot color + right label now reflect backend status — emerald `READ_ONLY` (streaming), amber `NO ADAPTER` (UNSUPPORTED), grey `OFF` — instead of green-for-anything-enabled. Footer adds a `Streaming: N` count (READ_ONLY venues) next to Active/Configured.
+- `getEnabledConnectedVenueCodes` doc comment corrected (HL/LGT/RH adapters; prefer `getAdmittedVenueCodes`).
+
+**Tests**: `test_system_status_reflects_account_level_enablement` extended — robinhood account → READ_ONLY, binance account → UNSUPPORTED. New frontend tests cover `getAdmittedVenueCodes` (READ_ONLY-only admission) and every branch of `tickerUnavailabilityReason`. `cargo test` 113 pass; `npm test` 51 pass; tsc clean.
+
+**Note**: `VantaAdapter`/`ArcusAdapter`/`PopDexAdapter` exist but are deliberately NOT admitted by `get_venues` (vanta's public Orderly book works unauthenticated; arcus bails without an API key; popdex host is a parked domain). Admitting vanta would widen the ticker universe — product decision, left unadmitted.
+
+### 9.12 Corner-radius canon sweep (controls)
+
+Radius scale enforced: cards/tiles `rounded-lg` (8px) · buttons/inputs/selects `rounded-md` (6px) · segmented chips + badges `rounded-sm` (2px) · modals `rounded-xl` (12px) · toggles `rounded-full`. Fixed ~35 deviant controls:
+
+- bare `rounded` (4px) → `rounded-md`: `BotLifecycleControls` START/PAUSE/STOP group, OpportunityRadar configurator inputs (12), modal close-X, in-row action button, SpotArb select chips, TriangularArb asset chips
+- `rounded-lg` on controls → `rounded-md`: EngineSettings (5 inputs + 4 buttons incl. footer Save/Cancel + vault-set buttons), ExchangeAccounts inputs, OpportunityRadar modal footer, SpotArb Deploy, TriangularArb inputs + Execute, StrategyPerformance buttons, VaultUnlockModal inputs + buttons
+- status chip `rounded` → `rounded-sm` (OpportunityRadar), exec-mode toggle chips `rounded` → `rounded-sm` (TickerConfigModal)
+
+Deliberately kept `rounded-lg`: card panels, list tiles (exchange rows, position cards, config sidebar nav), dashed add-account dropzone. Live audit: every button computes 6px, chips 2px, nav tabs 0px. `getComputedStyle().borderRadius` shorthand serializes "0px" in the Obscura harness — use `borderTopLeftRadius` per-corner when verifying.
+
+**Concentric-corner follow-up**: segmented chips nested in `p-0.5`+`rounded-md` containers were `rounded-sm` (2px) — visibly sharper than the 6px outer corner. Rule: `inner radius ≈ outer radius − padding`. Fixed chips → `rounded` (4px) in PositionsPanel scope toggle, SignalTrend baseline/window chips, TickerLogMonitor level filter, TickerTransactionHistory status filter. `p-1`+`rounded-md` containers correctly pair with `rounded-sm` (6−4=2): TickerConfigModal timeframe grid + exec mode, TriangularArb asset chips.
+
+**Padding-balance sweep**: user flagged the BotLifecycleControls group container (`px-2 py-1` — left gap 8px vs top/bottom 4px) → `px-1.5 py-1`. Then a full audit normalized every framed interactive element to horizontal padding ≤ ~2× vertical. Convention: compact chips/buttons `px-2 py-1` (8/4); standard buttons `px-3 py-1.5` (12/6); large `px-4 py-1.5/2`. Fixes: `py-0.5` chips → `py-1` (SignalTrendGadget mode/window, TickerLogMonitor level, StatArbLab input-mode, OpportunityRadar Exec, EngineSettings un-hide chips, ExchangeAccounts label input); `px-3 py-1` → `px-3 py-1.5` (EngineSettings/ExchangeAccounts secondary buttons, LiveMatrix exec cell, SpotArb Select, TickerConfigModal exec-mode pair, TriangularArb Fill Cycle); Header PAUSE ALL/STOP ALL `px-2.5 py-1` → `px-2 py-1`. Intentionally untouched: full-height strip tabs (py-0, fills parent), non-interactive badges/spans, `px-1 py-0.5` compact table inputs, `w-full py-2/3` CTAs. Live audit after: zero buttons above 2:1.
+
+**Label-case canon**: all word labels are sentence case (first char uppercase only). Removed `uppercase` utility from BotLifecycleControls buttons + phase badge, ExchangeAccounts "Default" badge, TickerExplorer "Issue" badge, EngineSettings "Paper" badge. Literal-caps → sentence case: SignalTrend CONSENSUS/LEADER + Sell/Buy legend, Header Pause All/Continue All/Stop All, OpportunityRadar venue "All", LiveMatrix Perp + Best badges, StrategyPerformance "Active", TickerExplorer Perp/Off, PredictionHub Buy Yes/Buy No. TickerLogMonitor filter chips + level badges keep caps **values** (filter keys `ALL`/`TRADES`/`EXEC`/etc.) but render transformed via `lvl.charAt(0) + lvl.slice(1).toLowerCase()`. EngineSettings mode badge capitalizes `tradingMode` ("Paper"/"Real"). Kept uppercase: unit codes (USD, BPS), venue/strategy codes (HL/LGT/SS), brand (ARBITRAGER), ticker symbols, search-input `uppercase` transform.
+
+**Tooltip rework**: `InfoTooltip` was `absolute`-inside-`relative` — clipped by any ancestor `overflow-hidden`/`overflow-y-auto` (e.g. Dislocation Matrix "?" at a container edge). Now renders via `createPortal` to `document.body` at `position: fixed` with viewport clamping (8px margin), auto top/bottom flip when space is short, arrow tracks trigger center, closes on scroll. Styling: dark `bg-slate-900/95` → light-blue `bg-accent-dim/95` + `border-accent-line` + `text-slate-700` (z-100, above modals). SignalTrendGadget chart hover readout restyled to match. Kept dark intentionally: `bg-slate-900` code block (serve command) and modal scrims.
+
+**Dropdown-menu canon**: all 4 floating menus now share inset-item styling — container `p-1` (was `py-1`, so item highlights get a white gutter instead of touching the border), items `rounded-sm` (concentric: 6−4=2), header labels `-mx-1 px-3.5` and separators `-mx-1` so dividers still span edge-to-edge. Widths bumped: OpportunityRadar venue w-44→w-52, SpotArb asset w-40→w-48, PositionsPanel sort w-44→w-52, TickerExplorer sort w-48→w-56. SpotArb asset filter converted from single-select chip row to this dropdown multi-selector (client-side `assetFilters` on symbol base — backend `scan_spot_opportunities` is a stub that ignores the filter anyway).
+
+### 9.13 Venue connectivity truth pass — Vanta admission, explicit Ping, live market universe
+
+**Vanta docs mismatch**: Vanta's own docs state its perpetual API is Orderly's; the adapter was pointing at the stale `api-evm.orderly.org` host and undocumented GET routes. `VantaAdapter` rewritten for `POST {base}/v1/public/query` (unauthenticated, weight-1): `marketSummary` (markets/ticker/funding), `orderbook` (max_level 100, empty sides returned as an empty book — validation omits it), `rateLimitStatus` probe. All numeric fields parse decimal strings without f64 round-trips; missing bid/ask/funding/next_funding_time fail closed; `PERP_<BASE>_USDC` exact-match only (broker-suffixed symbols excluded). Defaults updated to `https://api.orderly.org` (state.rs, adapter, EngineSettings fallbacks); user-configured URLs preserved. Vanta is now admitted by `get_venues` in paper mode (`Vanta (Orderly, Read-Only)`) with a simulator-backed paper exchange ($100k explicitly paper equity) — reversing the 9.11 deferral.
+
+**Explicit Ping**: new `refresh_venue_latencies` command clears `latency_probe_at` and re-runs `get_system_status` so all enabled venues (adapter `ping()` or public probe) re-measure on demand. EngineSettings header gets a `Ping` button (RefreshCw, disabled while pinging, refreshes `liveVenues` from `active_venues`). `PublicProbe` gained an optional POST body so Vanta probes `rateLimitStatus` (2xx only); other venues stay GET.
+
+**List semantics**: exchange rows now prioritize measured RTT for any enabled venue — `Off` / `{ms} ms` / `No response`; no more `NO ADAPTER`/`N/A`/uppercase `OFF`. Titles distinguish admitted (`Market data active · measured API round-trip`) vs unsupported (`API reachable …, but market quotes are not integrated` / `… probe returned no response`) vs off. Equity line reads `Paper $X` / `No paper` with honest titles; both rows `text-[11px]`. Dot semantics kept: green = admitted market-data adapter, amber = enabled but no quotes integration, gray = off.
+
+**Dynamic market universe**: new `get_market_universe` command fans `fetch_markets` out to all admitted adapters concurrently (per-venue failure omits that venue, fail closed), returns active-perp `BASE-QUOTE` symbols sorted/deduped per venue. Frontend `applyMarketUniverse(catalog, universe)` intersects the 52-row catalog with actual reported markets — a ticker needs ≥2 real reporting venues and its `venues` array is replaced by the truth. App polls it immediately + every 30s; `filterAvailableTickers`/static venue claims no longer decide availability. `tickerUnavailabilityReason` no longer hardcodes three venue names.
+
+**Verification**: `pixi run check`, `pixi run test`, `npx tsc --noEmit`, `npm test`, `git diff --check` all green at handoff. Fixture parser tests cover standard-market accept, broker-suffix rejection, orderbook parsing, and fail-closed ticker/funding — no network.
+
+### 9.14 Per-ticker adaptive sliding window + durable baselines (2026-09-15)
+
+**Config shape**: `StrategyParamsDto` gained `slidingWindowMode` (`manual`|`auto`) + `slidingWindowSecs` (camelCase, serde defaults `manual`/`86400` so old records load). `save_strategy_params` rejects unknown modes and secs outside 300..2592000 (5m–30d) instead of clamping, and canonicalizes the legacy `sliding_window` string from seconds (largest exact unit: d→h→m→s). Defaults/factory reset are now manual `86400`/`24h` everywhere (state.rs, `defaults_for`, `TickerStrategyConfigDto::default`, frontend normalize).
+
+**`get_matrix_baselines` command**: validates symbol/mode/manual window/percentile (50–99), pulls the trailing 30 days of persisted `spread_samples` under the monitor's three symbol aliases (base, `BASE-USDC`, `BASE-USD`) with `(ts_ms, venue_id)` dedup, builds aligned pair series via `build_pair_series` (30s gap), and per ordered venue pair reports mean + nearest-rank percentile gross bps over the effective window — only when ≥20 observations and ≥90% window coverage, else `None` stats with truthful counts. Auto mode qualifies pairs at ≥40 aligned obs + ≥1800s span + `OuModelParams::fit` half-life finite/positive + R² ≥ 0.6, recommends `2×half-life` clamped 30m–7d, and takes the deterministic upper median across pairs; no qualifying pair → `auto_window_secs=None`, effective = manual, `using_manual_fallback=true`. Nothing is fabricated; the WFO minimal-data path is not used.
+
+**Matrix consumption**: `buildCrossVenueMatrix` takes an optional trailing `durableBaselines` arg; when supplied it never records/consults `RollingSpreadTracker`, subtracts fees+closing friction from durable gross stats, and sets `baselineReady` — insufficient pairs render `Δ —`, keep truthful `sampleCount`, and cannot execute divergence entries (convergence unwinds of held units stay allowed). `LiveMatrix` polls the snapshot per ticker every 15s, derives the effective window from it, and passes an empty list when absent (fail closed). `baseline_mean_spread_bps` is omitted from execution candidates when not ready.
+
+**UI**: `TickerConfigModal` Signal Trigger swaps the 10s–15m preset buttons for a number+unit (Minutes/Hours/Days) input plus an `Auto from history` `SwitchToggle`; a debounced (300ms) snapshot fetch powers the status line (`Manual trailing baseline · …` / `Auto-selected … from N qualified venue pairs · median half-life …` / `Collecting sufficient history · using manual fallback …`). `SignalTrendGadget` formats arbitrary effective seconds via shared `formatDuration`; `get_signal_series` clamp raised 7d→30d to match retention. Shared helpers (`durationParts`/`durationSeconds`/`formatDuration`/`parseDuration`) live in `matrixQuant.ts`; `SlidingWindowOption` is a plain string alias.
+
+**Verification**: Rust tests cover manual sufficiency/insufficiency, OU-median auto selection, fallback, validation, and alias dedup; frontend tests cover durable-override, friction conversion, fail-closed divergence, unwind-without-baseline, duration helpers, and normalize defaults. Full gates run at handoff.
+
+### 9.15 Backend-owned Single Spread route economics (2026-09-15)
+
+**UI removals**: `TickerConfigModal` lost the left-sidebar `{base} Preview` summary (Min Lot / Margin / Venues — sidebar is now settings tabs only) and the blue static Nominal Hurdle gadget from Signal Trigger (fixed 7.0 fee + 0.6 friction assumptions deleted along with the dead `Info` import). Signal Trigger is four gadgets: Target Profit, Sliding Window, Window Percentile, Execution Mode.
+
+**Route economics seam**: one pure `compute_route_economics(book_buy, book_sell, qty, buy_fee, sell_fee, target)` in `commands.rs` now serves both `scan_spatial_opportunities` and execution preflight. For configured qty it requires all four legs to fill fully on current books — entry buy (buy-venue asks), entry sell (sell-venue bids), expected exit sell (buy-venue bids), expected exit buy (sell-venue asks) — else the route is not costable and is omitted (scan) or rejected (execution). Friction = round-trip commission `2×(buy_fee+sell_fee)` + entry slippage + exit slippage + closing spread (sum of both venues' `(ask−bid)/mid`); `required_gross = friction + target`, `expected_net = top_gross − friction`, `est_profit = expected_net × mid notional`. `slippage_ok` = all four legs pass `verify_pre_execution_slippage` (entry legs on IOC-bounded books); `depth_ok` = bounded entry depth ≥ qty × min_depth_ratio. `is_executable = expected_net ≥ target && slippage_ok && depth_ok`. `effective_venue_fee_bps(state, venue)` centralizes the fee schedule + Lighter/Robinhood +0.5 BPS Plus-tier surcharge (default account); `monitor.rs` now calls it, so scan/monitor/execution cannot drift.
+
+**Execution preflight**: `execute_spatial_arbitrage_inner` re-fetches fresh books, recomputes route economics, and rejects unless `slippage_ok`/`depth_ok` hold and `expected_net_bps ≥ strategy_params["futures"].target_profit_bps`. The caller's `nominal_hurdle_bps` is kept for IPC/log shape but no longer admits trades; `trigger_spread_bps`/`expected_net_usd` in logs use recomputed values.
+
+**Frontend**: `SpatialOpportunityDto`/`MatrixCellDto` carry the full cost breakdown + `costReady`. `buildCrossVenueMatrix` takes trailing `routeEconomics` — matched (case-insensitive venue IDs) cells use backend gross/net/friction/required-gross, convert durable gross baselines to net by subtracting `expected_friction_bps`, and require `costReady + baselineReady + slippage_ok + depth_ok + gross ≥ required + net ≥ percentile` for divergence (convergence unwind unchanged). Uncosted cells render `—` with neutral styling and exact-breakdown/`Route economics unavailable` titles. `LiveMatrix` passes `opportunities` always; the Hurdle chip shows the selected route's `requiredGrossBps` (else min across costed cells, else `—`); table rows send the backend `required_gross_bps`. `App.refreshAllData` scans at the configured futures target + `deriveUnitSize(unitSizeUsd)` quantity and now depends on `strategyParams`.
+
+**Target default**: Target Profit default/fallback/reset is **1 BPS** everywhere (state.rs `defaults_for` + `TickerStrategyConfigDto::default`, configurator initial/load/reset, api normalize, LiveMatrix, App refresh, TickerLogMonitor `?? 1.0`); persisted user values are untouched.
+
+**Tests**: Rust — exact friction math, multi-level VWAP slippage, incomplete-depth fail-closed, plus-tier fee sharing, scan gating (target/slippage/depth), target-vs-hurdle admission. Frontend — backend override, missing-route fail-closed + neutral visuals, flag gating, unwind-without-costs. Full gates run at handoff.
+
+### 9.16 Configurator/UI polish + spec issue #7 (2026-09-15)
+
+**TickerConfigModal structure**: section tabs in the left panel now carry their `?` InfoTooltip inline beside the tab name (no more explanation line under names; section-level header icons removed). The "Hurdle & Triggers" tab/section renamed **Signal Trigger**. The Quick Configuration Presets bar (Conservative/Balanced/Aggressive + Sparkles icon) deleted outright. Section-level outer cards removed — every setting is its own floating gadget card (Signal Trigger: Target Profit / Sliding Window / Window Percentile / Execution Mode after the 9.15 removals; Sizing & Grid, Leverage & Margin, Carry, Spatial similarly split). Selected nav row uses `bg-accent text-white` (was a one-off `bg-white text-blue-600` anomaly).
+
+**TickerExplorer selection**: selected ticker card uses the light-blue accent-dim treatment (`bg-accent-dim/70 border-accent/60` + `border-l-accent` 3px rail) and it now wins over the disabled gray when the ticker bot is Off — previously Off styling overrode selection.
+
+**OpportunityRadar filter bar parity**: bar `gap-2 py-2` → `gap-3 py-3` to match FundingRadar/SpotArb (`gap-3`/`py-3`, `p-4`); field inputs widened (Symbol w-20→w-28 fits `BTC-USDC`, Min Exp/Min Win w-12→w-16).
+
+**SignalTrendGadget**: dynamic first chip now renders just the duration (`1m`), `BOT` prefix removed per user request — meaning preserved in the tooltip.
+
+**Spec published**: **GitHub Issue #7** — *Backend-owned route economics for Single Spread: dynamic per-route friction, universal configurator, 1 BPS target default* (`ready-for-agent`). Documents the landed 9.15 behavior as a verification contract: both test seams named explicitly (pure `compute_route_economics`/`route_execution_gates` primary + IPC regression on `scan_spatial_opportunities`/`execute_spatial_arbitrage_inner`), 22 user stories, out-of-scope list (live trading, live fee fetching, maker modeling, per-ticker params).
+
+**Working tree state & open items**: (1) everything above is uncommitted local work — no PR/merge state; (2) Vite Fast Refresh warnings persist for non-component exports (`EXCHANGES_ALPHABETICAL`, `ACCOUNT_CREDENTIAL_FIELDS`) — cosmetic, non-blocking; (3) `get_market_quotes` per-quote `fee_bps` still uses the base schedule (display-only, not execution economics); (4) dev env relaunched this session via `pixi run desktop` after a stale Vite held :1420 — kill stray `vite` processes before relaunching.
+
+---
 ---
 *Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*

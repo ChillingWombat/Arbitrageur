@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { SlidersHorizontal, ShieldCheck } from "lucide-react";
-import type { TickerStrategyConfigDto } from "../types";
+import type { TickerStrategyConfigDto, StrategyParamsDto } from "../types";
 import type { PerpTicker } from "../types/tickers";
 import { computeSafeLeverage } from "../services/contractSpecs";
 import { TickerConfigModal } from "./TickerConfigModal";
@@ -9,7 +9,7 @@ interface TickerStrategyBarProps {
   ticker: PerpTicker;
   venues: string[];
   config: TickerStrategyConfigDto;
-  onChangeConfig: (newConfig: TickerStrategyConfigDto) => void;
+  onChangeConfig: (params: StrategyParamsDto) => void;
   avgFeeBps?: number;
   avgSpreadBps?: number;
   onOpenConfigModal?: () => void;
@@ -48,7 +48,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
 
   return (
     <>
-      <div className="bg-surface border border-surface-border rounded-lg p-3 text-xs font-mono shadow-xs mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
+      <div className="bg-surface border border-surface-border rounded-lg p-3 text-xs font-mono shadow-2xs mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
         {/* Left: Quantitative Strategy Parameters Summary Chips */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center space-x-1.5 text-slate-500 font-medium">
@@ -106,8 +106,8 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
         <button
           type="button"
           onClick={handleOpenModal}
-          className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-xs cursor-pointer"
-          title={`Configure ${ticker.symbol} quantitative parameters in pop-out window`}
+          className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+          title="Configure Single Spread strategy parameters (applies to all tickers)"
         >
           <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
           <span>Configure Strategy</span>
@@ -120,7 +120,6 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           isOpen={internalModalOpen}
           onClose={() => setInternalModalOpen(false)}
           tickerSymbol={ticker.symbol}
-          strategyConfig={config}
           onSaveConfig={onChangeConfig}
           initialStrategy="futures"
         />
