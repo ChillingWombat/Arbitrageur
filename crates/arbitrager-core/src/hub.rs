@@ -25,11 +25,22 @@ pub struct MarketUpdateEvent {
     pub funding_rate_8h: Option<Decimal>,
 }
 
+/// Provenance of a cached orderbook: which ingestion path fed the hub.
+/// WS-fed books let REST polling stand down; REST-fed books are the
+/// cold-start / stale-feed fallback. Funding rates are REST-only (no WS
+/// funding channel) and carry no provenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BookSource {
+    Ws,
+    Rest,
+}
+
 /// Entry stored in the in-memory cache with monotonic reception timestamp.
 #[derive(Clone, Debug)]
 struct CachedBook {
     received_at: Instant,
     book: OrderBook,
+    source: BookSource,
 }
 
 #[derive(Clone, Debug)]
@@ -71,7 +82,19 @@ impl MarketDataHub {
     }
 
     /// Store a newly ingested orderbook and broadcast the update to all subscribed strategies.
+    /// REST ingestion path (cold-start / stale-feed fallback provenance).
     pub fn update_orderbook(&self, book: OrderBook) -> MarketUpdateEvent {
+        self.store_orderbook(book, BookSource::Rest)
+    }
+
+    /// Store a WS-ingested orderbook. Same semantics as
+    /// [`update_orderbook`](Self::update_orderbook) with WS provenance, so
+    /// REST polling can stand down while the feed is fresh.
+    pub fn update_orderbook_from_ws(&self, book: OrderBook) -> MarketUpdateEvent {
+        self.store_orderbook(book, BookSource::Ws)
+    }
+
+    fn store_orderbook(&self, book: OrderBook, source: BookSource) -> MarketUpdateEvent {
         let seq = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
         let now = Instant::now();
         let utc_now = Utc::now();
@@ -110,6 +133,7 @@ impl MarketDataHub {
                 CachedBook {
                     received_at: now,
                     book,
+                    source,
                 },
             );
         }
@@ -174,6 +198,27 @@ impl MarketDataHub {
         None
     }
 
+    /// Retrieve the cached orderbook only if it is WS-sourced and fresher
+    /// than `max_age`. Returns `None` for REST-sourced or stale books, so
+    /// callers can skip REST fetches only when the WS feed is live.
+    /// Fail-closed: a missing entry yields `None`, never a synthesized book.
+    pub fn get_valid_ws_book(
+        &self,
+        venue: &VenueId,
+        symbol: &str,
+        max_age: Option<Duration>,
+    ) -> Option<OrderBook> {
+        let max_age = max_age.unwrap_or(self.default_ttl);
+        let key = (venue.clone(), symbol.to_string());
+        let lock = self.orderbooks.read();
+        if let Some(cached) = lock.get(&key) {
+            if cached.source == BookSource::Ws && cached.received_at.elapsed() <= max_age {
+                return Some(cached.book.clone());
+            }
+        }
+        None
+    }
+
     /// Retrieve consolidated cross-venue orderbooks for a given symbol in one atomic read.
     pub fn get_cross_venue_snapshot(
         &self,
@@ -220,5 +265,67 @@ impl MarketDataHub {
     pub fn clear(&self) {
         self.orderbooks.write().clear();
         self.funding_rates.write().clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::quote::BookLevel;
+
+    fn book(venue: &str, symbol: &str) -> OrderBook {
+        let mut b = OrderBook::new(VenueId::new(venue), symbol.to_string());
+        b.bids.push(BookLevel::new(dec(100.0), dec(1.0)));
+        b.asks.push(BookLevel::new(dec(101.0), dec(1.0)));
+        b
+    }
+
+    fn dec(v: f64) -> Decimal {
+        Decimal::from_f64_retain(v).unwrap_or(Decimal::ZERO)
+    }
+
+    #[test]
+    fn ws_book_is_returned_while_fresh() {
+        let hub = MarketDataHub::new(16, 400);
+        hub.update_orderbook_from_ws(book("hyperliquid", "BTC"));
+        let vid = VenueId::new("hyperliquid");
+        assert!(hub
+            .get_valid_ws_book(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_some());
+    }
+
+    #[test]
+    fn rest_book_never_counts_as_ws() {
+        let hub = MarketDataHub::new(16, 400);
+        hub.update_orderbook(book("hyperliquid", "BTC"));
+        let vid = VenueId::new("hyperliquid");
+        assert!(hub
+            .get_valid_ws_book(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_none());
+        assert!(hub
+            .get_valid_orderbook(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_some());
+    }
+
+    #[test]
+    fn stale_ws_book_falls_back_to_none() {
+        let hub = MarketDataHub::new(16, 400);
+        hub.update_orderbook_from_ws(book("lighter", "ETH"));
+        let vid = VenueId::new("lighter");
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(hub
+            .get_valid_ws_book(&vid, "ETH", Some(Duration::from_millis(20)))
+            .is_none());
+    }
+
+    #[test]
+    fn rest_overwrite_revokes_ws_provenance() {
+        let hub = MarketDataHub::new(16, 400);
+        hub.update_orderbook_from_ws(book("hyperliquid", "BTC"));
+        hub.update_orderbook(book("hyperliquid", "BTC"));
+        let vid = VenueId::new("hyperliquid");
+        assert!(hub
+            .get_valid_ws_book(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_none());
     }
 }

@@ -135,3 +135,164 @@ Robinhood Web3 connects to the Robinhood EVM chain with multi-DEX router support
 - **API URL:** `https://trading-api.kalshi.com`
 - **Contract Format:** Standardized $0.01 - $0.99 binary event contracts.
 - **Settlement:** Cash-settled at $1.00 USD upon market resolution.
+
+---
+
+## 6. Aster (Binance-Style Futures DEX)
+
+Paper read-only adapter (`AsterAdapter`, venue `aster`, admitted to
+`get_venues`). Public REST only, no auth.
+
+- **REST API:** `https://fapi.asterdex.com` (`/fapi/v3/*` recommended,
+  `/fapi/v1/*` legacy)
+- **WebSocket (recorded, stubbed for v1):** `wss://fstream.asterdex.com`
+
+### 6.1 Key Endpoints
+1. **Connectivity:** `GET /fapi/v3/ping` -> `{}` (live-verified 2026-09-15)
+2. **Orderbook:**
+   ```bash
+   GET /fapi/v3/depth?symbol=BTCUSDT&limit=100
+   ```
+   returns `{lastUpdateId, E, T, bids: [[px, qty]...], asks: ...}` with
+   decimal-string numbers. Valid limits: 5, 10, 20, 50, 100, 500, 1000.
+3. **Markets:** `GET /fapi/v3/exchangeInfo` — 594 symbols (582 USDT-margined,
+   10 USD1-margined, 2 U-stablecoin; NO USDC perps). Entries carry
+   `baseAsset`/`quoteAsset` plus `PRICE_FILTER`/`LOT_SIZE`/`MIN_NOTIONAL`
+   filters. The adapter never assumes a USDT suffix: the quote always comes
+   from the entry's own `quoteAsset`, and bare UI bases resolve through the
+   live listing (USDT > USD1 > U preference).
+4. **Funding:** `GET /fapi/v3/premiumIndex?symbol=...` (`markPrice`,
+   `lastFundingRate`, `nextFundingTime`, 8h interval) and
+   `GET /fapi/v3/fundingRate` history. Bulk `fetch_funding_rates` joins the
+   all-symbols premiumIndex to the exchangeInfo quote map.
+5. **24h volumes:** `GET /fapi/v3/ticker/24hr` (`quoteVolume`).
+
+### 6.2 Rate Limits
+`REQUEST_WEIGHT` 2400/min/IP; depth weight 2-20 by limit. HTTP 429 feeds the
+coordinator backoff; HTTP 418 means IP ban. The adapter polls at a 100ms
+minimum interval.
+
+---
+
+## 7. Ondo Perps (Tokenized Equities + Crypto)
+
+Paper read-only adapter (`OndoPerpsAdapter`, venue `ondoperps`, admitted to
+`get_venues`). Public REST only, no auth. Poll politely: ~1 req/s venue
+guidance, so the adapter's coordinator minimum interval is 1100ms.
+
+- **REST API:** `https://api.ondoperps.xyz`
+- **WebSocket (recorded, stubbed for v1):** `wss://api.ondoperps.xyz/ws`
+  (`topOfBooksPerps` / `depthBooksPerps` public channels)
+
+### 7.1 Key Endpoints
+1. **Status:** `GET /status` ->
+   `{"success": true, "result": {"marketStatus": "open"}}` (live-verified
+   2026-09-15). Every response is enveloped `{"success": bool, "result": ..}`;
+   anything without `success: true` fails closed.
+2. **Markets:** `GET /v1/markets` -> `result.perps.tradingPairs` (81 markets,
+   live-verified). Entries carry `market` (`BTC-USD.P`), `pair: {base, quote}`,
+   `baseIncrement`/`quoteIncrement` ticks, decimal-fraction `makerFee`/
+   `takerFee` (BTC: 0.0001 / 0.00025), and `fundingIntervalDivisions` (8 ->
+   3h interval).
+3. **Orderbook:**
+   ```bash
+   GET /v1/perps/depth?market=BTC-USD.P&depth=10
+   ```
+   returns `{success, result: {market, time, asks: [[px, qty]], bids}}`
+   (live-verified for crypto and equity markets, e.g. `AAPL-USD.P`).
+4. **Funding:** `GET /v1/perps/funding_rates?market=...` -> `{market, rate,
+   intervalEnds, premiums}` (live-verified).
+
+### 7.2 Symbol Mapping
+UI canonical bases map to `{BASE}-USD.P` (`BTC` -> `BTC-USD.P`,
+`AAPL` -> `AAPL-USD.P`).
+
+### 7.3 Ondo Perps vs Ondo Finance — Do Not Confuse Them
+**Ondo Finance proper** (USDY/OUSG tokenized T-bills, yield-bearing RWA
+mint-redeem at `api.gm.ondo.finance`) is **not an exchange** and nothing in
+this repo integrates with it. The venue built here is **Ondo Perps**
+(`api.ondoperps.xyz`), a perpetual-futures venue for tokenized equities and
+crypto. Never send RWA mint/redeem flows through the perps adapter.
+
+---
+
+## 8. GRVT (JSON POST Market Data)
+
+Registered-but-**unadmitted** adapter (`GrvtAdapter`, venue `grvt`):
+constructor, probe, and fee wiring exist, but `get_venues` does not admit it
+until a full end-to-end sweep (markets + book + funding + volumes) is
+confirmed in the desktop harness. Public POST only, no auth.
+
+- **REST API:** `https://market-data.grvt.io` (`/full/v1/*`)
+- **WebSocket (recorded, stubbed for v1):** `wss://market-data.grvt.io/ws/full`
+  (JSONRPC `subscribe`, e.g. `v1.book.s` /
+  `BTC_USDT_Perp@500-10` selectors)
+
+### 8.1 Key Endpoints (All POST, Live-Verified 2026-09-15)
+1. **Orderbook:**
+   ```bash
+   POST /full/v1/book  {"instrument": "BTC_USDT_Perp", "depth": 50}
+   ```
+   returns `{result: {instrument, bids: [{price, size, num_orders}], asks,
+   event_time}}`. **Depth allowlist is exactly {10, 50, 100}** — probed
+   depths 1/5/15/20/25/30/200 all return code 3031 "Depth is invalid", and
+   the adapter fails closed on anything outside the allowlist.
+2. **Markets:** `POST /full/v1/all_instruments
+   {"is_active": true, "kinds": ["PERPETUAL"]}` -> `{result: [{instrument,
+   base, quote, kind, tick_size, min_size, min_notional,
+   funding_interval_hours}]}`. Instruments are `BASE_QUOTE_Perp`
+   (`BTC_USDT_Perp`).
+3. **Funding:** `POST /full/v1/funding {"instrument": ..., "limit": 1}` ->
+   `{result: [{funding_rate, funding_time (ns), funding_interval_hours}]}`.
+
+### 8.2 Symbol Mapping
+`BTC` / `BTC-USDT` / `BTC_USDT_Perp` all map to `BTC_USDT_Perp` (bare bases
+default to USDT — every live GRVT perp is USDT-quoted).
+
+---
+
+## 9. edgeX (StarkEx Perp DEX)
+
+Registered-but-**unadmitted** adapter (`EdgeXAdapter`, venue `edgex`): same
+status as GRVT — registered with probe + fee, admission withheld pending a
+confirmed harness sweep. Public REST only, no auth. All responses are
+enveloped `{"code": "SUCCESS", "data": ...}`; any other code fails closed.
+
+- **REST API:** `https://edgex-prod-v2.edgex.exchange` — this is the docs'
+  production api-domain (mainnet, live-verified 2026-09-15).
+  `https://pro.edgex.exchange` serves the web app and 404s
+  `/api/v2/public/*`; `https://api.edgex.exchange` is unreachable. Contract
+  ids are never hardcoded: the legacy docs example `10000001` (BTCUSDT)
+  already returns empty data; the live catalog is 173 USDC-settled contracts
+  (`30000001` = BTCUSDC).
+- **WebSocket (recorded, stubbed for v1):** `wss://quote.edgex.exchange`
+  (`{"type": "subscribe", "channel": "depth.{id}.{15|200}"}`, SNAPSHOT then
+  Changed deltas).
+
+### 9.1 Key Endpoints (Live-Verified 2026-09-15)
+1. **Metadata (docs § Metadata API):**
+   `GET /api/v2/public/meta/getMetaData` -> `data.contractList` with
+   `contractId`, `contractName` (`BTCUSDC`), `tickSize`, `stepSize`,
+   `minOrderSize`, decimal-fraction `defaultTakerFeeRate` (0.00045 = 4.5 bps)
+   / `defaultMakerFeeRate` (0.0004 = 4 bps), `fundingRateIntervalMin` (240 =
+   4h), `enableTrade`. Contract names split as BASE + quote suffix
+   (USDC/USDT/USD, longest first).
+2. **Depth (docs § Quote API):**
+   ```bash
+   GET /api/v2/public/quote/getDepth?contractId=30000001&level=15
+   ```
+   Level must be 15 or 200. Returns `data: [{contractId, contractName,
+   asks: [{price, size}], bids, depthType}]`.
+3. **Ticker:** `GET /api/v2/public/quote/getTicker?contractId=...`
+   (omit the id for the full catalog) -> `lastPrice`, `markPrice`,
+   `fundingRate`, `fundingTime`, `nextFundingTime`, 24h `value` (notional,
+   feeds `fetch_volumes_24h`). Bulk `fetch_funding_rates` uses the
+   full-catalog ticker.
+4. **Funding:** `GET
+   /api/v2/public/funding/getLatestFundingRate?contractId=...` ->
+   `{fundingRate, forecastFundingRate, fundingTime, ...}`.
+
+### 9.2 Symbol Mapping
+`BTC`, `BTC-USDC`, `BTCUSDC` all resolve through live metadata to the
+numeric contract id (USDC-settled preferred, then USDT). Raw numeric ids pass
+through only after metadata confirms they name a tradable contract.

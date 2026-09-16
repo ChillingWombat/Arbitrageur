@@ -299,9 +299,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           </div>
 
           <div className="space-y-3.5 text-xs">
-            <div>
-              <label className="block text-slate-500 mb-1">Trade Size (USD):</label>
-              <div className="relative">
+            <div className="flex items-center justify-between gap-3">
+              <label className="block text-slate-500 flex-1">Trade Size (USD):</label>
+              <div className="relative w-28 shrink-0">
                 <span className="absolute left-3 top-2 text-slate-400">$</span>
                 <input
                   type="number"
@@ -314,15 +314,15 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               </div>
             </div>
 
-            <div>
-              <label className="block text-slate-500 mb-1">Min Profit Hurdle (BPS):</label>
+            <div className="flex items-center justify-between gap-3">
+              <label className="block text-slate-500 flex-1">Min Profit Hurdle (BPS):</label>
               <input
                 type="number"
                 value={minProfitBps}
                 onChange={(e) => setMinProfitBps(Number(e.target.value) || 0.5)}
                 step={0.5}
                 min={0}
-                className="w-full px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+                className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
               />
             </div>
 
@@ -382,7 +382,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 <button
                   key={asset}
                   onClick={() => setSelectedAsset(asset)}
-                  className={`px-2.5 py-1 rounded-sm text-xs font-mono font-medium transition cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-sm text-[11px] font-mono font-medium transition cursor-pointer ${
                     selectedAsset === asset
                       ? "bg-accent text-white shadow-2xs"
                       : "text-slate-600 hover:text-slate-900"

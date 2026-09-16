@@ -51,6 +51,40 @@ impl HyperliquidAdapter {
     }
 }
 
+/// Append REST/WS `levels` ([bids, asks] of `{px, sz}` string entries)
+/// onto a book. Malformed levels are skipped, never fabricated.
+pub fn append_hyperliquid_levels(book: &mut OrderBook, levels: &serde_json::Value) {
+    let Some(arr) = levels.as_array() else {
+        return;
+    };
+    if arr.len() < 2 {
+        return;
+    }
+    if let Some(bids) = arr[0].as_array() {
+        for b in bids {
+            if let (Some(px), Some(sz)) = (
+                b.get("px").and_then(|p| p.as_str()),
+                b.get("sz").and_then(|s| s.as_str()),
+            ) {
+                if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
+                    book.bids.push(BookLevel::new(p, s));
+                }
+            }
+        }
+    }
+    if let Some(asks) = arr[1].as_array() {
+        for a in asks {
+            if let (Some(px), Some(sz)) = (
+                a.get("px").and_then(|p| p.as_str()),
+                a.get("sz").and_then(|s| s.as_str()),
+            ) {
+                if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
+                    book.asks.push(BookLevel::new(p, s));
+                }
+            }
+        }
+    }
+}
 /// Perp symbol normalization: Hyperliquid perp endpoints take the bare coin
 /// ("BTC-USDC" -> "BTC"). A `-SPOT` market-type suffix must fail closed —
 /// answering a spot query with the perp book would misattribute the market.
@@ -108,35 +142,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let res = self.post_info(json!({"type": "l2Book", "coin": coin})).await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        if let Some(levels) = res.get("levels").and_then(|l| l.as_array()) {
-            if levels.len() >= 2 {
-                // levels[0] = bids, levels[1] = asks
-                if let Some(bids) = levels[0].as_array() {
-                    for b in bids {
-                        if let (Some(px), Some(sz)) = (
-                            b.get("px").and_then(|p| p.as_str()),
-                            b.get("sz").and_then(|s| s.as_str()),
-                        ) {
-                            if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
-                                book.bids.push(BookLevel::new(p, s));
-                            }
-                        }
-                    }
-                }
-
-                if let Some(asks) = levels[1].as_array() {
-                    for a in asks {
-                        if let (Some(px), Some(sz)) = (
-                            a.get("px").and_then(|p| p.as_str()),
-                            a.get("sz").and_then(|s| s.as_str()),
-                        ) {
-                            if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
-                                book.asks.push(BookLevel::new(p, s));
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(levels) = res.get("levels") {
+            append_hyperliquid_levels(&mut book, levels);
         }
         book.timestamp = Utc::now();
         Ok(book)
@@ -189,9 +196,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     for (i, item) in uni.iter().enumerate() {
                         if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                             if let Some(ctx) = ctxs.get(i) {
-                                let rate_str =
-                                    ctx.get("funding").and_then(|f| f.as_str()).unwrap_or("0");
-                                let rate = Decimal::from_str(rate_str).unwrap_or(dec!(0));
+                                let rate_str = ctx.get("funding").and_then(|f| f.as_str());
+                                let rate_opt = rate_str.and_then(|s| Decimal::from_str(s).ok());
+                                let Some(rate) = rate_opt else { continue };
                                 out.push(FundingRate {
                                     venue: self.venue_id.clone(),
                                     symbol: Symbol::perp(name, "USDC").canonical(),

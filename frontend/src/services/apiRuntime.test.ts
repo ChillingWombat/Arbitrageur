@@ -5,6 +5,9 @@ import {
   invokeDesktop,
   nativeCommandAvailable,
   normalizeTickerStrategyConfig,
+  normalizeStrategyParams,
+  normalizeStrategyTicker,
+  normalizeEquityEvent,
   DESKTOP_REQUIRED_ERROR,
 } from "./api.ts";
 
@@ -73,6 +76,9 @@ const REGISTERED_NATIVE_COMMANDS = [
   "get_signal_series",
   "get_matrix_baselines",
   "scan_spatial_opportunities",
+  "scan_triangle_opportunities",
+  "execute_triangle_arbitrage",
+  "check_spatial_convergence",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
   "scan_funding_opportunities",
@@ -108,15 +114,19 @@ const REGISTERED_NATIVE_COMMANDS = [
   "get_ticker_position_state",
   "get_venue_balances",
   "get_strategy_performance",
+  "get_strategy_fill_pnl",
+  "get_utilisation_history",
   "run_wfo_calibration",
+  "apply_autotune_selected",
+  "run_seasonality_promotion",
+  "get_session_profile",
 ];
 
 test("nativeCommandAvailable mirrors the registered desktop command set", () => {
   for (const cmd of REGISTERED_NATIVE_COMMANDS) {
     assert.equal(nativeCommandAvailable(cmd), true, `${cmd} must be a registered native command`);
   }
-  assert.equal(nativeCommandAvailable("scan_triangle_opportunities"), false);
-  assert.equal(nativeCommandAvailable("execute_triangle_arbitrage"), false);
+  assert.equal(nativeCommandAvailable("nonexistent_command_xyz"), false);
 });
 
 test("normalizeTickerStrategyConfig preserves the backend sliding window", () => {
@@ -151,25 +161,131 @@ test("normalizeTickerStrategyConfig defaults unknown windows to 24h", () => {
   assert.equal(normalizeTickerStrategyConfig({}).slidingWindow, "24h");
 });
 
-test("triangle scan and execution fail closed in desktop mode", async () => {
+test("triangle scan/execute and convergence check fail closed without the desktop app", async () => {
   const g = globalThis as Record<string, unknown>;
   const prev = g.window;
-  g.window = { __TAURI_INTERNALS__: {} };
+  delete g.window;
   try {
-    const scan = await api.scanTriangleOpportunities("BTC");
-    assert.deepEqual(scan, []);
+    await assert.rejects(
+      api.scanTriangleOpportunities("BTC"),
+      new RegExp(DESKTOP_REQUIRED_ERROR),
+    );
     await assert.rejects(
       api.executeTriangleArbitrage({
-        id: "tri-1",
-        venue: "hyperliquid",
-        path: "BTC>ETH>USDC",
+        id: "lighter-TRI-BTC-ETH-USDC",
+        venue: "Lighter",
+        path: "USDC → BTC → ETH → USDC",
         trade_size_usd: 1000,
         min_profit_bps: 5,
       }),
-      /three-leg coordinator/,
+      new RegExp(DESKTOP_REQUIRED_ERROR),
+    );
+    await assert.rejects(
+      api.checkSpatialConvergence("BTC-USDC", "futures"),
+      new RegExp(DESKTOP_REQUIRED_ERROR),
     );
   } finally {
     if (prev === undefined) delete g.window;
     else g.window = prev;
   }
+});
+
+test("normalizeStrategyParams maps the new sizing fields", () => {
+  const p = normalizeStrategyParams({
+    strategyId: "futures",
+    targetProfitBps: 1.5,
+    windowPercentile: 80,
+    slidingWindow: "12h",
+    slidingWindowMode: "auto",
+    slidingWindowSecs: 43200,
+    stepSizeMult: 5,
+    maxStepUsd: 1000,
+    maxTickerEquityPct: 3,
+    executionMode: "DOUBLE_WAY",
+    userTargetLeverage: 3,
+    fundingTradeSizeUsd: 25000,
+    fundingMinAprPct: 8,
+    fundingHoldingDays: 14,
+    spotTradeSizeUsd: 1000,
+    spotMaxSlippageBps: 5,
+    spotMinNetSpreadBps: 15,
+  });
+  assert.equal(p.stepSizeMult, 5);
+  assert.equal(p.maxStepUsd, 1000);
+  assert.equal(p.maxTickerEquityPct, 3);
+});
+
+test("normalizeStrategyParams defaults missing sizing fields for backward load", () => {
+  const p = normalizeStrategyParams({
+    strategyId: "futures",
+    unitSizeUsd: 2500,
+    maxAccumulatedUnits: 3,
+  });
+  assert.equal(p.stepSizeMult, 10);
+  assert.equal(p.maxStepUsd, 2500);
+  assert.equal(p.maxTickerEquityPct, 20);
+  assert.equal(normalizeStrategyParams(null).stepSizeMult, 10);
+});
+
+test("normalizeStrategyParams carries the auto-filter thresholds (None/0 = off)", () => {
+  const p = normalizeStrategyParams({
+    strategyId: "futures",
+    autoMinVolumeUsd: 250000,
+    autoMinPriceUsd: 0,
+    auto_min_event_volume_usd: 500000,
+  });
+  assert.equal(p.autoMinVolumeUsd, 250000);
+  assert.equal(p.autoMinPriceUsd, null);
+  assert.equal(p.autoMinEventVolumeUsd, 500000);
+  const legacy = normalizeStrategyParams({ strategyId: "spot" });
+  assert.equal(legacy.autoMinVolumeUsd, null);
+  assert.equal(legacy.autoMinPriceUsd, null);
+  assert.equal(legacy.autoMinEventVolumeUsd, null);
+  assert.equal(normalizeStrategyParams(null).autoMinVolumeUsd, null);
+});
+
+test("native commands include the strategy ticker and equity event getters", () => {
+  assert.equal(nativeCommandAvailable("get_strategy_tickers"), true);
+  assert.equal(nativeCommandAvailable("get_account_equity_events"), true);
+});
+
+test("normalizeStrategyTicker maps pass flags and snake_case reasons", () => {
+  const ok = normalizeStrategyTicker({ base: "btc", venues: ["hyperliquid"], passes: true });
+  assert.deepEqual(ok, { base: "BTC", venues: ["hyperliquid"], passes: true, blockReason: null });
+  const blocked = normalizeStrategyTicker({
+    base: "PEPE",
+    venues: [],
+    passes: false,
+    block_reason: "PEPE blocked by auto volume filter",
+  });
+  assert.equal(blocked.passes, false);
+  assert.equal(blocked.blockReason, "PEPE blocked by auto volume filter");
+});
+
+test("normalizeEquityEvent maps snake_case IPC rows", () => {
+  const e = normalizeEquityEvent({
+    id: 7,
+    account_id: "lighter",
+    ts_ms: 123,
+    expected: 100,
+    actual: 105,
+    delta: 5,
+    kind: "deposit",
+    note: "",
+  });
+  assert.deepEqual(e, {
+    id: 7,
+    accountId: "lighter",
+    tsMs: 123,
+    expected: 100,
+    actual: 105,
+    delta: 5,
+    kind: "deposit",
+    note: "",
+  });
+});
+
+test("strategy ticker and equity event IPC fail closed without desktop", async () => {
+  await assert.rejects(api.getStrategyTickers("futures"), new RegExp(DESKTOP_REQUIRED_ERROR));
+  await assert.rejects(api.getAccountEquityEvents(), new RegExp(DESKTOP_REQUIRED_ERROR));
 });

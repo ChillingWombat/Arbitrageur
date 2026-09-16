@@ -124,6 +124,12 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "V1 API Key", secret: true, optional: true },
     { key: "apiSecret", label: "V1 API Secret", secret: true, optional: true },
   ],
+  // edgeX / GRVT / Ondo Perps: public read-only feeds need no credentials —
+  // an empty field list still allows a label-only enabled account profile,
+  // which is the venue's on/off switch. No trading credentials exist yet.
+  edgex: [],
+  grvt: [],
+  ondoperps: [],
   // Variational: public API is read-only today; trading auth is in development
   variational: [
     { key: "apiKey", label: "API Token", secret: true, optional: true },
@@ -147,10 +153,13 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   robinhood: "Robinhood Lighter",
   vanta: "Vanta",
   decibel: "Decibel",
+  edgex: "edgeX",
+  grvt: "GRVT",
   ibkr: "Interactive Brokers",
   ig: "IG Trading",
   binance: "Binance",
   okx: "OKX",
+  ondoperps: "Ondo Perps",
   aster: "Aster",
   variational: "Variational",
   coinbase: "Coinbase",
@@ -165,6 +174,8 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   binance: "binance_enabled",
   coinbase: "coinbase_enabled",
   decibel: "decibel_enabled",
+  edgex: "edgex_enabled",
+  grvt: "grvt_enabled",
   hyperliquid: "hyperliquid_enabled",
   ibkr: "ibkr_enabled",
   ig: "ig_enabled",
@@ -173,6 +184,7 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   kraken_spot: "kraken_spot_enabled",
   lighter: "lighter_enabled",
   okx: "okx_enabled",
+  ondoperps: "ondoperps_enabled",
   polymarket: "polymarket_enabled",
   popdex: "popdex_enabled",
   robinhood: "robinhood_enabled",
@@ -317,6 +329,26 @@ interface AccountCardProps {
   onChanged: () => void;
 }
 
+/** Parse the card's max-leverage text: "" = unlimited (null); otherwise an
+ *  integer 1..=5. Throws a user-facing error for anything else. */
+function parseMaxLeverage(raw: string): number | null {
+  const t = raw.trim();
+  if (t === "") return null;
+  const n = Number(t);
+  if (!Number.isInteger(n) || n < 1 || n > 5) {
+    throw new Error("Max leverage must be empty (unlimited) or an integer 1..=5");
+  }
+  return n;
+}
+
+/** Canonicalize leverage text so "3" and " 3 " compare equal in dirty checks. */
+function normalizeLeverageText(raw: string): string {
+  const t = raw.trim();
+  if (t === "") return "";
+  const n = Number(t);
+  return Number.isFinite(n) ? String(n) : t;
+}
+
 const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, labelInHeader = false, controlsInHeader = false, onChanged }) => {
   const fields = ACCOUNT_CREDENTIAL_FIELDS[account.venue] ?? [
     { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
@@ -324,6 +356,10 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
   ];
   const [label, setLabel] = useState(account.label);
   const [tier, setTier] = useState(account.accountTier || "standard");
+  // Per-account leverage ceiling as text; "" = unlimited (null over IPC).
+  const [maxLeverage, setMaxLeverage] = useState(
+    account.maxLeverage != null ? String(account.maxLeverage) : ""
+  );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
@@ -337,6 +373,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
   useEffect(() => {
     setLabel(account.label);
     setTier(account.accountTier || "standard");
+    setMaxLeverage(account.maxLeverage != null ? String(account.maxLeverage) : "");
     setDrafts({});
     setError(null);
     setSaved(false);
@@ -426,12 +463,14 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
       const { creds, error } = buildCredentials();
       if (error) throw new Error(error);
       if (!label.trim()) throw new Error("Account label is required");
+      const cap = parseMaxLeverage(maxLeverage);
       await api.upsertAccount({
         id: account.id,
         label: label.trim(),
         enabled: account.enabled,
         makeDefault: account.isDefault,
         accountTier: tier,
+        maxLeverage: cap,
         credentials: creds ?? null,
       });
       setDrafts({});
@@ -454,6 +493,8 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
         label: account.label,
         enabled: !account.enabled,
         makeDefault: account.isDefault,
+        accountTier: account.accountTier,
+        maxLeverage: account.maxLeverage ?? null,
       });
     });
 
@@ -474,6 +515,9 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
   const dirty =
     label.trim() !== account.label ||
     tier !== (account.accountTier || "standard") ||
+    normalizeLeverageText(maxLeverage) !== normalizeLeverageText(
+      account.maxLeverage != null ? String(account.maxLeverage) : ""
+    ) ||
     Object.keys(drafts).length > 0;
   // Lighter-family venues document per-account rate-limit tiers that share
   // the IP budget — the monitor derives its read cadence from the lowest
@@ -529,8 +573,8 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
       {/* Card body: label + credentials */}
       <div className="p-3.5 space-y-3">
         {!labelInHeader && (
-          <div className="text-xs font-mono">
-            <label className="text-slate-600 block mb-1">
+          <div className="text-xs font-mono flex items-center justify-between gap-3">
+            <label className="text-slate-600 flex-1">
               Account Label <span className="text-slate-400">(used in strategy routing)</span>:
             </label>
             <input
@@ -539,7 +583,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
               disabled={busy}
               onChange={(e) => setLabel(e.target.value)}
               placeholder={`${venueDisplay(account.venue)} Account ${ordinal}`}
-              className="w-full max-w-56 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+              className="w-44 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
             />
           </div>
         )}
@@ -565,6 +609,26 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
             </select>
           </div>
         )}
+        <div className="text-xs font-mono flex items-center justify-between gap-3">
+          <label className="text-slate-600 flex-1">
+            Max Leverage{" "}
+            <span className="text-slate-400">
+              (empty = unlimited · effective is min(strategy, account, venue), capped at 5x)
+            </span>
+            :
+          </label>
+          <input
+            type="number"
+            step="1"
+            min="1"
+            max="5"
+            value={maxLeverage}
+            disabled={busy}
+            placeholder="Unlimited"
+            onChange={(e) => setMaxLeverage(e.target.value)}
+            className="w-28 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+        </div>
         <CredentialGrid
           fields={fields}
           values={Object.fromEntries(fields.map((f) => [f.key, valueFor(f.key)]))}
@@ -666,6 +730,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
         label: effectiveLabel,
         enabled: true,
         makeDefault: !hasDefault,
+        maxLeverage: null,
         credentials: any ? creds : null,
       });
       onDone();
@@ -694,8 +759,8 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
       </div>
       <div className="p-3.5 space-y-3">
         {!labelFromHeader && (
-          <div className="text-xs font-mono">
-            <label className="text-slate-600 block mb-1">Account Label:</label>
+          <div className="text-xs font-mono flex items-center justify-between gap-3">
+            <label className="text-slate-600 flex-1">Account Label:</label>
             <input
               type="text"
               value={label}
@@ -703,7 +768,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
               placeholder={autoLabel}
               onChange={(e) => setLabel(e.target.value)}
               autoFocus
-              className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+              className="w-44 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
             />
           </div>
         )}
@@ -893,7 +958,7 @@ export const AccountLabelControl: React.FC<{
     if (!account || !next || next === account.label) return;
     setBusy(true);
     void api
-      .upsertAccount({ id: account.id, label: next, enabled: account.enabled, makeDefault: account.isDefault })
+      .upsertAccount({ id: account.id, label: next, enabled: account.enabled, makeDefault: account.isDefault, accountTier: account.accountTier, maxLeverage: account.maxLeverage ?? null })
       .then(() => onChanged?.())
       .catch(() => undefined)
       .finally(() => setBusy(false));
@@ -1099,6 +1164,8 @@ export const VenueAccountToggle: React.FC<{
             label: account.label,
             enabled: next,
             makeDefault: account.isDefault,
+            accountTier: account.accountTier,
+            maxLeverage: account.maxLeverage ?? null,
           })
           .then(() => {
             void reload();

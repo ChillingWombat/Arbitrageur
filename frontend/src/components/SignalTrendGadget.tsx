@@ -1,9 +1,11 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Activity, LineChart } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { Activity } from "lucide-react";
 import type { SignalSeriesDto } from "../types";
 import { api } from "../services/api";
 import { formatDuration } from "../services/matrixQuant";
+import { sessionOf, sessionSegments, SESSION_BAND_COLOR } from "../services/session.ts";
 import { InfoTooltip } from "./InfoTooltip";
+import { SessionBadge } from "./SessionBadge";
 import { EmptyState } from "./EmptyState";
 
 interface SignalTrendGadgetProps {
@@ -36,22 +38,46 @@ const fmtTick = (t: number, spanMs: number) => {
   return d.toLocaleTimeString([], { hour12: false });
 };
 
-export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
+export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = React.memo(SignalTrendGadgetInner);
+
+function SignalTrendGadgetInner({
   symbol,
   botWindowSec,
   hurdleBps,
-}) => {
+}: SignalTrendGadgetProps) {
   const [baselineMode, setBaselineMode] = useState<BaselineMode>("consensus");
   const [windowSec, setWindowSec] = useState(botWindowSec);
   const [series, setSeries] = useState<SignalSeriesDto | null>(null);
   const [failed, setFailed] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [chartSize, setChartSize] = useState({ w: 800, h: 176 });
+
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const update = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      if (w > 0 || h > 0)
+        setChartSize((prev) =>
+          prev.w === w && prev.h === h ? prev : { w: w > 0 ? w : prev.w, h: h > 0 ? h : prev.h },
+        );
+    };
+    update();
+    if (typeof ResizeObserver !== "undefined") {
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      return () => ro.disconnect();
+    }
+  }, []);
 
   const windowOptions = useMemo(() => {
     const opts = [{ s: botWindowSec, label: fmtWindow(botWindowSec) }];
     for (const s of [300, 900, 3600, 14400, 86400, 259200, 604800]) {
       if (!opts.some((o) => o.s === s)) opts.push({ s, label: fmtWindow(s) });
     }
+    opts.sort((a, b) => a.s - b.s);
     return opts;
   }, [botWindowSec]);
 
@@ -116,7 +142,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
       : 0;
   const isExecutableSpread = dislocationBps >= hurdleBps;
 
-  // Latest deviation per venue (last non-null observation), rich -> cheap.
+  // Latest deviation per venue (last non-null observation), A→Z by venue name.
   const legend = useMemo(() => {
     if (!series) return [];
     const rows: { vid: string; dev: number }[] = [];
@@ -129,21 +155,26 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
         }
       }
     });
-    rows.sort((a, b) => b.dev - a.dev);
+    rows.sort((a, b) =>
+      shortVenueName(series.venue_names?.[a.vid] ?? a.vid).localeCompare(
+        shortVenueName(series.venue_names?.[b.vid] ?? b.vid),
+        undefined,
+        { sensitivity: "base" },
+      ),
+    );
     return rows;
   }, [series]);
 
-  const richest = legend[0];
-  const cheapest = legend[legend.length - 1];
-  const showExtremes = legend.length >= 2 && dislocationBps > 0.05;
-
-  // Chart geometry
-  const W = 800;
-  const H = 180;
+  // Chart geometry — the svg renders 1:1 (width/height attrs, no viewBox),
+  // so user units are device px and hover fractions map exactly. W/H track
+  // the measured element size; the !== guard in the observer holds the fixed
+  // point so resizes settle instead of looping.
   const PAD_L = 46;
   const PAD_R = 10;
   const PAD_T = 10;
   const PAD_B = 20;
+  const W = Math.max(320, chartSize.w);
+  const H = Math.max(120, chartSize.h);
 
   const maxAbsDev = useMemo(() => {
     let m = 0;
@@ -180,7 +211,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
     });
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, maxAbsDev, t0, spanMs]);
+  }, [series, maxAbsDev, t0, spanMs, W, H]);
 
   // Isolated observations (no adjacent non-null bucket) draw no visible
   // line — render them as dots so sparse history doesn't silently vanish.
@@ -201,7 +232,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
     });
     return dots;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, maxAbsDev, t0, spanMs]);
+  }, [series, maxAbsDev, t0, spanMs, W, H]);
 
   const bandPath = useMemo(() => {
     if (!series || bandIdx.length < 2) return "";
@@ -217,14 +248,15 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
       );
     return `${top.join(" ")} ${bottom.join(" ")} Z`;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, bandIdx, maxAbsDev, t0, spanMs]);
+  }, [series, bandIdx, maxAbsDev, t0, spanMs, W, H]);
 
   const hoverDevs = useMemo(() => {
-    if (hoverIdx === null || !series || !series.ts_ms[hoverIdx]) return [];
-    return series.venues
-      .map((vid, j) => ({ vid, dev: series.dev_bps[hoverIdx][j] }))
-      .filter((r): r is { vid: string; dev: number } => r.dev !== null)
-      .sort((a, b) => b.dev - a.dev);
+    if (hoverIdx === null || !series || !series.ts_ms[hoverIdx]) return null;
+    const map = new Map<string, number | null>();
+    series.venues.forEach((vid, j) => {
+      map.set(vid, series.dev_bps[hoverIdx][j]);
+    });
+    return map;
   }, [hoverIdx, series]);
 
   const historyLabel = useMemo(() => {
@@ -239,15 +271,20 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
 
   const hasSeries = pointCount >= 2;
 
+  // Session overlay: UTC regime bands behind the series, derived from wall
+  // time so they render even before any profile calibrates.
+  const sessionRects = useMemo(
+    () => (hasSeries ? sessionSegments(t0, t1) : []),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hasSeries, t0, t1],
+  );
+  const currentSession = sessionOf(Date.now());
+
   return (
     <div className="space-y-3 font-mono text-xs select-none">
       {/* Header: title, dislocation badge, controls */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-2.5 border-b border-surface-border">
         <div className="flex items-center space-x-2">
-          <div className="flex items-center space-x-1.5 bg-surface-raised px-2.5 py-1 rounded-md border border-surface-border">
-            <LineChart className="w-3.5 h-3.5 text-accent" />
-            <span className="font-bold text-slate-900">{symbol}</span>
-          </div>
           <span className="text-sm text-slate-900 flex items-center">
             Venue deviation from baseline
             <InfoTooltip
@@ -255,23 +292,15 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
               text="Each line is a venue's mid-price deviation from the baseline, in basis points. Above 0 = expensive (sell candidate); below 0 = cheap (buy candidate). The shaded band spans the cheapest-to-richest gap — its height is the gross pairwise spread and it tints green when it exceeds the hurdle. Computed in Rust over persisted samples; gaps are real gaps."
             />
           </span>
-          {bandIsFresh && (
-            <span
-              className={`px-2 py-0.5 rounded-sm border text-xs font-bold ${
-                isExecutableSpread
-                  ? "bg-profit-dim text-profit border-profit-border"
-                  : "bg-surface-raised text-slate-600 border-surface-border"
-              }`}
-              title="Current max pairwise spread vs configured hurdle"
-            >
-              Spread {dislocationBps.toFixed(1)} / {hurdleBps.toFixed(1)} BPS
-            </span>
-          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Current UTC session regime */}
+          <span title="Current UTC trading session regime">
+            <SessionBadge sessionId={currentSession} />
+          </span>
           {/* Baseline selector */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
             {(["consensus", "leader"] as const).map((m) => (
               <button
                 key={m}
@@ -293,7 +322,7 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
             ))}
           </div>
           {/* Window selector — default mirrors the bot's trailing window */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
             {windowOptions.map((w) => (
               <button
                 key={w.s}
@@ -317,12 +346,13 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
         </div>
       </div>
 
-      {/* Legend: current deviation per venue, rich -> cheap */}
+      {/* Legend: current deviation per venue, A→Z (hover updates values) */}
       {legend.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
           {legend.map((row) => {
-            const isSell = showExtremes && row.vid === richest?.vid;
-            const isBuy = showExtremes && row.vid === cheapest?.vid;
+            const displayDev: number | null = hoverDevs
+              ? (hoverDevs.get(row.vid) ?? null)
+              : row.dev;
             return (
               <span
                 key={row.vid}
@@ -334,21 +364,15 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                   style={{ backgroundColor: venueColor(row.vid) }}
                 />
                 <span className="font-semibold text-slate-700">{venueName(row.vid)}</span>
-                <span
-                  className={`tabular-nums font-bold ${
-                    row.dev > 0 ? "text-loss" : row.dev < 0 ? "text-profit" : "text-slate-500"
-                  }`}
-                >
-                  {fmtBps(row.dev)}
-                </span>
-                {isSell && (
-                  <span className="px-1 rounded-sm bg-loss-dim text-loss border border-loss-border font-bold text-xs">
-                    Sell
-                  </span>
-                )}
-                {isBuy && (
-                  <span className="px-1 rounded-sm bg-profit-dim text-profit border border-profit-border font-bold text-xs">
-                    Buy
+                {displayDev === null ? (
+                  <span className="tabular-nums font-bold text-slate-400">—</span>
+                ) : (
+                  <span
+                    className={`tabular-nums font-bold ${
+                      displayDev > 0 ? "text-loss" : displayDev < 0 ? "text-profit" : "text-slate-500"
+                    }`}
+                  >
+                    {fmtBps(displayDev)}
                   </span>
                 )}
               </span>
@@ -382,17 +406,20 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
           />
         ) : (
           <svg
-            viewBox={`0 0 ${W} ${H}`}
-            className="w-full h-44 block"
+            ref={svgRef}
+            width={W}
+            height={H}
+            className="w-full h-auto block"
             onMouseLeave={() => setHoverIdx(null)}
             onMouseMove={(e) => {
               if (!series) return;
               const rect = e.currentTarget.getBoundingClientRect();
-              const x = ((e.clientX - rect.left) / rect.width) * W;
+              const f = (e.clientX - rect.left) / rect.width;
+              const xPx = Math.min(W - PAD_R, Math.max(PAD_L, f * W));
               let idx = 0;
               let best = Infinity;
               series.ts_ms.forEach((t, i) => {
-                const d = Math.abs(xOf(t) - x);
+                const d = Math.abs(xOf(t) - xPx);
                 if (d < best) {
                   best = d;
                   idx = i;
@@ -430,6 +457,19 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
                 </g>
               );
             })}
+
+            {/* Session regime bands (UTC) behind the series */}
+            {sessionRects.map((s, i) => (
+              <rect
+                key={i}
+                x={xOf(s.fromMs)}
+                width={Math.max(1, xOf(s.toMs) - xOf(s.fromMs))}
+                y={PAD_T}
+                height={H - PAD_T - PAD_B}
+                fill={SESSION_BAND_COLOR[s.session]}
+                opacity={0.3}
+              />
+            ))}
 
             {/* Dislocation band (max-min venue envelope, ≥2 venues only) */}
             {bandPath && (
@@ -477,43 +517,26 @@ export const SignalTrendGadget: React.FC<SignalTrendGadgetProps> = ({
               />
             )}
 
-            {/* X-axis time ticks */}
+            {/* X-axis time ticks — time fractions, never sample indices:
+                clustered sampling would otherwise pile labels together. */}
             {series &&
-              [0, Math.floor(pointCount / 2), pointCount - 1].map((i) => (
-                <text
-                  key={i}
-                  x={xOf(series.ts_ms[i])}
-                  y={H - 6}
-                  textAnchor="middle"
-                  className="fill-slate-400"
-                  fontSize="9"
-                  fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
-                >
-                  {fmtTick(series.ts_ms[i], spanMs)}
-                </text>
-              ))}
+              [0, 0.5, 1].map((f) => {
+                const t = t0 + f * spanMs;
+                return (
+                  <text
+                    key={f}
+                    x={xOf(t)}
+                    y={H - 6}
+                    textAnchor="middle"
+                    className="fill-slate-400"
+                    fontSize="9"
+                    fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
+                  >
+                    {fmtTick(t, spanMs)}
+                  </text>
+                );
+              })}
           </svg>
-        )}
-
-        {/* Hover tooltip */}
-        {hoverIdx !== null && series && hoverDevs.length > 0 && (
-          <div className="absolute top-2 right-2 bg-accent-dim/95 text-slate-700 rounded-md shadow-xl border border-accent-line px-2.5 py-2 text-xs font-mono pointer-events-none backdrop-blur-xs">
-            <div className="text-slate-500 mb-1">
-              {fmtTick(series.ts_ms[hoverIdx], spanMs)}
-            </div>
-            {hoverDevs.map((r) => (
-              <div key={r.vid} className="flex items-center justify-between space-x-3">
-                <span className="flex items-center space-x-1.5">
-                  <span
-                    className="w-1.5 h-1.5 rounded-full inline-block"
-                    style={{ backgroundColor: venueColor(r.vid) }}
-                  />
-                  <span>{venueName(r.vid)}</span>
-                </span>
-                <span className="tabular-nums font-bold">{fmtBps(r.dev)} bps</span>
-              </div>
-            ))}
-          </div>
         )}
       </div>
 

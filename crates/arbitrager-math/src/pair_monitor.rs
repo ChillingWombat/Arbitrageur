@@ -37,13 +37,14 @@ pub fn build_pair_series(
             j += 1;
         }
         let mut best: Option<(i64, f64)> = None;
-        for k in j..mids_sell.len().min(j + 2) {
-            let (ts_b, mid_b) = mids_sell[k];
+        let mut best_offset: usize = 0;
+        for (offset, (ts_b, mid_b)) in mids_sell.iter().skip(j).take(2).copied().enumerate() {
             if ts_b > ts_a + max_gap_ms {
                 break;
             }
             if mid_b.is_finite() && mid_b > 0.0 {
                 best = Some((ts_b, mid_b));
+                best_offset = offset;
                 break;
             }
         }
@@ -54,11 +55,137 @@ pub fn build_pair_series(
                     ts_ms: ts_a.max(ts_b),
                     spread_bps,
                 });
-                j += 1;
+                // Advance past the consumed sample (and any skipped invalid
+                // sample before it) so the next buy cannot reuse it.
+                j += best_offset + 1;
             }
         }
     }
     out
+}
+
+/// Canonical bucket width for window-coverage accounting, ms. Mirrors the
+/// monitor's alignment gap (`PAIR_ALIGN_GAP_MS` in the Tauri backend):
+/// one expected pair observation per 30s bucket; empty buckets are nulls
+/// (gaps stay gaps, never interpolated).
+pub const PAIR_BUCKET_MS: i64 = 30_000;
+
+/// Fraction of in-window observed buckets whose directional deviation
+/// `spread - mu` sits at or above `entry_thresh_bps` — the same sign
+/// convention as the monitor's `signal_active` (`dev >= entry_thresh`,
+/// never `abs`). The window is the trailing `window_secs` ending at
+/// `window_end_ms`; only observations with
+/// `window_end - window_secs*1000 < ts <= window_end` count.
+///
+/// Returns `None` when uncomputable: non-finite `mu`/`entry_thresh`,
+/// non-positive window, or zero finite in-window observations. Never
+/// fabricates: no interpolation, no default ratio.
+pub fn above_threshold_ratio(
+    series: &[PairObservation],
+    mu: f64,
+    entry_thresh_bps: f64,
+    window_secs: f64,
+    window_end_ms: i64,
+) -> Option<f64> {
+    if !mu.is_finite() || !entry_thresh_bps.is_finite() {
+        return None;
+    }
+    if !window_secs.is_finite() || window_secs <= 0.0 {
+        return None;
+    }
+    let window_ms = window_secs * 1000.0;
+    if !window_ms.is_finite() || window_ms <= 0.0 {
+        return None;
+    }
+    let start_ms = window_end_ms as f64 - window_ms;
+    if !start_ms.is_finite() {
+        return None;
+    }
+    let mut denom = 0usize;
+    let mut numer = 0usize;
+    for o in series {
+        let ts = o.ts_ms as f64;
+        if !(ts > start_ms && ts <= window_end_ms as f64) {
+            continue;
+        }
+        if !o.spread_bps.is_finite() {
+            continue;
+        }
+        denom += 1;
+        let dev = o.spread_bps - mu;
+        if dev.is_finite() && dev >= entry_thresh_bps {
+            numer += 1;
+        }
+    }
+    if denom == 0 {
+        return None;
+    }
+    let ratio = numer as f64 / denom as f64;
+    if ratio.is_finite() {
+        Some(ratio.clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+/// Fraction of expected window buckets that contain at least one pair
+/// observation (both venues observed, non-null). The window is the trailing
+/// `window_secs` ending at `window_end_ms`, split into `bucket_ms` buckets
+/// (`ceil(window_ms / bucket_ms)` expected); a bucket counts when any
+/// finite observation falls inside. Gaps stay gaps: empty buckets are nulls.
+///
+/// Returns `None` when uncomputable: non-finite/non-positive window or
+/// bucket, or zero expected buckets. Never fabricates: sparse data reads as
+/// low coverage, never as an interpolated fill.
+pub fn effective_coverage(
+    series: &[PairObservation],
+    window_secs: f64,
+    window_end_ms: i64,
+    bucket_ms: i64,
+) -> Option<f64> {
+    if !window_secs.is_finite() || window_secs <= 0.0 {
+        return None;
+    }
+    if bucket_ms <= 0 {
+        return None;
+    }
+    let window_ms_f = window_secs * 1000.0;
+    if !window_ms_f.is_finite() || window_ms_f <= 0.0 {
+        return None;
+    }
+    let expected = (window_ms_f / bucket_ms as f64).ceil() as i64;
+    if expected <= 0 {
+        return None;
+    }
+    if expected > 1_000_000 {
+        return None;
+    }
+    let start_f = window_end_ms as f64 - window_ms_f;
+    if !start_f.is_finite() {
+        return None;
+    }
+    let mut occupied = std::collections::HashSet::new();
+    for o in series {
+        let ts = o.ts_ms as f64;
+        if !(ts > start_f && ts <= window_end_ms as f64) {
+            continue;
+        }
+        if !o.spread_bps.is_finite() {
+            continue;
+        }
+        let idx = ((ts - start_f) / bucket_ms as f64).floor() as i64;
+        if idx >= 0 && idx < expected {
+            occupied.insert(idx);
+        } else if idx == expected {
+            occupied.insert(expected - 1);
+        }
+    }
+    let cov = occupied.len() as f64 / expected as f64;
+    if cov.is_finite() {
+        Some(cov.clamp(0.0, 1.0))
+    } else {
+        None
+    }
 }
 
 /// Outcome of one deviation episode.
@@ -470,6 +597,18 @@ mod tests {
     }
 
     #[test]
+    fn pair_series_invalid_first_sell_consumed_once() {
+        let buy = vec![(0, 100.0), (2, 100.0), (4, 100.0)];
+        let sell = vec![(0, f64::NAN), (1, 101.0), (3, 102.0)];
+        let s = build_pair_series(&buy, &sell, 5);
+        assert_eq!(s.len(), 2, "consumed sell sample must not be reused");
+        assert_eq!(s[0].ts_ms, 1);
+        assert_eq!(s[1].ts_ms, 3);
+        assert!((s[0].spread_bps - 100.0).abs() < 1e-9);
+        assert!((s[1].spread_bps - 200.0).abs() < 1e-9);
+    }
+
+    #[test]
     fn episodes_win_stop_open() {
         // mu=0, band=2, stop=15.
         let series = vec![
@@ -593,5 +732,86 @@ mod tests {
         let gain = funding_carry_bps(Some(0.0001), Some(0.0003), Some(86400.0)).unwrap();
         assert!((gain + 2.0).abs() < 1e-9); // gain: benefit capped at 1h
         assert!(funding_carry_bps(None, Some(0.0001), Some(1.0)).is_none());
+    }
+
+    #[test]
+    fn threshold_ratio_persistent_beats_flicker_same_peak() {
+        let end = 1_000_000i64;
+        let mk = |spreads: &[f64]| -> Vec<PairObservation> {
+            spreads
+                .iter()
+                .enumerate()
+                .map(|(i, s)| obs(end - (spreads.len() as i64 - i as i64) * 30_000, *s))
+                .collect()
+        };
+        // Same peak (12bps), mu=0, thresh=5: persistent 16/20 above,
+        // flicker 1/20 above.
+        let persistent = mk(&[
+            12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0,
+            12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0,
+        ]);
+        let flicker = mk(&[
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0, 0.0, 12.0,
+        ]);
+        let rp = above_threshold_ratio(&persistent, 0.0, 5.0, 3600.0, end).unwrap();
+        let rf = above_threshold_ratio(&flicker, 0.0, 5.0, 3600.0, end).unwrap();
+        assert!((rp - 0.8).abs() < 1e-9, "persistent ratio {rp}");
+        assert!((rf - 0.05).abs() < 1e-9, "flicker ratio {rf}");
+        assert!(rp >= 0.2 && rf < 0.2, "floor 0.2 separates them");
+    }
+
+    #[test]
+    fn threshold_ratio_is_directional_not_abs() {
+        let s = vec![obs(1000, -12.0), obs(2000, -12.0), obs(3000, -12.0)];
+        // |dev| is 12 everywhere but directional dev (-12) never >= +5.
+        assert_eq!(
+            above_threshold_ratio(&s, 0.0, 5.0, 3600.0, 3000),
+            Some(0.0)
+        );
+        let s2 = vec![obs(1000, 12.0), obs(2000, 12.0), obs(3000, -12.0)];
+        let r = above_threshold_ratio(&s2, 0.0, 5.0, 3600.0, 3000).unwrap();
+        assert!((r - 2.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn coverage_full_vs_thin_same_dev() {
+        let end = 5_000_000i64;
+        let window = 3600.0; // 120 buckets of 30s
+        let full: Vec<PairObservation> = (0..120)
+            .map(|i| obs(end - (119 - i) * 30_000, 12.0))
+            .collect();
+        let thin: Vec<PairObservation> = (0..12)
+            .map(|i| obs(end - (11 - i) * 300_000, 12.0))
+            .collect();
+        let cf = effective_coverage(&full, window, end, PAIR_BUCKET_MS).unwrap();
+        let ct = effective_coverage(&thin, window, end, PAIR_BUCKET_MS).unwrap();
+        assert!(cf >= 0.99, "full coverage {cf}");
+        assert!(ct < 0.5, "thin coverage {ct} must fail the 0.5 floor");
+    }
+
+    #[test]
+    fn signal_gates_deterministic_nan_empty_guards() {
+        let s = vec![obs(1000, 12.0), obs(2000, 0.0), obs(3000, 12.0)];
+        let a = above_threshold_ratio(&s, 0.0, 5.0, 3600.0, 3000);
+        let b = above_threshold_ratio(&s, 0.0, 5.0, 3600.0, 3000);
+        assert_eq!(a, b);
+        let c = effective_coverage(&s, 60.0, 3000, 30_000);
+        let d = effective_coverage(&s, 60.0, 3000, 30_000);
+        assert_eq!(c, d);
+        // Empty / degenerate inputs fail closed.
+        let empty: Vec<PairObservation> = Vec::new();
+        assert!(above_threshold_ratio(&empty, 0.0, 5.0, 60.0, 3000).is_none());
+        assert!(above_threshold_ratio(&s, f64::NAN, 5.0, 60.0, 3000).is_none());
+        assert!(above_threshold_ratio(&s, 0.0, f64::NAN, 60.0, 3000).is_none());
+        assert!(above_threshold_ratio(&s, 0.0, 5.0, 0.0, 3000).is_none());
+        assert!(effective_coverage(&empty, 60.0, 3000, 30_000).is_some());
+        assert!(effective_coverage(&s, 0.0, 3000, 30_000).is_none());
+        assert!(effective_coverage(&s, 60.0, 3000, 0).is_none());
+        assert!(effective_coverage(&s, f64::NAN, 3000, 30_000).is_none());
+        // Non-finite spreads are skipped, never counted as above.
+        let dirty = vec![obs(1000, f64::NAN), obs(2000, 12.0), obs(3000, f64::INFINITY)];
+        let r = above_threshold_ratio(&dirty, 0.0, 5.0, 3600.0, 3000).unwrap();
+        assert!((r - 1.0).abs() < 1e-9);
     }
 }

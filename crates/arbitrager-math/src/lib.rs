@@ -10,6 +10,10 @@ pub mod risk_math;
 pub mod calibration;
 pub mod dislocation;
 pub mod pair_monitor;
+pub mod autotune;
+pub mod session;
+pub mod seasonality;
+pub mod triangular;
 
 pub use rolling_stats::*;
 pub use spatial_spread::*;
@@ -23,6 +27,10 @@ pub use risk_math::*;
 pub use calibration::*;
 pub use dislocation::*;
 pub use pair_monitor::*;
+pub use autotune::*;
+pub use session::*;
+pub use seasonality::*;
+pub use triangular::*;
 
 #[cfg(test)]
 mod tests {

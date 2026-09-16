@@ -1,0 +1,42 @@
+[Unit]
+Description=Arbitrager headless paper daemon (port %i)
+Documentation=file:///opt/arbitrager/ops/deploy/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Instance name is the health-listener port: systemctl start arbitrager@8787
+ExecStart=/usr/local/bin/arbitrager serve --bind ${ARBITRAGER_BIND:-127.0.0.1} --port %i
+EnvironmentFile=-/etc/arbitrager/arbitrager.env
+# Per-instance data isolation: each port gets its own HOME so its SQLite
+# state (~/.arbitrager/state.sqlite3) and vault (~/.arbitrager/vault.enc)
+# are never shared between writers. Sharing one state.sqlite3 across
+# processes risks SQLITE_BUSY writer contention and WAL recovery races.
+Environment=HOME=/var/lib/arbitrager-%i
+StateDirectory=arbitrager-%i
+StateDirectoryMode=0700
+User=arbitrager
+Group=arbitrager
+UMask=0077
+WorkingDirectory=/var/lib/arbitrager-%i
+Restart=on-failure
+RestartSec=10
+# Keep one daemon per port: a second start on the same port fails fast on
+# bind instead of double-driving one database.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=arbitrager-%i
+# Paper-only hardening: no new privileges, private /tmp, read-only system.
+# HOME (/var/lib/arbitrager-%i) stays writable for SQLite + vault.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

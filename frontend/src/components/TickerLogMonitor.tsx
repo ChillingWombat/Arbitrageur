@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
+import React, { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import {
   Search,
   Trash2,
@@ -32,7 +32,94 @@ interface TickerLogMonitorProps {
   isPaused?: boolean;
 }
 
-export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
+const getLevelBadgeClass = (level: LogItem["level"]) => {
+  switch (level) {
+    case "EXEC":
+      return "bg-profit-dim text-profit border-profit-border";
+    case "TRIGGER":
+      return "bg-blue-50 text-accent border-blue-200";
+    case "EVAL":
+      return "bg-indigo-50 text-indigo-700 border-indigo-200";
+    case "SCAN":
+      return "bg-slate-100 text-slate-700 border-slate-200";
+    case "WARN":
+      return "bg-amber-50 text-amber-700 border-amber-200";
+    case "ERROR":
+      return "bg-loss-dim text-loss border-loss-border";
+    default:
+      return "bg-surface-raised text-slate-600 border-surface-border";
+  }
+};
+
+interface LogRowProps {
+  id: string;
+  timestamp: string;
+  level: LogItem["level"];
+  source: string;
+  route: string | undefined;
+  message: string;
+  netPnl: number | undefined;
+  status: LogItem["status"];
+}
+
+const LogRow: React.FC<LogRowProps> = React.memo(
+  ({ timestamp, level, source, route, message, netPnl, status }) => (
+    <tr className="hover:bg-surface-raised/60 transition">
+      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-[11px]">
+        {timestamp}
+      </td>
+      <td className="py-2 px-2.5 whitespace-nowrap">
+        <span
+          className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold border ${getLevelBadgeClass(
+            level
+          )}`}
+        >
+          {level.charAt(0) + level.slice(1).toLowerCase()}
+        </span>
+      </td>
+      <td className="py-2 px-3 font-semibold text-slate-900 whitespace-nowrap">
+        {route ? (
+          <span className="flex items-center space-x-1 text-slate-800">
+            <span>{route}</span>
+          </span>
+        ) : (
+          <span className="text-slate-600">{source}</span>
+        )}
+      </td>
+      <td className="py-2 px-3 text-slate-700 leading-relaxed">
+        <span>{message}</span>
+        {netPnl !== undefined && (
+          <span
+            className={`ml-1.5 font-bold ${
+              netPnl >= 0 ? "text-profit" : "text-loss"
+            }`}
+          >
+            ({formatCurrencyPnl(netPnl)})
+          </span>
+        )}
+      </td>
+      <td className="py-2 px-3 text-right whitespace-nowrap">
+        <span
+          className={`text-[11px] font-semibold ${
+            status === "SUCCESS"
+              ? "text-profit"
+              : status === "WARNING"
+              ? "text-amber-600"
+              : status === "REJECTED"
+              ? "text-loss"
+              : "text-slate-500"
+          }`}
+        >
+          {status}
+        </span>
+      </td>
+    </tr>
+  ),
+);
+
+export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = React.memo(TickerLogMonitorInner);
+
+function TickerLogMonitorInner({
   symbol,
   strategyName = "Single Spread",
   config,
@@ -40,7 +127,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   orderbooks = [],
   autoBotEnabled = false,
   isPaused = false,
-}) => {
+}: TickerLogMonitorProps) {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [logDepth, setLogDepth] = useState<string>("100");
   const [searchQuery, setSearchQuery] = useState<string>("");
@@ -48,12 +135,18 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   const [runtimeLogs, setRuntimeLogs] = useState<LogItem[]>([]);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
   const storageKey = `ticker-log-monitor:${symbol}`;
+  // Heartbeat entries buffer here and flush to state at most once per
+  // second — the 3s orderbook poll must not setState per tick.
+  const pendingRef = useRef<LogItem[]>([]);
 
   // Load persisted telemetry stream for this ticker (survives remounts/restarts)
   useEffect(() => {
+    pendingRef.current = [];
     try {
       const raw = localStorage.getItem(storageKey);
-      setRuntimeLogs(raw ? (JSON.parse(raw) as LogItem[]) : []);
+      const parsed = raw ? (JSON.parse(raw) as LogItem[]) : [];
+      parsed.sort((a, b) => a.epochMs - b.epochMs);
+      setRuntimeLogs(parsed.slice(-500));
     } catch {
       setRuntimeLogs([]);
     }
@@ -107,6 +200,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
   // Generate live strategy telemetry heartbeat logs on ticker / orderbook updates
   useEffect(() => {
     if (orderbooks.length === 0) return;
+    if (typeof document !== "undefined" && document.hidden) return;
 
     const now = new Date();
     const timestamp = now.toISOString().replace("T", " ").substring(0, 23);
@@ -189,19 +283,71 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
     }
 
     if (newEntries.length > 0) {
-      setRuntimeLogs((prev) => {
-        // Keep up to 500 recent telemetry entries
-        const combined = [...prev, ...newEntries];
-        return combined.slice(-500);
-      });
+      pendingRef.current.push(...newEntries);
     }
   }, [orderbooks, symbol, autoBotEnabled, isPaused, config]);
 
+  // Flush buffered heartbeats at most once per second; no pending entries
+  // means no state update and no downstream re-sort/reconciliation.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      const pending = pendingRef.current;
+      if (pending.length === 0) return;
+      pendingRef.current = [];
+      setRuntimeLogs((prev) => {
+        const next = [...prev];
+        for (const entry of pending) {
+          const last = next[next.length - 1];
+          if (last && entry.epochMs < last.epochMs) {
+            let lo = 0;
+            let hi = next.length;
+            while (lo < hi) {
+              const mid = (lo + hi) >> 1;
+              if (next[mid].epochMs <= entry.epochMs) lo = mid + 1;
+              else hi = mid;
+            }
+            next.splice(lo, 0, entry);
+          } else {
+            next.push(entry);
+          }
+        }
+        return next.length > 500 ? next.slice(next.length - 500) : next;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Both inputs arrive newest-last; merge descending in O(n) instead of a
+  // full O(n log n) re-sort on every append.
+  const sortedExecutionItems = useMemo<LogItem[]>(() => {
+    return [...executionItems].sort((a, b) => b.epochMs - a.epochMs);
+  }, [executionItems]);
+
   // Combine execution history + runtime telemetry, sorted descending (newest first)
   const allLogs = useMemo<LogItem[]>(() => {
-    const combined = [...executionItems, ...runtimeLogs];
-    return combined.sort((a, b) => b.epochMs - a.epochMs);
-  }, [executionItems, runtimeLogs]);
+    const out: LogItem[] = [];
+    let i = 0;
+    let j = runtimeLogs.length - 1;
+    while (i < sortedExecutionItems.length && j >= 0) {
+      if (sortedExecutionItems[i].epochMs >= runtimeLogs[j].epochMs) {
+        out.push(sortedExecutionItems[i]);
+        i += 1;
+      } else {
+        out.push(runtimeLogs[j]);
+        j -= 1;
+      }
+    }
+    while (i < sortedExecutionItems.length) {
+      out.push(sortedExecutionItems[i]);
+      i += 1;
+    }
+    while (j >= 0) {
+      out.push(runtimeLogs[j]);
+      j -= 1;
+    }
+    return out;
+  }, [sortedExecutionItems, runtimeLogs]);
 
   // Filter logs by level, search query, and depth/time window
   const filteredLogs = useMemo<LogItem[]>(() => {
@@ -240,33 +386,15 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
     }
   }, [filteredLogs.length, autoScroll]);
 
-  const handleClearLogs = () => {
+  const handleClearLogs = useCallback(() => {
+    pendingRef.current = [];
     setRuntimeLogs([]);
     try {
       localStorage.removeItem(storageKey);
     } catch {
       // ignore
     }
-  };
-
-  const getLevelBadgeClass = (level: LogItem["level"]) => {
-    switch (level) {
-      case "EXEC":
-        return "bg-profit-dim text-profit border-profit-border";
-      case "TRIGGER":
-        return "bg-blue-50 text-accent border-blue-200";
-      case "EVAL":
-        return "bg-indigo-50 text-indigo-700 border-indigo-200";
-      case "SCAN":
-        return "bg-slate-100 text-slate-700 border-slate-200";
-      case "WARN":
-        return "bg-amber-50 text-amber-700 border-amber-200";
-      case "ERROR":
-        return "bg-loss-dim text-loss border-loss-border";
-      default:
-        return "bg-surface-raised text-slate-600 border-surface-border";
-    }
-  };
+  }, [storageKey]);
 
   return (
     <div className="space-y-3 font-mono text-xs select-none">
@@ -275,7 +403,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
         {/* Right: Controls (Level Filters, Search, Clear) */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Level Filter Chips */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
             {(["ALL", "TRADES", "TRIGGER", "SCAN", "ERRORS"] as const).map((lvl) => (
               <button
                 key={lvl}
@@ -345,8 +473,8 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
           />
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
-            <table className="w-full text-left font-mono text-xs">
-              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-xs text-slate-500 tracking-wider">
+            <table className="w-full text-left font-mono text-[11px]">
+              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[11px] text-slate-500 tracking-wider">
                 <tr>
                   <th className="py-2 px-3 w-40">Timestamp</th>
                   <th className="py-2 px-2.5 w-20">Level</th>
@@ -355,70 +483,20 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = ({
                   <th className="py-2 px-3 text-right w-24">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-surface-border text-xs">
-                {filteredLogs.map((item) => {
-                  return (
-                    <tr key={item.id} className="hover:bg-surface-raised/60 transition">
-                      {/* Timestamp */}
-                      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-xs">
-                        {item.timestamp}
-                      </td>
-
-                      {/* Level */}
-                      <td className="py-2 px-2.5 whitespace-nowrap">
-                        <span
-                          className={`px-1.5 py-0.2 rounded-sm text-xs font-bold border ${getLevelBadgeClass(
-                            item.level
-                          )}`}
-                        >
-                          {item.level.charAt(0) + item.level.slice(1).toLowerCase()}
-                        </span>
-                      </td>
-
-                      {/* Source / Route */}
-                      <td className="py-2 px-3 font-semibold text-slate-900 whitespace-nowrap">
-                        {item.route ? (
-                          <span className="flex items-center space-x-1 text-slate-800">
-                            <span>{item.route}</span>
-                          </span>
-                        ) : (
-                          <span className="text-slate-600">{item.source}</span>
-                        )}
-                      </td>
-
-                      {/* Details */}
-                      <td className="py-2 px-3 text-slate-700 leading-relaxed">
-                        <span>{item.message}</span>
-                        {item.netPnl !== undefined && (
-                          <span
-                            className={`ml-1.5 font-bold ${
-                              item.netPnl >= 0 ? "text-profit" : "text-loss"
-                            }`}
-                          >
-                            ({formatCurrencyPnl(item.netPnl)})
-                          </span>
-                        )}
-                      </td>
-
-                      {/* Status */}
-                      <td className="py-2 px-3 text-right whitespace-nowrap">
-                        <span
-                          className={`text-xs font-semibold ${
-                            item.status === "SUCCESS"
-                              ? "text-profit"
-                              : item.status === "WARNING"
-                              ? "text-amber-600"
-                              : item.status === "REJECTED"
-                              ? "text-loss"
-                              : "text-slate-500"
-                          }`}
-                        >
-                          {item.status}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
+              <tbody className="divide-y divide-surface-border text-[11px]">
+                {filteredLogs.map((item) => (
+                  <LogRow
+                    key={item.id}
+                    id={item.id}
+                    timestamp={item.timestamp}
+                    level={item.level}
+                    source={item.source}
+                    route={item.route}
+                    message={item.message}
+                    netPnl={item.netPnl}
+                    status={item.status}
+                  />
+                ))}
               </tbody>
             </table>
           </div>

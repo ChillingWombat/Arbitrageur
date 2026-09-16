@@ -98,6 +98,20 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             <span className="font-bold text-slate-900">1.0</span>
             <span className="text-slate-400">¢</span>
           </div>
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md opacity-60"
+            title="Min event volume filter (auto_min_event_volume_usd) is defined but disabled: no venue volume data — prediction adapters are scaffolds"
+          >
+            <span className="text-slate-400">Min Vol</span>
+            <span className="font-bold text-slate-500">no venue volume data</span>
+          </div>
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md opacity-60"
+            title="Max slippage gate (prediction_max_slippage_bps) is defined but disabled: no execution path — prediction adapters are scaffolds"
+          >
+            <span className="text-slate-400">Max Slip</span>
+            <span className="font-bold text-slate-500">no execution path</span>
+          </div>
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">

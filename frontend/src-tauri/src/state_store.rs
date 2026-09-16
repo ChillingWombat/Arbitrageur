@@ -4,11 +4,12 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use rusqlite::{params, Connection, OptionalExtension, Row, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 6] =
-    ["futures", "radar", "funding", "spot", "prediction", "stat_arb"];
+pub const ALLOWED_STRATEGY_IDS: [&str; 7] =
+    ["futures", "radar", "funding", "spot", "prediction", "stat_arb", "triangle"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -23,12 +24,63 @@ pub struct AccountProfile {
     /// enabled accounts applies) and fee adjustments (+0.5bps for plus).
     #[serde(default = "default_account_tier")]
     pub account_tier: String,
+    /// Per-account leverage ceiling, 1..=5. `None` = unlimited (the backend
+    /// hard ceiling of 5 still applies). Effective order-time leverage is
+    /// min(strategy target, this cap, venue cap).
+    #[serde(default)]
+    pub max_leverage: Option<u32>,
     pub created_at: String,
     pub updated_at: String,
 }
 
 fn default_account_tier() -> String {
     "standard".into()
+}
+
+/// One external-delta attribution row: actual equity disagreed with the
+/// fills-derived baseline, so the move was classified, recorded, and the
+/// baseline rebased to actual.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountEquityEvent {
+    pub id: i64,
+    pub account_id: String,
+    pub ts_ms: i64,
+    pub expected: f64,
+    pub actual: f64,
+    pub delta: f64,
+    pub kind: String,
+    pub note: String,
+}
+
+/// Outcome of [`StateStore::check_account_equity`]: the recorded event, if
+/// any, plus a coverage note when no event was emitted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EquityCheckReport {
+    pub event: Option<AccountEquityEvent>,
+    pub note: Option<String>,
+}
+
+struct EquityEventDraft {
+    account_id: String,
+    ts_ms: i64,
+    expected: f64,
+    actual: f64,
+    delta: f64,
+    kind: String,
+    note: String,
+}
+
+fn equity_event_from_row(row: &Row<'_>) -> rusqlite::Result<AccountEquityEvent> {    Ok(AccountEquityEvent {
+        id: row.get(0)?,
+        account_id: row.get(1)?,
+        ts_ms: row.get(2)?,
+        expected: row.get(3)?,
+        actual: row.get(4)?,
+        delta: row.get(5)?,
+        kind: row.get(6)?,
+        note: row.get(7)?,
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +246,92 @@ pub struct VenueSampleEntry {
     pub mid: f64,
     pub best_bid: f64,
     pub best_ask: f64,
+}
+
+/// One shrunk per-session aggregate for a symbol. `med_abs_spread_bps`
+/// is the decision value: the winsorized session median shrunk toward the
+/// global median (n0 = 150). Provisional rows must be read as neutral
+/// x1.0 by every consumer — never as a tuned multiplier.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProfileRow {
+    pub symbol: String,
+    pub session_id: String,
+    pub n_episodes: i64,
+    pub med_abs_spread_bps: Option<f64>,
+    pub p90_spread_bps: Option<f64>,
+    pub rv_bps: Option<f64>,
+    pub win_rate: Option<f64>,
+    pub mean_hold_s: Option<f64>,
+    pub provisional: bool,
+    pub updated_ts: i64,
+}
+
+/// One 24h hour-bin modulator inside a session's row family. Decisions
+/// read sessions, never raw bins; the modulator only ever scales within
+/// +/-25% and provisional bins read as exactly 1.0.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHourBinRow {
+    pub symbol: String,
+    pub hour: i64,
+    pub n_obs: i64,
+    pub med_spread_bps: Option<f64>,
+    pub modulator: f64,
+    pub provisional: bool,
+    pub updated_ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HarAnchorRow {
+    pub symbol: String,
+    pub intercept: f64,
+    pub b_daily: f64,
+    pub b_weekly: f64,
+    pub b_monthly: f64,
+    pub r2: f64,
+    pub n_days: i64,
+    pub forecast_rv_bps: f64,
+    pub trailing_mean_rv_bps: f64,
+    pub updated_ts: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromotionStateRow {
+    pub symbol: String,
+    pub status: String,
+    pub fit_delta_bps: f64,
+    pub val_delta_bps: f64,
+    pub reason: String,
+    pub updated_ts: i64,
+}
+
+/// One durable margin-utilisation observation for a paper venue: equity and
+/// used margin in USD plus the utilisation rate in percent. Written on a
+/// bounded cadence (fills + periodic heartbeat, capped frequency) and pruned
+/// by the shared retention-days cutoff. Feeds the 24h time-weighted average
+/// utilisation stat; any strategy or bot may consume it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MarginSnapshot {
+    pub venue: String,
+    pub account_id: String,
+    pub ts_ms: i64,
+    pub equity: f64,
+    pub used_margin: f64,
+    pub rate_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AutotuneApplyEventRow {
+    pub id: i64,
+    pub symbol: String,
+    pub applied_json: String,
+    pub detail_json: String,
+    pub ts_ms: i64,
 }
 
 /// One venue's signed net filled quantity inside an aggregated open position.
@@ -366,21 +504,82 @@ pub struct MonitorSignalRow {
     pub last_dev_bps: Option<f64>,
 }
 
+/// One persisted pair-signal lifecycle event (monitor_signal_events table).
+/// Append-only audit history behind `monitor_signals`: every lifecycle
+/// transition plus a minute-bucketed heartbeat while a signal stays active.
+/// `economics_json` carries the point-in-time friction/exit snapshot so a
+/// later reader can replay why the transition fired. No UI reads this table
+/// in v1 — the only consumer is the `get_monitor_signal_events` IPC (future
+/// bot + debugging).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MonitorSignalEventRow {
+    pub id: i64,
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub ts_ms: i64,
+    pub old_status: Option<String>,
+    pub new_status: String,
+    pub edge_bps: Option<f64>,
+    pub dev_bps: Option<f64>,
+    pub p_win: Option<f64>,
+    pub economics_json: Option<String>,
+    pub trigger: String,
+}
+
+/// One open convergence-bot position (radar_bot_positions table): the entry
+/// snapshot exit watchers need to survive restarts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BotPositionRow {
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub entry_ts_ms: i64,
+    pub entry_dev_bps: f64,
+    pub baseline_bps: Option<f64>,
+    pub friction_band_bps: f64,
+    pub size_usd: f64,
+    pub deadline_ms: i64,
+    pub unwatched_since_ms: Option<i64>,
+    pub last_seen_ms: i64,
+}
+
+/// One Single-Spread entry baseline (spatial_entry_baseline table, v13): the
+/// edge snapshot the convergence check needs to decide converge/stop/timeout
+/// unwinds for "futures" pair positions.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpatialEntryBaseline {
+    pub signal_id: String,
+    pub symbol: String,
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub entry_net_bps: f64,
+    pub baseline_bps: Option<f64>,
+    pub entry_ts_ms: i64,
+}
+
+/// Separate row cap for the signal-event audit log. Retention shares the
+/// spread-sample `max_days` cutoff (same setting, one pass), but the cap is
+/// independent so a chatty pair can never evict price history — and price
+/// pruning can never wipe the audit trail's newest window either.
+pub const MONITOR_SIGNAL_EVENTS_MAX_ROWS: i64 = 50_000;
+
 const ACCOUNT_COLS: &str =
-    "id, venue, label, enabled, is_default, account_tier, created_at, updated_at";
+    "id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at";
 
 const ACCOUNT_BY_ID_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
 FROM exchange_accounts
 WHERE id = ?1";
 
 const ACCOUNT_ALL_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
 FROM exchange_accounts
 ORDER BY venue COLLATE NOCASE, is_default DESC, label COLLATE NOCASE, id";
 
 const ACCOUNT_BY_VENUE_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
 FROM exchange_accounts
 WHERE venue = ?1
 ORDER BY is_default DESC, label COLLATE NOCASE, id";
@@ -405,13 +604,14 @@ WHERE venue = ?1 AND id = ?3 AND enabled = 1";
 
 const ACCOUNT_UPSERT_SQL: &str = "\
 INSERT INTO exchange_accounts
-    (id, venue, label, enabled, is_default, account_tier, created_at, updated_at)
-VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6)
+    (id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, 0, ?5, ?7, ?6, ?6)
 ON CONFLICT(id) DO UPDATE SET
     label = excluded.label,
     enabled = excluded.enabled,
     is_default = 0,
     account_tier = excluded.account_tier,
+    max_leverage = excluded.max_leverage,
     updated_at = excluded.updated_at";
 
 const ROUTE_JOIN_SQL: &str = "\
@@ -580,6 +780,329 @@ CREATE TABLE strategy_params (
 PRAGMA user_version = 6;
 COMMIT;";
 
+const MIGRATION_V7_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE kv (
+  k TEXT PRIMARY KEY,
+  v TEXT NOT NULL
+);
+PRAGMA user_version = 7;
+COMMIT;";
+
+/// v8 adds the session-seasonality layer (Phase 1): raw hourly venue
+/// volume samples plus shrunk per-session aggregates and their 24h
+/// hour-bin modulators. Profiles are derived (rollup) state — the
+/// retention passes only ever delete from `spread_samples` (and the raw
+/// volume table), so profiles survive every raw-sample prune.
+const MIGRATION_V8_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE venue_volume_samples (
+    venue_id TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_id) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    vol_usd REAL NOT NULL CHECK(vol_usd > 0),
+    PRIMARY KEY (venue_id, symbol, ts_ms)
+);
+CREATE INDEX ix_venue_volume_samples_symbol_ts ON venue_volume_samples(symbol, ts_ms);
+CREATE TABLE session_profiles (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    session_id TEXT NOT NULL CHECK(session_id IN ('asia','europe','overlap','us_late','dead')),
+    n_episodes INTEGER NOT NULL CHECK(n_episodes >= 0),
+    med_abs_spread_bps REAL,
+    p90_spread_bps REAL,
+    rv_bps REAL,
+    win_rate REAL,
+    mean_hold_s REAL,
+    provisional INTEGER NOT NULL CHECK(provisional IN (0, 1)),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    PRIMARY KEY (symbol, session_id)
+);
+CREATE TABLE session_hour_bins (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+    n_obs INTEGER NOT NULL CHECK(n_obs >= 0),
+    med_spread_bps REAL,
+    modulator REAL NOT NULL,
+    provisional INTEGER NOT NULL CHECK(provisional IN (0, 1)),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    PRIMARY KEY (symbol, hour)
+);
+PRAGMA user_version = 8;
+COMMIT;";
+
+/// v12 adds Seasonality Phase 2 + Autotune Phase 2 tables:
+/// - `har_anchors`: one nightly log-HAR(1,5,22) fit per symbol with its
+///   one-day-ahead forecast (rescales session RV norms, never rewrites them
+///   beyond ±50%).
+/// - `promotion_state`: one walk-forward promotion verdict per symbol
+///   (promoted/held/demoted with fit/validate deltas + reason). Absent row =
+///   Phase-1 baseline display (fail-closed, no tuned tables served).
+/// - `autotune_apply_events`: append-only audit log for one-click
+///   apply-selected writes (params + fit/validate metrics + span).
+const MIGRATION_V12_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE har_anchors (
+    symbol TEXT PRIMARY KEY NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    intercept REAL NOT NULL,
+    b_daily REAL NOT NULL,
+    b_weekly REAL NOT NULL,
+    b_monthly REAL NOT NULL,
+    r2 REAL NOT NULL CHECK(r2 >= 0.0 AND r2 <= 1.0),
+    n_days INTEGER NOT NULL CHECK(n_days >= 0),
+    forecast_rv_bps REAL NOT NULL CHECK(forecast_rv_bps > 0),
+    trailing_mean_rv_bps REAL NOT NULL CHECK(trailing_mean_rv_bps > 0),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0)
+);
+CREATE TABLE promotion_state (
+    symbol TEXT PRIMARY KEY NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('promoted','held','demoted')),
+    fit_delta_bps REAL NOT NULL,
+    val_delta_bps REAL NOT NULL,
+    reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 512),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0)
+);
+CREATE TABLE autotune_apply_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    applied_json TEXT NOT NULL CHECK(length(applied_json) BETWEEN 2 AND 8192),
+    detail_json TEXT NOT NULL CHECK(length(detail_json) BETWEEN 2 AND 8192),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0)
+);
+CREATE INDEX ix_autotune_apply_events_symbol_ts
+    ON autotune_apply_events(symbol, ts_ms);
+PRAGMA user_version = 12;
+COMMIT;";
+
+/// v13 admits 'triangle' into the signal_executions strategy CHECK and adds
+/// the Single-Spread entry-baseline table. The backend records one baseline
+/// row per successful "futures" open (entry edge, optional caller baseline,
+/// entry timestamp); the convergence check reads it to decide
+/// converge/stop/timeout unwinds. Absent row = fail-closed Unwatched (manual
+/// flatten only), never an invented baseline.
+const MIGRATION_V13_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE signal_executions_v13 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb', 'triangle')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT
+);
+INSERT INTO signal_executions_v13
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v13 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+CREATE TABLE spatial_entry_baseline (
+    signal_id TEXT PRIMARY KEY NOT NULL CHECK(length(signal_id) BETWEEN 1 AND 128)
+        REFERENCES signal_executions(id) ON DELETE CASCADE,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    entry_net_bps REAL NOT NULL,
+    baseline_bps REAL,
+    entry_ts_ms INTEGER NOT NULL CHECK(entry_ts_ms >= 0)
+);
+PRAGMA user_version = 13;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
+/// v14 adds the per-account leverage ceiling. NULL = unlimited (the backend
+/// hard ceiling of 5 still applies); otherwise 1..=5, enforced at order
+/// time as min(strategy target, account cap, venue cap).
+const MIGRATION_V14_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE exchange_accounts
+    ADD COLUMN max_leverage INTEGER NULL
+    CHECK(max_leverage IS NULL OR (max_leverage >= 1 AND max_leverage <= 5));
+PRAGMA user_version = 14;
+COMMIT;";
+
+/// v15 adds live/external balance attribution: one expected-equity baseline
+/// row per paper account plus the append-only external-delta event log.
+/// Paper fills move equity only through the fills-only writer; any other
+/// nonzero actual-vs-expected move is recorded here and the baseline is
+/// rebased so total PnL never absorbs manual flows.
+const MIGRATION_V15_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE paper_equity_expectations (
+    account_id TEXT PRIMARY KEY NOT NULL CHECK(length(account_id) BETWEEN 1 AND 128),
+    expected REAL NOT NULL CHECK(expected >= 0),
+    last_pos_sig TEXT NOT NULL DEFAULT '',
+    last_poll_ms INTEGER NOT NULL DEFAULT 0 CHECK(last_poll_ms >= 0),
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE account_equity_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL CHECK(length(account_id) BETWEEN 1 AND 128),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    expected REAL NOT NULL,
+    actual REAL NOT NULL,
+    delta REAL NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('deposit', 'withdrawal', 'transfer', 'funding')),
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX ix_account_equity_events_account_ts
+    ON account_equity_events(account_id, ts_ms);
+PRAGMA user_version = 15;
+COMMIT;";
+
+/// v16 adds the margin-utilisation snapshot log. One row per paper venue per
+/// observation (`venue`, `ts_ms`, `equity`, `used_margin`, `rate_pct`): the
+/// durable history behind the 24h time-weighted average utilisation stat.
+/// Bounded by the shared retention-days cutoff; never pruned by the GB pass
+/// (rows are tiny and independently capped by the writer cadence).
+const MIGRATION_V16_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE margin_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venue TEXT NOT NULL COLLATE NOCASE CHECK(length(venue) BETWEEN 1 AND 64),
+    account_id TEXT NOT NULL DEFAULT '' CHECK(length(account_id) BETWEEN 0 AND 128),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    equity REAL NOT NULL CHECK(equity >= 0),
+    used_margin REAL NOT NULL CHECK(used_margin >= 0),
+    rate_pct REAL NOT NULL CHECK(rate_pct >= 0)
+);
+CREATE INDEX ix_margin_snapshots_venue_ts
+    ON margin_snapshots(venue, ts_ms);
+PRAGMA user_version = 16;
+COMMIT;";
+
+/// v11 adds the convergence-bot open-position table. Positions are keyed by
+/// ordered pair; each row carries the entry snapshot the exit watchers need
+/// (entry deviation, friction band, hold deadline) so a restart re-attaches
+/// watchers without replaying the audit log. It also admits 'radar' into the
+/// signal_executions strategy CHECK (the app allowlist already accepted it,
+/// so ledger inserts for radar fills failed closed at the SQL layer).
+const MIGRATION_V11_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE radar_bot_positions (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    entry_ts_ms INTEGER NOT NULL CHECK(entry_ts_ms >= 0),
+    entry_dev_bps REAL NOT NULL,
+    baseline_bps REAL,
+    friction_band_bps REAL NOT NULL CHECK(friction_band_bps >= 0),
+    size_usd REAL NOT NULL CHECK(size_usd > 0),
+    deadline_ms INTEGER NOT NULL,
+    unwatched_since_ms INTEGER,
+    last_seen_ms INTEGER NOT NULL,
+    PRIMARY KEY (symbol, buy_venue, sell_venue)
+);
+CREATE TABLE signal_executions_v11 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT
+);
+INSERT INTO signal_executions_v11
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v11 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+PRAGMA user_version = 11;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
+/// v10 admits the convergence-bot audit decisions into the append-only
+/// signal-event log and adds the bot's own config row. SQLite cannot alter
+/// a CHECK in place, so the events table is rebuilt with the extended
+/// decision/trigger sets and every existing row is copied verbatim
+/// (lossless: same columns, same order, same index). The lifecycle
+/// statuses and the old_status set are untouched — bot rows carry the
+/// pair's live lifecycle status (or NULL) in old_status and one of
+/// {bot_enter, bot_skip, bot_exit} in new_status with trigger
+/// 'bot_decision'.
+const MIGRATION_V10_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE monitor_signal_events_v10 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    old_status TEXT CHECK(old_status IN ('collecting','watching','signaled','qualified','stale')),
+    new_status TEXT NOT NULL CHECK(new_status IN ('collecting','watching','signaled','qualified','stale','bot_enter','bot_skip','bot_exit')),
+    edge_bps REAL,
+    dev_bps REAL,
+    p_win REAL,
+    economics_json TEXT,
+    trigger TEXT NOT NULL CHECK(trigger IN ('transition','heartbeat','bot_decision'))
+);
+INSERT INTO monitor_signal_events_v10
+    (id, symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
+     edge_bps, dev_bps, p_win, economics_json, trigger)
+    SELECT id, symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
+           edge_bps, dev_bps, p_win, economics_json, trigger
+    FROM monitor_signal_events;
+DROP TABLE monitor_signal_events;
+ALTER TABLE monitor_signal_events_v10 RENAME TO monitor_signal_events;
+CREATE INDEX ix_monitor_signal_events_pair_ts
+    ON monitor_signal_events(symbol, buy_venue, sell_venue, ts_ms);
+CREATE TABLE radar_bot_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+PRAGMA user_version = 10;
+COMMIT;";
+
+/// v9 adds the append-only signal-event audit log behind `monitor_signals`.
+const MIGRATION_V9_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE monitor_signal_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    old_status TEXT CHECK(old_status IN ('collecting','watching','signaled','qualified','stale')),
+    new_status TEXT NOT NULL CHECK(new_status IN ('collecting','watching','signaled','qualified','stale')),
+    edge_bps REAL,
+    dev_bps REAL,
+    p_win REAL,
+    economics_json TEXT,
+    trigger TEXT NOT NULL CHECK(trigger IN ('transition','heartbeat'))
+);
+CREATE INDEX ix_monitor_signal_events_pair_ts
+    ON monitor_signal_events(symbol, buy_venue, sell_venue, ts_ms);
+PRAGMA user_version = 9;
+COMMIT;";
+
 /// Durable, non-secret account/route metadata store. Contains no credential
 /// material; secrets remain exclusively in the encrypted vault.
 pub struct StateStore {
@@ -637,6 +1160,54 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
     Ok(v.to_string())
 }
 
+/// Canonical base asset for cross-venue pairing: uppercase, quote suffixes
+/// stripped ("BTC-USD"/"BTC-USDC"/"BTCUSDT"/"btc" -> "BTC").
+///
+/// Separator-suffixed quotes ("-USDC" etc.) strip freely; *bare* quote
+/// suffixes (Binance-style "BTCUSD") only strip when at least 3 chars of
+/// base remain — otherwise real tickers like "TUSD"/"SUSD"/"BUSD" would
+/// collapse to a single letter.
+pub fn canonical_base(raw: &str) -> String {
+    let up = raw.trim().to_uppercase();
+    for suf in ["-USDC", "-USDT", "-USD", "/USDC", "/USDT", "/USD", "-PERP"] {
+        if up.len() > suf.len() && up.ends_with(suf) {
+            return up[..up.len() - suf.len()].to_string();
+        }
+    }
+    for suf in ["USDC", "USDT", "USD"] {
+        if up.ends_with(suf) && up.len() - suf.len() >= 3 {
+            return up[..up.len() - suf.len()].to_string();
+        }
+    }
+    up
+}
+
+/// Every storage key that may hold samples for one asset. Background paths
+/// (monitor lanes, WS feed) record under the canonical base ("BTC") while
+/// UI polls record under the full symbol ("BTC-USDC"); reads must cover
+/// both or unselected tickers lose their trailing window.
+pub fn spread_symbol_aliases(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim().to_string();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let base = canonical_base(&trimmed);
+    let mut out = Vec::with_capacity(6);
+    for key in [
+        trimmed,
+        raw.trim().to_uppercase(),
+        base.clone(),
+        format!("{base}-USDC"),
+        format!("{base}-USD"),
+        format!("{base}-USDT"),
+    ] {
+        if !out.contains(&key) {
+            out.push(key);
+        }
+    }
+    out
+}
+
 fn account_from_row(row: &Row<'_>) -> rusqlite::Result<AccountProfile> {
     Ok(AccountProfile {
         id: row.get(0)?,
@@ -645,8 +1216,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<AccountProfile> {
         enabled: row.get(3)?,
         is_default: row.get(4)?,
         account_tier: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
+        max_leverage: row.get::<_, Option<i64>>(6)?.and_then(|v| u32::try_from(v).ok()),
+        created_at: row.get(7)?,
+        updated_at: row.get(8)?,
     })
 }
 
@@ -713,7 +1285,9 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
         signal_id: row.get(1)?,
         account_id: row.get(2)?,
         venue: row.get(3)?,
-        side: LegSide::from_side(&side_raw).unwrap_or(LegSide::Long),
+        side: LegSide::from_side(&side_raw).ok_or_else(|| {
+            rusqlite::Error::InvalidColumnType(4, "side".into(), rusqlite::types::Type::Text)
+        })?,
         intended_qty: row.get(5)?,
         filled_qty: row.get(6)?,
         fill_price: row.get(7)?,
@@ -791,7 +1365,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 6 {
+        if version > 16 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -830,9 +1404,70 @@ impl StateStore {
                 return Err(err.into());
             }
         }
+        if version <= 6 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V7_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 7 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V8_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 8 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V9_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 9 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V10_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 10 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V11_SQL) {
+                let _ = conn.execute_batch("ROLLBACK; PRAGMA foreign_keys = ON;");
+                return Err(err.into());
+            }
+        }
+        if version <= 11 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V12_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 12 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V13_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 13 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V14_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 14 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V15_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 15 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V16_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_account(
         &self,
         id: &str,
@@ -841,11 +1476,17 @@ impl StateStore {
         enabled: bool,
         make_default: bool,
         account_tier: &str,
+        max_leverage: Option<u32>,
     ) -> anyhow::Result<AccountProfile> {
         let id = normalize_id(id)?;
         let venue = normalize_venue(venue)?;
         let label = normalize_label(label)?;
         let account_tier = normalize_account_tier(account_tier)?;
+        let max_leverage_i64 = match max_leverage {
+            None => None,
+            Some(v) if (1..=5).contains(&v) => Some(i64::from(v)),
+            Some(v) => anyhow::bail!("max_leverage {v} out of range; must be 1..=5 or unset (unlimited)"),
+        };
         let now = Utc::now().to_rfc3339();
 
         let mut conn = self.conn.lock();
@@ -870,7 +1511,7 @@ impl StateStore {
 
         tx.execute(
             ACCOUNT_UPSERT_SQL,
-            params![id, venue, label, enabled, account_tier, now],
+            params![id, venue, label, enabled, account_tier, now, max_leverage_i64],
         )?;
 
         let chosen: Option<String> = if make_default && enabled {
@@ -1029,7 +1670,7 @@ impl StateStore {
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id, venue, label, enabled, is_default, account_tier, created_at, updated_at
+                "SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
 FROM exchange_accounts
 WHERE venue = ?1 AND enabled = 1
 ORDER BY is_default DESC, label COLLATE NOCASE, id
@@ -1580,6 +2221,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
     }
 
     /// Samples for a symbol in `[from_ts_ms, to_ts_ms]`, ordered by time then venue.
+    /// Matches every storage alias for the asset (canonical base plus
+    /// quoted UI forms) so background and UI recording paths read as one.
     pub fn spread_samples(
         &self,
         symbol: &str,
@@ -1587,14 +2230,23 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         to_ts_ms: i64,
     ) -> anyhow::Result<Vec<SpreadSample>> {
         let symbol = normalize_symbol(symbol)?;
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
             "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask
              FROM spread_samples
-             WHERE symbol = ?1 AND ts_ms >= ?2 AND ts_ms <= ?3
-             ORDER BY ts_ms ASC, venue_id ASC",
-        )?;
-        let rows = stmt.query_map(params![symbol, from_ts_ms, to_ts_ms], |r| {
+             WHERE symbol IN ({placeholders}) AND ts_ms >= ? AND ts_ms <= ?
+             ORDER BY ts_ms ASC, venue_id ASC"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = keys
+            .iter()
+            .map(|k| k as &dyn rusqlite::ToSql)
+            .collect();
+        params.push(&from_ts_ms);
+        params.push(&to_ts_ms);
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             Ok(SpreadSample {
                 symbol: r.get(0)?,
                 venue_id: r.get(1)?,
@@ -1608,14 +2260,19 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
     }
 
     /// Earliest recorded sample timestamp for a symbol (history depth indicator).
+    /// Alias-aware, matching [`Self::spread_samples`].
     pub fn earliest_spread_sample_ts(&self, symbol: &str) -> anyhow::Result<Option<i64>> {
         let symbol = normalize_symbol(symbol)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!("SELECT MIN(ts_ms) FROM spread_samples WHERE symbol IN ({placeholders})");
         let conn = self.conn.lock();
-        Ok(conn.query_row(
-            "SELECT MIN(ts_ms) FROM spread_samples WHERE symbol = ?1",
-            [&symbol],
-            |r| r.get(0),
-        )?)
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> = keys
+            .iter()
+            .map(|k| k as &dyn rusqlite::ToSql)
+            .collect();
+        Ok(stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
     /// Drop samples older than `retain_after_ts_ms`, then enforce a global row
@@ -1637,6 +2294,688 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             [max_rows],
         )?;
         Ok(())
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Session seasonality (Phase 1): volume sampler + profiles + rollup    */
+    /* ------------------------------------------------------------------ */
+
+    /// Persist one volume-refresh poll per venue. Symbols are stored under
+    /// the canonical base so reads stay alias-normalized through
+    /// `spread_symbol_aliases`. Best-effort shape: bad rows are skipped,
+    /// never persisted as plausible numbers.
+    pub fn record_venue_volume_samples(
+        &self,
+        venue: &str,
+        ts_ms: i64,
+        volumes: &HashMap<String, f64>,
+    ) -> anyhow::Result<()> {
+        let venue = normalize_venue(venue)?;
+        if volumes.is_empty() || ts_ms < 0 {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO venue_volume_samples (venue_id, symbol, ts_ms, vol_usd)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (asset, vol) in volumes {
+                if !vol.is_finite() || *vol <= 0.0 {
+                    continue;
+                }
+                let symbol = canonical_base(asset);
+                if symbol.is_empty() {
+                    continue;
+                }
+                stmt.execute(params![venue, symbol, ts_ms, vol])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Raw volume series for one symbol/venue window. Alias-aware like
+    /// `spread_samples`.
+    pub fn venue_volume_series(
+        &self,
+        symbol: &str,
+        venue: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+    ) -> anyhow::Result<Vec<(i64, f64)>> {
+        let symbol = normalize_symbol(symbol)?;
+        let venue = normalize_venue(venue)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT ts_ms, vol_usd FROM venue_volume_samples
+             WHERE venue_id = ? AND symbol IN ({placeholders})
+               AND ts_ms >= ? AND ts_ms <= ?
+             ORDER BY ts_ms ASC"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(keys.len() + 3);
+        params.push(&venue);
+        for k in &keys {
+            params.push(k);
+        }
+        params.push(&from_ts_ms);
+        params.push(&to_ts_ms);
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Bound the raw volume log with the same retention cutoffs as spread
+    /// samples. Profile and hour-bin tables are never touched here — they
+    /// are derived state that survives every raw-sample prune.
+    pub fn prune_venue_volume_samples(
+        &self,
+        retain_after_ts_ms: i64,
+        max_rows: i64,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM venue_volume_samples WHERE ts_ms < ?1",
+            [retain_after_ts_ms],
+        )?;
+        conn.execute(
+            "DELETE FROM venue_volume_samples WHERE rowid IN (
+                 SELECT rowid FROM venue_volume_samples
+                 ORDER BY ts_ms DESC, rowid DESC LIMIT -1 OFFSET ?1
+             )",
+            [max_rows],
+        )?;
+        Ok(())
+    }
+
+    /// Distinct canonical symbols present in the spread log (rollup driver).
+    pub fn distinct_sample_symbols(&self) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM spread_samples")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out: Vec<String> = Vec::new();
+        for raw in rows.collect::<rusqlite::Result<Vec<_>>>()? {
+            let base = canonical_base(&raw);
+            if !base.is_empty() && !out.contains(&base) {
+                out.push(base);
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// Read shrunk session aggregates for a symbol (alias-aware). Missing
+    /// sessions simply have no row — callers read that as neutral x1.0.
+    pub fn session_profiles(&self, symbol: &str) -> anyhow::Result<Vec<SessionProfileRow>> {
+        let symbol = normalize_symbol(symbol)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
+                    rv_bps, win_rate, mean_hold_s, provisional, updated_ts
+             FROM session_profiles WHERE symbol IN ({placeholders})
+             ORDER BY session_id ASC"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok(SessionProfileRow {
+                symbol: r.get(0)?,
+                session_id: r.get(1)?,
+                n_episodes: r.get(2)?,
+                med_abs_spread_bps: r.get(3)?,
+                p90_spread_bps: r.get(4)?,
+                rv_bps: r.get(5)?,
+                win_rate: r.get(6)?,
+                mean_hold_s: r.get(7)?,
+                provisional: r.get::<_, i64>(8)? != 0,
+                updated_ts: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Read hour-bin modulators for a symbol (alias-aware).
+    pub fn session_hour_bins(&self, symbol: &str) -> anyhow::Result<Vec<SessionHourBinRow>> {
+        let symbol = normalize_symbol(symbol)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts
+             FROM session_hour_bins WHERE symbol IN ({placeholders})
+             ORDER BY hour ASC"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            Ok(SessionHourBinRow {
+                symbol: r.get(0)?,
+                hour: r.get(1)?,
+                n_obs: r.get(2)?,
+                med_spread_bps: r.get(3)?,
+                modulator: r.get(4)?,
+                provisional: r.get::<_, i64>(5)? != 0,
+                updated_ts: r.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Hourly rollup: rebuild one symbol's session aggregates plus 24h
+    /// hour-bin modulators from the trailing spread log. Pair spreads are
+    /// aligned with the same 30s gap rule as the live monitor; gaps stay
+    /// gaps (no interpolation). Returns profile rows written (0 when the
+    /// history cannot support a single pair observation).
+    pub fn rollup_session_profiles(
+        &self,
+        symbol: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<usize> {
+        use arbitrager_math::pair_monitor::{
+            build_pair_series, reversion_stats, PairObservation,
+        };
+        use arbitrager_math::session::{
+            hour_modulator, hour_of_day_utc, percentile_sorted, session_of, session_stats,
+            winsorized_median, SessionId, SESSION_MIN_EPISODES,
+        };
+
+        let canonical = canonical_base(symbol);
+        if canonical.is_empty() {
+            anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
+        }
+        let samples = self.spread_samples(symbol, from_ts_ms, to_ts_ms)?;
+        let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+        for s in &samples {
+            if s.mid.is_finite() && s.mid > 0.0 {
+                mids_by_venue
+                    .entry(s.venue_id.clone())
+                    .or_default()
+                    .push((s.ts_ms, s.mid));
+            }
+        }
+        let venues: Vec<String> = mids_by_venue.keys().cloned().collect();
+        if venues.len() < 2 {
+            return Ok(0);
+        }
+        let mut all: Vec<PairObservation> = Vec::new();
+        for a in &venues {
+            for b in &venues {
+                if a == b {
+                    continue;
+                }
+                if let (Some(ma), Some(mb)) = (mids_by_venue.get(a), mids_by_venue.get(b)) {
+                    all.extend(build_pair_series(ma, mb, 30_000));
+                }
+            }
+        }
+        if all.is_empty() {
+            return Ok(0);
+        }
+        // Episode segmentation runs on absolute spreads against the global
+        // median magnitude: session profiles calibrate how far the spread
+        // stretches per regime and how fast magnitude reverts. Signed
+        // directions would cancel across ordered pairs and fuse the whole
+        // window into one open episode.
+        let mut all_abs: Vec<PairObservation> = all
+            .iter()
+            .map(|o| PairObservation {
+                ts_ms: o.ts_ms,
+                spread_bps: o.spread_bps.abs(),
+            })
+            .collect();
+        all_abs.sort_by_key(|o| o.ts_ms);
+        let abs_vals: Vec<f64> = all_abs.iter().map(|o| o.spread_bps).collect();
+        let global_med = match winsorized_median(&abs_vals) {
+            Some(g) if g.is_finite() => g,
+            _ => return Ok(0),
+        };
+        let spreads: Vec<f64> = abs_vals.clone();
+        let n_all = spreads.len();
+        let sigma_abs = if n_all >= 2 {
+            let v = spreads.iter().map(|x| (x - global_med).powi(2)).sum::<f64>()
+                / (n_all - 1) as f64;
+            if v.is_finite() && v >= 0.0 {
+                v.sqrt()
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let have_moments = n_all >= 2 && sigma_abs.is_finite() && sigma_abs > 0.0;
+
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut written = 0usize;
+        // Per-session aggregates first so hour bins can reference them.
+        let mut session_shrunk: HashMap<String, f64> = HashMap::new();
+        {
+            let mut upsert = tx.prepare(
+                "INSERT OR REPLACE INTO session_profiles
+                 (symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
+                  rv_bps, win_rate, mean_hold_s, provisional, updated_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )?;
+            for sess in SessionId::all() {
+                let sub: Vec<PairObservation> = all_abs
+                    .iter()
+                    .filter(|o| session_of(o.ts_ms) == sess)
+                    .cloned()
+                    .collect();
+                let abs_vals: Vec<f64> = sub.iter().map(|o| o.spread_bps).collect();
+                let stats = session_stats(&abs_vals, global_med);
+                let sid = sess.as_str().to_string();
+                if sub.is_empty() {
+                    upsert.execute(params![
+                        canonical,
+                        sid,
+                        0,
+                        Option::<f64>::None,
+                        Option::<f64>::None,
+                        Option::<f64>::None,
+                        Option::<f64>::None,
+                        Option::<f64>::None,
+                        1,
+                        now_ms
+                    ])?;
+                    written += 1;
+                    continue;
+                }
+                let (n_episodes, win_rate, mean_hold_s) = if have_moments {
+                    let rs = reversion_stats(&sub, global_med, sigma_abs, 2.0, 2.0, 3.0, 1);
+                    (
+                        rs.episodes as i64,
+                        rs.p_win,
+                        rs.median_converge_secs,
+                    )
+                } else {
+                    (0i64, None, None)
+                };
+                let p90 = percentile_sorted(
+                    &{
+                        let mut v = abs_vals.clone();
+                        v.sort_by(|a, b| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        v
+                    },
+                    0.90,
+                );
+                let rv = if sub.len() >= 2 {
+                    let v = sub
+                        .iter()
+                        .map(|o| (o.spread_bps - global_med).powi(2))
+                        .sum::<f64>()
+                        / (sub.len() - 1) as f64;
+                    if v.is_finite() && v >= 0.0 {
+                        Some(v.sqrt())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let provisional = (n_episodes as usize) < SESSION_MIN_EPISODES;
+                if let Some(shrunk) = stats.shrunk_med {
+                    if shrunk.is_finite() {
+                        session_shrunk.insert(sid.clone(), shrunk);
+                    }
+                }
+                upsert.execute(params![
+                    canonical,
+                    sid,
+                    n_episodes,
+                    stats.shrunk_med,
+                    p90,
+                    rv,
+                    win_rate,
+                    mean_hold_s,
+                    if provisional { 1 } else { 0 },
+                    now_ms
+                ])?;
+                written += 1;
+            }
+        }
+        {
+            let mut upsert = tx.prepare(
+                "INSERT OR REPLACE INTO session_hour_bins
+                 (symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for hour in 0..24i64 {
+                let vals: Vec<f64> = all_abs
+                    .iter()
+                    .filter(|o| hour_of_day_utc(o.ts_ms) == Some(hour as u32))
+                    .map(|o| o.spread_bps)
+                    .collect();
+                let med = winsorized_median(&vals);
+                let session_of_hour = SessionId::all().into_iter().find(|s| {
+                    let open = s.open_hour_utc() as i64;
+                    let next = match s {
+                        SessionId::Asia => 8,
+                        SessionId::Europe => 13,
+                        SessionId::Overlap => 17,
+                        SessionId::UsLate => 22,
+                        SessionId::Dead => 24,
+                    };
+                    hour >= open && hour < next
+                });
+                let modulator = match (
+                    med,
+                    session_of_hour
+                        .as_ref()
+                        .and_then(|s| session_shrunk.get(s.as_str())),
+                ) {
+                    (Some(m), Some(sm)) => hour_modulator(m, *sm),
+                    _ => 1.0,
+                };
+                let provisional = vals.len() < SESSION_MIN_EPISODES;
+                let modulator = if provisional { 1.0 } else { modulator };
+                upsert.execute(params![
+                    canonical,
+                    hour,
+                    vals.len() as i64,
+                    med,
+                    modulator,
+                    if provisional { 1 } else { 0 },
+                    now_ms
+                ])?;
+            }
+        }
+        tx.commit()?;
+        Ok(written)
+    }
+
+    pub fn phase2_har_anchor(&self, symbol: &str) -> anyhow::Result<Option<HarAnchorRow>> {
+        let symbol = normalize_symbol(symbol)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
+                    forecast_rv_bps, trailing_mean_rv_bps, updated_ts
+             FROM har_anchors WHERE symbol IN ({placeholders}) LIMIT 1"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        let row = stmt
+            .query_map(rusqlite::params_from_iter(params), |r| {
+                Ok(HarAnchorRow {
+                    symbol: r.get(0)?,
+                    intercept: r.get(1)?,
+                    b_daily: r.get(2)?,
+                    b_weekly: r.get(3)?,
+                    b_monthly: r.get(4)?,
+                    r2: r.get(5)?,
+                    n_days: r.get(6)?,
+                    forecast_rv_bps: r.get(7)?,
+                    trailing_mean_rv_bps: r.get(8)?,
+                    updated_ts: r.get(9)?,
+                })
+            })?
+            .next()
+            .transpose()?;
+        Ok(row)
+    }
+
+    pub fn phase2_upsert_har_anchor(&self, row: &HarAnchorRow) -> anyhow::Result<()> {
+        let symbol = canonical_base(&row.symbol);
+        if symbol.is_empty() {
+            anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
+        }
+        for (name, v) in [
+            ("intercept", row.intercept),
+            ("b_daily", row.b_daily),
+            ("b_weekly", row.b_weekly),
+            ("b_monthly", row.b_monthly),
+        ] {
+            if !v.is_finite() {
+                anyhow::bail!("non-finite HAR anchor {name}");
+            }
+        }
+        if !(0.0..=1.0).contains(&row.r2) || !row.r2.is_finite() {
+            anyhow::bail!("HAR anchor r2 outside 0..=1");
+        }
+        if row.n_days < 0 || row.updated_ts < 0 {
+            anyhow::bail!("negative HAR anchor day count or timestamp");
+        }
+        if !(row.forecast_rv_bps.is_finite()
+            && row.forecast_rv_bps > 0.0
+            && row.trailing_mean_rv_bps.is_finite()
+            && row.trailing_mean_rv_bps > 0.0)
+        {
+            anyhow::bail!("non-positive HAR anchor forecast or trailing mean");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO har_anchors
+                 (symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
+                  forecast_rv_bps, trailing_mean_rv_bps, updated_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(symbol) DO UPDATE SET
+                 intercept = ?2, b_daily = ?3, b_weekly = ?4, b_monthly = ?5,
+                 r2 = ?6, n_days = ?7, forecast_rv_bps = ?8,
+                 trailing_mean_rv_bps = ?9, updated_ts = ?10",
+            params![
+                symbol,
+                row.intercept,
+                row.b_daily,
+                row.b_weekly,
+                row.b_monthly,
+                row.r2,
+                row.n_days,
+                row.forecast_rv_bps,
+                row.trailing_mean_rv_bps,
+                row.updated_ts
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn phase2_promotion_state(
+        &self,
+        symbol: &str,
+    ) -> anyhow::Result<Option<PromotionStateRow>> {
+        let symbol = normalize_symbol(symbol)?;
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts
+             FROM promotion_state WHERE symbol IN ({placeholders}) LIMIT 1"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        let row = stmt
+            .query_map(rusqlite::params_from_iter(params), |r| {
+                Ok(PromotionStateRow {
+                    symbol: r.get(0)?,
+                    status: r.get(1)?,
+                    fit_delta_bps: r.get(2)?,
+                    val_delta_bps: r.get(3)?,
+                    reason: r.get(4)?,
+                    updated_ts: r.get(5)?,
+                })
+            })?
+            .next()
+            .transpose()?;
+        Ok(row)
+    }
+
+    pub fn phase2_upsert_promotion_state(&self, row: &PromotionStateRow) -> anyhow::Result<()> {
+        let symbol = canonical_base(&row.symbol);
+        if symbol.is_empty() {
+            anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
+        }
+        if !matches!(row.status.as_str(), "promoted" | "held" | "demoted") {
+            anyhow::bail!("invalid promotion status '{}'", row.status);
+        }
+        for (name, v) in [
+            ("fit_delta", row.fit_delta_bps),
+            ("val_delta", row.val_delta_bps),
+        ] {
+            if !v.is_finite() {
+                anyhow::bail!("non-finite promotion {name}");
+            }
+        }
+        if row.reason.is_empty() || row.reason.len() > 512 || row.updated_ts < 0 {
+            anyhow::bail!("invalid promotion reason or timestamp");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO promotion_state
+                 (symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(symbol) DO UPDATE SET
+                 status = ?2, fit_delta_bps = ?3, val_delta_bps = ?4,
+                 reason = ?5, updated_ts = ?6",
+            params![
+                symbol,
+                row.status,
+                row.fit_delta_bps,
+                row.val_delta_bps,
+                row.reason,
+                row.updated_ts
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_autotune_apply_event(
+        &self,
+        symbol: &str,
+        applied_json: &str,
+        detail_json: &str,
+        ts_ms: i64,
+    ) -> anyhow::Result<i64> {
+        let symbol = normalize_symbol(symbol)?;
+        if ts_ms < 0 {
+            anyhow::bail!("negative autotune apply timestamp");
+        }
+        for (name, j) in [("applied", applied_json), ("detail", detail_json)] {
+            if j.len() < 2 || j.len() > 8192 {
+                anyhow::bail!("autotune apply {name} snapshot has invalid size");
+            }
+            if serde_json::from_str::<serde_json::Value>(j).is_err() {
+                anyhow::bail!("autotune apply {name} snapshot is not valid JSON");
+            }
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO autotune_apply_events (symbol, applied_json, detail_json, ts_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![symbol, applied_json, detail_json, ts_ms],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn recent_autotune_apply_events(
+        &self,
+        symbol: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<AutotuneApplyEventRow>> {
+        let symbol = normalize_symbol(symbol)?;
+        if limit <= 0 {
+            anyhow::bail!("event limit must be positive");
+        }
+        let limit = limit.min(1000);
+        let keys = spread_symbol_aliases(&symbol);
+        let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, symbol, applied_json, detail_json, ts_ms
+             FROM autotune_apply_events WHERE symbol IN ({placeholders})
+             ORDER BY ts_ms DESC, id DESC LIMIT ?"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut binds: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        binds.push(&limit);
+        let rows = stmt.query_map(rusqlite::params_from_iter(binds), |r| {
+            Ok(AutotuneApplyEventRow {
+                id: r.get(0)?,
+                symbol: r.get(1)?,
+                applied_json: r.get(2)?,
+                detail_json: r.get(3)?,
+                ts_ms: r.get(4)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn kv_get(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row("SELECT v FROM kv WHERE k = ?1", [key], |r| r.get(0))
+            .optional()?)
+    }
+
+    pub fn kv_set(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        if key.is_empty() || key.len() > 128 {
+            anyhow::bail!("invalid kv key");
+        }
+        if value.len() > 4096 {
+            anyhow::bail!("invalid kv value");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO kv (k, v) VALUES (?1, ?2)
+             ON CONFLICT(k) DO UPDATE SET v = ?2",
+            rusqlite::params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn kv_delete(&self, key: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM kv WHERE k = ?1", [key])?;
+        Ok(())
+    }
+
+    pub fn db_size_bytes(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock();
+        let page_count: i64 =
+            conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 =
+            conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok((page_count.max(0) as u64) * (page_size.max(0) as u64))
+    }
+
+    pub fn delete_spread_samples_before(&self, retain_after_ts_ms: i64) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute(
+            "DELETE FROM spread_samples WHERE ts_ms < ?1",
+            [retain_after_ts_ms],
+        )?)
+    }
+
+    pub fn delete_oldest_spread_samples(&self, limit: u64) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute(
+            "DELETE FROM spread_samples WHERE id IN (
+                 SELECT id FROM spread_samples ORDER BY ts_ms ASC, id ASC LIMIT ?1
+             )",
+            [limit as i64],
+        )?)
+    }
+
+    pub fn spread_sample_count(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))?;
+        Ok(n.max(0) as u64)
     }
 
     /// Set or clear a ticker's monitor/strategy exemption. Exempt tickers are
@@ -1671,6 +3010,255 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
     pub fn clear_ticker_exemptions(&self) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
         Ok(conn.execute("DELETE FROM ticker_exemptions", [])?)
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Balance attribution: expected equity + external-delta events        */
+    /* ------------------------------------------------------------------ */
+
+    /* ------------------------------------------------------------------ */
+    /* Margin utilisation snapshots (24h time-weighted average history)    */
+    /* ------------------------------------------------------------------ */
+
+    /// Append one margin-utilisation observation for a paper venue. The
+    /// writer enforces the cadence cap (see `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`
+    /// in commands); this method validates and persists unconditionally.
+    pub fn record_margin_snapshot(
+        &self,
+        venue: &str,
+        account_id: &str,
+        ts_ms: i64,
+        equity: f64,
+        used_margin: f64,
+        rate_pct: f64,
+    ) -> anyhow::Result<()> {
+        let venue = normalize_venue(venue)?;
+        let account_id = account_id.trim().to_lowercase();
+        if account_id.len() > 128 {
+            anyhow::bail!("margin snapshot account id must fit in 128 characters");
+        }
+        if ts_ms < 0 {
+            anyhow::bail!("margin snapshot timestamp must be non-negative");
+        }
+        for (name, v) in [("equity", equity), ("used margin", used_margin), ("rate", rate_pct)] {
+            if !v.is_finite() || v < 0.0 {
+                anyhow::bail!("margin snapshot {name} must be finite and non-negative");
+            }
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO margin_snapshots
+                 (venue, account_id, ts_ms, equity, used_margin, rate_pct)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![venue, account_id, ts_ms, equity, used_margin, rate_pct],
+        )?;
+        Ok(())
+    }
+
+    /// `(ts_ms, rate_pct)` points for one venue at or after `since_ms`,
+    /// oldest first. Callers cap the window; the table itself is bounded by
+    /// the shared retention-days prune.
+    pub fn list_margin_snapshots(
+        &self,
+        venue: &str,
+        since_ms: i64,
+    ) -> anyhow::Result<Vec<MarginSnapshot>> {
+        let venue = normalize_venue(venue)?;
+        if since_ms < 0 {
+            anyhow::bail!("margin snapshot window start must be non-negative");
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT venue, account_id, ts_ms, equity, used_margin, rate_pct
+             FROM margin_snapshots WHERE venue = ?1 AND ts_ms >= ?2
+             ORDER BY ts_ms ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![venue, since_ms], |r| {
+                Ok(MarginSnapshot {
+                    venue: r.get(0)?,
+                    account_id: r.get(1)?,
+                    ts_ms: r.get(2)?,
+                    equity: r.get(3)?,
+                    used_margin: r.get(4)?,
+                    rate_pct: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete snapshots older than `before_ms` (the shared retention-days
+    /// cutoff). Returns rows removed.
+    pub fn prune_margin_snapshots(&self, before_ms: i64) -> anyhow::Result<usize> {
+        if before_ms < 0 {
+            anyhow::bail!("margin snapshot prune cutoff must be non-negative");
+        }
+        let conn = self.conn.lock();
+        Ok(conn.execute("DELETE FROM margin_snapshots WHERE ts_ms < ?1", [before_ms])?)
+    }
+
+    /// Stored baseline behind one paper account, if any.
+    pub fn get_equity_expectation(
+        &self,
+        account_id: &str,
+    ) -> anyhow::Result<Option<(f64, String, i64)>> {
+        let account_id = normalize_id(account_id)?;
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT expected, last_pos_sig, last_poll_ms
+                 FROM paper_equity_expectations WHERE account_id = ?1",
+                [&account_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?)
+    }
+
+    /// Persist (or refresh) one paper account's expected-equity baseline.
+    pub fn set_equity_expectation(
+        &self,
+        account_id: &str,
+        expected: f64,
+        pos_sig: &str,
+        poll_ms: i64,
+    ) -> anyhow::Result<()> {
+        let account_id = normalize_id(account_id)?;
+        if !expected.is_finite() || expected < 0.0 {
+            anyhow::bail!("expected equity must be finite and non-negative");
+        }
+        if poll_ms < 0 {
+            anyhow::bail!("poll timestamp must be non-negative");
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO paper_equity_expectations
+                 (account_id, expected, last_pos_sig, last_poll_ms, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(account_id) DO UPDATE SET
+                 expected = excluded.expected,
+                 last_pos_sig = excluded.last_pos_sig,
+                 last_poll_ms = excluded.last_poll_ms,
+                 updated_at = excluded.updated_at",
+            params![account_id, expected, pos_sig, poll_ms, now],
+        )?;
+        Ok(())
+    }
+
+    fn insert_equity_event(&self, draft: &EquityEventDraft) -> anyhow::Result<AccountEquityEvent> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO account_equity_events
+                 (account_id, ts_ms, expected, actual, delta, kind, note)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                draft.account_id,
+                draft.ts_ms,
+                draft.expected,
+                draft.actual,
+                draft.delta,
+                draft.kind,
+                draft.note
+            ],
+        )?;
+        let id = conn.last_insert_rowid();
+        Ok(AccountEquityEvent {
+            id,
+            account_id: draft.account_id.clone(),
+            ts_ms: draft.ts_ms,
+            expected: draft.expected,
+            actual: draft.actual,
+            delta: draft.delta,
+            kind: draft.kind.clone(),
+            note: draft.note.clone(),
+        })
+    }
+
+    /// Compare one poll of actual equity against the stored baseline and
+    /// persist the outcome. A nonzero delta records an external-delta event
+    /// and rebases the baseline to actual so total PnL never absorbs manual
+    /// flows; a comparison gap records no event, only a coverage note.
+    pub fn check_account_equity(
+        &self,
+        account_id: &str,
+        actual: f64,
+        pos_sig: &str,
+        now_ms: i64,
+    ) -> anyhow::Result<EquityCheckReport> {
+        let account_id = normalize_id(account_id)?;
+        if now_ms < 0 {
+            anyhow::bail!("poll timestamp must be non-negative");
+        }
+        let prev = self.get_equity_expectation(&account_id)?;
+        let gap_ms = prev
+            .as_ref()
+            .map(|(_, _, last_poll)| now_ms.saturating_sub(*last_poll));
+        let expected = prev.as_ref().map(|(e, _, _)| *e);
+        let positions_changed = prev
+            .as_ref()
+            .is_some_and(|(_, sig, _)| sig.as_str() != pos_sig);
+        let positions_open = !pos_sig.is_empty();
+        let outcome =
+            crate::equity_attribution::check_equity_delta(expected, actual, positions_changed, positions_open, gap_ms);
+        if outcome.rebased && actual.is_finite() {
+            self.set_equity_expectation(&account_id, actual, pos_sig, now_ms)?;
+        } else if prev.is_some() {
+            let keep = expected.unwrap_or(actual);
+            if keep.is_finite() {
+                self.set_equity_expectation(&account_id, keep, pos_sig, now_ms)?;
+            }
+        }
+        let event = match outcome.event_kind {
+            Some(kind) => Some(self.insert_equity_event(&EquityEventDraft {
+                account_id: account_id.clone(),
+                ts_ms: now_ms,
+                expected: expected.unwrap_or(actual),
+                actual,
+                delta: outcome.delta,
+                kind,
+                note: outcome.note.clone().unwrap_or_default(),
+            })?),
+            None => None,
+        };
+        Ok(EquityCheckReport {
+            event,
+            note: outcome.note,
+        })
+    }
+
+    /// Recent external-delta events, newest first. `limit` clamps to 1..=500.
+    pub fn list_equity_events(
+        &self,
+        account_id: Option<&str>,
+        limit: u32,
+    ) -> anyhow::Result<Vec<AccountEquityEvent>> {
+        let limit = limit.clamp(1, 500) as i64;
+        let conn = self.conn.lock();
+        let mut out = Vec::new();
+        if let Some(raw) = account_id {
+            let account_id = normalize_id(raw)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, account_id, ts_ms, expected, actual, delta, kind, note
+                 FROM account_equity_events WHERE account_id = ?1
+                 ORDER BY ts_ms DESC, id DESC LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![account_id, limit], equity_event_from_row)?;
+            for r in rows {
+                out.push(r?);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT id, account_id, ts_ms, expected, actual, delta, kind, note
+                 FROM account_equity_events
+                 ORDER BY ts_ms DESC, id DESC LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([limit], equity_event_from_row)?;
+            for r in rows {
+                out.push(r?);
+            }
+        }
+        Ok(out)
     }
 
     /// Account tiers of enabled accounts on a venue — the venue's shared-IP
@@ -1718,7 +3306,215 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    pub fn radar_bot_config_json(&self) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT config_json FROM radar_bot_config WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn save_radar_bot_config_json(&self, json: &str) -> anyhow::Result<()> {
+        if json.is_empty() || json.len() > 64 * 1024 {
+            anyhow::bail!("invalid radar bot config payload");
+        }
+        if serde_json::from_str::<serde_json::Value>(json).is_err() {
+            anyhow::bail!("radar bot config payload is not valid JSON");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO radar_bot_config (id, config_json, updated_at)
+             VALUES (1, ?1, ?2)
+             ON CONFLICT(id) DO UPDATE SET config_json = ?1, updated_at = ?2",
+            params![json, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn count_bot_decisions_since(&self, since_ts_ms: i64) -> anyhow::Result<Vec<(String, i64)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT new_status, COUNT(*) FROM monitor_signal_events
+             WHERE trigger = 'bot_decision' AND ts_ms >= ?1
+             GROUP BY new_status",
+        )?;
+        let rows = stmt.query_map([since_ts_ms], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn upsert_bot_position(&self, row: &BotPositionRow) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(&row.symbol)?;
+        let buy_venue = normalize_venue(&row.buy_venue)?;
+        let sell_venue = normalize_venue(&row.sell_venue)?;
+        if row.entry_ts_ms < 0 || row.deadline_ms < 0 || row.last_seen_ms < 0 {
+            anyhow::bail!("negative bot position timestamp");
+        }
+        if let Some(u) = row.unwatched_since_ms {
+            if u < 0 {
+                anyhow::bail!("negative bot position unwatched timestamp");
+            }
+        }
+        for (name, v) in [
+            ("entry_dev", row.entry_dev_bps),
+            ("friction_band", row.friction_band_bps),
+            ("size_usd", row.size_usd),
+        ] {
+            if !v.is_finite() {
+                anyhow::bail!("non-finite bot position {name}");
+            }
+        }
+        if row.friction_band_bps < 0.0 || row.size_usd <= 0.0 {
+            anyhow::bail!("invalid bot position band/size");
+        }
+        if let Some(b) = row.baseline_bps {
+            if !b.is_finite() {
+                anyhow::bail!("non-finite bot position baseline");
+            }
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO radar_bot_positions
+                 (symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
+                  baseline_bps, friction_band_bps, size_usd, deadline_ms,
+                  unwatched_since_ms, last_seen_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(symbol, buy_venue, sell_venue) DO UPDATE SET
+                 entry_ts_ms = ?4, entry_dev_bps = ?5, baseline_bps = ?6,
+                 friction_band_bps = ?7, size_usd = ?8, deadline_ms = ?9,
+                 unwatched_since_ms = ?10, last_seen_ms = ?11",
+            params![
+                symbol,
+                buy_venue,
+                sell_venue,
+                row.entry_ts_ms,
+                row.entry_dev_bps,
+                row.baseline_bps,
+                row.friction_band_bps,
+                row.size_usd,
+                row.deadline_ms,
+                row.unwatched_since_ms,
+                row.last_seen_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_bot_position(
+        &self,
+        symbol: &str,
+        buy_venue: &str,
+        sell_venue: &str,
+    ) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(symbol)?;
+        let buy_venue = normalize_venue(buy_venue)?;
+        let sell_venue = normalize_venue(sell_venue)?;
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM radar_bot_positions WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3",
+            params![symbol, buy_venue, sell_venue],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_bot_positions(&self) -> anyhow::Result<Vec<BotPositionRow>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
+                    baseline_bps, friction_band_bps, size_usd, deadline_ms,
+                    unwatched_since_ms, last_seen_ms
+             FROM radar_bot_positions ORDER BY entry_ts_ms, symbol",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(BotPositionRow {
+                symbol: r.get(0)?,
+                buy_venue: r.get(1)?,
+                sell_venue: r.get(2)?,
+                entry_ts_ms: r.get(3)?,
+                entry_dev_bps: r.get(4)?,
+                baseline_bps: r.get(5)?,
+                friction_band_bps: r.get(6)?,
+                size_usd: r.get(7)?,
+                deadline_ms: r.get(8)?,
+                    unwatched_since_ms: r.get(9)?,
+                    last_seen_ms: r.get(10)?,
+                })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn record_spatial_baseline(&self, row: &SpatialEntryBaseline) -> anyhow::Result<()> {
+        let signal_id = normalize_id(&row.signal_id)?;
+        let symbol = normalize_symbol(&row.symbol)?;
+        let buy_venue = normalize_venue(&row.buy_venue)?;
+        let sell_venue = normalize_venue(&row.sell_venue)?;
+        if !row.entry_net_bps.is_finite() {
+            anyhow::bail!("non-finite spatial entry edge");
+        }
+        if let Some(b) = row.baseline_bps {
+            if !b.is_finite() {
+                anyhow::bail!("non-finite spatial entry baseline");
+            }
+        }
+        if row.entry_ts_ms < 0 {
+            anyhow::bail!("negative spatial entry timestamp");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO spatial_entry_baseline
+                 (signal_id, symbol, buy_venue, sell_venue,
+                  entry_net_bps, baseline_bps, entry_ts_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(signal_id) DO UPDATE SET
+                 symbol = ?2, buy_venue = ?3, sell_venue = ?4,
+                 entry_net_bps = ?5, baseline_bps = ?6, entry_ts_ms = ?7",
+            params![
+                signal_id,
+                symbol,
+                buy_venue,
+                sell_venue,
+                row.entry_net_bps,
+                row.baseline_bps,
+                row.entry_ts_ms
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn spatial_baseline_for_signal(
+        &self,
+        signal_id: &str,
+    ) -> anyhow::Result<Option<SpatialEntryBaseline>> {
+        let signal_id = normalize_id(signal_id)?;
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT signal_id, symbol, buy_venue, sell_venue,
+                    entry_net_bps, baseline_bps, entry_ts_ms
+             FROM spatial_entry_baseline WHERE signal_id = ?1",
+            [&signal_id],
+            |r| {
+                Ok(SpatialEntryBaseline {
+                    signal_id: r.get(0)?,
+                    symbol: r.get(1)?,
+                    buy_venue: r.get(2)?,
+                    sell_venue: r.get(3)?,
+                    entry_net_bps: r.get(4)?,
+                    baseline_bps: r.get(5)?,
+                    entry_ts_ms: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(anyhow::Error::from)
+    }
+
     /// Upsert one pair signal's lifecycle state.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_monitor_signal(
         &self,
         symbol: &str,
@@ -1813,6 +3609,177 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// Append one lifecycle audit event. `old_status` is `None` on first
+    /// sighting; `trigger` is `transition` when the status changed and
+    /// `heartbeat` for the minute-bucketed still-active re-assertion.
+    /// Non-finite metric snapshots are rejected rather than persisted as
+    /// plausible numbers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_monitor_signal_event(
+        &self,
+        symbol: &str,
+        buy_venue: &str,
+        sell_venue: &str,
+        ts_ms: i64,
+        old_status: Option<&str>,
+        new_status: &str,
+        edge_bps: Option<f64>,
+        dev_bps: Option<f64>,
+        p_win: Option<f64>,
+        economics_json: Option<&str>,
+        trigger: &str,
+    ) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(symbol)?;
+        let buy_venue = normalize_venue(buy_venue)?;
+        let sell_venue = normalize_venue(sell_venue)?;
+        if ts_ms < 0 {
+            anyhow::bail!("negative signal event timestamp");
+        }
+        const LIFECYCLE: [&str; 5] = ["collecting", "watching", "signaled", "qualified", "stale"];
+        const DECISIONS: [&str; 3] = ["bot_enter", "bot_skip", "bot_exit"];
+        if let Some(old) = old_status {
+            if !LIFECYCLE.contains(&old) {
+                anyhow::bail!("invalid old monitor signal status '{old}'");
+            }
+        }
+        if !(LIFECYCLE.contains(&new_status) || DECISIONS.contains(&new_status)) {
+            anyhow::bail!("invalid new monitor signal status '{new_status}'");
+        }
+        if !matches!(trigger, "transition" | "heartbeat" | "bot_decision") {
+            anyhow::bail!("invalid signal event trigger '{trigger}'");
+        }
+        for (name, v) in [("edge", edge_bps), ("dev", dev_bps), ("p_win", p_win)] {
+            if let Some(x) = v {
+                if !x.is_finite() {
+                    anyhow::bail!("non-finite signal event {name}");
+                }
+            }
+        }
+        if let Some(p) = p_win {
+            if !(0.0..=1.0).contains(&p) {
+                anyhow::bail!("signal event p_win outside 0..=1");
+            }
+        }
+        if let Some(j) = economics_json {
+            if j.len() > 8192 {
+                anyhow::bail!("signal event economics snapshot too large");
+            }
+            if !j.is_empty() && serde_json::from_str::<serde_json::Value>(j).is_err() {
+                anyhow::bail!("signal event economics snapshot is not valid JSON");
+            }
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO monitor_signal_events
+                 (symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
+                  edge_bps, dev_bps, p_win, economics_json, trigger)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                symbol,
+                buy_venue,
+                sell_venue,
+                ts_ms,
+                old_status,
+                new_status,
+                edge_bps,
+                dev_bps,
+                p_win,
+                economics_json,
+                trigger
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Recent audit events for one pair (or every pair when the key is
+    /// `None`), newest first, bounded by `limit`. Fail-closed read path for
+    /// the future bot + debugging IPC.
+    pub fn recent_monitor_signal_events(
+        &self,
+        symbol: Option<&str>,
+        buy_venue: Option<&str>,
+        sell_venue: Option<&str>,
+        limit: i64,
+    ) -> anyhow::Result<Vec<MonitorSignalEventRow>> {
+        if limit <= 0 {
+            anyhow::bail!("event limit must be positive");
+        }
+        let limit = limit.min(10_000);
+        let mut sql = String::from(
+            "SELECT id, symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
+                    edge_bps, dev_bps, p_win, economics_json, trigger
+             FROM monitor_signal_events WHERE 1=1",
+        );
+        let mut binds: Vec<String> = Vec::new();
+        if let Some(s) = symbol {
+            sql.push_str(" AND symbol = ?");
+            binds.push(normalize_symbol(s)?);
+        }
+        if let Some(b) = buy_venue {
+            sql.push_str(" AND buy_venue = ?");
+            binds.push(normalize_venue(b)?);
+        }
+        if let Some(s) = sell_venue {
+            sql.push_str(" AND sell_venue = ?");
+            binds.push(normalize_venue(s)?);
+        }
+        sql.push_str(" ORDER BY ts_ms DESC, id DESC LIMIT ?");
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> =
+            binds.iter().map(|b| b as &dyn rusqlite::types::ToSql).collect();
+        let mut all_refs: Vec<&dyn rusqlite::types::ToSql> = refs;
+        all_refs.push(&limit);
+        let rows = stmt.query_map(rusqlite::params_from_iter(all_refs), |r| {
+            Ok(MonitorSignalEventRow {
+                id: r.get(0)?,
+                symbol: r.get(1)?,
+                buy_venue: r.get(2)?,
+                sell_venue: r.get(3)?,
+                ts_ms: r.get(4)?,
+                old_status: r.get(5)?,
+                new_status: r.get(6)?,
+                edge_bps: r.get(7)?,
+                dev_bps: r.get(8)?,
+                p_win: r.get(9)?,
+                economics_json: r.get(10)?,
+                trigger: r.get(11)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn monitor_signal_event_count(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM monitor_signal_events", [], |r| {
+            r.get(0)
+        })?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// Bound the audit log with the shared spread-sample day cutoff plus the
+    /// independent `MONITOR_SIGNAL_EVENTS_MAX_ROWS` cap (newest rows survive).
+    /// Derived session profiles are never touched here.
+    pub fn prune_monitor_signal_events(
+        &self,
+        retain_after_ts_ms: i64,
+        max_rows: i64,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM monitor_signal_events WHERE ts_ms < ?1",
+            [retain_after_ts_ms],
+        )?;
+        conn.execute(
+            "DELETE FROM monitor_signal_events WHERE id IN (
+                 SELECT id FROM monitor_signal_events
+                 ORDER BY ts_ms DESC, id DESC LIMIT -1 OFFSET ?1
+             )",
+            [max_rows],
+        )?;
+        Ok(())
+    }
+
     fn legs_for(conn: &Connection, signal_id: &str) -> rusqlite::Result<Vec<SignalLeg>> {
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
@@ -1852,7 +3819,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 6);
+            assert_eq!(version, 16);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -1913,14 +3880,14 @@ mod tests {
     fn test_default_account_lifecycle() {
         let store = StateStore::open_in_memory().unwrap();
         let first = store
-            .upsert_account("hl_main", "HyperLiquid", "Main", true, false, "standard")
+            .upsert_account("hl_main", "HyperLiquid", "Main", true, false, "standard", None)
             .unwrap();
         assert!(first.is_default);
         assert!(store.has_enabled_account("hyperliquid").unwrap());
         assert!(!store.has_enabled_account("lighter").unwrap());
 
         let second = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard")
+            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard", None)
             .unwrap();
         assert!(!second.is_default);
         assert_eq!(
@@ -1929,29 +3896,29 @@ mod tests {
         );
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", true, false, "standard")
+            .upsert_account("hl_zulu", "hyperliquid", "Zulu", true, false, "standard", None)
             .unwrap();
         store.set_default_account("hyperliquid", "hl_zulu").unwrap();
         assert!(store.get_account("hl_zulu").unwrap().unwrap().is_default);
         assert!(!store.get_account("hl_main").unwrap().unwrap().is_default);
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", false, false, "standard")
+            .upsert_account("hl_zulu", "hyperliquid", "Zulu", false, false, "standard", None)
             .unwrap();
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
         assert_eq!(promoted.id, "hl_alt");
 
         store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", false, false, "standard")
+            .upsert_account("hl_alt", "hyperliquid", "Alt", false, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("hl_main", "hyperliquid", "Main", false, false, "standard")
+            .upsert_account("hl_main", "hyperliquid", "Main", false, false, "standard", None)
             .unwrap();
         assert!(store.default_account("hyperliquid").unwrap().is_none());
         assert!(!store.has_enabled_account("hyperliquid").unwrap());
 
         let reenabled = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard")
+            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard", None)
             .unwrap();
         assert!(reenabled.is_default);
     }
@@ -1960,13 +3927,13 @@ mod tests {
     fn test_delete_default_promotes_alphabetically_first_enabled() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("a_main", "hyperliquid", "Main", true, true, "standard")
+            .upsert_account("a_main", "hyperliquid", "Main", true, true, "standard", None)
             .unwrap();
         store
-            .upsert_account("a_zulu", "hyperliquid", "Zulu", true, false, "standard")
+            .upsert_account("a_zulu", "hyperliquid", "Zulu", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("a_beta", "hyperliquid", "Beta", true, false, "standard")
+            .upsert_account("a_beta", "hyperliquid", "Beta", true, false, "standard", None)
             .unwrap();
         assert!(store.delete_account("a_main").unwrap());
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
@@ -1977,10 +3944,10 @@ mod tests {
     fn test_validation_and_immutable_venue() {
         let store = StateStore::open_in_memory().unwrap();
         assert!(store
-            .upsert_account("", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("", "hyperliquid", "Main", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("bad id", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("bad id", "hyperliquid", "Main", true, false, "standard", None)
             .is_err());
         assert!(store
             .upsert_account(
@@ -1989,20 +3956,21 @@ mod tests {
                 "Main",
                 true,
                 false,
-                "standard"
+                "standard",
+                None
             )
             .is_err());
         assert!(store
-            .upsert_account("a", "", "Main", true, false, "standard")
+            .upsert_account("a", "", "Main", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("a", "bad venue", "Main", true, false, "standard")
+            .upsert_account("a", "bad venue", "Main", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", "", true, false, "standard")
+            .upsert_account("a", "hyperliquid", "", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", &"y".repeat(81), true, false, "standard")
+            .upsert_account("a", "hyperliquid", &"y".repeat(81), true, false, "standard", None)
             .is_err());
         assert!(store
             .upsert_account(
@@ -2011,18 +3979,19 @@ mod tests {
                 "bad\u{0007}label",
                 true,
                 false,
-                "standard"
+                "standard",
+                None
             )
             .is_err());
 
         store
-            .upsert_account("acct1", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("acct1", "hyperliquid", "Main", true, false, "standard", None)
             .unwrap();
         assert!(store
-            .upsert_account("acct1", "lighter", "Moved", true, false, "standard")
+            .upsert_account("acct1", "lighter", "Moved", true, false, "standard", None)
             .is_err());
         let renamed = store
-            .upsert_account("acct1", "HyperLiquid", "Renamed", true, false, "standard")
+            .upsert_account("acct1", "HyperLiquid", "Renamed", true, false, "standard", None)
             .unwrap();
         assert_eq!(renamed.venue, "hyperliquid");
         assert_eq!(renamed.label, "Renamed");
@@ -2032,13 +4001,13 @@ mod tests {
     fn test_label_uniqueness_scoped_to_venue() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", None)
             .unwrap();
         assert!(store
-            .upsert_account("a2", "hyperliquid", "MAIN", true, false, "standard")
+            .upsert_account("a2", "hyperliquid", "MAIN", true, false, "standard", None)
             .is_err());
         store
-            .upsert_account("a2", "lighter", "main", true, false, "standard")
+            .upsert_account("a2", "lighter", "main", true, false, "standard", None)
             .unwrap();
         assert_eq!(store.list_accounts(None).unwrap().len(), 2);
     }
@@ -2047,16 +4016,16 @@ mod tests {
     fn test_route_rules_and_canonicalization() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard")
+            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_off", "lighter", "LT Off", false, false, "standard")
+            .upsert_account("lt_off", "lighter", "LT Off", false, false, "standard", None)
             .unwrap();
 
         assert!(store
@@ -2104,10 +4073,10 @@ mod tests {
     fn test_referenced_account_delete_requires_route_removal() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
             .unwrap();
         store
             .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -2126,16 +4095,16 @@ mod tests {
     fn test_eligible_strategy_routes_filters() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard")
+            .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard")
+            .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard")
+            .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_b", "lighter", "LT B", true, false, "standard")
+            .upsert_account("lt_b", "lighter", "LT B", true, false, "standard", None)
             .unwrap();
 
         store
@@ -2148,7 +4117,7 @@ mod tests {
             .upsert_strategy_route("r3", "futures", "Stale", "hl_a", "lt_b", true)
             .unwrap();
         store
-            .upsert_account("lt_b", "lighter", "LT B", false, false, "standard")
+            .upsert_account("lt_b", "lighter", "LT B", false, false, "standard", None)
             .unwrap();
 
         let eligible = store
@@ -2179,10 +4148,10 @@ mod tests {
         {
             let store = StateStore::open(&file).unwrap();
             store
-                .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
+                .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
                 .unwrap();
             store
-                .upsert_account("lt_a", "lighter", "Alt", true, false, "standard")
+                .upsert_account("lt_a", "lighter", "Alt", true, false, "standard", None)
                 .unwrap();
             store
                 .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -2234,10 +4203,10 @@ mod tests {
     fn test_signal_lifecycle_blocks_then_frees_ticker() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "Main", true, false, "standard")
+            .upsert_account("lt_a", "lighter", "Main", true, false, "standard", None)
             .unwrap();
 
         let sig = store
@@ -2366,7 +4335,7 @@ mod tests {
 
         // account_has_signal_legs gates deletion.
         store
-            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
             .unwrap();
         assert!(!store.account_has_signal_legs("hl_a").unwrap());
         store
@@ -2374,6 +4343,51 @@ mod tests {
             .unwrap();
         assert!(store.account_has_signal_legs("hl_a").unwrap());
         assert!(store.delete_account("hl_a").is_err());
+    }
+
+    #[test]
+    fn test_spatial_baseline_roundtrip_and_validation() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(normalize_strategy_id("triangle").unwrap(), "triangle");
+        store
+            .record_signal_execution(&two_leg_signal("sig-base-1", "BTC-USDC", None, None))
+            .unwrap();
+        let row = SpatialEntryBaseline {
+            signal_id: "sig-base-1".into(),
+            symbol: "BTC-USDC".into(),
+            buy_venue: "hyperliquid".into(),
+            sell_venue: "lighter".into(),
+            entry_net_bps: 20.5,
+            baseline_bps: Some(12.0),
+            entry_ts_ms: 1_000_000,
+        };
+        store.record_spatial_baseline(&row).unwrap();
+        let got = store
+            .spatial_baseline_for_signal("sig-base-1")
+            .unwrap()
+            .expect("baseline present");
+        assert_eq!(got, row);
+        assert!(store
+            .spatial_baseline_for_signal("sig-missing")
+            .unwrap()
+            .is_none());
+        let mut bad = row.clone();
+        bad.signal_id = "sig-bad".into();
+        bad.entry_net_bps = f64::NAN;
+        assert!(store.record_spatial_baseline(&bad).is_err());
+        let mut bad = row.clone();
+        bad.signal_id = "sig-bad2".into();
+        bad.entry_ts_ms = -1;
+        assert!(store.record_spatial_baseline(&bad).is_err());
+        // Re-recording the same signal replaces the baseline (re-entry).
+        let mut updated = row.clone();
+        updated.entry_net_bps = 18.0;
+        store.record_spatial_baseline(&updated).unwrap();
+        let got = store
+            .spatial_baseline_for_signal("sig-base-1")
+            .unwrap()
+            .expect("baseline present");
+        assert_eq!(got.entry_net_bps, 18.0);
     }
 
     fn sample(venue_id: &str, mid: f64) -> VenueSampleEntry {
@@ -2451,6 +4465,179 @@ mod tests {
     }
 
     #[test]
+    fn test_spread_samples_merge_background_and_ui_keys() {
+        // Regression: the monitor + WS feed record under the canonical base
+        // ("BTC") while UI polls record under the full symbol ("BTC-USDC").
+        // Reads for either key must see both so unselected tickers keep a
+        // fresh trailing window from background recording alone.
+        let store = StateStore::open_in_memory().unwrap();
+        let now = 1_700_000_000_000i64;
+        store
+            .record_spread_samples("BTC", now - 1_000, &[sample("hyperliquid", 100.0)])
+            .unwrap();
+        store
+            .record_spread_samples("BTC-USDC", now - 60_000, &[sample("lighter", 101.0)])
+            .unwrap();
+
+        let via_ui = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+        assert_eq!(via_ui.len(), 2, "UI key must see background base-keyed rows");
+        let via_base = store.spread_samples("BTC", 0, i64::MAX).unwrap();
+        assert_eq!(via_base.len(), 2, "base key must see UI full-symbol rows");
+        // Trailing-window slice sees the fresh background row.
+        let windowed = store
+            .spread_samples("BTC-USDC", now - 5_000, now)
+            .unwrap();
+        assert_eq!(windowed.len(), 1);
+        assert_eq!(windowed[0].venue_id, "hyperliquid");
+        assert_eq!(
+            store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
+            Some(now - 60_000)
+        );
+        assert_eq!(
+            store.earliest_spread_sample_ts("BTC").unwrap(),
+            Some(now - 60_000)
+        );
+    }
+
+    #[test]
+    fn test_spread_samples_aliases_keep_symbols_isolated() {
+        // Alias merging must never leak one asset's rows into another's.
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_spread_samples("ETH", 1_000, &[sample("lighter", 50.0)])
+            .unwrap();
+        store
+            .record_spread_samples("ETH-USDC", 2_000, &[sample("lighter", 51.0)])
+            .unwrap();
+        store
+            .record_spread_samples("BTC", 1_500, &[sample("lighter", 100.0)])
+            .unwrap();
+        let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mid, 100.0);
+        assert_eq!(
+            store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
+            Some(1_500)
+        );
+    }
+
+    #[test]
+    fn test_kv_roundtrip_and_retention_keys() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(store.kv_get("retention.max_days").unwrap(), None);
+        store.kv_set("retention.max_days", "30").unwrap();
+        store.kv_set("retention.max_gb", "2.5").unwrap();
+        assert_eq!(
+            store.kv_get("retention.max_days").unwrap(),
+            Some("30".to_string())
+        );
+        assert_eq!(
+            store.kv_get("retention.max_gb").unwrap(),
+            Some("2.5".to_string())
+        );
+        store.kv_set("retention.max_days", "7").unwrap();
+        assert_eq!(
+            store.kv_get("retention.max_days").unwrap(),
+            Some("7".to_string())
+        );
+        store.kv_delete("retention.max_days").unwrap();
+        assert_eq!(store.kv_get("retention.max_days").unwrap(), None);
+        assert!(store.kv_set("", "x").is_err());
+    }
+
+    #[test]
+    fn test_kv_survives_reopen() {
+        let (dir, file) = temp_store_path("kv_reopen");
+        {
+            let store = StateStore::open(&file).unwrap();
+            store.kv_set("retention.max_days", "14").unwrap();
+            store.kv_set("retention.max_gb", "1.5").unwrap();
+        }
+        {
+            let reopened = StateStore::open(&file).unwrap();
+            assert_eq!(
+                reopened.kv_get("retention.max_days").unwrap(),
+                Some("14".to_string())
+            );
+            assert_eq!(
+                reopened.kv_get("retention.max_gb").unwrap(),
+                Some("1.5".to_string())
+            );
+            let version: i64 = reopened
+                .conn
+                .lock()
+                .query_row("PRAGMA user_version", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(version, 16);
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_retention_time_cutoff_deletes_oldest_first() {
+        let store = StateStore::open_in_memory().unwrap();
+        for i in 0..10 {
+            store
+                .record_spread_samples(
+                    "BTC-USDC",
+                    i * 1_000,
+                    &[sample("hyperliquid", 100.0 + i as f64)],
+                )
+                .unwrap();
+        }
+        let removed = store.delete_spread_samples_before(5_000).unwrap();
+        assert_eq!(removed, 5);
+        let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].ts_ms, 5_000);
+    }
+
+    #[test]
+    fn test_retention_cutoff_keeps_fresh_rows_across_alias_keys() {
+        // Retention is purely time-based: fresh background ("BTC") and UI
+        // ("BTC-USDC") rows must both survive a cutoff that drops old rows.
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_spread_samples("BTC", 1_000, &[sample("hyperliquid", 100.0)])
+            .unwrap();
+        store
+            .record_spread_samples("BTC-USDC", 2_000, &[sample("lighter", 101.0)])
+            .unwrap();
+        store
+            .record_spread_samples("BTC", 9_000, &[sample("hyperliquid", 102.0)])
+            .unwrap();
+        store
+            .record_spread_samples("BTC-USDC", 10_000, &[sample("lighter", 103.0)])
+            .unwrap();
+        let removed = store.delete_spread_samples_before(5_000).unwrap();
+        assert_eq!(removed, 2);
+        let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.ts_ms >= 5_000));
+    }
+
+    #[test]
+    fn test_retention_oldest_first_batch_delete() {
+        let store = StateStore::open_in_memory().unwrap();
+        for i in 0..10 {
+            store
+                .record_spread_samples(
+                    "BTC-USDC",
+                    i * 1_000,
+                    &[sample("hyperliquid", 100.0 + i as f64)],
+                )
+                .unwrap();
+        }
+        let removed = store.delete_oldest_spread_samples(3).unwrap();
+        assert_eq!(removed, 3);
+        let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+        assert_eq!(rows.len(), 7);
+        assert_eq!(rows[0].ts_ms, 3_000);
+        assert_eq!(store.spread_sample_count().unwrap(), 7);
+        assert!(store.db_size_bytes().unwrap() > 0);
+    }
+
+    #[test]
     fn test_spread_samples_prune_retention_and_cap() {
         let store = StateStore::open_in_memory().unwrap();
         for i in 0..10 {
@@ -2473,6 +4660,432 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ts_ms, 8_000);
         assert_eq!(rows[1].ts_ms, 9_000);
+    }
+
+    /* ------------------ signal-event audit log (V9) ------------------ */
+
+    #[test]
+    fn test_signal_events_append_readback_and_validation() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_monitor_signal_event(
+                "BTC",
+                "HyperLiquid",
+                "lighter",
+                60_000,
+                None,
+                "collecting",
+                Some(12.5),
+                Some(3.0),
+                Some(0.9),
+                Some(r#"{"friction_bps":5.0}"#),
+                "transition",
+            )
+            .unwrap();
+        store
+            .record_monitor_signal_event(
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                120_000,
+                Some("collecting"),
+                "signaled",
+                None,
+                None,
+                None,
+                None,
+                "transition",
+            )
+            .unwrap();
+        store
+            .record_monitor_signal_event(
+                "BTC",
+                "lighter",
+                "hyperliquid",
+                120_000,
+                None,
+                "watching",
+                Some(1.0),
+                None,
+                None,
+                Some("{}"),
+                "transition",
+            )
+            .unwrap();
+
+        // Pair-filtered readback, newest first; venue ids normalize.
+        let rows = store
+            .recent_monitor_signal_events(Some("BTC"), Some("hyperliquid"), Some("lighter"), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ts_ms, 120_000);
+        assert_eq!(rows[0].old_status.as_deref(), Some("collecting"));
+        assert_eq!(rows[0].new_status, "signaled");
+        assert_eq!(rows[1].old_status, None);
+        assert_eq!(
+            rows[1].economics_json.as_deref(),
+            Some(r#"{"friction_bps":5.0}"#)
+        );
+        assert_eq!(rows[1].buy_venue, "hyperliquid");
+        // Unfiltered sees all three; limit bounds the read.
+        assert_eq!(
+            store
+                .recent_monitor_signal_events(None, None, None, 10)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            store
+                .recent_monitor_signal_events(None, None, None, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(store.monitor_signal_event_count().unwrap(), 3);
+
+        // Every invalid append is rejected and stores nothing new.
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", -1, None, "signaled",
+                None, None, None, None, "transition",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, None, "bogus",
+                None, None, None, None, "transition",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, Some("bogus"), "signaled",
+                None, None, None, None, "transition",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                None, None, None, None, "pulse",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                Some(f64::NAN), None, None, None, "transition",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                None, None, Some(1.5), None, "transition",
+            )
+            .is_err());
+        assert!(store
+            .record_monitor_signal_event(
+                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                None, None, None, Some("{nope"), "transition",
+            )
+            .is_err());
+        assert_eq!(store.monitor_signal_event_count().unwrap(), 3);
+        assert!(store
+            .recent_monitor_signal_events(None, None, None, 0)
+            .is_err());
+    }
+
+    #[test]
+    fn test_signal_events_prune_retention_and_cap() {
+        let store = StateStore::open_in_memory().unwrap();
+        for i in 0..6 {
+            store
+                .record_monitor_signal_event(
+                    "BTC",
+                    "hyperliquid",
+                    "lighter",
+                    i * 1_000,
+                    None,
+                    "watching",
+                    None,
+                    None,
+                    None,
+                    None,
+                    "transition",
+                )
+                .unwrap();
+        }
+        // Same-days time cutoff drops old audit rows first.
+        store
+            .prune_monitor_signal_events(3_000, MONITOR_SIGNAL_EVENTS_MAX_ROWS)
+            .unwrap();
+        let rows = store
+            .recent_monitor_signal_events(None, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.ts_ms >= 3_000));
+        // Separate cap keeps only the newest rows.
+        store.prune_monitor_signal_events(0, 2).unwrap();
+        let rows = store
+            .recent_monitor_signal_events(None, None, None, 100)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ts_ms, 5_000);
+        assert_eq!(rows[1].ts_ms, 4_000);
+    }
+
+    /* ------------------ session seasonality (V8) ------------------ */
+
+    #[test]
+    fn test_migration_v7_to_v8_preserves_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        for batch in [
+            MIGRATION_V1_SQL,
+            MIGRATION_V2_SQL,
+            MIGRATION_V3_SQL,
+            MIGRATION_V4_SQL,
+            MIGRATION_V5_SQL,
+            MIGRATION_V6_SQL,
+            MIGRATION_V7_SQL,
+        ] {
+            conn.execute_batch(batch).unwrap();
+        }
+        let v7: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v7, 7);
+        conn.execute(
+            "INSERT INTO spread_samples (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
+             VALUES ('BTC', 'hyperliquid', 1000, 100.0, 99.9, 100.1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO monitor_signals
+                 (symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms, updated_at)
+             VALUES ('BTC', 'hyperliquid', 'lighter', 'watching', 1, 2, 't')",
+            [],
+        )
+        .unwrap();
+        StateStore::migrate(&conn).unwrap();
+        let v10: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v10, 16);
+        let kept: i64 = conn
+            .query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 1, "V7 rows must survive the V8..V16 migration");
+        let kept_signals: i64 = conn
+            .query_row("SELECT COUNT(*) FROM monitor_signals", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept_signals, 1, "V5 lifecycle rows must survive");
+        for table in [
+            "venue_volume_samples",
+            "session_profiles",
+            "session_hour_bins",
+            "monitor_signal_events",
+            "radar_bot_config",
+            "radar_bot_positions",
+            "har_anchors",
+            "promotion_state",
+            "autotune_apply_events",
+            "spatial_entry_baseline",
+            "paper_equity_expectations",
+            "account_equity_events",
+        ] {
+            let found: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(found, 1, "migration must create {table}");
+        }
+    }
+
+    #[test]
+    fn test_volume_sampler_roundtrip_and_alias() {
+        use std::collections::HashMap;
+        let store = StateStore::open_in_memory().unwrap();
+        let mut vols = HashMap::new();
+        vols.insert("BTCUSDT".to_string(), 1_000_000.0);
+        vols.insert("ETHUSDT".to_string(), 500_000.0);
+        vols.insert("JUNK".to_string(), f64::NAN);
+        vols.insert("ZERO".to_string(), 0.0);
+        store
+            .record_venue_volume_samples("hyperliquid", 60_000, &vols)
+            .unwrap();
+        // Canonical-base storage reads back through quoted aliases.
+        let btc = store
+            .venue_volume_series("BTC-USDC", "hyperliquid", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(btc, vec![(60_000, 1_000_000.0)]);
+        let eth = store
+            .venue_volume_series("eth", "hyperliquid", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(eth.len(), 1);
+        // Non-finite / non-positive rows are never persisted.
+        let all: i64 = store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(all, 2);
+        // Retention bounds the raw log.
+        store.prune_venue_volume_samples(60_000, 1_000_000).unwrap();
+        let kept: i64 = store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 2);
+        store.prune_venue_volume_samples(60_001, 1_000_000).unwrap();
+        let kept: i64 = store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kept, 0);
+    }
+
+    /// Frozen sixteen-day fixture: hourly two-venue polls, Thursday 2026-01-15
+    /// 00:00 UTC onward. Spreads alternate between a session peak and a
+    /// 7bps revert level so every session segments winning episodes. Peaks
+    /// land on even poll indexes, so a session with H hours calibrates
+    /// H/2 episodes per day.
+    fn seed_session_history(store: &StateStore, days: i64) -> (i64, i64) {
+        use chrono::TimeZone;
+        let base = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let peak_for_hour = |h: i64| match h % 24 {
+            0..=7 => 4.0,
+            8..=12 => 12.0,
+            13..=16 => 22.0,
+            17..=21 => 14.0,
+            _ => 3.0,
+        };
+        for i in 0..(days * 24) {
+            let ts = base + i * 3_600_000 + 60_000;
+            let spread_bps = if i % 2 == 0 {
+                peak_for_hour(i)
+            } else {
+                7.0
+            };
+            store
+                .record_spread_samples(
+                    "BTC",
+                    ts,
+                    &[
+                        sample("hyperliquid", 100.0),
+                        sample("lighter", 100.0 * (1.0 + spread_bps / 10_000.0)),
+                    ],
+                )
+                .unwrap();
+        }
+        (base, base + days * 24 * 3_600_000)
+    }
+
+    #[test]
+    fn test_rollup_seeded_multi_day_history() {
+        let store = StateStore::open_in_memory().unwrap();
+        let (from, to) = seed_session_history(&store, 16);
+        let written = store
+            .rollup_session_profiles("BTC-USDC", from - 1_000, to + 1_000, to)
+            .unwrap();
+        assert_eq!(written, 5, "one row per session");
+        let profiles = store.session_profiles("BTC").unwrap();
+        assert_eq!(profiles.len(), 5);
+        let by_session: std::collections::HashMap<&str, &SessionProfileRow> = profiles
+            .iter()
+            .map(|r| (r.session_id.as_str(), r))
+            .collect();
+        // Overlap carries 32 episodes: calibrated, not provisional.
+        let overlap = by_session["overlap"];
+        assert!(overlap.n_episodes >= 30, "overlap episodes: {}", overlap.n_episodes);
+        assert!(!overlap.provisional);
+        assert!(overlap.med_abs_spread_bps.unwrap() > 0.0);
+        assert!(
+            overlap.win_rate.unwrap() >= 0.9,
+            "alternating fixture must mostly revert, got {:?}",
+            overlap.win_rate
+        );
+        assert!(overlap.mean_hold_s.unwrap() > 0.0);
+        assert!(overlap.rv_bps.unwrap() > 0.0);
+        // Dead zone carries 16 episodes: provisional, never fabricated.
+        let dead = by_session["dead"];
+        assert!(dead.n_episodes < 30);
+        assert!(dead.provisional);
+        // Hour bins: 24 rows, modulators inside +/-25%, provisional reads 1.0.
+        let bins = store.session_hour_bins("BTC-USDC").unwrap();
+        assert_eq!(bins.len(), 24);
+        for b in &bins {
+            assert!(
+                (0.75..=1.25).contains(&b.modulator),
+                "hour {} modulator {}",
+                b.hour,
+                b.modulator
+            );
+            if b.provisional {
+                assert_eq!(b.modulator, 1.0);
+            }
+        }
+        let peak_bin = bins.iter().find(|b| b.hour == 14).unwrap();
+        assert!(!peak_bin.provisional);
+        assert!(peak_bin.med_spread_bps.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_rollup_thin_data_stays_provisional() {
+        let store = StateStore::open_in_memory().unwrap();
+        use chrono::TimeZone;
+        let ts = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 14, 5, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        store
+            .record_spread_samples(
+                "BTC",
+                ts,
+                &[sample("hyperliquid", 100.0), sample("lighter", 100.5)],
+            )
+            .unwrap();
+        let written = store
+            .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts)
+            .unwrap();
+        assert_eq!(written, 5);
+        for row in store.session_profiles("BTC").unwrap() {
+            assert!(
+                row.provisional,
+                "single-tick history must stay provisional: {:?}",
+                row.session_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_prune_keeps_session_profiles() {
+        let store = StateStore::open_in_memory().unwrap();
+        let (from, to) = seed_session_history(&store, 16);
+        store
+            .rollup_session_profiles("BTC", from - 1_000, to + 1_000, to)
+            .unwrap();
+        assert_eq!(store.session_profiles("BTC").unwrap().len(), 5);
+        // Nuke the entire raw log: time cutoff plus zero-row cap.
+        store.prune_spread_samples(i64::MAX, 0).unwrap();
+        assert_eq!(store.spread_sample_count().unwrap(), 0);
+        assert_eq!(
+            store
+                .delete_spread_samples_before(i64::MAX)
+                .unwrap_or(0),
+            0
+        );
+        // Derived state survives every raw-sample prune path.
+        assert_eq!(store.session_profiles("BTC").unwrap().len(), 5);
+        assert_eq!(store.session_hour_bins("BTC").unwrap().len(), 24);
     }
 
     /* ------------------ open-position aggregation ------------------ */
@@ -2505,6 +5118,24 @@ mod tests {
         store
             .update_signal_status(id, SignalStatus::Balanced, None)
             .unwrap();
+    }
+
+    #[test]
+    fn test_unknown_leg_side_fails_closed_instead_of_defaulting_long() {
+        let store = StateStore::open_in_memory().unwrap();
+        let sig = two_leg_signal("sig_bad_side", "BTC-USDC", None, None);
+        store.record_signal_execution(&sig).unwrap();
+        {
+            let conn = store.conn.lock();
+            conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+                .unwrap();
+            conn.execute(
+                "UPDATE signal_legs SET side = 'sideways' WHERE signal_id = ?1",
+                [&sig.id],
+            )
+            .unwrap();
+        }
+        assert!(store.get_signal(&sig.id).is_err());
     }
 
     #[test]
@@ -2596,5 +5227,286 @@ mod tests {
         assert!((p.venues[0].net_qty - 0.4).abs() < 1e-9);
         assert!((p.venues[1].net_qty + 0.4).abs() < 1e-9);
         assert_eq!(p.signal_count, 2);
+    }
+
+    /* ------------------ seasonality Phase 2 + autotune apply (V12) -------- */
+
+    fn har_row() -> HarAnchorRow {
+        HarAnchorRow {
+            symbol: "BTC-USDC".to_string(),
+            intercept: 0.2,
+            b_daily: 0.5,
+            b_weekly: 0.3,
+            b_monthly: 0.15,
+            r2: 0.92,
+            n_days: 60,
+            forecast_rv_bps: 11.0,
+            trailing_mean_rv_bps: 10.0,
+            updated_ts: 7_000,
+        }
+    }
+
+    #[test]
+    fn test_phase2_har_anchor_roundtrip_and_validation() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(store.phase2_har_anchor("BTC-USDC").unwrap(), None);
+        store.phase2_upsert_har_anchor(&har_row()).unwrap();
+        let got = store.phase2_har_anchor("BTC").unwrap().expect("alias read");
+        assert!((got.forecast_rv_bps - 11.0).abs() < 1e-12);
+        let mut bad = har_row();
+        bad.r2 = 1.5;
+        assert!(store.phase2_upsert_har_anchor(&bad).is_err());
+        let mut nan = har_row();
+        nan.b_daily = f64::NAN;
+        assert!(store.phase2_upsert_har_anchor(&nan).is_err());
+        let mut neg = har_row();
+        neg.forecast_rv_bps = -1.0;
+        assert!(store.phase2_upsert_har_anchor(&neg).is_err());
+    }
+
+    #[test]
+    fn test_phase2_promotion_state_roundtrip_and_validation() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(store.phase2_promotion_state("ETH-USDC").unwrap(), None);
+        store
+            .phase2_upsert_promotion_state(&PromotionStateRow {
+                symbol: "ETH-USDC".to_string(),
+                status: "promoted".to_string(),
+                fit_delta_bps: 2.0,
+                val_delta_bps: 1.5,
+                reason: "agree".to_string(),
+                updated_ts: 9_000,
+            })
+            .unwrap();
+        let got = store.phase2_promotion_state("ETH").unwrap().expect("alias read");
+        assert_eq!(got.status, "promoted");
+        assert!(store
+            .phase2_upsert_promotion_state(&PromotionStateRow {
+                symbol: "ETH-USDC".to_string(),
+                status: "live".to_string(),
+                fit_delta_bps: 2.0,
+                val_delta_bps: 1.5,
+                reason: "agree".to_string(),
+                updated_ts: 9_000,
+            })
+            .is_err());
+    }
+
+    #[test]
+    fn test_autotune_apply_events_audit_roundtrip() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert!(store.recent_autotune_apply_events("BTC-USDC", 10).unwrap().is_empty());
+        let id = store
+            .record_autotune_apply_event(
+                "BTC-USDC",
+                r#"{"targetProfitBps": 8.5}"#,
+                r#"{"span": [1, 2], "fit": "ok"}"#,
+                12_000,
+            )
+            .unwrap();
+        assert!(id > 0);
+        let rows = store.recent_autotune_apply_events("BTC", 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].applied_json, r#"{"targetProfitBps": 8.5}"#);
+        assert!(store
+            .record_autotune_apply_event("BTC-USDC", "not json", "{}", 1)
+            .is_err());
+        assert!(store.recent_autotune_apply_events("BTC-USDC", 0).is_err());
+    }
+
+    #[test]
+    fn test_max_leverage_validation_bounds() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert!(store
+            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(0))
+            .is_err());
+        assert!(store
+            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(6))
+            .is_err());
+        assert!(store
+            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(99))
+            .is_err());
+        for ok in [None, Some(1), Some(3), Some(5)] {
+            store
+                .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", ok)
+                .unwrap();
+            let got = store.get_account("a1").unwrap().expect("row");
+            assert_eq!(got.max_leverage, ok);
+        }
+    }
+
+    #[test]
+    fn test_max_leverage_roundtrip_update_and_clear() {
+        let store = StateStore::open_in_memory().unwrap();
+        let created = store
+            .upsert_account("a1", "lighter", "Main", true, true, "standard", Some(2))
+            .unwrap();
+        assert_eq!(created.max_leverage, Some(2));
+        let listed = store.list_accounts(Some("lighter")).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].max_leverage, Some(2));
+        let cleared = store
+            .upsert_account("a1", "lighter", "Main", true, true, "standard", None)
+            .unwrap();
+        assert_eq!(cleared.max_leverage, None);
+        let fetched = store.get_account("a1").unwrap().expect("row");
+        assert_eq!(fetched.max_leverage, None);
+        assert!(fetched.is_default);
+    }
+
+    #[test]
+    fn test_equity_expectation_baseline_init_then_quiet() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert_eq!(store.get_equity_expectation("hyperliquid").unwrap(), None);
+        let first = store
+            .check_account_equity("hyperliquid", 100_000.0, "", 1_000)
+            .unwrap();
+        assert_eq!(first.event, None);
+        assert!(first.note.is_some(), "init must leave a coverage note");
+        let (expected, sig, poll) = store
+            .get_equity_expectation("hyperliquid")
+            .unwrap()
+            .expect("baseline stored");
+        assert_eq!(expected, 100_000.0);
+        assert_eq!(sig, "");
+        assert_eq!(poll, 1_000);
+        let quiet = store
+            .check_account_equity("hyperliquid", 100_000.0, "", 2_000)
+            .unwrap();
+        assert_eq!(quiet.event, None);
+        assert_eq!(quiet.note, None);
+        assert!(store.list_equity_events(Some("hyperliquid"), 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_equity_manual_deposit_detected_and_rebased() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .check_account_equity("lighter", 50_000.0, "", 1_000)
+            .unwrap();
+        let report = store
+            .check_account_equity("lighter", 55_000.0, "", 2_000)
+            .unwrap();
+        let event = report.event.expect("deposit event");
+        assert_eq!(event.kind, "deposit");
+        assert_eq!(event.delta, 5_000.0);
+        assert_eq!(event.expected, 50_000.0);
+        assert_eq!(event.actual, 55_000.0);
+        let (expected, _, _) = store
+            .get_equity_expectation("lighter")
+            .unwrap()
+            .expect("rebased");
+        assert_eq!(expected, 55_000.0, "baseline must rebase so PnL never absorbs the flow");
+        let rows = store.list_equity_events(Some("lighter"), 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, event.id);
+    }
+
+    #[test]
+    fn test_equity_withdrawal_and_transfer_guess() {
+        let store = StateStore::open_in_memory().unwrap();
+        store.check_account_equity("vanta", 20_000.0, "", 1_000).unwrap();
+        let out = store
+            .check_account_equity("vanta", 19_000.0, "", 2_000)
+            .unwrap();
+        assert_eq!(out.event.as_ref().map(|e| e.kind.as_str()), Some("withdrawal"));
+        let moved = store
+            .check_account_equity("vanta", 19_050.0, "BTC-USDC:Buy:1", 3_000)
+            .unwrap();
+        assert_eq!(
+            moved.event.as_ref().map(|e| e.kind.as_str()),
+            Some("transfer"),
+            "position change cross-check must win over the sign guess"
+        );
+    }
+
+    #[test]
+    fn test_equity_missed_poll_gap_produces_no_event() {
+        let store = StateStore::open_in_memory().unwrap();
+        store.check_account_equity("grvt", 10_000.0, "", 1_000).unwrap();
+        let gap = crate::equity_attribution::EQUITY_POLL_GAP_MAX_MS + 1;
+        let report = store
+            .check_account_equity("grvt", 99_000.0, "", 1_000 + gap)
+            .unwrap();
+        assert_eq!(report.event, None);
+        assert!(report.note.unwrap_or_default().contains("gap"));
+        let (expected, _, _) = store.get_equity_expectation("grvt").unwrap().expect("rebased");
+        assert_eq!(expected, 99_000.0);
+        assert!(store.list_equity_events(None, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_equity_events_ipc_listing_filters_and_limits() {        let store = StateStore::open_in_memory().unwrap();
+        for (acct, base) in [("hyperliquid", 10_000.0), ("lighter", 20_000.0)] {
+            store.check_account_equity(acct, base, "", 1_000).unwrap();
+            store.check_account_equity(acct, base + 100.0, "", 2_000).unwrap();
+        }
+        let all = store.list_equity_events(None, 100).unwrap();
+        assert_eq!(all.len(), 2);
+        assert!(all[0].ts_ms >= all[1].ts_ms, "newest first");
+        let one = store.list_equity_events(Some("lighter"), 100).unwrap();
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].account_id, "lighter");
+        let capped = store.list_equity_events(None, 1).unwrap();
+        assert_eq!(capped.len(), 1);
+        assert!(store.list_equity_events(Some("nope"), 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_margin_snapshots_record_list_prune() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_margin_snapshot("hyperliquid", "hyperliquid", 1_000, 10_000.0, 2_000.0, 20.0)
+            .unwrap();
+        store
+            .record_margin_snapshot("hyperliquid", "hyperliquid", 2_000, 10_000.0, 3_000.0, 30.0)
+            .unwrap();
+        store
+            .record_margin_snapshot("lighter", "lighter", 2_000, 5_000.0, 500.0, 10.0)
+            .unwrap();
+        let rows = store.list_margin_snapshots("hyperliquid", 0).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].ts_ms, 1_000);
+        assert_eq!(rows[1].rate_pct, 30.0);
+        assert!(rows[0].ts_ms <= rows[1].ts_ms, "oldest first");
+        let windowed = store.list_margin_snapshots("hyperliquid", 2_000).unwrap();
+        assert_eq!(windowed.len(), 1);
+        let removed = store.prune_margin_snapshots(2_000).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.list_margin_snapshots("hyperliquid", 0).unwrap().len(), 1);
+        assert_eq!(store.list_margin_snapshots("lighter", 0).unwrap().len(), 1);
+        let removed_all = store.prune_margin_snapshots(3_000).unwrap();
+        assert_eq!(removed_all, 2);
+        assert!(store.list_margin_snapshots("lighter", 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_margin_snapshots_reject_bad_rows() {
+        let store = StateStore::open_in_memory().unwrap();
+        assert!(store
+            .record_margin_snapshot("", "a", 1_000, 10_000.0, 1_000.0, 10.0)
+            .is_err());
+        assert!(store
+            .record_margin_snapshot("hyperliquid", "a", -1, 10_000.0, 1_000.0, 10.0)
+            .is_err());
+        assert!(store
+            .record_margin_snapshot("hyperliquid", "a", 1_000, f64::NAN, 1_000.0, 10.0)
+            .is_err());
+        assert!(store
+            .record_margin_snapshot("hyperliquid", "a", 1_000, 10_000.0, -5.0, 10.0)
+            .is_err());
+        assert!(store.list_margin_snapshots("hyperliquid", -1).is_err());
+        assert!(store.prune_margin_snapshots(-1).is_err());
+    }
+
+    #[test]
+    fn test_margin_snapshots_table_exists_after_migration() {
+        let store = StateStore::open_in_memory().unwrap();
+        let count: i64 = store
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM margin_snapshots", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

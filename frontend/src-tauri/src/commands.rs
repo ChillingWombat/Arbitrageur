@@ -7,13 +7,21 @@ use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::quote::OrderBook;
 use arbitrager_core::types::{dec, Decimal, Side, VenueId};
 use arbitrager_execution::coordinator::ArbitrageExecutionResult;
+use arbitrager_execution::passive_unwind::{
+    execute_passive_reduce, PassiveBookRefresh, PassiveOutcome, PassiveUnwindConfig,
+};
 use arbitrager_execution::smart_routing::SmartOrderRouter;
 use arbitrager_execution::virtual_ledger::StrategyMetrics;
 use arbitrager_math::calibration::WfoOptimizationResult;
+use arbitrager_math::autotune::{
+    TuneHistory, TuneParams, recommend,
+};
 use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
 use arbitrager_math::funding_carry::evaluate_funding_carry;
 use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrager_math::ou_process::OuModelParams;
+use arbitrager_math::pair_monitor::build_pair_series;
+use arbitrager_math::triangular::{evaluate_triangular_cycle, TriLegSide};
 
 use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use chrono::Utc;
@@ -113,6 +121,12 @@ pub struct SpatialOpportunityDto {
     pub required_gross_bps: f64,
     pub slippage_ok: bool,
     pub depth_ok: bool,
+    /// Empirical win probability from the pair's episode history, computed to
+    /// the monitor's statistical standard (min-episodes gate + OU fallback).
+    /// Informational in scan: never gates ordering or executability.
+    /// `None` renders as "—" (insufficient data).
+    #[serde(default)]
+    pub win_probability: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -158,6 +172,57 @@ pub struct SpotExecutionParams {
     pub max_slippage_bps: f64,
     #[serde(default)]
     pub net_spread_bps: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TriangleLegDto {
+    pub symbol: String,
+    pub action: String,
+    pub price: f64,
+    pub fee_bps: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TriangleOpportunityDto {
+    pub id: String,
+    pub venue: String,
+    pub path: String,
+    pub base_asset: String,
+    pub intermediate_a: String,
+    pub intermediate_b: String,
+    pub leg1: TriangleLegDto,
+    pub leg2: TriangleLegDto,
+    pub leg3: TriangleLegDto,
+    pub gross_spread_bps: f64,
+    pub total_fee_bps: f64,
+    pub net_spread_bps: f64,
+    pub net_profit_usd: f64,
+    pub trade_size_usd: f64,
+    pub estimated_latency_ms: u64,
+    pub is_executable: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TriangleExecutionParams {
+    pub id: String,
+    pub venue: String,
+    pub path: String,
+    pub trade_size_usd: f64,
+    pub min_profit_bps: f64,
+    #[serde(default)]
+    pub net_spread_bps: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ConvergenceCheckDto {
+    pub signal_id: String,
+    pub symbol: String,
+    pub verdict: String,
+    pub trigger: Option<String>,
+    pub reason: String,
+    pub live_net_bps: Option<f64>,
+    pub entry_net_bps: Option<f64>,
+    pub unwound: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -286,6 +351,10 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
         "robinhood" => dec!(2.5),
         "arcus" => dec!(1.5),
         "popdex" => dec!(2.0),
+        "aster" => dec!(3.5),
+        "ondoperps" => dec!(3.5),
+        "grvt" => dec!(2.0),
+        "edgex" => dec!(4.5),
         "polymarket" => dec!(0.0),
         "kalshi" => dec!(10.0),
         _ => dec!(2.0),
@@ -410,6 +479,20 @@ fn compute_route_economics(
         required_gross_bps,
         estimated_profit_usd,
     })
+}
+
+/// Per-strategy slippage gate value (bps) for the futures/spread path.
+/// Reads the futures strategy record; a missing record falls back to
+/// defaults. Callers convert to Decimal and fail closed on invalid values.
+/// There is intentionally no global slippage setting.
+fn futures_slippage_setting(state: &AppEngineState) -> f64 {
+    state
+        .strategy_params
+        .read()
+        .get("futures")
+        .cloned()
+        .unwrap_or_else(|| StrategyParamsDto::defaults_for("futures"))
+        .futures_max_slippage_bps
 }
 
 fn route_execution_gates(
@@ -552,6 +635,12 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("kalshi", s.kalshi_enabled || account_enabled("kalshi"));
     push("decibel", s.decibel_enabled || account_enabled("decibel"));
     push("aster", s.aster_enabled || account_enabled("aster"));
+    push(
+        "ondoperps",
+        s.ondoperps_enabled || account_enabled("ondoperps"),
+    );
+    push("grvt", s.grvt_enabled || account_enabled("grvt"));
+    push("edgex", s.edgex_enabled || account_enabled("edgex"));
     push("binance", s.binance_enabled || account_enabled("binance"));
     push("coinbase", s.coinbase_enabled || account_enabled("coinbase"));
     push("okx", s.okx_enabled || account_enabled("okx"));
@@ -604,6 +693,16 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
         "okx" => p("https://www.okx.com/api/v5/public/time", false),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
         "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
+        "ondoperps" => p("https://api.ondoperps.xyz/status", false),
+        "edgex" => p(
+            "https://edgex-prod-v2.edgex.exchange/api/v2/public/meta/getServerTime",
+            false,
+        ),
+        "grvt" => Some(PublicProbe {
+            url: "https://market-data.grvt.io/full/v1/all_instruments",
+            accept_4xx: false,
+            post_body: Some(r#"{"is_active":true,"kinds":["PERPETUAL"]}"#),
+        }),
         // IG has no public endpoint; the session route returns an
         // app-level JSON 400 that proves the API gateway responded.
         "ig" => p("https://api.ig.com/gateway/deal/session", true),
@@ -884,6 +983,34 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             fee_bps: 3.5,
         },
         VenueStatusDto {
+            id: "ondoperps".into(),
+            name: "Ondo Perps".into(),
+            market_type: "Equity + Crypto Perps".into(),
+            status: venue_status(
+                "ondoperps",
+                s.ondoperps_enabled || account_enabled("ondoperps"),
+            )
+            .into(),
+            latency_ms: probe_ms("ondoperps"),
+            fee_bps: 3.5,
+        },
+        VenueStatusDto {
+            id: "grvt".into(),
+            name: "GRVT".into(),
+            market_type: "Perp DEX".into(),
+            status: venue_status("grvt", s.grvt_enabled || account_enabled("grvt")).into(),
+            latency_ms: probe_ms("grvt"),
+            fee_bps: 2.0,
+        },
+        VenueStatusDto {
+            id: "edgex".into(),
+            name: "edgeX".into(),
+            market_type: "StarkEx Perp DEX".into(),
+            status: venue_status("edgex", s.edgex_enabled || account_enabled("edgex")).into(),
+            latency_ms: probe_ms("edgex"),
+            fee_bps: 4.5,
+        },
+        VenueStatusDto {
             id: "binance".into(),
             name: "Binance".into(),
             market_type: "CEX Spot & Perp".into(),
@@ -1022,6 +1149,53 @@ pub async fn get_market_universe_impl(
     Ok(out)
 }
 
+pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
+    let (max_days, max_gb) = {
+        let s = state.settings.read();
+        (s.spread_samples_max_days, s.spread_samples_max_gb)
+    };
+    if let Some(days) = max_days {
+        if days > 0 {
+            let retain_after = now_ms - (days as i64) * 86_400_000;
+            let _ = state.state_store.delete_spread_samples_before(retain_after);
+            // Same cutoff bounds the raw volume log. Session profiles and
+            // hour bins are derived state and are never pruned here.
+            let _ = state
+                .state_store
+                .prune_venue_volume_samples(retain_after, i64::MAX);
+            // Same day cutoff bounds the signal-event audit log, with its
+            // own row cap so audit history and price history prune
+            // independently.
+            let _ = state.state_store.prune_monitor_signal_events(
+                retain_after,
+                crate::state_store::MONITOR_SIGNAL_EVENTS_MAX_ROWS,
+            );
+            // Same day cutoff bounds the margin-snapshot log behind the
+            // 24h average-utilisation stat.
+            let _ = state.state_store.prune_margin_snapshots(retain_after);
+        }
+    }
+    if let Some(gb) = max_gb {
+        if gb.is_finite() && gb > 0.0 {
+            let budget = (gb * 1024.0 * 1024.0 * 1024.0) as u64;
+            for _ in 0..1000 {
+                let size = match state.state_store.db_size_bytes() {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                if size <= budget {
+                    break;
+                }
+                match state.state_store.delete_oldest_spread_samples(100_000) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+}
+
 pub async fn fetch_orderbooks_impl(
     symbol: &str,
     state: &AppEngineState,
@@ -1034,23 +1208,25 @@ pub async fn fetch_orderbooks_impl(
 
     for (vid, vname, adapter) in venues {
         let venue_id = adapter.venue_id();
-        let maybe_book = state.market_data_hub.get_valid_orderbook(
-            &venue_id,
+        let book = match crate::ws_primary::resolve_book_ws_first(
+            &state.market_data_hub,
+            &state.orderbook_flights,
+            &adapter,
             symbol,
-            Some(std::time::Duration::from_millis(350)),
-        );
-        let book = match maybe_book {
-            Some(b) => b,
-            None => match adapter.fetch_orderbook(symbol).await {
-                Ok(b) => {
-                    if validate_adapter_book(&b, &venue_id, symbol).is_err() {
-                        continue;
-                    }
-                    state.market_data_hub.update_orderbook(b.clone());
-                    b
+            std::time::Duration::from_millis(350),
+        )
+        .await
+        {
+            Some(crate::ws_primary::ResolvedBook::Ws(b))
+            | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
+            Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
+                if validate_adapter_book(&b, &venue_id, symbol).is_err() {
+                    continue;
                 }
-                Err(_) => continue,
-            },
+                state.market_data_hub.update_orderbook(b.clone());
+                b
+            }
+            None => continue,
         };
         if validate_adapter_book(&book, &venue_id, symbol).is_err() {
             continue;
@@ -1167,17 +1343,23 @@ pub async fn fetch_orderbooks_impl(
         .state_store
         .record_spread_samples(symbol, now_ms, &sample_entries);
 
-    // Hourly retention pass: keep 30 days of samples, hard-capped globally.
+    // Hourly retention pass: settings-driven time cutoff + GB budget.
+    // Both unset -> no-op. Best-effort, never breaks ingestion.
     let current_hour = now_ms / 3_600_000;
-    {
+    let heartbeat_due = {
         let mut last_hour = state.sample_prune_at.lock();
         if current_hour > *last_hour {
             *last_hour = current_hour;
-            let retain_after = now_ms - 30 * 86_400_000;
-            let _ = state
-                .state_store
-                .prune_spread_samples(retain_after, 4_000_000);
+            enforce_retention_pass(state, now_ms);
+            true
+        } else {
+            false
         }
+    };
+    if heartbeat_due {
+        // Periodic heartbeat for the utilisation history: the cadence
+        // cap keeps this to at most one row per venue per minute.
+        maybe_record_margin_snapshots(state, now_ms).await;
     }
 
     Ok(result)
@@ -1209,23 +1391,25 @@ pub async fn fetch_multi_market_quotes_impl(
 
         for (_vid, vname, adapter) in &venues {
             let venue_id = adapter.venue_id();
-            let maybe_book = state.market_data_hub.get_valid_orderbook(
-                &venue_id,
+            let book = match crate::ws_primary::resolve_book_ws_first(
+                &state.market_data_hub,
+                &state.orderbook_flights,
+                adapter,
                 &sym,
-                Some(std::time::Duration::from_millis(500)),
-            );
-            let book = match maybe_book {
-                Some(b) => b,
-                None => match adapter.fetch_orderbook(&sym).await {
-                    Ok(b) => {
-                        if validate_adapter_book(&b, &venue_id, &sym).is_err() {
-                            continue;
-                        }
-                        state.market_data_hub.update_orderbook(b.clone());
-                        b
+                std::time::Duration::from_millis(500),
+            )
+            .await
+            {
+                Some(crate::ws_primary::ResolvedBook::Ws(b))
+                | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
+                Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
+                    if validate_adapter_book(&b, &venue_id, &sym).is_err() {
+                        continue;
                     }
-                    Err(_) => continue,
-                },
+                    state.market_data_hub.update_orderbook(b.clone());
+                    b
+                }
+                None => continue,
             };
             if validate_adapter_book(&book, &venue_id, &sym).is_err() {
                 continue;
@@ -1306,23 +1490,25 @@ pub async fn scan_spatial_opportunities_impl(
     let mut books = Vec::new();
     for (vid, vname, adapter) in &venues {
         let venue_id = adapter.venue_id();
-        let maybe_book = state.market_data_hub.get_valid_orderbook(
-            &venue_id,
+        let book = match crate::ws_primary::resolve_book_ws_first(
+            &state.market_data_hub,
+            &state.orderbook_flights,
+            adapter,
             symbol,
-            Some(std::time::Duration::from_millis(350)),
-        );
-        let book = match maybe_book {
-            Some(b) => b,
-            None => match adapter.fetch_orderbook(symbol).await {
-                Ok(b) => {
-                    if validate_adapter_book(&b, &venue_id, symbol).is_err() {
-                        continue;
-                    }
-                    state.market_data_hub.update_orderbook(b.clone());
-                    b
+            std::time::Duration::from_millis(350),
+        )
+        .await
+        {
+            Some(crate::ws_primary::ResolvedBook::Ws(b))
+            | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
+            Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
+                if validate_adapter_book(&b, &venue_id, symbol).is_err() {
+                    continue;
                 }
-                Err(_) => continue,
-            },
+                state.market_data_hub.update_orderbook(b.clone());
+                b
+            }
+            None => continue,
         };
         if validate_adapter_book(&book, &venue_id, symbol).is_err() {
             continue;
@@ -1336,14 +1522,42 @@ pub async fn scan_spatial_opportunities_impl(
 
     let target_qty_dec = Decimal::from_f64_retain(order_qty)
         .ok_or_else(|| "order_qty is outside supported decimal range".to_string())?;
-    let (max_slippage_bps, min_depth_ratio) = {
-        let s = state.settings.read();
-        (s.max_slippage_bps, s.min_depth_ratio)
-    };
+    let max_slippage_bps = futures_slippage_setting(state);
+    let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
     let min_depth_dec = Decimal::from_f64_retain(min_depth_ratio)
         .ok_or_else(|| "Invalid min depth ratio setting".to_string())?;
+
+    // Episode history for win probabilities (informational only): one
+    // `spread_samples` read shared across all venue pairs, scored to the
+    // monitor's statistical standard (min-episodes gate + OU R² fallback).
+    // Fail-closed throughout: any missing history yields `None` ("—").
+    let now_ms = Utc::now().timestamp_millis();
+    let monitor_cfg = state
+        .state_store
+        .monitor_config_json()
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<crate::monitor::MonitorConfigDto>(&j).ok())
+        .unwrap_or_default();
+    let scan_min_episodes = monitor_cfg.min_episodes.max(1);
+    let scan_history_secs = monitor_cfg.history_window_secs.clamp(3600, 30 * 86400);
+    let scan_history_from = now_ms.saturating_sub((scan_history_secs as i64).saturating_mul(1000));
+    let mut scan_mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    if let Ok(samples) = state
+        .state_store
+        .spread_samples(symbol, scan_history_from, now_ms)
+    {
+        for s in &samples {
+            if s.mid.is_finite() && s.mid > 0.0 {
+                scan_mids_by_venue
+                    .entry(s.venue_id.clone())
+                    .or_default()
+                    .push((s.ts_ms, s.mid));
+            }
+        }
+    }
     let mut opps = Vec::new();
 
     for i in 0..books.len() {
@@ -1381,6 +1595,30 @@ pub async fn scan_spatial_opportunities_impl(
                 let is_executable =
                     econ.expected_net_bps >= min_bps && slippage_ok && depth_ok;
 
+                // Informational win probability on the shared monitor
+                // standard. Never feeds ordering or `is_executable`.
+                let win_probability = match (
+                    scan_mids_by_venue.get(buy_id),
+                    scan_mids_by_venue.get(sell_id),
+                ) {
+                    (Some(buy_mids), Some(sell_mids))
+                        if !buy_mids.is_empty() && !sell_mids.is_empty() =>
+                    {
+                        let series = build_pair_series(
+                            buy_mids,
+                            sell_mids,
+                            crate::monitor::PAIR_ALIGN_GAP_MS,
+                        );
+                        crate::monitor::pair_win_probability(
+                            &series,
+                            econ.top_gross_bps,
+                            econ.expected_friction_bps,
+                            scan_min_episodes,
+                        )
+                    }
+                    _ => None,
+                };
+
                 opps.push(SpatialOpportunityDto {
                     id: format!("{}-{}-{}", symbol, buy_id, sell_id),
                     symbol: symbol.to_string(),
@@ -1407,6 +1645,7 @@ pub async fn scan_spatial_opportunities_impl(
                     required_gross_bps: econ.required_gross_bps,
                     slippage_ok,
                     depth_ok,
+                    win_probability,
                 });
             }
         }
@@ -1446,6 +1685,739 @@ pub async fn execute_spot_arbitrage_impl(
     }
     let _ = params;
     Err("Native 'spot' execution is disabled until authentic order submission and reconciliation are implemented".into())
+}
+
+// ---------------------------------------------------------------------------
+// Triangular arbitrage (single-venue A -> B -> C -> A cycles, paper-only)
+// ---------------------------------------------------------------------------
+
+/// Strategy id under which triangle residuals are recorded. The 2-leg signal
+/// ledger cannot represent an atomic 3-leg cycle as one row (1-2 leg cap), so
+/// a completed cycle's legs persist as individual 1-leg `Imbalanced` signals:
+/// each one blocks its symbol and unwinds through the existing symbol-scoped
+/// flatten path, exactly like any other open paper position.
+pub(crate) const TRIANGLE_STRATEGY_ID: &str = "triangle";
+/// Paper-dust tolerance for the triangle entry guard: f64/Decimal ledger
+/// conversions can strand sub-1e-9 base-unit residue after a flatten.
+/// Economically meaningless on every listed venue, so it must not block
+/// re-entry forever; anything at or above it is a real position.
+fn triangle_dust_qty() -> Decimal {
+    dec!(0.000000001)
+}
+/// Leftover-sweep rule for close/unwind sizing (shared implementation:
+/// `arbitrager_strategy::pair_trim::sweep_close_qty`). When a close is
+/// requested for `requested` (e.g. one grid unit, or the paper position when
+/// it covers less than the ledger) but the attributed residual exceeds it by
+/// less than one full step, closing only `requested` would strand a sub-step
+/// remnant that can never close on its own — so the ENTIRE residual closes
+/// instead. A real multi-step remainder (residual >= requested + one step)
+/// still closes in part. Applied in the flatten path, which also serves
+/// convergence unwinds. Returns the original Decimal inputs untouched, so no
+/// f64 round-trip dust enters the ledger.
+fn sweep_flatten_qty(residual: Decimal, capped: Decimal, step: Decimal) -> Decimal {
+    let to_f64 = |v: Decimal| v.to_string().parse::<f64>().ok();
+    let (Some(r), Some(q)) = (to_f64(residual), to_f64(capped)) else {
+        return capped;
+    };
+    if !r.is_finite() || !q.is_finite() {
+        return capped;
+    }
+    let s = to_f64(step).unwrap_or(0.0);
+    let swept = arbitrager_strategy::pair_trim::sweep_close_qty(r, q, s);
+    if swept >= r {
+        residual
+    } else {
+        capped
+    }
+}
+/// One full grid step for `symbol` from its ticker config (the min tradable
+/// unit for sweep purposes). Unknown or invalid configs yield zero, which
+/// disables the sweep (plain capped-close semantics).
+fn flatten_step_qty(state: &AppEngineState, symbol: &str) -> Decimal {
+    state
+        .strategy_configs
+        .read()
+        .get(symbol)
+        .and_then(|c| Decimal::from_f64_retain(c.unit_size))
+        .filter(|u| *u > dec!(0))
+        .unwrap_or(dec!(0))
+}
+const TRIANGLE_QUOTE: &str = "USDC";
+const TRIANGLE_BASES: [&str; 5] = ["BTC", "ETH", "SOL", "BNB", "XRP"];
+/// Fixed scan notional: matches the frontend "Est. Profit ($10k)" column.
+const TRIANGLE_SCAN_NOTIONAL_USD: f64 = 10_000.0;
+
+struct TrianglePlan {
+    base_a: String,
+    base_b: String,
+    leg_symbols: [String; 3],
+    leg_sides: [TriLegSide; 3],
+    order_sides: [Side; 3],
+    leg_actions: [&'static str; 3],
+    path: String,
+}
+
+/// Canonical USDC -> A -> B -> USDC cycle on one venue. Only the "{A}-{B}"
+/// orientation is attempted for the middle leg; the reverse triangle is a
+/// separate candidate (ordered pairs are enumerated both ways). When the
+/// venue does not list a leg symbol, book resolution fails closed and the
+/// candidate is skipped — never synthesized.
+fn triangle_plan(base_a: &str, base_b: &str) -> TrianglePlan {
+    TrianglePlan {
+        base_a: base_a.to_string(),
+        base_b: base_b.to_string(),
+        leg_symbols: [
+            format!("{base_a}-{TRIANGLE_QUOTE}"),
+            format!("{base_a}-{base_b}"),
+            format!("{base_b}-{TRIANGLE_QUOTE}"),
+        ],
+        leg_sides: [TriLegSide::BuyBase, TriLegSide::SellBase, TriLegSide::SellBase],
+        order_sides: [Side::Buy, Side::Sell, Side::Sell],
+        leg_actions: ["BUY", "SELL", "SELL"],
+        path: format!("{TRIANGLE_QUOTE} → {base_a} → {base_b} → {TRIANGLE_QUOTE}"),
+    }
+}
+
+struct TriangleEval {
+    gross_bps: f64,
+    fee_bps: f64,
+    net_bps: f64,
+    profit_usd: f64,
+    order_qty: [f64; 3],
+    leg_prices: [f64; 3],
+}
+
+fn evaluate_triangle_books(
+    books: &[OrderBook; 3],
+    sides: [TriLegSide; 3],
+    fee_bps: f64,
+    notional_usd: f64,
+) -> Option<TriangleEval> {
+    let notional = Decimal::from_f64_retain(notional_usd).filter(|q| *q > dec!(0))?;
+    let fee = Decimal::from_f64_retain(fee_bps).filter(|f| *f >= dec!(0))?;
+    let res = evaluate_triangular_cycle(
+        [&books[0], &books[1], &books[2]],
+        sides,
+        [fee, fee, fee],
+        notional,
+    )?;
+    let num = |v: Decimal| v.to_string().parse::<f64>().ok().filter(|f| f.is_finite());
+    let prices = [
+        num(books[0].best_ask_price()?)?,
+        num(books[1].best_bid_price()?)?,
+        num(books[2].best_bid_price()?)?,
+    ];
+    if prices.iter().any(|p| *p <= 0.0) {
+        return None;
+    }
+    let qty = [
+        num(res.order_qty[0])?,
+        num(res.order_qty[1])?,
+        num(res.order_qty[2])?,
+    ];
+    if qty.iter().any(|q| !q.is_finite() || *q <= 0.0) {
+        return None;
+    }
+    Some(TriangleEval {
+        gross_bps: num(res.gross_bps)?,
+        fee_bps: num(res.total_fee_bps)?,
+        net_bps: num(res.net_bps)?,
+        profit_usd: num(res.estimated_profit)?,
+        order_qty: qty,
+        leg_prices: prices,
+    })
+}
+
+/// Resolve all three cycle books, hub-first with a 2s freshness bound, else a
+/// fresh fetch through the admitted read-only adapter. All-or-none: any
+/// missing leg returns `None` and the candidate is skipped.
+async fn resolve_triangle_books(
+    state: &AppEngineState,
+    adapter: &Arc<dyn ExchangeAdapter>,
+    vid: &VenueId,
+    symbols: &[String; 3],
+) -> Option<[OrderBook; 3]> {
+    let mut out: Vec<OrderBook> = Vec::with_capacity(3);
+    for sym in symbols {
+        let book = match state.market_data_hub.get_valid_orderbook(
+            vid,
+            sym,
+            Some(std::time::Duration::from_secs(2)),
+        ) {
+            Some(b) => b,
+            None => {
+                let b = adapter.fetch_orderbook(sym).await.ok()?;
+                validate_adapter_book(&b, vid, sym).ok()?;
+                state.market_data_hub.update_orderbook(b.clone());
+                b
+            }
+        };
+        if validate_adapter_book(&book, vid, sym).is_err() {
+            return None;
+        }
+        out.push(book);
+    }
+    Some([out.remove(0), out.remove(0), out.remove(0)])
+}
+
+fn triangle_target_profit_bps(state: &AppEngineState) -> f64 {
+    state
+        .strategy_params
+        .read()
+        .get("futures")
+        .map(|p| p.target_profit_bps)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(1.0)
+}
+
+pub async fn scan_triangular_opportunities_impl(
+    filter_asset: &str,
+    state: &AppEngineState,
+) -> Result<Vec<TriangleOpportunityDto>, String> {
+    let filter = filter_asset.trim().to_uppercase();
+    if !filter.is_empty()
+        && (filter.len() > 10 || !filter.chars().all(|c| c.is_ascii_alphanumeric()))
+    {
+        return Err("filter asset must be empty or 1-10 ASCII alphanumeric characters".into());
+    }
+    let venues = state.get_venues();
+    if venues.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hurdle = triangle_target_profit_bps(state);
+    let mut opps = Vec::new();
+    for (vid, vname, adapter) in &venues {
+        let fee = effective_venue_fee_bps(state, vid);
+        let latency_ms = state
+            .latency_ema
+            .lock()
+            .get(*vid)
+            .copied()
+            .unwrap_or(0.0)
+            .max(0.0) as u64;
+        let venue_id = adapter.venue_id();
+        for base_a in TRIANGLE_BASES {
+            for base_b in TRIANGLE_BASES {
+                if base_a == base_b {
+                    continue;
+                }
+                if !filter.is_empty() && filter != base_a && filter != base_b {
+                    continue;
+                }
+                let plan = triangle_plan(base_a, base_b);
+                let books =
+                    match resolve_triangle_books(state, adapter, &venue_id, &plan.leg_symbols)
+                        .await
+                    {
+                        Some(b) => b,
+                        None => continue,
+                    };
+                let eval = match evaluate_triangle_books(
+                    &books,
+                    plan.leg_sides,
+                    fee,
+                    TRIANGLE_SCAN_NOTIONAL_USD,
+                ) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                let legs = [
+                    TriangleLegDto {
+                        symbol: plan.leg_symbols[0].clone(),
+                        action: plan.leg_actions[0].to_string(),
+                        price: eval.leg_prices[0],
+                        fee_bps: fee,
+                    },
+                    TriangleLegDto {
+                        symbol: plan.leg_symbols[1].clone(),
+                        action: plan.leg_actions[1].to_string(),
+                        price: eval.leg_prices[1],
+                        fee_bps: fee,
+                    },
+                    TriangleLegDto {
+                        symbol: plan.leg_symbols[2].clone(),
+                        action: plan.leg_actions[2].to_string(),
+                        price: eval.leg_prices[2],
+                        fee_bps: fee,
+                    },
+                ];
+                opps.push(TriangleOpportunityDto {
+                    id: format!("{vid}-TRI-{base_a}-{base_b}-{TRIANGLE_QUOTE}"),
+                    venue: vname.to_string(),
+                    path: plan.path.clone(),
+                    base_asset: TRIANGLE_QUOTE.to_string(),
+                    intermediate_a: plan.base_a.clone(),
+                    intermediate_b: plan.base_b.clone(),
+                    leg1: legs[0].clone(),
+                    leg2: legs[1].clone(),
+                    leg3: legs[2].clone(),
+                    gross_spread_bps: eval.gross_bps,
+                    total_fee_bps: eval.fee_bps,
+                    net_spread_bps: eval.net_bps,
+                    net_profit_usd: eval.profit_usd,
+                    trade_size_usd: TRIANGLE_SCAN_NOTIONAL_USD,
+                    estimated_latency_ms: latency_ms,
+                    is_executable: eval.net_bps >= hurdle,
+                });
+            }
+        }
+    }
+    opps.sort_by(|a, b| {
+        b.net_spread_bps
+            .partial_cmp(&a.net_spread_bps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(opps)
+}
+
+/// Persist one filled triangle leg as a 1-leg `Imbalanced` signal so the leg
+/// symbol stays blocked and unwinds through the existing symbol-scoped
+/// flatten path. Only legs with a positive fill and price are recorded.
+///
+/// `qty_f64` must be the exact submitted quantity for full fills: the paper
+/// position holds `Decimal::from_f64_retain(qty_f64)`, so recording the same
+/// f64 source keeps the ledger residual bit-identical to the paper position.
+/// Re-converting the Decimal fill back to f64 would shed ~1e-19 of dust and
+/// leave the symbol blocked on economically meaningless residue.
+#[allow(clippy::too_many_arguments)]
+fn record_triangle_leg_fill(
+    state: &AppEngineState,
+    cycle_tag: &str,
+    leg_idx: usize,
+    venue_id: &str,
+    symbol: &str,
+    order_side: Side,
+    qty_f64: f64,
+    fill_px: Decimal,
+    fee: Decimal,
+    order_id: &str,
+    note: &str,
+) -> Result<(), String> {
+    use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+    if !qty_f64.is_finite() || qty_f64 <= 0.0 {
+        return Err("triangle fill quantity is not positive".into());
+    }
+    let px_f = dec_to_f64(fill_px, "triangle fill price")?;
+    let fee_f = dec_to_f64(fee, "triangle fill fee")?;
+    if px_f <= 0.0 || fee_f < 0.0 {
+        return Err("triangle fill is not recordable".into());
+    }
+    let side = match order_side {
+        Side::Buy => LegSide::Long,
+        Side::Sell => LegSide::Short,
+    };
+    let account_id = state
+        .state_store
+        .default_account(venue_id)
+        .ok()
+        .flatten()
+        .map(|a| a.id);
+    let signal_id = format!("{cycle_tag}-leg{leg_idx}");
+    state
+        .state_store
+        .record_signal_execution(&NewSignalExecution {
+            id: signal_id.clone(),
+            strategy_id: TRIANGLE_STRATEGY_ID.to_string(),
+            symbol: symbol.to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some(note.to_string()),
+            legs: vec![NewSignalLeg {
+                account_id,
+                venue: venue_id.to_string(),
+                side,
+                intended_qty: qty_f64,
+            }],
+        })
+        .map_err(|e| format!("Failed to persist triangle leg record: {e}"))?;
+    state
+        .state_store
+        .apply_leg_fill(&signal_id, side, qty_f64, px_f, fee_f, Some(order_id))
+        .map_err(|e| e.to_string())?;
+    state
+        .state_store
+        .update_signal_status(&signal_id, SignalStatus::Imbalanced, Some(note))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn execute_triangle_arbitrage_impl(
+    params: TriangleExecutionParams,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
+    if params.id.trim().is_empty() || params.id.len() > 128 {
+        return Err("triangle opportunity id must be 1-128 characters".into());
+    }
+    if params.venue.trim().is_empty() {
+        return Err("triangle venue must be specified".into());
+    }
+    if !params.trade_size_usd.is_finite() || params.trade_size_usd <= 0.0 {
+        return Err("trade_size_usd must be a finite positive number".into());
+    }
+    if !params.min_profit_bps.is_finite() || params.min_profit_bps < 0.0 {
+        return Err("min_profit_bps must be finite and nonnegative".into());
+    }
+
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {reason}"
+        ));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+
+    let adapter = state.get_adapter(&params.venue).ok_or_else(|| {
+        format!(
+            "Venue '{}' is not admitted for paper execution",
+            params.venue
+        )
+    })?;
+    let paper = state
+        .get_paper_exchange(&params.venue)
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", params.venue))?;
+    let vid = adapter.venue_id();
+
+    // The caller-supplied spread is never trusted: re-scan and match the
+    // opportunity id against freshly resolved books.
+    let opps = scan_triangular_opportunities_impl("", state).await?;
+    let opp = opps
+        .into_iter()
+        .find(|o| o.id == params.id)
+        .ok_or_else(|| {
+            "triangular opportunity is no longer available (missing legs or stale books)".to_string()
+        })?;
+    let plan = triangle_plan(&opp.intermediate_a, &opp.intermediate_b);
+    // Serialize dispatch against every other execution path. The rescan
+    // above runs unlocked (it fans out over venues and may hit the network);
+    // everything from the dispatch-time book resolution on is mutually
+    // exclusive, and the hurdle is re-enforced on those books.
+    let _execution_guard = state.execution_lock.lock().await;
+    // Re-check the risk gates under the lock: a pause or trip landing
+    // between the fast pre-check and dispatch must still refuse.
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {reason}"
+        ));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+    let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols)
+        .await
+        .ok_or_else(|| "triangle legs went stale before dispatch".to_string())?;
+    let fee = effective_venue_fee_bps(state, vid.as_str());
+    let eval = evaluate_triangle_books(&books, plan.leg_sides, fee, params.trade_size_usd)
+        .ok_or_else(|| {
+            "triangle route economics unavailable: the full quantity cannot be priced on all three legs"
+                .to_string()
+        })?;
+    if eval.net_bps < params.min_profit_bps {
+        return Err(format!(
+            "triangle net {:.1} BPS is below the {:.1} BPS hurdle — not executed",
+            eval.net_bps, params.min_profit_bps
+        ));
+    }
+
+    // One-open-pair-per-symbol, extended to the cycle: any blocking ledger
+    // signal or any open paper position on a leg symbol refuses dispatch.
+    for sym in &plan.leg_symbols {
+        if let Some(blocker) = state
+            .state_store
+            .blocking_signals(sym)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next()
+        {
+            return Err(format!(
+                "Symbol {sym} is blocked by signal {} (status {}): awaiting leg reconciliation/delta-neutral confirmation",
+                blocker.id,
+                blocker.status.as_str()
+            ));
+        }
+    }
+    let pre_acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+    let dust = triangle_dust_qty();
+    for sym in &plan.leg_symbols {
+        if pre_acc
+            .get_position(sym)
+            .is_some_and(|p| p.quantity > dust)
+        {
+            return Err(format!(
+                "An open paper position already exists for {sym}; flatten it before cycling"
+            ));
+        }
+    }
+
+    let (target_leverage, account_cap) = resolve_effective_leverage(
+        state,
+        "futures",
+        "futures",
+        &plan.leg_symbols[0],
+        &params.venue,
+        &params.venue,
+        None,
+    )?;
+    if let Some(paper) = state.get_paper_exchange(&params.venue) {
+        if paper.max_leverage_cap() != account_cap {
+            paper
+                .set_max_leverage_cap(account_cap)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    let size_dec = Decimal::from_f64_retain(params.trade_size_usd)
+        .ok_or_else(|| "Invalid trade size".to_string())?;
+    // Conservative margin bound: three full-notional legs against free margin.
+    let total_im = size_dec * dec!(3) / Decimal::from(target_leverage);
+    if total_im > pre_acc.free_margin {
+        return Err(format!(
+            "Insufficient free margin on {}: required {total_im} > available {}",
+            params.venue, pre_acc.free_margin
+        ));
+    }
+    let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    match margin_monitor.evaluate_account(&pre_acc) {
+        MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
+            return Err(format!(
+                "Paper account {} margin status is critical/breached; execution refused",
+                params.venue
+            ));
+        }
+        _ => {}
+    }
+
+    for book in &books {
+        paper
+            .replace_orderbook(book.clone())
+            .map_err(|e| e.to_string())?;
+    }
+
+    let mut equity_before = dec!(0);
+    let mut equity_before_by_venue = HashMap::new();
+    for (vid, p) in state.paper_exchanges() {
+        let acc = p.fetch_account().await.map_err(|e| e.to_string())?;
+        equity_before += acc.equity;
+        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+            if f.is_finite() {
+                equity_before_by_venue.insert(vid.to_string(), f);
+            }
+        }
+    }
+
+    let cycle = {
+        let mut step = state.sim_step_counter.write();
+        *step += 1;
+        *step
+    };
+    let cycle_tag = format!(
+        "tri-{}-{:08x}",
+        Utc::now().timestamp_millis(),
+        rand::random::<u32>()
+    );
+    let started = std::time::Instant::now();
+
+    let mut fills: Vec<(usize, arbitrager_core::order::OrderResponse)> = Vec::new();
+    let mut leg_error: Option<String> = None;
+    for (idx, ((sym, order_side), qty_f)) in plan
+        .leg_symbols
+        .iter()
+        .zip(plan.order_sides.iter())
+        .zip(eval.order_qty.iter())
+        .enumerate()
+    {
+        // Codebase convention (spatial path + ledger): f64 quantities cross
+        // into Decimal through their shortest string rendering, so the paper
+        // position and the ledger residual are bit-identical and flatten
+        // closes exactly. from_f64_retain's exact-binary expansion disagrees
+        // at ~1e-22 and would strand dust.
+        let qty = match Decimal::from_str_exact(&qty_f.to_string())
+            .ok()
+            .filter(|q| *q > dec!(0))
+        {
+            Some(q) => q,
+            None => {
+                leg_error = Some(format!("leg {} quantity is not positive", idx + 1));
+                break;
+            }
+        };
+        let order = arbitrager_core::order::OrderRequest::new_market(
+            paper.venue_id(),
+            sym,
+            *order_side,
+            qty,
+        );
+        match paper.place_order(order).await {
+            Ok(resp)
+                if resp.filled_qty == qty
+                    && resp.remaining_qty == dec!(0)
+                    && resp.avg_fill_price.filter(|p| *p > dec!(0)).is_some() =>
+            {
+                fills.push((idx, resp));
+            }
+            Ok(resp) => {
+                if resp.filled_qty > dec!(0) {
+                    fills.push((idx, resp));
+                }
+                leg_error = Some(format!(
+                    "leg {} on {sym} partially filled or rejected",
+                    idx + 1
+                ));
+                break;
+            }
+            Err(e) => {
+                leg_error = Some(format!("leg {} on {sym} failed: {e}", idx + 1));
+                break;
+            }
+        }
+    }
+    let latency_us = started.elapsed().as_micros() as u64;
+
+    let mut equity_after = dec!(0);
+    for (_, p) in state.paper_exchanges() {
+        equity_after += p
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+            .equity;
+    }
+    refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
+    let attempt_pnl = equity_after - equity_before;
+    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+    let total_f = {
+        let mut total_pnl = state.total_realized_profit.write();
+        *total_pnl = equity_after - state.paper_baseline_equity();
+        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+    };
+    state.circuit_breaker.update_equity(equity_after);
+
+    let fee_total_f: f64 = fills
+        .iter()
+        .filter_map(|(_, r)| r.fee.to_string().parse::<f64>().ok())
+        .sum();
+    let cycle_note = format!(
+        "triangle {} legs {}/3 filled, net {:.1} BPS at scan",
+        plan.path,
+        fills.len(),
+        eval.net_bps
+    );
+    let mut record_errors = Vec::new();
+    for (idx, resp) in &fills {
+        let fill_px = resp.avg_fill_price.unwrap_or(dec!(0));
+        // Single f64 source per leg: full fills reuse the exact submitted
+        // quantity; a partial failed leg falls back to its actual fill (any
+        // conversion dust is covered by the epsilon in the entry guard).
+        let qty_f64 = if resp.filled_qty == resp.original_qty {
+            eval.order_qty[*idx]
+        } else {
+            resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0)
+        };
+        if let Err(e) = record_triangle_leg_fill(
+            state,
+            &cycle_tag,
+            *idx,
+            vid.as_str(),
+            &resp.symbol,
+            plan.order_sides[*idx],
+            qty_f64,
+            fill_px,
+            resp.fee,
+            &resp.order_id,
+            &cycle_note,
+        ) {
+            record_errors.push(e);
+        }
+    }
+
+    if let Some(err) = leg_error {
+        state.execution_logs.write().push(ExecutionLogEntry {
+            id: format!("exec-triangle-{cycle}"),
+            timestamp: Utc::now().to_rfc3339(),
+            trade_type: "Triangle".into(),
+            strategy_id: crate::attribution::attribute_strategy_id(TRIANGLE_STRATEGY_ID),
+            symbol: plan.path.clone(),
+            venue_a: params.venue.clone(),
+            venue_b: params.venue.clone(),
+            leg_a_status: format!("{}/3 legs filled", fills.len()),
+            leg_b_status: err.clone(),
+            success: false,
+            gross_profit: 0.0,
+            fees: fee_total_f,
+            net_profit: attempt_pnl_f,
+            latency_us,
+            note: format!(
+                "Triangle cycle PARTIAL: {err}. {cycle_note}. Residual legs recorded as imbalanced 'triangle' signals — flatten each leg symbol to unwind. Record errors: {}",
+                record_errors.join("; ")
+            ),
+            direction: Some(plan.path.clone()),
+            trigger_spread_bps: Some(eval.net_bps),
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: Some(params.min_profit_bps),
+        });
+        return Err(format!(
+            "Triangle cycle PARTIAL ({}/3 legs): {err}; residuals recorded — flatten leg symbols to unwind",
+            fills.len()
+        ));
+    }
+
+    state.execution_logs.write().push(ExecutionLogEntry {
+        id: format!("exec-triangle-{cycle}"),
+        timestamp: Utc::now().to_rfc3339(),
+        trade_type: "Triangle".into(),
+        strategy_id: crate::attribution::attribute_strategy_id(TRIANGLE_STRATEGY_ID),
+        symbol: plan.path.clone(),
+        venue_a: params.venue.clone(),
+        venue_b: params.venue.clone(),
+        leg_a_status: "FILLED".into(),
+        leg_b_status: "FILLED".into(),
+        success: true,
+        gross_profit: 0.0,
+        fees: fee_total_f,
+        net_profit: attempt_pnl_f,
+        latency_us,
+        note: format!(
+            "Triangle cycle dispatched 3/3 paper legs ({cycle_note}); spread position open — unwind each leg symbol via flatten. Record errors: {}",
+            record_errors.join("; ")
+        ),
+        direction: Some(plan.path.clone()),
+        trigger_spread_bps: Some(eval.net_bps),
+        baseline_mean_spread_bps: None,
+        position_step: None,
+        max_units: None,
+        nominal_hurdle_bps: Some(params.min_profit_bps),
+    });
+
+    maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
+
+    Ok(SimStepResultDto {
+        cycle,
+        opportunity_found: true,
+        execution_success: true,
+        trade_type: "Triangle".into(),
+        direction: plan.path.clone(),
+        venue_a: params.venue.clone(),
+        venue_b: params.venue.clone(),
+        spread_bps: eval.net_bps,
+        realized_profit_usd: attempt_pnl_f,
+        total_cumulative_pnl_usd: total_f,
+        message: format!(
+            "Triangle cycle dispatched on {}: 3/3 paper legs filled, realized P&L ${attempt_pnl_f:.2}; spread position open — flatten leg symbols to unwind",
+            params.venue
+        ),
+    })
 }
 
 pub async fn scan_funding_opportunities_impl(
@@ -1870,6 +2842,41 @@ async fn execute_spatial_arbitrage_inner(
         }
     }
 
+    // Authoritative grid-cap gate. The frontend derives max_units per ticker
+    // (step = min(mult x venue min-lot, maxStepUsd / price); max steps from
+    // total paper equity x pct) and threads it through position_step/max_units.
+    // The backend holds no venue min-lot table so it cannot re-derive the cap;
+    // it enforces the caller-supplied cap strictly instead: an entry whose step
+    // exceeds the cap, or a ticker already at the cap, is rejected here before
+    // any orderbook work. Callers that pass max_units=None (monitor path) skip
+    // this gate.
+    if let Some(max) = max_units {
+        if max < 1 {
+            return Err("max_units must be at least 1".into());
+        }
+        if let Some(step) = position_step {
+            if step < 1 {
+                return Err("position_step must be at least 1".into());
+            }
+            if step > max {
+                return Err(format!(
+                    "Grid cap reached for {symbol}: position_step {step} exceeds max_units {max} — entry rejected"
+                ));
+            }
+        }
+        let current = state
+            .strategy_configs
+            .read()
+            .get(symbol)
+            .map(|c| c.current_accumulated_units)
+            .unwrap_or(0);
+        if current >= max {
+            return Err(format!(
+                "Grid cap reached for {symbol}: {current}/{max} accumulated units — entry rejected"
+            ));
+        }
+    }
+
     let _execution_guard = state.execution_lock.lock().await;
 
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
@@ -1980,10 +2987,8 @@ async fn execute_spatial_arbitrage_inner(
         .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "Invalid order quantity".to_string())?;
-    let (max_slippage_bps, min_depth_ratio) = {
-        let s = state.settings.read();
-        (s.max_slippage_bps, s.min_depth_ratio)
-    };
+    let max_slippage_bps = futures_slippage_setting(state);
+    let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
     let min_depth_dec = Decimal::from_f64_retain(min_depth_ratio)
@@ -2143,28 +3148,19 @@ async fn execute_spatial_arbitrage_inner(
             _ => {}
         }
     }
-    // Universal Single Spread params are canonical for leverage; the per-symbol
-    // record is a legacy fallback for configs written before strategy params
-    // existed in this session.
-    let target_leverage = state
-        .strategy_params
-        .read()
-        .get("futures")
-        .map(|p| p.user_target_leverage)
-        .or_else(|| {
-            state
-                .strategy_configs
-                .read()
-                .get(symbol)
-                .map(|c| c.user_target_leverage)
-        })
-        .unwrap_or(5);
-    if !(1..=5).contains(&target_leverage) {
-        return Err(format!(
-            "Configured leverage {} for {} is out of range; must be 1..=5",
-            target_leverage, symbol
-        ));
-    }
+    // Effective order-time leverage: the strategy chain (strategy params,
+    // then the per-symbol legacy fallback, then 5) lowered via min() by
+    // each leg account's cap and the venue cap. Feeds both the IM
+    // pre-checks below and the set_leverage calls after the books load.
+    let (target_leverage, account_cap) = resolve_effective_leverage(
+        state,
+        "futures",
+        strategy_id,
+        symbol,
+        buy_venue,
+        sell_venue,
+        route_id,
+    )?;
     let leverage = Decimal::from(target_leverage);
     let im_buy = (buy_vwap * qty_dec) / leverage;
     if im_buy > acc_buy.free_margin {
@@ -2206,6 +3202,17 @@ async fn execute_spatial_arbitrage_inner(
     sell_paper
         .replace_orderbook(book_sell.clone())
         .map_err(|e| e.to_string())?;
+    // Harden the simulator's own margin paths with the same account cap, so
+    // a raw strategy target passed anywhere else still books at the cap.
+    // Venue-wide last-write-wins; a tighter cap only ever refuses, never
+    // over-leverages, so the failure direction stays fail-closed.
+    for paper in [&buy_paper, &sell_paper] {
+        if paper.max_leverage_cap() != account_cap {
+            paper
+                .set_max_leverage_cap(account_cap)
+                .map_err(|e| e.to_string())?;
+        }
+    }
 
     let order_buy =
         router.build_ioc_order(buy_paper.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
@@ -2225,12 +3232,15 @@ async fn execute_spatial_arbitrage_inner(
     let sell_exec: Arc<dyn arbitrager_core::exchange::ExchangeAdapter> = sell_paper;
 
     let mut equity_before = dec!(0);
-    for (_, paper) in state.paper_exchanges() {
-        equity_before += paper
-            .fetch_account()
-            .await
-            .map_err(|e| e.to_string())?
-            .equity;
+    let mut equity_before_by_venue = HashMap::new();
+    for (vid, paper) in state.paper_exchanges() {
+        let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+        equity_before += acc.equity;
+        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+            if f.is_finite() {
+                equity_before_by_venue.insert(vid.to_string(), f);
+            }
+        }
     }
 
     // Persist the selected candidate as in_flight BEFORE dispatch: if the
@@ -2289,6 +3299,9 @@ async fn execute_spatial_arbitrage_inner(
             .map_err(|e| e.to_string())?
             .equity;
     }
+    // Own fills move the expected-equity baselines forward so the next
+    // attribution poll does not misread trade PnL as a manual flow.
+    refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
     let attempt_pnl = equity_after - equity_before;
     let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
     // Realized portfolio P&L is always derived from actual paper-account
@@ -2305,6 +3318,60 @@ async fn execute_spatial_arbitrage_inner(
         let mut step = state.sim_step_counter.write();
         *step += 1;
         *step
+    };
+
+    // Partial-fill trim attribution: the coordinator trimmed the larger leg
+    // down to min(fill_a, fill_b) via the unwind path on the excess only and
+    // kept the matched portion open as a delta-neutral pair. The excess was
+    // already unwound on the paper venues (paper equity reflects it), so the
+    // ledger cycle and the signal fills below must cover exactly
+    // `matched_qty` — attributing the raw fills would reconcile Imbalanced
+    // and strand the slot. A trim whose residual unwind failed never reaches
+    // this arm: the coordinator reports UnresolvedExposure and trips.
+    let mut open_qty = order_qty;
+    let mut trim_note = String::new();
+    let res = match res {
+        ArbitrageExecutionResult::PartialPairKept {
+            leg_a_fill,
+            leg_b_fill,
+            matched_qty,
+            unwind_a,
+            unwind_b,
+            realized_profit: _,
+        } => {
+            let matched_f = dec_to_f64(matched_qty, "trimmed matched quantity")?;
+            if matched_f <= 0.0 {
+                return Err("trimmed matched quantity is not positive".to_string());
+            }
+            open_qty = matched_f;
+            let describe_trim = |o: &Option<Box<arbitrager_core::order::OrderResponse>>| {
+                o.as_ref().map_or_else(
+                    || "no trim (leg equals matched quantity)".to_string(),
+                    |r| format!("trimmed excess via order {}", r.order_id),
+                )
+            };
+            trim_note = format!(
+                "Partial fills trimmed to matched {matched_qty} (A: {}; B: {}); ",
+                describe_trim(&unwind_a),
+                describe_trim(&unwind_b),
+            );
+            let mut a = leg_a_fill;
+            a.filled_qty = matched_qty;
+            a.remaining_qty = dec!(0);
+            a.original_qty = matched_qty;
+            let mut b = leg_b_fill;
+            b.filled_qty = matched_qty;
+            b.remaining_qty = dec!(0);
+            b.original_qty = matched_qty;
+            // Realized cash P&L stays fee outflow only (entry + trim fees are
+            // already in paper equity); the matched pair itself is unrealized.
+            ArbitrageExecutionResult::Success {
+                realized_profit: -(a.fee + b.fee),
+                leg_a: a,
+                leg_b: b,
+            }
+        }
+        other => other,
     };
 
     match res {
@@ -2332,14 +3399,14 @@ async fn execute_spatial_arbitrage_inner(
             let cycle_id = format!("paper-spatial-{}", cycle);
             state.virtual_ledger.write().open_cycle(
                 cycle_id,
-                "spatial_spread".to_string(),
+                crate::attribution::ledger_strategy_id(strategy_id),
                 symbol.to_string(),
                 buy_venue.to_string(),
                 sell_venue.to_string(),
                 net_bps_f,
-                order_qty,
+                open_qty,
                 buy_px_f,
-                order_qty,
+                open_qty,
                 sell_px_f,
                 fee_f,
             );
@@ -2359,10 +3426,36 @@ async fn execute_spatial_arbitrage_inner(
                 .update_signal_status(&signal_id, signal_status, None)
                 .map_err(|e| e.to_string())?;
 
+            // Position-aware exit support: persist the entry edge baseline
+            // for "futures" opens so the convergence check can later decide
+            // converge/stop/timeout unwinds through the flatten path.
+            // Best-effort AFTER fills are durable: a baseline-write failure
+            // must never rewrite an executed open as failed; the slot then
+            // stays under manual-flatten control and the check reports
+            // Unwatched instead of inventing a baseline.
+            let mut baseline_note = String::new();
+            if strategy_id == "futures" {
+                let row = crate::state_store::SpatialEntryBaseline {
+                    signal_id: signal_id.clone(),
+                    symbol: symbol.to_string(),
+                    buy_venue: buy_vid.to_string(),
+                    sell_venue: sell_vid.to_string(),
+                    entry_net_bps: net_bps_f,
+                    baseline_bps: baseline_mean_spread_bps,
+                    entry_ts_ms: Utc::now().timestamp_millis(),
+                };
+                if let Err(e) = state.state_store.record_spatial_baseline(&row) {
+                    baseline_note = format!(
+                        " Entry baseline not persisted ({e}); convergence auto-check unavailable, manual flatten only."
+                    );
+                }
+            }
+
             state.execution_logs.write().push(ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
+                strategy_id: crate::attribution::attribute_strategy_id(strategy_id),
                 symbol: symbol.to_string(),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
@@ -2374,7 +3467,7 @@ async fn execute_spatial_arbitrage_inner(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!(
-                    "Paper position opened; expected convergence capture ${:.2} is unrealized",
+                    "{trim_note}Paper position opened; expected convergence capture ${:.2} is unrealized{baseline_note}",
                     expected_capture_f
                 ),
                 direction: direction
@@ -2386,6 +3479,8 @@ async fn execute_spatial_arbitrage_inner(
                 max_units: max_units.or(Some(3)),
                 nominal_hurdle_bps,
             });
+
+            maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
             Ok(SimStepResultDto {
                 cycle,
@@ -2399,7 +3494,7 @@ async fn execute_spatial_arbitrage_inner(
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
-                    "Paper position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
+                    "{trim_note}Paper position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
                     buy_venue, sell_venue, attempt_pnl_f, expected_capture_f
                 ),
             })
@@ -2454,6 +3549,7 @@ async fn execute_spatial_arbitrage_inner(
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
+                strategy_id: crate::attribution::attribute_strategy_id(strategy_id),
                 symbol: symbol.to_string(),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
@@ -2498,6 +3594,7 @@ async fn execute_spatial_arbitrage_inner(
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
+                strategy_id: crate::attribution::attribute_strategy_id(strategy_id),
                 symbol: symbol.to_string(),
                 venue_a: buy_venue.to_string(),
                 venue_b: sell_venue.to_string(),
@@ -2553,6 +3650,13 @@ pub struct SpatialCandidateInput {
     /// Explicit strategy-level route override (account A ↔ account B).
     pub route_id: Option<String>,
     pub direction: Option<String>,
+    /// Grid-cap context threaded through to the execution gate: the entry's
+    /// 1-based step and the derived per-ticker max. Both default to None so
+    /// older callers keep working (gate skipped when max_units is None).
+    #[serde(default)]
+    pub position_step: Option<u32>,
+    #[serde(default)]
+    pub max_units: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2616,6 +3720,29 @@ pub async fn execute_spatial_candidates_impl(
             continue;
         }
 
+        // Bot targeting honors the active strategy's auto-filters before any
+        // economics ranking: filtered tickers lose with an explicit reason.
+        // The execution-relevant scope is the candidate's own venue pair.
+        let base = crate::monitor::canonical_base(&symbol_key);
+        let mut auto_block: Option<String> = None;
+        for c in &cands {
+            let mut scope = vec![c.buy_venue.clone(), c.sell_venue.clone()];
+            scope.sort();
+            scope.dedup();
+            if let Err(reason) =
+                reject_if_strategy_filtered(state, "futures", &base, &scope).await
+            {
+                auto_block = Some(reason);
+                break;
+            }
+        }
+        if let Some(reason) = auto_block {
+            for c in &cands {
+                outcomes.push(outcome_for(c, false, Some(reason.clone()), None));
+            }
+            continue;
+        }
+
         // Highest expected net USD wins; missing estimates rank last.
         cands.sort_by(|a, b| {
             b.expected_net_usd
@@ -2640,8 +3767,8 @@ pub async fn execute_spatial_candidates_impl(
             winner.direction.clone(),
             None,
             None,
-            None,
-            None,
+            winner.position_step,
+            winner.max_units,
             None,
             winner.route_id.as_deref(),
             "futures",
@@ -3025,15 +4152,105 @@ fn dec_to_f64(value: Decimal, what: &str) -> Result<f64, String> {
     Ok(f)
 }
 
+/// Resolve the passive-unwind controls for a flatten. Only strategies with
+/// a live reduce surface (futures/funding/spot) can return `Some`, and only
+/// when enabled with a valid record — everything else (including triangle,
+/// radar, unknown ids, and invalid records) falls back to market exits.
+fn passive_cfg_for(state: &AppEngineState, strategy_id: &str) -> Option<PassiveUnwindConfig> {
+    let key = strategy_id.trim().to_lowercase();
+    let map = state.strategy_params.read();
+    let params = map.get(key.as_str())?;
+    let cfg = match key.as_str() {
+        "futures" => params.futures_passive_unwind,
+        "funding" => params.funding_passive_unwind,
+        "spot" => params.spot_passive_unwind,
+        _ => return None,
+    };
+    if cfg.enabled && cfg.validate().is_ok() {
+        Some(cfg)
+    } else {
+        None
+    }
+}
+
+/// Re-fetcher for passive retries: every attempt re-prices from a newly
+/// fetched, validated adapter book mirrored into the paper exchange —
+/// exactly like the initial flatten fetch, never a stale peg.
+struct FlattenPaperRefresh<'a> {
+    state: &'a AppEngineState,
+    venue_label: String,
+    venue_id: VenueId,
+    symbol: String,
+    paper: Arc<arbitrager_exchanges::simulated::SimulatedExchange>,
+}
+
+#[async_trait::async_trait]
+impl PassiveBookRefresh for FlattenPaperRefresh<'_> {
+    async fn fresh_book(&self) -> anyhow::Result<OrderBook> {
+        // Mirror the initial flatten fetch: prefer the hub's fresh book
+        // (no network, no revalidation — the hub only holds live books),
+        // else fetch from the adapter with full validation.
+        if let Some(b) = self.state.market_data_hub.get_valid_orderbook(
+            &self.venue_id,
+            &self.symbol,
+            Some(std::time::Duration::from_secs(2)),
+        ) {
+            self.paper
+                .replace_orderbook(b.clone())
+                .map_err(anyhow::Error::msg)?;
+            return Ok(b);
+        }
+        let adapter = self.state.get_adapter(&self.venue_label).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Venue '{}' is not admitted for paper execution",
+                self.venue_label
+            )
+        })?;
+        let b = adapter.fetch_orderbook(&self.symbol).await.map_err(|e| {
+            anyhow::anyhow!(
+                "No fresh {} orderbook for {}: {e}",
+                self.venue_label,
+                self.symbol
+            )
+        })?;
+        validate_adapter_book(&b, &self.venue_id, &self.symbol)
+            .map_err(|e| anyhow::anyhow!("Flatten order book rejected: {e}"))?;
+        self.state.market_data_hub.update_orderbook(b.clone());
+        self.paper
+            .replace_orderbook(b.clone())
+            .map_err(anyhow::Error::msg)?;
+        Ok(b)
+    }
+}
+
+/// Arguments for one flatten leg-close (bundled: clippy allows at most
+/// seven function parameters).
+struct FlattenLegArgs<'a> {
+    state: &'a AppEngineState,
+    venue: &'a str,
+    symbol: &'a str,
+    side: Side,
+    qty: Decimal,
+    strategy_id: &'a str,
+    sig_id: &'a str,
+    notes: &'a mut Vec<String>,
+}
+
 /// Place a reduce-only market order on a venue's paper exchange to close one
 /// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
 async fn flatten_leg_on_paper(
-    state: &AppEngineState,
-    venue: &str,
-    symbol: &str,
-    side: Side,
-    qty: Decimal,
+    args: FlattenLegArgs<'_>,
 ) -> Result<Option<(Decimal, Decimal, Decimal, String)>, String> {
+    let FlattenLegArgs {
+        state,
+        venue,
+        symbol,
+        side,
+        qty,
+        strategy_id,
+        sig_id,
+        notes,
+    } = args;
     let canonical = crate::state::canonical_venue_id(venue)
         .ok_or_else(|| format!("Unknown venue '{venue}'"))?;
     let adapter = state
@@ -3066,6 +4283,50 @@ async fn flatten_leg_on_paper(
     if qty <= dec!(0) {
         return Err("Invalid leg quantity".to_string());
     }
+    if let Some(cfg) = passive_cfg_for(state, strategy_id) {
+        let paper_adapter: Arc<dyn ExchangeAdapter> = paper.clone();
+        let refresher = FlattenPaperRefresh {
+            state,
+            venue_label: venue.to_string(),
+            venue_id: vid.clone(),
+            symbol: symbol.to_string(),
+            paper: paper.clone(),
+        };
+        // No fast-vol tracker exists on the flatten path, so the spread leg
+        // is the hard guard (documented in `calm_gate_ok`).
+        let report = execute_passive_reduce(
+            &paper_adapter,
+            &refresher,
+            symbol,
+            side,
+            qty,
+            &cfg,
+            None,
+        )
+        .await
+        .map_err(|e| format!("passive reduce failed: {e:#}"))?;
+        match &report.outcome {
+            PassiveOutcome::LimitFilled => notes.push(format!(
+                "{sig_id}: {venue} leg passively closed {qty} (limit, {} tries)",
+                report.limit_tries
+            )),
+            PassiveOutcome::LimitPartialThenMarket => notes.push(format!(
+                "{sig_id}: {venue} leg limit-partial, remainder at market ({qty})"
+            )),
+            PassiveOutcome::MarketFallback { reason } => notes.push(format!(
+                "{sig_id}: {venue} leg passive skipped, market exit ({reason})"
+            )),
+        }
+        let resp = report.response;
+        if resp.filled_qty <= dec!(0) {
+            return Ok(None);
+        }
+        let px = resp
+            .avg_fill_price
+            .filter(|p| *p > dec!(0))
+            .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
+        return Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)));
+    }
     let mut order =
         arbitrager_core::order::OrderRequest::new_market(paper.venue_id(), symbol, side, qty);
     order.reduce_only = true;
@@ -3081,11 +4342,19 @@ async fn flatten_leg_on_paper(
     Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
 }
 
+/// Close the attributed virtual-ledger lot for a flattened signal family and
+/// report its realized PnL. The lot is matched on the signal's own ledger
+/// namespace (see `attribution::ledger_strategy_id`), so radar, futures and
+/// any future attributed strategy close their own lots instead of sharing
+/// one hardcoded namespace. Returns `None` when no matching open lot holds
+/// enough quantity (e.g. single-leg triangle residuals, which realize purely
+/// through their signal legs) — the caller keeps the 0.0 log convention
+/// there rather than inventing a number.
 fn close_flattened_spatial_lot(
     state: &AppEngineState,
     sig: &crate::state_store::SignalExecution,
     family: &[crate::state_store::SignalExecution],
-) {
+) -> Option<(f64, f64)> {
     use crate::state_store::LegSide;
     use arbitrager_execution::virtual_ledger::CycleStatus;
 
@@ -3097,7 +4366,7 @@ fn close_flattened_spatial_lot(
     };
     let (Some(long_venue), Some(short_venue)) = (venue_of(LegSide::Long), venue_of(LegSide::Short))
     else {
-        return;
+        return None;
     };
 
     #[derive(Default)]
@@ -3132,16 +4401,17 @@ fn close_flattened_spatial_lot(
         agg_for(long_venue, LegSide::Short),
         agg_for(short_venue, LegSide::Long),
     ) else {
-        return;
+        return None;
     };
 
+    let want_ledger_strategy = crate::attribution::ledger_strategy_id(&sig.strategy_id);
     let lot_id = {
         let ledger = state.virtual_ledger.read();
         ledger
             .lots
             .values()
             .find(|lot| {
-                lot.strategy_id == "spatial_spread"
+                lot.strategy_id == want_ledger_strategy
                     && lot.symbol == sig.symbol
                     && lot.status == CycleStatus::Open
                     && crate::state::canonical_venue_id(&lot.venue_long) == Some(long_venue)
@@ -3152,13 +4422,22 @@ fn close_flattened_spatial_lot(
             .map(|l| l.id.clone())
     };
     if let Some(id) = lot_id {
-        state.virtual_ledger.write().close_cycle(
-            &id,
-            long_exit.px_qty / long_exit.qty,
-            short_exit.px_qty / short_exit.qty,
-            exit_fees,
-            CycleStatus::StoppedOut,
-        );
+        state
+            .virtual_ledger
+            .write()
+            .close_cycle(
+                &id,
+                long_exit.px_qty / long_exit.qty,
+                short_exit.px_qty / short_exit.qty,
+                exit_fees,
+                CycleStatus::StoppedOut,
+            )
+            .and_then(|l| match (l.realized_pnl_usd, l.realized_pnl_bps) {
+                (Some(usd), Some(bps)) => Some((usd, bps)),
+                _ => None,
+            })
+    } else {
+        None
     }
 }
 
@@ -3180,6 +4459,7 @@ pub async fn flatten_ticker_positions_impl(
         return Err(LIVE_EXECUTION_DISABLED.into());
     }
     let _execution_guard = state.execution_lock.lock().await;
+    let flatten_equity_before = snapshot_paper_equity(state).await;
 
     let all_signals = state
         .state_store
@@ -3339,7 +4619,21 @@ pub async fn flatten_ticker_positions_impl(
                     ));
                 }
                 Some(p) => {
-                    let qty = residual.min(p.quantity);
+                    let basis = residual.min(p.quantity);
+                    // Leftover sweep: when the residual exceeds the closable
+                    // quantity by less than one full ticker step, close the
+                    // ENTIRE residual instead of stranding sub-step dust.
+                    // Oversized reduce-only paper orders cap at the position.
+                    let mut qty = basis;
+                    let swept =
+                        sweep_flatten_qty(residual, basis, flatten_step_qty(state, &sig.symbol));
+                    if swept > basis {
+                        qty = swept;
+                        out.notes.push(format!(
+                            "{}: {} leg sweep closes entire residual {}/{} (sub-step leftover)",
+                            sig.id, leg.venue, swept, basis
+                        ));
+                    }
                     targets.push(CloseTarget {
                         venue: leg.venue.clone(),
                         account_id: leg.account_id.clone(),
@@ -3416,7 +4710,17 @@ pub async fn flatten_ticker_positions_impl(
 
         let mut leg_desc = Vec::new();
         for t in &targets {
-            match flatten_leg_on_paper(state, &t.venue, &sig.symbol, t.order_side, t.qty).await {
+            match flatten_leg_on_paper(FlattenLegArgs {
+                state,
+                venue: &t.venue,
+                symbol: &sig.symbol,
+                side: t.order_side,
+                qty: t.qty,
+                strategy_id: &sig.strategy_id,
+                sig_id: &sig.id,
+                notes: &mut out.notes,
+            })
+            .await {
                 Ok(Some((qty, px, fee, oid))) => {
                     state
                         .state_store
@@ -3492,10 +4796,14 @@ pub async fn flatten_ticker_positions_impl(
         }
 
         let note = format!("emergency flatten via {close_id}");
+        // Realized PnL comes from the attributed ledger lot when the exit
+        // fills cover it; single-leg residuals (e.g. triangle legs) realize
+        // purely through their signal legs and keep the 0.0 log convention.
+        let mut flatten_realized: Option<(f64, f64)> = None;
         if fully_flat {
             close_family(&note)?;
             out.signals_closed += 1;
-            close_flattened_spatial_lot(state, &sig, &family_now);
+            flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now);
         } else {
             state
                 .state_store
@@ -3518,6 +4826,7 @@ pub async fn flatten_ticker_positions_impl(
             id: format!("exec-flatten-{}-{}", cycle, sig.id),
             timestamp: Utc::now().to_rfc3339(),
             trade_type: "Flatten".into(),
+            strategy_id: crate::attribution::attribute_strategy_id(&sig.strategy_id),
             symbol: sig.symbol.clone(),
             venue_a,
             venue_b,
@@ -3526,7 +4835,7 @@ pub async fn flatten_ticker_positions_impl(
             success: fully_flat,
             gross_profit: 0.0,
             fees: 0.0,
-            net_profit: 0.0,
+            net_profit: flatten_realized.map(|(usd, _)| usd).unwrap_or(0.0),
             latency_us: 0,
             note: if fully_flat {
                 format!("Emergency flatten closed signal {}", sig.id)
@@ -3570,6 +4879,8 @@ pub async fn flatten_ticker_positions_impl(
         *total_pnl = equity_after - state.paper_baseline_equity();
     }
     state.circuit_breaker.update_equity(equity_after);
+    refresh_equity_expectations_after_fills(state, &flatten_equity_before).await;
+    maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
     Ok(out)
 }
@@ -3600,17 +4911,24 @@ pub fn get_engine_settings_impl(state: &AppEngineState) -> Result<EngineSettings
 }
 
 pub fn save_engine_settings_impl(
-    settings: EngineSettingsDto,
+    mut settings: EngineSettingsDto,
     state: &AppEngineState,
 ) -> Result<String, String> {
     if !settings.trading_mode.eq_ignore_ascii_case("paper") {
         return Err("trading_mode must be 'paper'; live execution is unavailable".into());
     }
-    if !settings.max_slippage_bps.is_finite()
-        || settings.max_slippage_bps < 0.1
-        || settings.max_slippage_bps > 500.0
-    {
-        return Err("Max slippage tolerance must be between 0.1 and 500 BPS".into());
+    settings.spread_samples_max_days = match settings.spread_samples_max_days {
+        None => None,
+        Some(0) => None,
+        Some(d) => Some(d),
+    };
+    match settings.spread_samples_max_gb {
+        None => {}
+        Some(0.0) => settings.spread_samples_max_gb = None,
+        Some(gb) if !gb.is_finite() || gb < 0.0 => {
+            return Err("spread_samples_max_gb must be a non-negative finite number".into());
+        }
+        Some(_) => {}
     }
     if !settings.min_depth_ratio.is_finite() || settings.min_depth_ratio < 1.0 {
         return Err("Min depth ratio must be at least 1.0".into());
@@ -3719,6 +5037,30 @@ pub fn save_engine_settings_impl(
     let mut sanitized = settings;
     sanitized.clear_credential_material();
     sanitized.configured_venues = state.vault.write().configured_venues().unwrap_or_default();
+    match sanitized.spread_samples_max_days {
+        Some(0) | None => {
+            let _ = state.state_store.kv_delete("retention.max_days");
+        }
+        Some(d) => {
+            let _ = state
+                .state_store
+                .kv_set("retention.max_days", &d.to_string());
+        }
+    }
+    match sanitized.spread_samples_max_gb {
+        None => {
+            let _ = state.state_store.kv_delete("retention.max_gb");
+        }
+        Some(0.0) => {
+            sanitized.spread_samples_max_gb = None;
+            let _ = state.state_store.kv_delete("retention.max_gb");
+        }
+        Some(gb) => {
+            let _ = state
+                .state_store
+                .kv_set("retention.max_gb", &gb.to_string());
+        }
+    }
     // A changed starting balance reinitializes every paper account: fresh
     // equity, no open positions. Unrelated saves leave paper state alone.
     let prev_balance = state.settings.read().paper_starting_balance_usd;
@@ -3726,6 +5068,17 @@ pub fn save_engine_settings_impl(
         if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
             for (_, paper) in state.paper_exchanges() {
                 paper.reset_account(eq);
+            }
+            // A reset moves the baseline itself: rebase every account's
+            // expected equity to the new starting balance (flat, no event).
+            let f = sanitized.paper_starting_balance_usd;
+            if f.is_finite() && f >= 0.0 {
+                let now_ms = Utc::now().timestamp_millis();
+                for (vid, _) in state.paper_exchanges() {
+                    let _ = state
+                        .state_store
+                        .set_equity_expectation(vid, f, "", now_ms);
+                }
             }
         }
     }
@@ -3790,6 +5143,17 @@ pub(crate) async fn cached_venue_volumes(
                     .filter_map(|(k, v)| v.to_string().parse::<f64>().ok().map(|f| (k, f)))
                     .collect(),
             );
+        }
+    }
+    // Session-seasonality sampler (Phase 1): persist this refresh into the
+    // raw hourly volume log feeding the session rollup. Best-effort — a
+    // store failure must never break the market-data path.
+    {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for (venue, vols) in &map {
+            let _ = state
+                .state_store
+                .record_venue_volume_samples(venue, now_ms, vols);
         }
     }
     *state.volume_cache.lock() = Some((std::time::Instant::now(), map.clone()));
@@ -4288,6 +5652,31 @@ pub async fn execute_spatial_arbitrage(
 }
 
 #[tauri::command]
+pub async fn scan_triangle_opportunities(
+    filter_asset: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<TriangleOpportunityDto>, String> {
+    scan_triangular_opportunities_impl(&filter_asset, &state).await
+}
+
+#[tauri::command]
+pub async fn execute_triangle_arbitrage(
+    params: TriangleExecutionParams,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SimStepResultDto, String> {
+    execute_triangle_arbitrage_impl(params, &state).await
+}
+
+#[tauri::command]
+pub async fn check_spatial_convergence(
+    symbol: Option<String>,
+    strategy_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<ConvergenceCheckDto>, String> {
+    check_spatial_convergence_impl(symbol.as_deref(), &strategy_id, &state).await
+}
+
+#[tauri::command]
 pub async fn execute_cross_ticker_arbitrage(
     long_symbol: String,
     short_symbol: String,
@@ -4505,11 +5894,11 @@ pub fn get_strategy_params_impl(
 }
 
 fn canonical_sliding_window(secs: u64) -> String {
-    if secs % 86_400 == 0 {
+    if secs.is_multiple_of(86_400) {
         format!("{}d", secs / 86_400)
-    } else if secs % 3_600 == 0 {
+    } else if secs.is_multiple_of(3_600) {
         format!("{}h", secs / 3_600)
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         format!("{}m", secs / 60)
     } else {
         format!("{secs}s")
@@ -4542,14 +5931,20 @@ pub fn save_strategy_params_impl(
     if params.window_percentile < 50 {
         return Err("window_percentile must be at least 50%".into());
     }
-    if params.max_accumulated_units < 1 {
-        return Err("max_accumulated_units must be at least 1".into());
-    }
     if !(1..=5).contains(&params.user_target_leverage) {
         return Err("user_target_leverage must be between 1 and 5".into());
     }
-    if !params.unit_size_usd.is_finite() || params.unit_size_usd <= 0.0 {
-        return Err("unit_size_usd must be finite and positive".into());
+    if !params.step_size_mult.is_finite() || params.step_size_mult < 1.0 {
+        return Err("step_size_mult must be finite and >= 1".into());
+    }
+    if !params.max_step_usd.is_finite() || params.max_step_usd <= 0.0 {
+        return Err("max_step_usd must be finite and positive".into());
+    }
+    if !params.max_ticker_equity_pct.is_finite()
+        || params.max_ticker_equity_pct <= 0.0
+        || params.max_ticker_equity_pct > 100.0
+    {
+        return Err("max_ticker_equity_pct must be finite and within (0, 100]".into());
     }
     if !params.funding_trade_size_usd.is_finite() || params.funding_trade_size_usd <= 0.0 {
         return Err("funding_trade_size_usd must be finite and positive".into());
@@ -4566,9 +5961,63 @@ pub fn save_strategy_params_impl(
     if !params.spot_max_slippage_bps.is_finite() || params.spot_max_slippage_bps <= 0.0 {
         return Err("spot_max_slippage_bps must be finite and positive".into());
     }
+    for (label, value) in [
+        ("futures_max_slippage_bps", params.futures_max_slippage_bps),
+        ("funding_max_slippage_bps", params.funding_max_slippage_bps),
+        ("prediction_max_slippage_bps", params.prediction_max_slippage_bps),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("{label} must be finite and positive"));
+        }
+    }
+    if !params.funding_max_entry_spread_bps.is_finite()
+        || params.funding_max_entry_spread_bps <= 0.0
+    {
+        return Err("funding_max_entry_spread_bps must be finite and positive".into());
+    }
+    for (label, value) in [
+        ("funding_auto_exit_spread_pct", params.funding_auto_exit_spread_pct),
+        ("funding_liq_trim_pct", params.funding_liq_trim_pct),
+        ("futures_liq_trim_pct", params.futures_liq_trim_pct),
+        ("spot_liq_trim_pct", params.spot_liq_trim_pct),
+        ("prediction_liq_trim_pct", params.prediction_liq_trim_pct),
+    ] {
+        if let Some(pct) = value {
+            if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+                return Err(format!("{label} must be within (0, 100] when set"));
+            }
+        }
+    }
+    if let Some(threshold) = params.funding_rotation_threshold_bps {
+        if !threshold.is_finite() || threshold <= 0.0 {
+            return Err(
+                "funding_rotation_threshold_bps must be finite and positive when set".into(),
+            );
+        }
+    }
+    for (label, cfg) in [
+        ("futures_passive_unwind", &params.futures_passive_unwind),
+        ("funding_passive_unwind", &params.funding_passive_unwind),
+        ("spot_passive_unwind", &params.spot_passive_unwind),
+    ] {
+        cfg.validate()
+            .map_err(|e| format!("{label}: {e}"))?;
+        if cfg.enabled && cfg.timeout_secs < 1 {
+            return Err(format!("{label}: timeout_secs must be at least 1 when enabled"));
+        }
+    }
     if !params.spot_min_net_spread_bps.is_finite() || params.spot_min_net_spread_bps <= 0.0 {
         return Err("spot_min_net_spread_bps must be finite and positive".into());
     }
+    crate::strategy_filters::validate_auto_threshold(
+        params.auto_min_volume_usd,
+        "auto_min_volume_usd",
+    )?;
+    crate::strategy_filters::validate_auto_threshold(params.auto_min_price_usd, "auto_min_price_usd")?;
+    crate::strategy_filters::validate_auto_threshold(
+        params.auto_min_event_volume_usd,
+        "auto_min_event_volume_usd",
+    )?;
     let params_json = serde_json::to_string(&params).map_err(|e| e.to_string())?;
     state
         .state_store
@@ -4614,6 +6063,969 @@ pub async fn get_all_strategy_params(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<StrategyParamsDto>, String> {
     get_all_strategy_params_impl(&state)
+}
+
+// ---------------------------------------------------------------------------
+// Per-strategy auto-hide ticker filters + effective leverage + strategy tickers
+// ---------------------------------------------------------------------------
+
+/// One row of the `get_strategy_tickers` response: the ticker's in-scope
+/// venues, whether it passes the strategy's auto-filters, and the explicit
+/// block reason when it does not. Manual (global-exempt) hiding is managed
+/// separately and applied after this auto-filter on both layers.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct StrategyTickerDto {
+    pub base: String,
+    pub venues: Vec<String>,
+    pub passes: bool,
+    pub block_reason: Option<String>,
+}
+
+/// Resolve which strategy record carries the auto-filters for an execution
+/// or listing context. The Spread Radar scans the same perp universe as
+/// Single Spread, so "radar" evaluates against the "futures" record.
+fn filter_strategy_id(strategy_id: &str) -> Result<&'static str, String> {
+    match strategy_id.trim().to_lowercase().as_str() {
+        "futures" | "radar" => Ok("futures"),
+        "funding" => Ok("funding"),
+        "spot" => Ok("spot"),
+        other => Err(format!("unknown strategy_id '{other}' for ticker filters")),
+    }
+}
+
+fn strategy_auto_filters(
+    state: &AppEngineState,
+    strategy_id: &str,
+) -> Result<crate::strategy_filters::StrategyAutoFilters, String> {
+    let canonical = filter_strategy_id(strategy_id)?;
+    let params = state.strategy_params.read();
+    let p = params
+        .get(canonical)
+        .cloned()
+        .unwrap_or_else(|| StrategyParamsDto::defaults_for(canonical));
+    Ok(crate::strategy_filters::StrategyAutoFilters {
+        min_volume_usd: p.auto_min_volume_usd,
+        min_price_usd: p.auto_min_price_usd,
+    })
+}
+
+fn auto_filters_active(filters: crate::strategy_filters::StrategyAutoFilters) -> bool {
+    crate::strategy_filters::threshold_active(filters.min_volume_usd)
+        || crate::strategy_filters::threshold_active(filters.min_price_usd)
+}
+
+fn hub_mid_usd(state: &AppEngineState, base: &str, venue: &str) -> Option<f64> {
+    for key in [base.to_string(), format!("{base}-USDC")] {
+        if let Some(book) = state.market_data_hub.get_valid_orderbook(
+            &VenueId::from(venue),
+            &key,
+            Some(std::time::Duration::from_secs(60)),
+        ) {
+            if let Some(mid) = book.mid_price() {
+                if let Ok(m) = mid.to_string().parse::<f64>() {
+                    if m.is_finite() && m > 0.0 {
+                        return Some(m);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Shared fail-closed gate for bot/scan targeting and radar Execute: when
+/// the strategy's auto-filters are off this is a no-op; otherwise the
+/// ticker must pass MIN aggregation across `in_scope_venues`.
+pub(crate) async fn reject_if_strategy_filtered(
+    state: &AppEngineState,
+    strategy_id: &str,
+    base: &str,
+    in_scope_venues: &[String],
+) -> Result<(), String> {
+    let filters = strategy_auto_filters(state, strategy_id)?;
+    if !auto_filters_active(filters) {
+        return Ok(());
+    }
+    let volumes = cached_venue_volumes(state).await;
+    let mut mids = HashMap::new();
+    for v in in_scope_venues {
+        if let Some(m) = hub_mid_usd(state, base, v) {
+            mids.insert(v.clone(), m);
+        }
+    }
+    let (ok, reason) = crate::strategy_filters::ticker_passes_strategy_filters(
+        base,
+        in_scope_venues,
+        &volumes,
+        &mids,
+        filters,
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err(reason.unwrap_or_else(|| format!("{base} blocked by strategy auto-filter")))
+    }
+}
+
+pub async fn get_strategy_tickers_impl(
+    state: &AppEngineState,
+    strategy_id: &str,
+) -> Result<Vec<StrategyTickerDto>, String> {
+    let filters = strategy_auto_filters(state, strategy_id)?;
+    let mut venue_bases: HashMap<String, Vec<String>> = HashMap::new();
+    for (vid, _, adapter) in state.get_venues() {
+        if let Ok(markets) = adapter.fetch_markets().await {
+            let mut bases: Vec<String> = markets
+                .iter()
+                .filter(|m| m.is_active)
+                .map(|m| crate::monitor::canonical_base(&m.symbol.base))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            bases.sort();
+            venue_bases.insert(vid.to_string(), bases);
+        }
+    }
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for bases in venue_bases.values() {
+        for b in bases {
+            *counts.entry(b.clone()).or_default() += 1;
+        }
+    }
+    let mut bases: Vec<String> = counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(b, _)| b)
+        .collect();
+    bases.sort();
+    let volumes = if auto_filters_active(filters) {
+        cached_venue_volumes(state).await
+    } else {
+        HashMap::new()
+    };
+    let mut out = Vec::new();
+    for base in bases {
+        let mut scope: Vec<String> = venue_bases
+            .iter()
+            .filter(|(_, v)| v.contains(&base))
+            .map(|(k, _)| k.clone())
+            .collect();
+        scope.sort();
+        let mut mids = HashMap::new();
+        if auto_filters_active(filters) {
+            for v in &scope {
+                if let Some(m) = hub_mid_usd(state, &base, v) {
+                    mids.insert(v.clone(), m);
+                }
+            }
+        }
+        let (passes, reason) = if auto_filters_active(filters) {
+            crate::strategy_filters::ticker_passes_strategy_filters(
+                &base, &scope, &volumes, &mids, filters,
+            )
+        } else {
+            (true, None)
+        };
+        out.push(StrategyTickerDto {
+            base,
+            venues: scope,
+            passes,
+            block_reason: reason,
+        });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+pub async fn get_strategy_tickers(
+    strategy_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<StrategyTickerDto>, String> {
+    get_strategy_tickers_impl(&state, &strategy_id).await
+}
+
+/// Recent external-delta balance attribution events, newest first.
+#[tauri::command]
+pub async fn get_account_equity_events(
+    account_id: Option<String>,
+    limit: Option<u32>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<crate::state_store::AccountEquityEvent>, String> {
+    let clean = account_id.filter(|s| !s.trim().is_empty());
+    state
+        .state_store
+        .list_equity_events(clean.as_deref(), limit.unwrap_or(100))
+        .map_err(|e| e.to_string())
+}
+
+/// Effective order-time leverage for a two-leg signal: the strategy chain
+/// (strategy params, then the per-symbol legacy fallback, then 5) lowered
+/// by each leg account's cap and the venue cap via min(). Generic per
+/// venue/account — no venue-specific adapter code. Returns the effective
+/// leverage plus the binding account cap (`None` = unlimited), so callers
+/// can harden the simulator's own margin paths with the same cap.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_effective_leverage(
+    state: &AppEngineState,
+    params_strategy_id: &str,
+    attribution_strategy_id: &str,
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    route_id: Option<&str>,
+) -> Result<(u32, Option<u32>), String> {
+    let strategy_target = state
+        .strategy_params
+        .read()
+        .get(params_strategy_id)
+        .map(|p| p.user_target_leverage)
+        .or_else(|| {
+            state
+                .strategy_configs
+                .read()
+                .get(symbol)
+                .map(|c| c.user_target_leverage)
+        })
+        .unwrap_or(5);
+    if !(1..=5).contains(&strategy_target) {
+        return Err(format!(
+            "Configured leverage {strategy_target} for {symbol} is out of range; must be 1..=5"
+        ));
+    }
+    let accounts =
+        resolve_signal_accounts(state, attribution_strategy_id, buy_venue, sell_venue, route_id)?;
+    let mut account_cap: Option<u32> = None;
+    for id in [accounts.long, accounts.short].into_iter().flatten() {
+        if let Ok(Some(profile)) = state.state_store.get_account(&id) {
+            account_cap = match (account_cap, profile.max_leverage) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            };
+        }
+    }
+    Ok((
+        crate::strategy_filters::effective_leverage(strategy_target, account_cap, None),
+        account_cap,
+    ))
+}
+
+/// Position signature for the attribution cross-check: sorted
+/// `symbol:side:quantity` segments, empty when flat.
+pub(crate) fn position_signature(
+    positions: &[arbitrager_core::position::Position],
+) -> String {
+    let mut parts: Vec<String> = positions
+        .iter()
+        .map(|p| format!("{}:{:?}:{}", p.symbol, p.side, p.quantity))
+        .collect();
+    parts.sort();
+    parts.join("|")
+}
+
+/// Minimum gap between two margin-snapshot rows for the same venue.
+/// Bounds the writer cadence absolutely: fills dispatch paths and the
+/// periodic retention heartbeat all funnel through
+/// `maybe_record_margin_snapshots`, which drops observations that arrive
+/// inside the window. One row per venue per minute at most.
+pub(crate) const MARGIN_SNAPSHOT_MIN_INTERVAL_MS: i64 = 60_000;
+
+/// Default trailing window for the average-utilisation stat (24h).
+pub(crate) const UTILISATION_DEFAULT_WINDOW_MS: i64 = 24 * 3_600_000;
+
+/// Record one margin-utilisation snapshot per admitted paper venue unless
+/// the per-venue cadence cap says the last write is still fresh. Best
+/// effort: account reads or store writes never break execution. Called on
+/// fills dispatches (open, triangle, flatten) and by the periodic retention
+/// heartbeat so history stays bounded yet continuous.
+pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms: i64) {
+    if now_ms < 0 {
+        return;
+    }
+    for (vid, paper) in state.paper_exchanges() {
+        let fresh = state
+            .margin_snapshot_at
+            .lock()
+            .get(vid)
+            .is_some_and(|last| now_ms.saturating_sub(*last) < MARGIN_SNAPSHOT_MIN_INTERVAL_MS);
+        if fresh {
+            continue;
+        }
+        let account = match paper.fetch_account().await {
+            Ok(acc) => acc,
+            Err(_) => continue,
+        };
+        let equity = match account.equity.to_string().parse::<f64>() {
+            Ok(v) if v.is_finite() && v >= 0.0 => v,
+            _ => continue,
+        };
+        let free = match account.free_margin.to_string().parse::<f64>() {
+            Ok(v) if v.is_finite() => v,
+            _ => continue,
+        };
+        let rate = match account.margin_usage_pct.to_string().parse::<f64>() {
+            Ok(v) if v.is_finite() && v >= 0.0 => v,
+            _ => continue,
+        };
+        let used = (equity - free).max(0.0);
+        if state
+            .state_store
+            .record_margin_snapshot(vid, vid, now_ms, equity, used, rate)
+            .is_ok()
+        {
+            state.margin_snapshot_at.lock().insert(vid.to_string(), now_ms);
+        }
+    }
+}
+
+/// Per-venue actual paper equity snapshot, taken immediately before a
+/// fills dispatch.
+async fn snapshot_paper_equity(state: &AppEngineState) -> HashMap<String, f64> {    let mut map = HashMap::new();
+    for (vid, paper) in state.paper_exchanges() {
+        if let Ok(acc) = paper.fetch_account().await {
+            if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+                if f.is_finite() {
+                    map.insert(vid.to_string(), f);
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Fold a fills dispatch back into the expected-equity baselines:
+/// expected_new = prior_expected (or the pre-trade snapshot when no
+/// baseline exists yet) + (actual_after - actual_before). The dispatch
+/// window holds the execution lock, so the delta is own fills minus fees
+/// by construction. Best-effort: attribution must never break execution.
+async fn refresh_equity_expectations_after_fills(
+    state: &AppEngineState,
+    before: &HashMap<String, f64>,
+) {
+    let now_ms = Utc::now().timestamp_millis();
+    for (vid, paper) in state.paper_exchanges() {
+        let Ok(acc) = paper.fetch_account().await else {
+            continue;
+        };
+        let Ok(after) = acc.equity.to_string().parse::<f64>() else {
+            continue;
+        };
+        if !after.is_finite() {
+            continue;
+        }
+        let Some(b) = before.get(vid).copied() else {
+            continue;
+        };
+        let prior = state
+            .state_store
+            .get_equity_expectation(vid)
+            .ok()
+            .flatten()
+            .map(|(e, _, _)| e);
+        let next = prior.unwrap_or(b) + (after - b);
+        if next.is_finite() && next >= 0.0 {
+            let _ = state.state_store.set_equity_expectation(
+                vid,
+                next,
+                &position_signature(&acc.positions),
+                now_ms,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-tune Phase 1 (recommend-only) — Single Spread futures
+// ---------------------------------------------------------------------------
+
+/// One validated recommendation row. `recommended` is `None` exactly when
+/// `status == "HELD"` — the manual value stays authoritative. Read-only:
+/// no write path consumes this DTO.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AutotuneRowDto {
+    pub param: String,
+    pub current: f64,
+    pub recommended: Option<f64>,
+    pub status: String,
+    pub fit_metric: String,
+    pub validated_metric: String,
+    pub n: usize,
+    pub rationale: String,
+    pub formula_id: String,
+    pub confidence: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AutotuneBannerDto {
+    pub fit_from_ms: i64,
+    pub fit_to_ms: i64,
+    pub validate_from_ms: i64,
+    pub validate_to_ms: i64,
+    pub regime_verdict: String,
+    pub ready_count: usize,
+    pub total: usize,
+}
+
+/// Recommend-only preview for one symbol's Single Spread futures params.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AutotuneRecommendationDto {
+    pub symbol: String,
+    pub buy_venue: Option<String>,
+    pub sell_venue: Option<String>,
+    pub pair_observations: usize,
+    pub rows: Vec<AutotuneRowDto>,
+    pub banner: AutotuneBannerDto,
+    pub session_tau_scale: f64,
+    pub session_sigma_scale: f64,
+}
+
+fn tune_params_from_dto(p: &StrategyParamsDto) -> TuneParams {
+    TuneParams {
+        window_secs: p.sliding_window_secs,
+        target_bps: p.target_profit_bps,
+        percentile: p.window_percentile,
+        step_mult: p.step_size_mult,
+        max_step_usd: p.max_step_usd,
+        equity_pct: p.max_ticker_equity_pct,
+        leverage: p.user_target_leverage,
+    }
+}
+
+fn map_autotune_report(
+    symbol: &str,
+    buy_venue: Option<String>,
+    sell_venue: Option<String>,
+    pair_observations: usize,
+    coupling: arbitrager_math::seasonality::SessionCoupling,
+    rep: arbitrager_math::autotune::AutotuneReport,
+) -> AutotuneRecommendationDto {
+    AutotuneRecommendationDto {
+        symbol: symbol.to_string(),
+        buy_venue,
+        sell_venue,
+        pair_observations,
+        rows: rep
+            .rows
+            .into_iter()
+            .map(|r| AutotuneRowDto {
+                param: r.param,
+                current: r.current,
+                recommended: r.recommended,
+                status: match r.status {
+                    arbitrager_math::autotune::RowStatus::READY => "READY".to_string(),
+                    arbitrager_math::autotune::RowStatus::HELD => "HELD".to_string(),
+                },
+                fit_metric: r.fit_metric,
+                validated_metric: r.validated_metric,
+                n: r.n,
+                rationale: r.rationale,
+                formula_id: r.formula_id,
+                confidence: r.confidence,
+            })
+            .collect(),
+        banner: AutotuneBannerDto {
+            fit_from_ms: rep.banner.fit_from_ms,
+            fit_to_ms: rep.banner.fit_to_ms,
+            validate_from_ms: rep.banner.validate_from_ms,
+            validate_to_ms: rep.banner.validate_to_ms,
+            regime_verdict: rep.banner.regime_verdict.as_str().to_string(),
+            ready_count: rep.banner.ready_count,
+            total: rep.banner.total,
+        },
+        session_tau_scale: coupling.tau_scale,
+        session_sigma_scale: coupling.sigma_scale,
+    }
+}
+
+/// Capacity tiers backing the step/maxStep candidates: the monitor's
+/// default tiers plus a 0.5% participation-cap tier off the smaller venue's
+/// 24h volume when both volumes are known.
+fn autotune_tiers_with_cap(
+    volumes: &HashMap<String, HashMap<String, f64>>,
+    buy_v: &str,
+    sell_v: &str,
+    symbol: &str,
+    base: &str,
+) -> Vec<f64> {
+    let mut tiers = vec![1000.0, 5000.0, 10_000.0];
+    let keys = [
+        symbol.to_string(),
+        base.to_string(),
+        format!("K{base}"),
+        format!("1000{base}"),
+    ];
+    let lookup = |venue: &str| -> Option<f64> {
+        let m = volumes.get(venue)?;
+        keys.iter()
+            .filter_map(|k| {
+                m.iter()
+                    .find(|(mk, _)| mk.eq_ignore_ascii_case(k))
+                    .map(|(_, v)| *v)
+            })
+            .next()
+    };
+    if let (Some(a), Some(b)) = (lookup(buy_v), lookup(sell_v)) {
+        let cap = a.min(b) * 0.005;
+        if cap.is_finite() && cap > 0.0 {
+            tiers.push(cap);
+            tiers.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+            tiers.dedup();
+        }
+    }
+    tiers
+}
+
+pub async fn get_autotune_recommendation_impl(
+    symbol: &str,
+    state: &AppEngineState,
+) -> Result<AutotuneRecommendationDto, String> {
+    validate_market_symbol(symbol)?;
+    let current_dto = get_strategy_params_impl("futures", state)?;
+    let current = tune_params_from_dto(&current_dto);
+    let defaults = tune_params_from_dto(&StrategyParamsDto::defaults_for("futures"));
+
+    let base = symbol
+        .split(['-', '/', '_'])
+        .next()
+        .unwrap_or(symbol)
+        .to_ascii_uppercase();
+    let keys = [base.clone(), format!("{base}-USDC"), format!("{base}-USD")];
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms - BASELINE_RETENTION_MS;
+    let store = state.state_store.clone();
+    let sym_owned = symbol.to_string();
+    let (best_pair, pair_observations): (
+        Option<(String, String, Vec<arbitrager_math::pair_monitor::PairObservation>)>,
+        usize,
+    ) = tokio::task::spawn_blocking(move || {
+        let mut all = Vec::new();
+        for k in &keys {
+            if let Ok(mut rows) = store.spread_samples(k, since_ms, now_ms) {
+                all.append(&mut rows);
+            }
+        }
+        all.sort_by(|a, b| (a.ts_ms, a.venue_id.as_str()).cmp(&(b.ts_ms, b.venue_id.as_str())));
+        all.dedup_by(|a, b| a.ts_ms == b.ts_ms && a.venue_id == b.venue_id);
+        let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+        for s in &all {
+            if s.mid.is_finite() && s.mid > 0.0 {
+                mids_by_venue
+                    .entry(s.venue_id.clone())
+                    .or_default()
+                    .push((s.ts_ms, s.mid));
+            }
+        }
+        let mut venues: Vec<String> = mids_by_venue.keys().cloned().collect();
+        venues.sort();
+        let mut best: Option<(String, String, Vec<arbitrager_math::pair_monitor::PairObservation>)> =
+            None;
+        let mut total = 0usize;
+        for buy_v in &venues {
+            for sell_v in &venues {
+                if buy_v == sell_v {
+                    continue;
+                }
+                let (Some(a), Some(b)) =
+                    (mids_by_venue.get(buy_v), mids_by_venue.get(sell_v))
+                else {
+                    continue;
+                };
+                let series = arbitrager_math::pair_monitor::build_pair_series(
+                    a,
+                    b,
+                    PAIR_ALIGN_GAP_MS,
+                );
+                total += series.len();
+                let longer = best.as_ref().map(|(_, _, s)| s.len()).unwrap_or(0);
+                if series.len() > longer {
+                    best = Some((buy_v.clone(), sell_v.clone(), series));
+                }
+            }
+        }
+        let _ = sym_owned;
+        Ok::<_, anyhow::Error>((best, total))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+
+    let Some((buy_v, sell_v, series)) = best_pair else {
+        // No paired history — honest all-HELD report, never fabricated.
+        let rep = recommend(&TuneHistory {
+            fit: Vec::new(),
+            validate: Vec::new(),
+            dt_fit_secs: 0.0,
+            dt_val_secs: 0.0,
+            friction_fit_bps: 0.0,
+            friction_val_bps: 0.0,
+            carry_known: false,
+            fit_optimal_size_usd: None,
+            fit_breakeven_size_usd: None,
+            current,
+            defaults,
+        });
+        let neutral = arbitrager_math::seasonality::SessionCoupling {
+            tau_scale: 1.0,
+            sigma_scale: 1.0,
+        };
+        return Ok(map_autotune_report(symbol, None, None, 0, neutral, rep));
+    };
+
+    // 70/30 chronological walk-forward split.
+    let k = series.len() * 7 / 10;
+    let (fit, validate) = if k >= 1 && series.len() - k >= 1 {
+        (series[..k].to_vec(), series[k..].to_vec())
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let seg_dt = |obs: &[arbitrager_math::pair_monitor::PairObservation]| -> f64 {
+        if obs.len() >= 2 {
+            let span = (obs[obs.len() - 1].ts_ms - obs[0].ts_ms) as f64 / 1000.0;
+            let dt = span / (obs.len() - 1) as f64;
+            if dt.is_finite() && dt > 0.0 {
+                return dt;
+            }
+        }
+        0.0
+    };
+    let dt_fit = seg_dt(&fit);
+    let dt_val = seg_dt(&validate);
+
+    // Static friction: both taker fees. Funding carry has no measured EMA
+    // on this path, so the carry term is 0 and flagged unknown.
+    let fee_sum =
+        effective_venue_fee_bps(state, &buy_v) + effective_venue_fee_bps(state, &sell_v);
+
+    // Seasonality Phase 2 coupling: the current session's shrunk τ/σ regime
+    // scales the recommender inputs (OU dt and friction). Missing or
+    // provisional profiles couple at exactly 1.0 — Phase-1 behavior.
+    let coupling = crate::seasonality::session_coupling_for(state, symbol, now_ms);
+
+    // Fit capacity summary from live-book ladder (0.5% participation cap).
+    // Hub cache only — a recommend preview must not trigger network fetches;
+    // absent books mean step/maxStep stay HELD.
+    let (fit_optimal, fit_breakeven) = {
+        let hub = &state.market_data_hub;
+        let stale = std::time::Duration::from_secs(300);
+        let buy_book = hub.get_valid_orderbook(
+            &arbitrager_core::types::VenueId::from(buy_v.as_str()),
+            symbol,
+            Some(stale),
+        );
+        let sell_book = hub.get_valid_orderbook(
+            &arbitrager_core::types::VenueId::from(sell_v.as_str()),
+            symbol,
+            Some(stale),
+        );
+        match (buy_book, sell_book) {
+            (Some(bk), Some(sk)) => {
+                let asks: Vec<(f64, f64)> = bk
+                    .asks
+                    .iter()
+                    .filter_map(|l| {
+                        let pf = l.price.to_string().parse::<f64>().ok()?;
+                        let sf = l.size.to_string().parse::<f64>().ok()?;
+                        (pf.is_finite() && sf.is_finite() && pf > 0.0 && sf > 0.0)
+                            .then_some((pf, sf))
+                    })
+                    .collect();
+                let bids: Vec<(f64, f64)> = sk
+                    .bids
+                    .iter()
+                    .filter_map(|l| {
+                        let pf = l.price.to_string().parse::<f64>().ok()?;
+                        let sf = l.size.to_string().parse::<f64>().ok()?;
+                        (pf.is_finite() && sf.is_finite() && pf > 0.0 && sf > 0.0)
+                            .then_some((pf, sf))
+                    })
+                    .collect();
+                let fit_vals: Vec<f64> = fit.iter().map(|o| o.spread_bps).collect();
+                let n = fit_vals.len();
+                let (mu_f, sig_f) = if n >= 2 {
+                    let m = fit_vals.iter().sum::<f64>() / n as f64;
+                    let v = fit_vals.iter().map(|x| (x - m).powi(2)).sum::<f64>()
+                        / (n - 1) as f64;
+                    (m, v.sqrt())
+                } else {
+                    (0.0, 0.0)
+                };
+                if !(mu_f.is_finite() && sig_f.is_finite() && sig_f > 0.0)
+                    || asks.is_empty()
+                    || bids.is_empty()
+                {
+                    (None, None)
+                } else {
+                    let volumes = cached_venue_volumes(state).await;
+                    let tiers =
+                        autotune_tiers_with_cap(&volumes, &buy_v, &sell_v, symbol, &base);
+                    let curve = arbitrager_math::pair_monitor::build_pwin_curve(
+                        &fit,
+                        mu_f,
+                        sig_f,
+                        fee_sum.max(2.0),
+                        3.0,
+                    );
+                    let rep = arbitrager_math::pair_monitor::capacity_ladder(
+                        &asks, &bids, mu_f, fee_sum, &tiers, &curve, 0.9,
+                    );
+                    (rep.optimal_size_usd, rep.breakeven_size_usd)
+                }
+            }
+            _ => (None, None),
+        }
+    };
+
+    let rep = recommend(&TuneHistory {
+        fit,
+        validate,
+        dt_fit_secs: dt_fit * coupling.tau_scale,
+        dt_val_secs: dt_val * coupling.tau_scale,
+        friction_fit_bps: fee_sum * coupling.sigma_scale,
+        friction_val_bps: fee_sum * coupling.sigma_scale,
+        carry_known: false,
+        fit_optimal_size_usd: fit_optimal,
+        fit_breakeven_size_usd: fit_breakeven,
+        current,
+        defaults,
+    });
+    Ok(map_autotune_report(
+        symbol,
+        Some(buy_v),
+        Some(sell_v),
+        pair_observations,
+        coupling,
+        rep,
+    ))
+}
+
+#[tauri::command]
+pub async fn get_autotune_recommendation(
+    symbol: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<AutotuneRecommendationDto, String> {
+    get_autotune_recommendation_impl(&symbol, &state).await
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AutotuneApplyResultDto {
+    pub symbol: String,
+    pub applied: Vec<String>,
+    pub skipped_held: Vec<String>,
+    pub audit_id: Option<i64>,
+}
+
+const AUTOTUNE_APPLYABLE: [&str; 7] = [
+    "slidingWindowSecs",
+    "targetProfitBps",
+    "windowPercentile",
+    "stepSizeMult",
+    "maxStepUsd",
+    "maxTickerEquityPct",
+    "userTargetLeverage",
+];
+
+fn apply_ready_to_strategy(
+    base: &StrategyParamsDto,
+    param: &str,
+    value: f64,
+) -> Result<StrategyParamsDto, String> {
+    let mut next = base.clone();
+    match param {
+        "slidingWindowSecs" => {
+            if !(1.0..=3_000_000.0).contains(&value) {
+                return Err(format!("rejecting out-of-range window {value}"));
+            }
+            next.sliding_window_secs = value.round() as u64;
+        }
+        "targetProfitBps" => next.target_profit_bps = value,
+        "windowPercentile" => {
+            if !(0.0..=100.0).contains(&value) {
+                return Err(format!("rejecting out-of-range percentile {value}"));
+            }
+            next.window_percentile = value.round() as u32;
+        }
+        "stepSizeMult" => next.step_size_mult = value,
+        "maxStepUsd" => next.max_step_usd = value,
+        "maxTickerEquityPct" => next.max_ticker_equity_pct = value,
+        "userTargetLeverage" => {
+            if !(0.0..=10.0).contains(&value) {
+                return Err(format!("rejecting out-of-range leverage {value}"));
+            }
+            next.user_target_leverage = value.round() as u32;
+        }
+        _ => return Err(format!("unknown autotune param '{param}'")),
+    }
+    Ok(next)
+}
+
+fn apply_ready_to_ticker(
+    base: &TickerStrategyConfigDto,
+    param: &str,
+    value: f64,
+    window_secs: u64,
+) -> TickerStrategyConfigDto {
+    let mut next = base.clone();
+    match param {
+        "slidingWindowSecs" => next.sliding_window = canonical_sliding_window(window_secs),
+        "targetProfitBps" => next.target_profit_bps = value,
+        "windowPercentile" => next.window_percentile = value.round() as u32,
+        "userTargetLeverage" => next.user_target_leverage = value.round() as u32,
+        _ => {}
+    }
+    next
+}
+
+pub async fn apply_autotune_rows_inner(
+    state: &AppEngineState,
+    symbol: &str,
+    report: &AutotuneRecommendationDto,
+    selected: &[String],
+    now_ms: i64,
+) -> Result<AutotuneApplyResultDto, String> {
+    validate_market_symbol(symbol)?;
+    if now_ms <= 0 {
+        return Err("invalid clock: refusing apply on non-positive time".to_string());
+    }
+    let mut wanted: Vec<String> = selected.to_vec();
+    wanted.sort();
+    wanted.dedup();
+    for p in &wanted {
+        if !AUTOTUNE_APPLYABLE.contains(&p.as_str()) {
+            return Err(format!("unknown autotune param '{p}'"));
+        }
+    }
+    let ready: std::collections::HashMap<&str, f64> = report
+        .rows
+        .iter()
+        .filter(|r| r.status == "READY")
+        .filter_map(|r| match r.recommended {
+            Some(v) if v.is_finite() => Some((r.param.as_str(), v)),
+            _ => None,
+        })
+        .collect();
+    let mut to_apply: Vec<(&str, f64)> = Vec::new();
+    let mut skipped_held: Vec<String> = Vec::new();
+    for p in &wanted {
+        match ready.get(p.as_str()) {
+            Some(v) => to_apply.push((p.as_str(), *v)),
+            None => skipped_held.push(p.clone()),
+        }
+    }
+    skipped_held.sort();
+    if to_apply.is_empty() {
+        return Ok(AutotuneApplyResultDto {
+            symbol: symbol.to_string(),
+            applied: Vec::new(),
+            skipped_held,
+            audit_id: None,
+        });
+    }
+    let _guard = state.autotune_apply_lock.lock().await;
+    let prev_strategy = get_strategy_params_impl("futures", state)?;
+    let prev_ticker = get_ticker_strategy_config_impl(symbol, state)?;
+    let mut next_strategy = prev_strategy.clone();
+    let mut next_ticker = prev_ticker.clone();
+    for (param, value) in &to_apply {
+        next_strategy = apply_ready_to_strategy(&next_strategy, param, *value)?;
+    }
+    let window_secs = next_strategy.sliding_window_secs;
+    for (param, value) in &to_apply {
+        next_ticker = apply_ready_to_ticker(&next_ticker, param, *value, window_secs);
+    }
+    save_strategy_params_impl(next_strategy, state)?;
+    if let Err(e) = save_ticker_strategy_config_impl(next_ticker, state) {
+        let _ = save_strategy_params_impl(prev_strategy.clone(), state);
+        return Err(e);
+    }
+    let applied_names: Vec<String> = to_apply.iter().map(|(p, _)| p.to_string()).collect();
+    let applied_map: serde_json::Map<String, serde_json::Value> = to_apply
+        .iter()
+        .map(|(p, v)| {
+            (
+                p.to_string(),
+                serde_json::Value::from(
+                    serde_json::Number::from_f64(*v).unwrap_or(serde_json::Number::from(0)),
+                ),
+            )
+        })
+        .collect();
+    let applied_json =
+        serde_json::Value::Object(applied_map).to_string();
+    let detail_rows: Vec<serde_json::Value> = report
+        .rows
+        .iter()
+        .filter(|r| applied_names.iter().any(|p| p == &r.param))
+        .map(|r| {
+            serde_json::json!({
+                "param": r.param,
+                "recommended": r.recommended,
+                "fit_metric": r.fit_metric,
+                "validated_metric": r.validated_metric,
+                "n": r.n,
+                "formula_id": r.formula_id,
+                "confidence": r.confidence,
+            })
+        })
+        .collect();
+    let detail_json = serde_json::json!({
+        "buy_venue": report.buy_venue,
+        "sell_venue": report.sell_venue,
+        "fit_from_ms": report.banner.fit_from_ms,
+        "fit_to_ms": report.banner.fit_to_ms,
+        "validate_from_ms": report.banner.validate_from_ms,
+        "validate_to_ms": report.banner.validate_to_ms,
+        "regime_verdict": report.banner.regime_verdict,
+        "session_tau_scale": report.session_tau_scale,
+        "session_sigma_scale": report.session_sigma_scale,
+        "rows": detail_rows,
+        "skipped_held": skipped_held.clone(),
+    })
+    .to_string();
+    match state.state_store.record_autotune_apply_event(
+        symbol,
+        &applied_json,
+        &detail_json,
+        now_ms,
+    ) {
+        Ok(audit_id) => Ok(AutotuneApplyResultDto {
+            symbol: symbol.to_string(),
+            applied: applied_names,
+            skipped_held,
+            audit_id: Some(audit_id),
+        }),
+        Err(e) => {
+            let _ = save_strategy_params_impl(prev_strategy, state);
+            let _ = save_ticker_strategy_config_impl(prev_ticker, state);
+            Err(format!("apply audit failed, changes rolled back: {e}"))
+        }
+    }
+}
+
+pub async fn apply_autotune_selected_impl(
+    symbol: &str,
+    selected: &[String],
+    state: &AppEngineState,
+) -> Result<AutotuneApplyResultDto, String> {
+    let report = get_autotune_recommendation_impl(symbol, state).await?;
+    let now_ms = Utc::now().timestamp_millis();
+    apply_autotune_rows_inner(state, symbol, &report, selected, now_ms).await
+}
+
+#[tauri::command]
+pub async fn apply_autotune_selected(
+    symbol: String,
+    selected: Vec<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<AutotuneApplyResultDto, String> {
+    apply_autotune_selected_impl(&symbol, &selected, &state).await
+}
+
+#[tauri::command]
+pub async fn run_seasonality_promotion(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::seasonality::SeasonalityRunSummary, String> {
+    let now_ms = Utc::now().timestamp_millis();
+    crate::seasonality::run_seasonality_promotion(&state, now_ms)
 }
 
 pub fn get_vault_status_impl(state: &AppEngineState) -> VaultStatus {
@@ -4715,6 +7127,9 @@ pub struct AccountDto {
     /// "standard" | "plus" | "premium" — Lighter-family tier drives the
     /// venue's shared-IP rate budget and fee adjustments.
     pub account_tier: String,
+    /// Per-account leverage ceiling 1..=5; `None` = unlimited (backend hard
+    /// ceiling of 5 still applies).
+    pub max_leverage: Option<u32>,
 }
 
 // Intentionally no Debug: may transiently hold credential material.
@@ -4809,6 +7224,10 @@ pub struct AccountUpsertInput {
     /// update and means standard on create.
     #[serde(default)]
     pub account_tier: Option<String>,
+    /// Per-account leverage ceiling 1..=5. `None` means unlimited; updates
+    /// are authoritative (sending `None` clears a previously stored cap).
+    #[serde(default)]
+    pub max_leverage: Option<u32>,
     #[serde(default)]
     pub credentials: Option<AccountCredentialInput>,
 }
@@ -4870,6 +7289,7 @@ fn ensure_default_profile(
                         enabled,
                         existing.is_default,
                         &existing.account_tier,
+                        existing.max_leverage,
                     )
                     .map_err(|e| e.to_string())
             } else {
@@ -4878,7 +7298,7 @@ fn ensure_default_profile(
         }
         None => state
             .state_store
-            .upsert_account(&pid, venue, "Default", enabled, true, "standard")
+            .upsert_account(&pid, venue, "Default", enabled, true, "standard", None)
             .map_err(|e| e.to_string()),
     }
 }
@@ -4939,7 +7359,7 @@ fn ensure_credential_migration(state: &AppEngineState) -> Result<(), String> {
             None => {
                 state
                     .state_store
-                    .upsert_account(&pid, &cred.venue, "Default", cred.enabled, true, "standard")
+                    .upsert_account(&pid, &cred.venue, "Default", cred.enabled, true, "standard", None)
                     .map_err(|e| e.to_string())?;
             }
         }
@@ -4985,6 +7405,7 @@ fn account_dto(
         subaccount_index: presence.and_then(|p| p.subaccount_index),
         api_key_index: presence.and_then(|p| p.api_key_index),
         account_tier: profile.account_tier.clone(),
+        max_leverage: profile.max_leverage,
     }
 }
 
@@ -5055,6 +7476,7 @@ pub fn upsert_account_impl(
                         .account_tier
                         .as_deref()
                         .unwrap_or(&existing.account_tier),
+                    input.max_leverage,
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -5084,6 +7506,7 @@ pub fn upsert_account_impl(
                     input.enabled,
                     input.make_default,
                     input.account_tier.as_deref().unwrap_or("standard"),
+                    input.max_leverage,
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -5389,6 +7812,33 @@ pub async fn get_venue_balances_impl(
             .parse::<f64>()
             .unwrap_or(0.0);
 
+        // Attribution poll: compare actual equity against the fills-derived
+        // baseline. Own fills already moved the baseline forward at dispatch,
+        // so any residual delta here is an external flow — recorded and
+        // rebased. Failures only log; balance reporting must never break.
+        if equity_usd.is_finite() {
+            let now_ms = Utc::now().timestamp_millis();
+            match state.state_store.check_account_equity(
+                vid,
+                equity_usd,
+                &position_signature(&account.positions),
+                now_ms,
+            ) {
+                Ok(report) => {
+                    if let Some(event) = report.event {
+                        tracing::warn!(
+                            "external equity delta on {vid}: {} expected {expected} actual {actual} ({kind}) — baseline rebased",
+                            event.delta,
+                            expected = event.expected,
+                            actual = event.actual,
+                            kind = event.kind,
+                        );
+                    }
+                }
+                Err(e) => tracing::warn!("equity attribution poll failed for {vid}: {e}"),
+            }
+        }
+
         let (status, action) = match monitor.evaluate_account(&account) {
             MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
             MarginHealthStatus::Warning => (
@@ -5438,6 +7888,150 @@ pub fn get_strategy_performance_impl(
         .collect();
 
     Ok(metrics)
+}
+
+/// Attributed realized PnL for one strategy, derived from durable signal-leg
+/// fills (fees included). Closed root families owned by `strategy_id` sum
+/// their root + `flat-*` child fills via side-signed cash flows; families
+/// that cannot be valued (no strategy tag, or no priced fills) are excluded
+/// from the sums and reported as `unattributed_closed_families`.
+pub fn get_strategy_fill_pnl_impl(
+    strategy_id: &str,
+    state: &AppEngineState,
+) -> Result<crate::attribution::StrategyFillPnl, String> {
+    use crate::state_store::LegSide;
+    let want = crate::attribution::attribute_strategy_id(strategy_id);
+    let signals = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+    let mut net_usd = 0.0_f64;
+    let mut notional = 0.0_f64;
+    let mut closed = 0_usize;
+    let mut open = 0_usize;
+    let mut unattributed = 0_usize;
+    for root in signals.iter().filter(|s| !s.id.starts_with("flat-")) {
+        let owned = crate::attribution::attribute_strategy_id(&root.strategy_id) == want;
+        let is_closed = root.status == crate::state_store::SignalStatus::Closed;
+        if !owned {
+            continue;
+        }
+        if !is_closed {
+            if root.status.counts_as_open() {
+                open += 1;
+            }
+            continue;
+        }
+        let prefix = format!("flat-{}-", root.id);
+        let mut fills = Vec::new();
+        for sig in std::iter::once(root).chain(
+            signals
+                .iter()
+                .filter(|s| s.id.starts_with(&prefix)),
+        ) {
+            for leg in &sig.legs {
+                fills.push(crate::attribution::LegFill {
+                    is_short: leg.side == LegSide::Short,
+                    qty: leg.filled_qty,
+                    price: leg.fill_price,
+                    fee_usd: leg.fee_usd,
+                });
+            }
+        }
+        match crate::attribution::family_realized_pnl(&fills) {
+            Some(pnl) => {
+                closed += 1;
+                net_usd += pnl.net_usd;
+                notional += pnl.notional_usd;
+            }
+            None => {
+                unattributed += 1;
+            }
+        }
+    }
+    if want == crate::attribution::UNATTRIBUTED_STRATEGY_ID {
+        // Quarantine query: report only the quarantined families.
+        return Ok(crate::attribution::StrategyFillPnl {
+            strategy_id: want,
+            net_profit_usd: 0.0,
+            net_profit_bps: None,
+            closed_families: 0,
+            open_families: 0,
+            unattributed_closed_families: unattributed,
+            unattributed_log_entries: state
+                .execution_logs
+                .read()
+                .iter()
+                .filter(|e| {
+                    crate::attribution::attribute_strategy_id(&e.strategy_id)
+                        == crate::attribution::UNATTRIBUTED_STRATEGY_ID
+                })
+                .count(),
+        });
+    }
+    Ok(crate::attribution::StrategyFillPnl {
+        strategy_id: want,
+        net_profit_usd: (net_usd * 100.0).round() / 100.0,
+        net_profit_bps: if notional > 0.0 {
+            Some(((net_usd / notional * 10_000.0) * 10.0).round() / 10.0)
+        } else {
+            None
+        },
+        closed_families: closed,
+        open_families: open,
+        unattributed_closed_families: unattributed,
+        unattributed_log_entries: state
+            .execution_logs
+            .read()
+            .iter()
+            .filter(|e| {
+                crate::attribution::attribute_strategy_id(&e.strategy_id)
+                    == crate::attribution::UNATTRIBUTED_STRATEGY_ID
+            })
+            .count(),
+    })
+}
+
+/// Time-weighted average utilisation for one venue over a trailing window
+/// (default 24h) from the durable margin-snapshot log. `partial` is true
+/// when snapshots cover less than the full window — the UI labels the
+/// shorter window honestly instead of stretching it.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UtilisationHistoryDto {
+    pub venue: String,
+    pub avg_rate_pct: Option<f64>,
+    pub covered_ms: i64,
+    pub window_ms: i64,
+    pub partial: bool,
+    pub point_count: usize,
+}
+
+pub fn get_utilisation_history_impl(
+    venue: &str,
+    window_hours: Option<u64>,
+    state: &AppEngineState,
+) -> Result<UtilisationHistoryDto, String> {
+    let default_hours = (UTILISATION_DEFAULT_WINDOW_MS / 3_600_000).max(1) as u64;
+    let hours = window_hours.unwrap_or(default_hours).clamp(1, 720);
+    let window_ms: i64 = (hours as i64).saturating_mul(3_600_000);
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms.saturating_sub(window_ms);
+    let rows = state
+        .state_store
+        .list_margin_snapshots(venue, since_ms)
+        .map_err(|e| e.to_string())?;
+    let points: Vec<(i64, f64)> = rows.iter().map(|r| (r.ts_ms, r.rate_pct)).collect();
+    let point_count = points.len();
+    let avg = crate::attribution::time_weighted_avg(&points, now_ms, window_ms);
+    Ok(UtilisationHistoryDto {
+        venue: venue.trim().to_lowercase(),
+        avg_rate_pct: avg.map(|a| (a.avg_rate_pct * 100.0).round() / 100.0),
+        covered_ms: avg.map(|a| a.covered_ms).unwrap_or(0),
+        window_ms,
+        partial: avg.map(|a| a.covered_ms < window_ms).unwrap_or(true),
+        point_count,
+    })
 }
 
 pub async fn run_wfo_calibration_impl(
@@ -5582,6 +8176,23 @@ pub async fn get_strategy_performance(
 }
 
 #[tauri::command]
+pub async fn get_strategy_fill_pnl(
+    strategy_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::attribution::StrategyFillPnl, String> {
+    get_strategy_fill_pnl_impl(&strategy_id, &state)
+}
+
+#[tauri::command]
+pub async fn get_utilisation_history(
+    venue: String,
+    window_hours: Option<u64>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<UtilisationHistoryDto, String> {
+    get_utilisation_history_impl(&venue, window_hours, &state)
+}
+
+#[tauri::command]
 pub async fn run_wfo_calibration(
     symbol: String,
     state: State<'_, Arc<AppEngineState>>,
@@ -5623,6 +8234,32 @@ pub async fn set_monitor_config(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<(), String> {
     monitor_engine(&state)?.set_config(config, &state)
+}
+
+/// Recent signal-lifecycle audit events (transitions + heartbeats), newest
+/// first. No UI consumes this in v1 — reserved for the future trading bot
+/// and debugging via IPC.
+#[tauri::command]
+pub async fn get_monitor_signal_events(
+    symbol: Option<String>,
+    buy_venue: Option<String>,
+    sell_venue: Option<String>,
+    limit: Option<i64>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<crate::state_store::MonitorSignalEventRow>, String> {
+    let clean = |v: Option<String>| {
+        v.filter(|s| !s.trim().is_empty())
+    };
+    let lim = limit.unwrap_or(200).clamp(1, 10_000);
+    state
+        .state_store
+        .recent_monitor_signal_events(
+            clean(symbol).as_deref(),
+            clean(buy_venue).as_deref(),
+            clean(sell_venue).as_deref(),
+            lim,
+        )
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -5683,8 +8320,23 @@ pub async fn execute_monitor_opportunity(
     size_usd: f64,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    let engine = monitor_engine(&state)?;
-    let sym = crate::monitor::canonical_base(&symbol);
+    execute_monitor_opportunity_impl(&symbol, &buy_venue, &sell_venue, size_usd, &state).await
+}
+
+/// Shared monitor-entry primitive. The manual row-Execute button and the
+/// autonomous convergence bot both enter through here, so the fail-closed
+/// gates (executability, stale books, paper-only, blocking signals) apply
+/// identically to human and bot flow. Paper-only: the inner spatial path
+/// hard-blocks live mode.
+pub(crate) async fn execute_monitor_opportunity_impl(
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    size_usd: f64,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
+    let engine = monitor_engine(state)?;
+    let sym = crate::monitor::canonical_base(symbol);
     if !(size_usd.is_finite() && size_usd > 0.0) {
         return Err("invalid size".into());
     }
@@ -5702,11 +8354,23 @@ pub async fn execute_monitor_opportunity(
             .clone()
             .unwrap_or_else(|| "opportunity is not executable".into()));
     }
+    // Auto-filtered tickers stay research-visible on the radar but refuse
+    // Execute with an explicit block reason. Manual (global-exempt) hiding
+    // is enforced separately by the watchlist derivation itself.
+    {
+        let mut scope = engine.in_scope_venues(&sym);
+        if scope.len() < 2 {
+            scope = vec![buy_venue.to_string(), sell_venue.to_string()];
+            scope.sort();
+            scope.dedup();
+        }
+        reject_if_strategy_filtered(state, "radar", &sym, &scope).await?;
+    }
     // Convert USD size to base qty at the current buy-side ask.
     let book = state
         .market_data_hub
         .get_valid_orderbook(
-            &arbitrager_core::types::VenueId(buy_venue.clone()),
+            &arbitrager_core::types::VenueId(buy_venue.to_string()),
             &sym,
             Some(std::time::Duration::from_secs(60)),
         )
@@ -5722,8 +8386,8 @@ pub async fn execute_monitor_opportunity(
     // Spread Radar page scopes positions separately from Single Spread.
     execute_spatial_arbitrage_inner(
         &sym,
-        &buy_venue,
-        &sell_venue,
+        buy_venue,
+        sell_venue,
         qty,
         Some("OPEN".into()),
         row.current_edge_bps,
@@ -5733,9 +8397,340 @@ pub async fn execute_monitor_opportunity(
         None,
         None,
         "radar",
-        &state,
+        state,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Single-Spread convergence lifecycle: position-aware exits that free the
+// pair slot for re-entry.
+// ---------------------------------------------------------------------------
+
+/// Re-price the live edge of an open "futures" pair from freshly validated
+/// books. `Ok(None)` means the edge is currently unpriceable (stale/missing
+/// books or unpriceable depth) — the caller holds (Unwatched) rather than
+/// exiting blind. `Err` is reserved for fail-closed input faults.
+async fn live_spatial_edge(
+    state: &AppEngineState,
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    qty: f64,
+) -> Result<Option<f64>, String> {
+    let buy_adapter = state.get_adapter(buy_venue).ok_or_else(|| {
+        format!("Buy venue '{buy_venue}' is not admitted for paper execution")
+    })?;
+    let sell_adapter = state.get_adapter(sell_venue).ok_or_else(|| {
+        format!("Sell venue '{sell_venue}' is not admitted for paper execution")
+    })?;
+    let buy_vid = buy_adapter.venue_id();
+    let sell_vid = sell_adapter.venue_id();
+    let qty_dec = Decimal::from_f64_retain(qty)
+        .filter(|q| *q > dec!(0))
+        .ok_or_else(|| "leg quantity is not a positive number".to_string())?;
+    let fetch_book = async |adapter: &Arc<dyn ExchangeAdapter>,
+                            vid: &VenueId,
+                            side: &str| {
+        let fresh = match state.market_data_hub.get_valid_orderbook(
+            vid,
+            symbol,
+            Some(std::time::Duration::from_secs(2)),
+        ) {
+            Some(b) => b,
+            None => {
+                let b = adapter.fetch_orderbook(symbol).await.map_err(|e| {
+                    format!("No fresh {side} orderbook for {symbol}: {e}")
+                })?;
+                validate_adapter_book(&b, vid, symbol)
+                    .map_err(|e| format!("{side} order book rejected: {e}"))?;
+                state.market_data_hub.update_orderbook(b.clone());
+                b
+            }
+        };
+        validate_adapter_book(&fresh, vid, symbol)
+            .map_err(|e| format!("{side} order book rejected: {e}"))?;
+        Ok::<OrderBook, String>(fresh)
+    };
+    let book_buy = fetch_book(&buy_adapter, &buy_vid, "buy-side").await?;
+    let book_sell = fetch_book(&sell_adapter, &sell_vid, "sell-side").await?;
+    match compute_route_economics(
+        &book_buy,
+        &book_sell,
+        qty_dec,
+        effective_venue_fee_bps(state, buy_vid.as_str()),
+        effective_venue_fee_bps(state, sell_vid.as_str()),
+        0.0,
+    ) {
+        Some(econ) if econ.expected_net_bps.is_finite() => Ok(Some(econ.expected_net_bps)),
+        _ => Ok(None),
+    }
+}
+
+/// Evaluate every open "futures" pair position (optionally scoped to one
+/// symbol) against its entry baseline and unwind converge/stop/timeout exits
+/// through the existing symbol-scoped flatten path. Unwinding marks the
+/// signal `closed` and flattens the paper legs, which frees the pair slot:
+/// the blocking-ledger and paper-position gates both clear, so re-entry is
+/// allowed afterwards. Positions without a baseline, without a live quote,
+/// or whose legs do not form a long/short pair report `unwatched` and are
+/// never auto-exited; the manual flatten path stays available for them.
+///
+/// The one-open-pair-per-symbol cap is intentionally kept (see the guard in
+/// `execute_spatial_arbitrage_inner`): paper accounts are shared per venue,
+/// so per-pair margin/PnL attribution is impossible without sub-accounting,
+/// and flatten is symbol-scoped — it would cross-close independent pairs on
+/// the same symbol. Multi-pair safety would additionally require per-pair
+/// position keys in the ledger, symbol+pair-scoped flatten, and per-pair
+/// margin isolation in the paper exchanges.
+pub async fn check_spatial_convergence_impl(
+    symbol: Option<&str>,
+    strategy_id: &str,
+    state: &AppEngineState,
+) -> Result<Vec<ConvergenceCheckDto>, String> {
+    use arbitrager_strategy::spatial_exit::{
+        evaluate_spatial_exit, SpatialExitConfig, SpatialExitVerdict,
+    };
+    let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
+    if sid != "futures" {
+        return Err(
+            "convergence check supports the 'futures' strategy only (radar positions have their own bot lifecycle)"
+                .into(),
+        );
+    }
+    let cfg = SpatialExitConfig::default();
+    cfg.validate().map_err(|e| e.to_string())?;
+    if let Some(s) = symbol {
+        validate_market_symbol(s)?;
+    }
+    let now_ms = Utc::now().timestamp_millis();
+    let signals = state
+        .state_store
+        .list_signals(symbol, None)
+        .map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for sig in signals
+        .iter()
+        .filter(|s| s.strategy_id.eq_ignore_ascii_case(&sid) && s.status.counts_as_open())
+    {
+        let baseline = state
+            .state_store
+            .spatial_baseline_for_signal(&sig.id)
+            .map_err(|e| e.to_string())?;
+        let entry_net = baseline.as_ref().map(|b| b.entry_net_bps);
+        let entry_ts = baseline.as_ref().map(|b| b.entry_ts_ms).unwrap_or(0);
+        let verdict_of = |verdict: &str,
+                          trigger: Option<String>,
+                          reason: String,
+                          live: Option<f64>,
+                          unwound: bool| {
+            ConvergenceCheckDto {
+                signal_id: sig.id.clone(),
+                symbol: sig.symbol.clone(),
+                verdict: verdict.to_string(),
+                trigger,
+                reason,
+                live_net_bps: live,
+                entry_net_bps: entry_net,
+                unwound,
+            }
+        };
+        let buy_leg = sig
+            .legs
+            .iter()
+            .find(|l| l.side == crate::state_store::LegSide::Long);
+        let sell_leg = sig
+            .legs
+            .iter()
+            .find(|l| l.side == crate::state_store::LegSide::Short);
+        let (Some(buy), Some(sell)) = (buy_leg, sell_leg) else {
+            out.push(verdict_of(
+                "unwatched",
+                None,
+                "signal legs do not form a long/short pair".to_string(),
+                None,
+                false,
+            ));
+            continue;
+        };
+        if !buy.filled_qty.is_finite() || buy.filled_qty <= 0.0 {
+            out.push(verdict_of(
+                "unwatched",
+                None,
+                "long leg has no positive fill to size the live quote".to_string(),
+                None,
+                false,
+            ));
+            continue;
+        }
+        let live = match live_spatial_edge(
+            state,
+            &sig.symbol,
+            &buy.venue,
+            &sell.venue,
+            buy.filled_qty,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(verdict_of("unwatched", None, e, None, false));
+                continue;
+            }
+        };
+        match evaluate_spatial_exit(entry_net, live, entry_ts, now_ms, &cfg) {
+            SpatialExitVerdict::Hold => {
+                out.push(verdict_of("hold", None, "edge inside band".to_string(), live, false));
+            }
+            SpatialExitVerdict::Unwatched { reason } => {
+                out.push(verdict_of("unwatched", None, reason, live, false));
+            }
+            SpatialExitVerdict::Exit { trigger, reason } => {
+                // Convergence unwinds route through the symbol-scoped flatten
+                // path, so the leftover sweep (sub-step residual guard) and
+                // the paper-flat reconciliation apply here unchanged.
+                match flatten_ticker_positions_impl(Some(&sig.symbol), &sid, state).await {
+                    Ok(r) if r.residual_signals == 0 => out.push(verdict_of(
+                        "exit",
+                        Some(trigger.as_str().to_string()),
+                        format!("{reason}; unwound {} signal(s)", r.signals_closed),
+                        live,
+                        true,
+                    )),
+                    Ok(r) => out.push(verdict_of(
+                        "exit",
+                        Some(trigger.as_str().to_string()),
+                        format!(
+                            "{reason}; flatten left {} residual signal(s) — slot stays blocked",
+                            r.residual_signals
+                        ),
+                        live,
+                        false,
+                    )),
+                    Err(e) => out.push(verdict_of(
+                        "exit",
+                        Some(trigger.as_str().to_string()),
+                        format!("{reason}; flatten failed: {e}"),
+                        live,
+                        false,
+                    )),
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Session-seasonality snapshot for one symbol: per-session aggregates,
+/// the current session, and the active multipliers. Display only.
+#[tauri::command]
+pub async fn get_session_profile(
+    symbol: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::monitor::SessionProfileDto, String> {
+    get_session_profile_impl(&symbol, &state)
+}
+
+pub(crate) fn get_session_profile_impl(
+    symbol: &str,
+    state: &AppEngineState,
+) -> Result<crate::monitor::SessionProfileDto, String> {
+    use arbitrager_math::session::{
+        in_funding_mask, is_weekend, session_allow, session_of, us_cash_open,
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let session = session_of(now_ms);
+    let weekend = is_weekend(now_ms);
+    // Symbol-level display mask covers the common 8h + 4h stamps; per-pair
+    // hourly masks apply inside the monitor evaluation itself.
+    let mask = in_funding_mask(now_ms, &[8, 4]);
+    let rows = state
+        .state_store
+        .session_profiles(symbol)
+        .map_err(|e| e.to_string())?;
+    let promotion_row = state
+        .state_store
+        .phase2_promotion_state(symbol)
+        .map_err(|e| e.to_string())?;
+    let anchor_row = state
+        .state_store
+        .phase2_har_anchor(symbol)
+        .map_err(|e| e.to_string())?;
+    let rescaled = crate::seasonality::promotion_active(
+        promotion_row.as_ref(),
+        anchor_row.as_ref(),
+        now_ms,
+    );
+    let scale = if rescaled {
+        match (&promotion_row, &anchor_row) {
+            (Some(_), Some(a)) => {
+                arbitrager_math::seasonality::rescale_factor(
+                    a.forecast_rv_bps,
+                    a.trailing_mean_rv_bps,
+                )
+            }
+            _ => 1.0,
+        }
+    } else {
+        1.0
+    };
+    let sessions = rows
+        .iter()
+        .map(|r| crate::monitor::SessionProfileEntryDto {
+            session_id: r.session_id.clone(),
+            n_episodes: r.n_episodes,
+            med_abs_spread_bps: r.med_abs_spread_bps,
+            p90_spread_bps: r.p90_spread_bps,
+            rv_bps: r.rv_bps.and_then(|v| {
+                if v.is_finite() && v > 0.0 {
+                    let s = v * scale;
+                    if s.is_finite() && s > 0.0 {
+                        Some(s)
+                    } else {
+                        Some(v)
+                    }
+                } else {
+                    r.rv_bps
+                }
+            }),
+            win_rate: r.win_rate,
+            mean_hold_s: r.mean_hold_s,
+            provisional: r.provisional,
+        })
+        .collect::<Vec<_>>();
+    let provisional = sessions
+        .iter()
+        .find(|s| s.session_id == session.as_str())
+        .map(|s| s.provisional)
+        .unwrap_or(true);
+    let promotion = promotion_row.map(|p| {
+        let har_r2 = anchor_row.as_ref().and_then(|a| {
+            if a.r2.is_finite() {
+                Some(a.r2)
+            } else {
+                None
+            }
+        });
+        crate::monitor::SessionPromotionDto {
+            status: p.status,
+            fit_delta_bps: p.fit_delta_bps,
+            val_delta_bps: p.val_delta_bps,
+            reason: p.reason,
+            har_r2,
+            rescaled,
+        }
+    });
+    Ok(crate::monitor::SessionProfileDto {
+        symbol: crate::monitor::canonical_base(symbol),
+        current_session: session.as_str().to_string(),
+        is_weekend: weekend,
+        in_funding_mask: mask,
+        us_cash_open: us_cash_open(now_ms),
+        session_allow: session_allow(session, weekend, mask),
+        provisional,
+        sessions,
+        promotion,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5814,7 +8809,7 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        assert_eq!(status.active_venues.len(), 17);
+        assert_eq!(status.active_venues.len(), 20);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);
@@ -5835,6 +8830,7 @@ mod tests {
         upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "L1".into(),
@@ -5870,6 +8866,7 @@ mod tests {
         upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "robinhood".into(),
                 label: "RH".into(),
@@ -5894,6 +8891,7 @@ mod tests {
         upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "binance".into(),
                 label: "B".into(),
@@ -5946,7 +8944,7 @@ mod tests {
             Some("LONG_HL_SHORT_LGT".into()),
             Some(15.0),
             Some(0.0),
-            Some(0),
+            Some(1),
             Some(3),
             Some(12.0),
             &state,
@@ -5975,7 +8973,7 @@ mod tests {
             Some("LONG_HL_SHORT_LGT".into()),
             Some(15.0),
             Some(0.0),
-            Some(0),
+            Some(1),
             Some(3),
             Some(12.0),
             &state,
@@ -6078,6 +9076,51 @@ mod tests {
             .expect("scan should succeed");
         // Zero synthetic data: unconfigured state returns empty
         assert_eq!(opps.len(), 0);
+    }
+
+    #[test]
+    fn test_session_profile_impl_roundtrip() {
+        use crate::state_store::VenueSampleEntry;
+        let state = AppEngineState::new();
+        // No history: neutral snapshot, provisional, no fabricated rows.
+        let empty = get_session_profile_impl("BTC-USDC", &state).unwrap();
+        assert_eq!(empty.symbol, "BTC");
+        assert!(empty.sessions.is_empty());
+        assert!(empty.provisional);
+        assert!(!empty.current_session.is_empty());
+        assert!(empty.session_allow.is_finite());
+        // One tick of two-venue history: rollup writes all five session
+        // rows (provisional), and the IPC mirrors them.
+        let ts = chrono::Utc::now().timestamp_millis();
+        state
+            .state_store
+            .record_spread_samples(
+                "BTC",
+                ts,
+                &[
+                    VenueSampleEntry {
+                        venue_id: "lighter".into(),
+                        mid: 100.0,
+                        best_bid: 99.9,
+                        best_ask: 100.1,
+                    },
+                    VenueSampleEntry {
+                        venue_id: "vanta".into(),
+                        mid: 100.5,
+                        best_bid: 100.4,
+                        best_ask: 100.6,
+                    },
+                ],
+            )
+            .unwrap();
+        state
+            .state_store
+            .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts)
+            .unwrap();
+        let prof = get_session_profile_impl("BTC-USDC", &state).unwrap();
+        assert_eq!(prof.sessions.len(), 5);
+        assert!(prof.sessions.iter().all(|s| s.provisional));
+        assert!(prof.provisional);
     }
 
     #[tokio::test]
@@ -6201,8 +9244,8 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Four seeded paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 400000.0);
+        // Eight seeded paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 800000.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
@@ -6234,11 +9277,10 @@ mod tests {
     async fn test_engine_settings_command() {
         let state = AppEngineState::new();
         let cur = get_engine_settings_impl(&state).expect("get settings");
-        assert_eq!(cur.max_slippage_bps, 15.0);
+        assert_eq!(cur.min_depth_ratio, 3.0);
 
         let new_settings = EngineSettingsDto {
             hsm_url: "http://hsm.internal:9000".into(),
-            max_slippage_bps: 20.0,
             min_depth_ratio: 4.0,
             hyperliquid_url: "https://api.hyperliquid.xyz".into(),
             lighter_url: "https://mainnet.zklighter.elliot.ai".into(),
@@ -6252,11 +9294,197 @@ mod tests {
 
         save_engine_settings_impl(new_settings, &state).expect("save settings");
         let updated = get_engine_settings_impl(&state).expect("get updated");
-        assert_eq!(updated.max_slippage_bps, 20.0);
         assert_eq!(updated.min_depth_ratio, 4.0);
         assert_eq!(updated.hsm_url, "http://hsm.internal:9000");
         assert_eq!(updated.robinhood_router, "0x1111");
         assert!(updated.configured_venues.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_retention_validation_zero_normalizes_to_none() {
+        let state = AppEngineState::new();
+        let settings = EngineSettingsDto {
+            spread_samples_max_days: Some(0),
+            spread_samples_max_gb: Some(0.0),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save");
+        let cur = get_engine_settings_impl(&state).expect("get");
+        assert_eq!(cur.spread_samples_max_days, None);
+        assert_eq!(cur.spread_samples_max_gb, None);
+        assert_eq!(state.state_store.kv_get("retention.max_days").unwrap(), None);
+        assert_eq!(state.state_store.kv_get("retention.max_gb").unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn test_retention_validation_rejects_bad_gb() {
+        let state = AppEngineState::new();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let settings = EngineSettingsDto {
+                spread_samples_max_gb: Some(bad),
+                ..EngineSettingsDto::default()
+            };
+            assert!(
+                save_engine_settings_impl(settings, &state).is_err(),
+                "gb={bad:?} must be rejected"
+            );
+        }
+        let cur = get_engine_settings_impl(&state).expect("get");
+        assert_eq!(cur.spread_samples_max_gb, None);
+    }
+
+    #[tokio::test]
+    async fn test_retention_ipc_roundtrip_persists_kv() {
+        let state = AppEngineState::new();
+        let settings = EngineSettingsDto {
+            spread_samples_max_days: Some(30),
+            spread_samples_max_gb: Some(2.5),
+            ..EngineSettingsDto::default()
+        };
+        save_engine_settings_impl(settings, &state).expect("save");
+        let cur = get_engine_settings_impl(&state).expect("get");
+        assert_eq!(cur.spread_samples_max_days, Some(30));
+        assert_eq!(cur.spread_samples_max_gb, Some(2.5));
+        assert_eq!(
+            state.state_store.kv_get("retention.max_days").unwrap(),
+            Some("30".to_string())
+        );
+        assert_eq!(
+            state.state_store.kv_get("retention.max_gb").unwrap(),
+            Some("2.5".to_string())
+        );
+        let json = serde_json::to_string(&cur).expect("serialize");
+        let back: EngineSettingsDto = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.spread_samples_max_days, Some(30));
+        assert_eq!(back.spread_samples_max_gb, Some(2.5));
+    }
+
+    #[tokio::test]
+    async fn test_retention_prune_days_only() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        for i in 0..6 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (5 - i) * 86_400_000,
+                &[("hyperliquid", 100.0 + i as f64)],
+            );
+        }
+        {
+            let mut s = state.settings.write();
+            s.spread_samples_max_days = Some(3);
+            s.spread_samples_max_gb = None;
+        }
+        enforce_retention_pass(&state, now);
+        let rows = state
+            .state_store
+            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .expect("samples");
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r.ts_ms >= now - 3 * 86_400_000));
+    }
+
+    #[tokio::test]
+    async fn test_retention_prune_neither_is_noop() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        for i in 0..4 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (3 - i) * 86_400_000,
+                &[("hyperliquid", 100.0 + i as f64)],
+            );
+        }
+        enforce_retention_pass(&state, now);
+        let rows = state
+            .state_store
+            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .expect("samples");
+        assert_eq!(rows.len(), 4, "both unset must leave history alone");
+    }
+
+    #[tokio::test]
+    async fn test_retention_prune_gb_only_evicts_oldest() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        for i in 0..6 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (5 - i) * 1_000,
+                &[("hyperliquid", 100.0 + i as f64)],
+            );
+        }
+        {
+            let mut s = state.settings.write();
+            s.spread_samples_max_days = None;
+            s.spread_samples_max_gb = Some(0.000001);
+        }
+        enforce_retention_pass(&state, now);
+        let count = state.state_store.spread_sample_count().unwrap();
+        assert!(count < 6, "tiny budget must evict oldest-first, left {count}");
+        if count > 0 {
+            let rows = state
+                .state_store
+                .spread_samples("BTC-USDC", 0, i64::MAX)
+                .expect("samples");
+            assert_eq!(
+                rows.last().unwrap().ts_ms,
+                now,
+                "newest sample survives oldest-first eviction"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retention_prune_both_applies_time_then_size() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        for i in 0..6 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (5 - i) * 86_400_000,
+                &[("hyperliquid", 100.0 + i as f64)],
+            );
+        }
+        {
+            let mut s = state.settings.write();
+            s.spread_samples_max_days = Some(3);
+            s.spread_samples_max_gb = Some(0.000001);
+        }
+        enforce_retention_pass(&state, now);
+        let rows = state
+            .state_store
+            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .expect("samples");
+        assert!(
+            rows.len() <= 3,
+            "time cutoff binds first, size budget binds after"
+        );
+        assert!(rows.iter().all(|r| r.ts_ms >= now - 3 * 86_400_000));
+    }
+
+    #[tokio::test]
+    async fn test_retention_boot_loads_persisted_kv() {
+        let dir = std::env::temp_dir().join(format!(
+            "arbitrager_retention_boot_{}",
+            rand::random::<u64>()
+        ));
+        let path = dir.join("state.sqlite3");
+        {
+            let store = crate::state_store::StateStore::open(&path).unwrap();
+            store.kv_set("retention.max_days", "21").unwrap();
+            store.kv_set("retention.max_gb", "4.25").unwrap();
+        }
+        let store = std::sync::Arc::new(crate::state_store::StateStore::open(&path).unwrap());
+        let state = AppEngineState::new_inner_for_test(store);
+        let cur = get_engine_settings_impl(&state).expect("get");
+        assert_eq!(cur.spread_samples_max_days, Some(21));
+        assert_eq!(cur.spread_samples_max_gb, Some(4.25));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
@@ -6272,7 +9500,7 @@ mod tests {
         assert!(res.unwrap_err().contains("locked"));
 
         let after = get_engine_settings_impl(&state).expect("settings after");
-        assert_eq!(after.max_slippage_bps, before.max_slippage_bps);
+        assert_eq!(after.min_depth_ratio, before.min_depth_ratio);
         assert!(after.configured_venues.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -6373,6 +9601,7 @@ mod tests {
         let a1 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -6394,6 +9623,7 @@ mod tests {
         let a2 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Alt".into(),
@@ -6431,6 +9661,7 @@ mod tests {
         assert!(upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: Some(a2.id.clone()),
                 venue: "lighter".into(),
                 label: "Moved".into(),
@@ -6445,6 +9676,7 @@ mod tests {
         let updated = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: Some(a2.id.clone()),
                 venue: "hyperliquid".into(),
                 label: "Alt Renamed".into(),
@@ -6488,6 +9720,7 @@ mod tests {
         let a1 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -6504,6 +9737,7 @@ mod tests {
         let a2 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Alt".into(),
@@ -6562,6 +9796,7 @@ mod tests {
         let a1 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -6580,6 +9815,7 @@ mod tests {
         let a2 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Alt".into(),
@@ -6604,6 +9840,7 @@ mod tests {
         let a3 = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Empty".into(),
@@ -6734,6 +9971,7 @@ mod tests {
         let hl = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "HL Main".into(),
@@ -6747,6 +9985,7 @@ mod tests {
         let lt = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "LT Main".into(),
@@ -6760,6 +9999,7 @@ mod tests {
         let lt_disabled = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "LT Off".into(),
@@ -6840,6 +10080,7 @@ mod tests {
         let a = upsert_account_impl(
             AccountUpsertInput {
                 account_tier: None,
+                max_leverage: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -6897,12 +10138,12 @@ mod tests {
     async fn test_nonsecret_settings_save_while_vault_locked() {
         let (state, dir) = test_state_with_vault("nonsecret");
         let settings = EngineSettingsDto {
-            max_slippage_bps: 25.0,
+            min_depth_ratio: 25.0,
             ..EngineSettingsDto::default()
         };
         save_engine_settings_impl(settings, &state).expect("save nonsecret settings");
         let updated = get_engine_settings_impl(&state).expect("get settings");
-        assert_eq!(updated.max_slippage_bps, 25.0);
+        assert_eq!(updated.min_depth_ratio, 25.0);
         assert!(updated.configured_venues.is_empty());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -7132,7 +10373,92 @@ mod tests {
         // Nothing may have mutated state
         assert!(state.virtual_ledger.read().lots.is_empty());
         assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
-        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_spatial_execution_uses_per_strategy_slippage_gate() {
+        let state = setup_test_state_with_venues();
+        // Qty 5 walks deep into a second ask level ~300 bps above top.
+        let mut book = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new("hyperliquid"),
+            "BTC-USDC".to_string(),
+        );
+        book.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64100.0),
+            dec!(50.0),
+        ));
+        book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64205.0),
+            dec!(1.0),
+        ));
+        book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(66200.0),
+            dec!(50.0),
+        ));
+        book.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(book);
+        let mut deep = arbitrager_core::quote::OrderBook::new(
+            arbitrager_core::types::VenueId::new("lighter"),
+            "BTC-USDC".to_string(),
+        );
+        deep.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64360.0),
+            dec!(50.0),
+        ));
+        deep.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64365.0),
+            dec!(50.0),
+        ));
+        deep.timestamp = Utc::now();
+        state.market_data_hub.update_orderbook(deep);
+
+        let run_execute = || {
+            execute_spatial_arbitrage_impl(
+                "BTC-USDC",
+                "hyperliquid",
+                "lighter",
+                5.0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &state,
+            )
+        };
+
+        // A strict per-strategy cap rejects on slippage (no global applies).
+        {
+            let mut params = state.strategy_params.write();
+            let mut p = params
+                .get("futures")
+                .cloned()
+                .unwrap_or_else(|| StrategyParamsDto::defaults_for("futures"));
+            p.futures_max_slippage_bps = 0.01;
+            params.insert("futures".to_string(), p);
+        }
+        let err = run_execute()
+            .await
+            .expect_err("strict per-strategy slippage must reject");
+        assert!(err.contains("slippage"), "expected slippage error, got: {err}");
+
+        // A generous per-strategy cap passes the slippage gate, so the same
+        // books fail later on economics/depth instead — proving the record
+        // value drove the gate.
+        {
+            let mut params = state.strategy_params.write();
+            let mut p = params
+                .get("futures")
+                .cloned()
+                .unwrap_or_else(|| StrategyParamsDto::defaults_for("futures"));
+            p.futures_max_slippage_bps = 500.0;
+            params.insert("futures".to_string(), p);
+        }
+        let err = run_execute()
+            .await
+            .expect_err("economics must reject after slippage passes");
+        assert!(!err.contains("slippage"), "slippage gate should pass, got: {err}");
     }
 
     #[tokio::test]
@@ -7460,6 +10786,7 @@ mod tests {
         upsert_account_impl(
             AccountUpsertInput {
                 account_tier: Some("plus".into()),
+                max_leverage: None,
                 id: None,
                 venue: "lighter".into(),
                 label: "L1".into(),
@@ -7477,14 +10804,33 @@ mod tests {
     #[tokio::test]
     async fn test_scan_spatial_route_economics_gating() {
         let state = setup_test_state_with_venues();
-        seed_test_book(
-            &state,
-            "hyperliquid",
-            "BTC-USDC",
-            dec!(64200.0),
-            dec!(64205.0),
-        );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64300.0), dec!(64305.0));
+        // Hermetic scan scope: only the two venues under test may resolve.
+        // Every other enabled venue falls through to a live REST fetch, and
+        // the wall-clock spent there lets the seeded books go stale past the
+        // 350ms hub TTL — later phases then depended on live venues (Lighter
+        // reachability, Vanta rate limits) instead of the seeds. Scoping the
+        // venues plus re-seeding before every scan keeps this test offline
+        // and deterministic.
+        {
+            let mut s = state.settings.write();
+            s.vanta_enabled = false;
+            s.robinhood_enabled = false;
+            s.arcus_enabled = false;
+            s.popdex_enabled = false;
+        }
+        // The hub only honors books fresher than 350ms; seeds from an
+        // earlier phase must never be reused by a later phase.
+        let seed_pair = || {
+            seed_test_book(
+                &state,
+                "hyperliquid",
+                "BTC-USDC",
+                dec!(64200.0),
+                dec!(64205.0),
+            );
+            seed_test_book(&state, "lighter", "BTC-USDC", dec!(64300.0), dec!(64305.0));
+        };
+        seed_pair();
 
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
             .await
@@ -7501,6 +10847,7 @@ mod tests {
         assert!((opp.required_gross_bps - (opp.expected_friction_bps + 1.0)).abs() < 1e-9);
         assert!((opp.net_spread_bps - (opp.gross_spread_bps - opp.expected_friction_bps)).abs() < 1e-9);
 
+        seed_pair();
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 50.0, 0.5, &state)
             .await
             .expect("scan");
@@ -7512,6 +10859,7 @@ mod tests {
 
         // Thin reverse exit: buy venue bids cannot absorb the unwind, so the
         // route is not costable and disappears from results entirely.
+        seed_pair();
         {
             let mut thin = arbitrager_core::quote::OrderBook::new(
                 arbitrager_core::types::VenueId::new("hyperliquid"),
@@ -7537,6 +10885,7 @@ mod tests {
 
         // Exit-side slippage gate: deep but stale-priced reverse book keeps
         // the route visible while blocking execution.
+        seed_pair();
         {
             let mut book = arbitrager_core::quote::OrderBook::new(
                 arbitrager_core::types::VenueId::new("hyperliquid"),
@@ -7566,6 +10915,295 @@ mod tests {
             .expect("route present but blocked");
         assert!(!opp.slippage_ok);
         assert!(!opp.is_executable);
+    }
+
+    fn seed_episode_history(state: &AppEngineState, symbol: &str, episodes: usize) {
+        // Six flats then a +24bps spike per episode: the spike pulls the
+        // series mean to ~3.4bps, so flats sit below the ~8.6bps friction
+        // band while every spike excursion reverts -> hit-rate 1.0 once
+        // the episode count clears the default min_episodes gate (5).
+        let now = Utc::now().timestamp_millis();
+        let base = now - 3_600_000;
+        for e in 0..episodes {
+            for k in 0..7 {
+                let light = if k == 6 { 100.24 } else { 100.0 };
+                let ts = base + (e * 7 + k) as i64 * 1_000;
+                seed_samples(
+                    state,
+                    symbol,
+                    ts,
+                    &[("hyperliquid", 100.0), ("lighter", light)],
+                );
+            }
+        }
+        // Trailing flats let the final episode resolve instead of ending open.
+        for k in 0..6 {
+            let ts = base + (episodes * 7 + k) as i64 * 1_000;
+            seed_samples(
+                state,
+                symbol,
+                ts,
+                &[("hyperliquid", 100.0), ("lighter", 100.0)],
+            );
+        }
+    }
+
+    fn seed_books_hl_lighter(state: &AppEngineState) {
+        seed_test_book(
+            state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        seed_test_book(state, "lighter", "BTC-USDC", dec!(64300.0), dec!(64305.0));
+    }
+
+    /// Hermetic two-venue state: only hyperliquid + lighter are admitted, so
+    /// scans resolve exactly the seeded hub books and never touch live
+    /// venue feeds (which would make route sets nondeterministic).
+    fn setup_two_venue_state() -> AppEngineState {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+        }
+        state
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_seeded_history() {
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+        seed_episode_history(&state, "BTC-USDC", 8);
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("hl->lighter route");
+        let p = opp
+            .win_probability
+            .expect("seeded episodes must yield a win probability");
+        assert!(p > 0.0 && p <= 1.0, "win p in (0,1], got {p}");
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_thin_history_is_none() {
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+        // Two samples: below every data floor, so every route reads None
+        // while economics/ordering stay untouched.
+        let now = Utc::now().timestamp_millis();
+        seed_samples(
+            &state,
+            "BTC-USDC",
+            now - 1_000,
+            &[("hyperliquid", 100.0), ("lighter", 100.1)],
+        );
+        seed_samples(
+            &state,
+            "BTC-USDC",
+            now,
+            &[("hyperliquid", 100.0), ("lighter", 100.1)],
+        );
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        assert!(!opps.is_empty());
+        assert!(opps.iter().all(|o| o.win_probability.is_none()));
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("route still reported");
+        assert!(opp.is_executable);
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_empty_history_is_none() {
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        assert!(!opps.is_empty());
+        assert!(opps.iter().all(|o| o.win_probability.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_ou_fallback() {
+        // Smooth sine history around +10bps, amplitude far below friction:
+        // zero episodes, but a qualifying OU fit -> fallback yields Some.
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+        let now = Utc::now().timestamp_millis();
+        let base = now - 3_600_000;
+        for k in 0..60 {
+            let x = 10.0 + 1.5 * ((k as f64) * 0.25).sin();
+            let light = 100.0 * (1.0 + x / 10_000.0);
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                base + k as i64 * 1_000,
+                &[("hyperliquid", 100.0), ("lighter", light)],
+            );
+        }
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("hl->lighter route");
+        let p = opp
+            .win_probability
+            .expect("qualifying OU fit must yield a fallback probability");
+        assert!(
+            p.is_finite() && (0.0..=1.0).contains(&p),
+            "fallback P_win in [0,1], got {p}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_deterministic() {
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+        seed_episode_history(&state, "BTC-USDC", 8);
+
+        let first = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let second = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        // Order-insensitive: route economics sort has exact-float ties, so
+        // only per-route values must be deterministic, not positions.
+        let by_id = |v: Vec<SpatialOpportunityDto>| {
+            let mut m: HashMap<String, SpatialOpportunityDto> = HashMap::new();
+            for o in v {
+                m.insert(o.id.clone(), o);
+            }
+            m
+        };
+        let a = by_id(first);
+        let b = by_id(second);
+        assert_eq!(a.len(), b.len());
+        for (id, x) in &a {
+            let y = b.get(id).expect("same route set");
+            assert_eq!(x.win_probability, y.win_probability);
+            assert!((x.net_spread_bps - y.net_spread_bps).abs() < 1e-12);
+        }
+        assert!(a.values().any(|o| o.win_probability.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_matches_monitor_standard() {
+        // Same pair + same history through the shared helper must agree
+        // with the scan value within epsilon: no second standard.
+        let state = setup_two_venue_state();
+        seed_books_hl_lighter(&state);
+        seed_episode_history(&state, "BTC-USDC", 8);
+
+        let opps = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.buy_venue_id == "hyperliquid" && o.sell_venue_id == "lighter")
+            .expect("hl->lighter route");
+        let scan_p = opp.win_probability.expect("seeded P_win");
+
+        let now_ms = Utc::now().timestamp_millis();
+        let samples = state
+            .state_store
+            .spread_samples("BTC-USDC", now_ms - 86_400_000, now_ms)
+            .expect("history");
+        let mut mids: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+        for s in &samples {
+            if s.mid.is_finite() && s.mid > 0.0 {
+                mids.entry(s.venue_id.clone())
+                    .or_default()
+                    .push((s.ts_ms, s.mid));
+            }
+        }
+        let series = arbitrager_math::pair_monitor::build_pair_series(
+            &mids["hyperliquid"],
+            &mids["lighter"],
+            crate::monitor::PAIR_ALIGN_GAP_MS,
+        );
+        let monitor_p = crate::monitor::pair_win_probability(
+            &series,
+            opp.gross_spread_bps,
+            opp.expected_friction_bps,
+            5,
+        )
+        .expect("shared helper P_win");
+        assert!(
+            (scan_p - monitor_p).abs() < 1e-12,
+            "scan {scan_p} vs monitor {monitor_p}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scan_win_probability_informational_only() {
+        // Seeded vs empty history: identical economics, ordering and
+        // executability; only win_probability differs.
+        let seeded = setup_two_venue_state();
+        seed_books_hl_lighter(&seeded);
+        seed_episode_history(&seeded, "BTC-USDC", 8);
+        let bare = setup_two_venue_state();
+        seed_books_hl_lighter(&bare);
+
+        let a = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &seeded)
+            .await
+            .expect("scan");
+        let b = scan_spatial_opportunities_impl("BTC-USDC", 1.0, 0.5, &bare)
+            .await
+            .expect("scan");
+        // Order-insensitive for the same tie reason as the determinism test.
+        let by_id = |v: Vec<SpatialOpportunityDto>| {
+            let mut m: HashMap<String, SpatialOpportunityDto> = HashMap::new();
+            for o in v {
+                m.insert(o.id.clone(), o);
+            }
+            m
+        };
+        let a = by_id(a);
+        let b = by_id(b);
+        assert_eq!(a.len(), b.len());
+        for (id, x) in &a {
+            let y = b.get(id).expect("same route set");
+            assert_eq!(x.is_executable, y.is_executable);
+            assert!((x.net_spread_bps - y.net_spread_bps).abs() < 1e-12);
+        }
+        assert!(a.values().any(|o| o.win_probability.is_some()));
+        assert!(b.values().all(|o| o.win_probability.is_none()));
+    }
+
+    #[tokio::test]
+    async fn test_scan_single_venue_symbol_yields_no_routes() {
+        // Only one venue has a book: fewer than two costable books means
+        // no routes at all (fail closed, no partial rows). A fictitious
+        // symbol keeps live venue feeds from resolving, so the seeded
+        // hyperliquid hub book stands alone hermetically.
+        let state = setup_two_venue_state();
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "TEST-XYZ",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        let opps = scan_spatial_opportunities_impl("TEST-XYZ", 1.0, 0.5, &state)
+            .await
+            .expect("scan");
+        assert!(opps.is_empty());
     }
 
     #[tokio::test]
@@ -7703,6 +11341,7 @@ mod tests {
                 false,
                 false,
                 "standard",
+                None,
             )
             .expect("disable account");
         let off = EngineSettingsDto {
@@ -7836,7 +11475,7 @@ mod tests {
         save_engine_settings_impl(
             EngineSettingsDto {
                 paper_starting_balance_usd: 25000.0,
-                max_slippage_bps: 42.0,
+                min_depth_ratio: 4.0,
                 ..EngineSettingsDto::default()
             },
             &state,
@@ -7846,7 +11485,7 @@ mod tests {
             let acc = paper.fetch_account().await.expect("account");
             assert_eq!(acc.equity, dec!(25000.0));
         }
-        assert_eq!(state.settings.read().max_slippage_bps, 42.0);
+        assert_eq!(state.settings.read().min_depth_ratio, 4.0);
     }
 
     #[tokio::test]
@@ -8051,6 +11690,766 @@ mod tests {
             .strategy_params_json()
             .expect("rows")
             .is_empty());
+    }
+
+    #[test]
+    fn test_strategy_params_sizing_defaults() {
+        let p = StrategyParamsDto::defaults_for("futures");
+        assert_eq!(p.step_size_mult, 10.0);
+        assert_eq!(p.max_step_usd, 2500.0);
+        assert_eq!(p.max_ticker_equity_pct, 20.0);
+    }
+
+    #[tokio::test]
+    async fn test_save_strategy_params_validates_auto_thresholds() {
+        let state = AppEngineState::new();
+        for bad in [f64::NAN, f64::INFINITY, -5.0] {
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            p.auto_min_volume_usd = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("spot");
+            p.auto_min_price_usd = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+        }
+        let mut p = StrategyParamsDto::defaults_for("funding");
+        p.auto_min_volume_usd = Some(250_000.0);
+        p.auto_min_price_usd = Some(0.0);
+        p.auto_min_event_volume_usd = Some(1_000_000.0);
+        save_strategy_params_impl(p, &state).expect("valid thresholds save");
+        let got = get_strategy_params_impl("funding", &state).expect("read back");
+        assert_eq!(got.auto_min_volume_usd, Some(250_000.0));
+        assert_eq!(got.auto_min_price_usd, Some(0.0));
+        assert_eq!(got.auto_min_event_volume_usd, Some(1_000_000.0));
+    }
+
+    #[tokio::test]
+    async fn test_save_strategy_params_validates_slippage_and_funding_guards() {
+        let state = AppEngineState::new();
+        // Every per-strategy slippage cap must be finite and positive.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            p.futures_max_slippage_bps = bad;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_max_slippage_bps = bad;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("spot");
+            p.spot_max_slippage_bps = bad;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            // Prediction is inert but validated identically.
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            p.prediction_max_slippage_bps = bad;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_max_entry_spread_bps = bad;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+        }
+        // Optional percent guards accept only (0, 100].
+        for bad in [-1.0, 0.0, 101.0, f64::NAN, f64::INFINITY] {
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_auto_exit_spread_pct = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_liq_trim_pct = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            p.futures_liq_trim_pct = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("spot");
+            p.spot_liq_trim_pct = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            p.prediction_liq_trim_pct = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+        }
+        // Rotation is a bps hurdle: finite and positive when set.
+        for bad in [-1.0, 0.0, f64::NAN, f64::INFINITY] {
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_rotation_threshold_bps = Some(bad);
+            assert!(save_strategy_params_impl(p, &state).is_err());
+        }
+        // A fully-armed funding record saves and reloads intact.
+        let mut p = StrategyParamsDto::defaults_for("funding");
+        p.funding_max_slippage_bps = 12.5;
+        p.funding_max_entry_spread_bps = 30.0;
+        p.funding_auto_exit_spread_pct = Some(5.0);
+        p.funding_liq_trim_pct = Some(15.0);
+        p.funding_auto_rebalance = true;
+        p.funding_rotation_threshold_bps = Some(10.0);
+        save_strategy_params_impl(p, &state).expect("valid funding guards save");
+        let got = get_strategy_params_impl("funding", &state).expect("read back");
+        assert_eq!(got.funding_max_slippage_bps, 12.5);
+        assert_eq!(got.funding_max_entry_spread_bps, 30.0);
+        assert_eq!(got.funding_auto_exit_spread_pct, Some(5.0));
+        assert_eq!(got.funding_liq_trim_pct, Some(15.0));
+        assert!(got.funding_auto_rebalance);
+        assert_eq!(got.funding_rotation_threshold_bps, Some(10.0));
+        // None disables each optional guard.
+        let mut p = StrategyParamsDto::defaults_for("funding");
+        p.funding_auto_exit_spread_pct = None;
+        p.funding_liq_trim_pct = None;
+        p.funding_rotation_threshold_bps = None;
+        save_strategy_params_impl(p, &state).expect("disabled guards save");
+    }
+
+    #[tokio::test]
+    async fn test_trim_block_persists_and_loads_per_strategy() {
+        let state = AppEngineState::new();
+        let mut f = StrategyParamsDto::defaults_for("futures");
+        f.futures_liq_trim_pct = Some(12.5);
+        // Prediction is defined-but-disabled: still persists on the record.
+        f.prediction_liq_trim_pct = Some(10.0);
+        save_strategy_params_impl(f, &state).expect("save futures");
+        let mut g = StrategyParamsDto::defaults_for("funding");
+        g.funding_liq_trim_pct = Some(15.0);
+        save_strategy_params_impl(g, &state).expect("save funding");
+        let mut s = StrategyParamsDto::defaults_for("spot");
+        s.spot_liq_trim_pct = Some(20.0);
+        save_strategy_params_impl(s, &state).expect("save spot");
+        let reloaded = crate::state::load_strategy_params(&state.state_store);
+        assert_eq!(reloaded["futures"].futures_liq_trim_pct, Some(12.5));
+        assert_eq!(reloaded["futures"].prediction_liq_trim_pct, Some(10.0));
+        assert_eq!(reloaded["funding"].funding_liq_trim_pct, Some(15.0));
+        assert_eq!(reloaded["spot"].spot_liq_trim_pct, Some(20.0));
+        let all = get_all_strategy_params_impl(&state).expect("all");
+        assert_eq!(all.len(), 3);
+        let spot = all.iter().find(|p| p.strategy_id == "spot").expect("spot");
+        assert_eq!(spot.spot_liq_trim_pct, Some(20.0));
+    }
+
+    #[tokio::test]
+    async fn test_prediction_event_volume_field_roundtrips_but_stays_inert() {
+        let state = AppEngineState::new();
+        let mut p = StrategyParamsDto::defaults_for("futures");
+        p.auto_min_event_volume_usd = Some(500_000.0);
+        save_strategy_params_impl(p, &state).expect("save");
+        let rows = state.state_store.strategy_params_json().expect("rows");
+        let persisted: StrategyParamsDto =
+            serde_json::from_str(&rows[0].1).expect("valid json");
+        assert_eq!(persisted.auto_min_event_volume_usd, Some(500_000.0));
+        assert!(get_strategy_tickers_impl(&state, "prediction").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_strategy_tickers_unknown_strategy_fails_closed() {
+        let state = AppEngineState::new();
+        assert!(get_strategy_tickers_impl(&state, "bogus").await.is_err());
+        assert!(get_strategy_tickers_impl(&state, "").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_get_strategy_tickers_filters_off_lists_without_error() {
+        let state = AppEngineState::new();
+        for sid in ["futures", "funding", "spot", "radar"] {
+            let rows = get_strategy_tickers_impl(&state, sid).await.expect("ipc");
+            assert!(rows.iter().all(|r| r.passes));
+            assert!(rows.iter().all(|r| r.block_reason.is_none()));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reject_if_strategy_filtered_noop_when_off() {
+        let state = AppEngineState::new();
+        reject_if_strategy_filtered(
+            &state,
+            "futures",
+            "BTC",
+            &["hyperliquid".to_string(), "lighter".to_string()],
+        )
+        .await
+        .expect("disabled filters must not fetch or block");
+    }
+
+    #[tokio::test]
+    async fn test_upsert_account_max_leverage_ipc_roundtrip() {
+        let state = AppEngineState::new();
+        let created = upsert_account_impl(
+            AccountUpsertInput {
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                account_tier: None,
+                max_leverage: Some(2),
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create with cap");
+        assert_eq!(created.max_leverage, Some(2));
+        for bad in [Some(0), Some(6), Some(99)] {
+            let res = upsert_account_impl(
+                AccountUpsertInput {
+                    id: Some(created.id.clone()),
+                    venue: String::new(),
+                    label: "Main".into(),
+                    enabled: true,
+                    make_default: true,
+                    account_tier: Some("standard".into()),
+                    max_leverage: bad,
+                    credentials: None,
+                },
+                &state,
+            );
+            assert!(res.is_err(), "cap {bad:?} must fail validation");
+        }
+        let cleared = upsert_account_impl(
+            AccountUpsertInput {
+                id: Some(created.id.clone()),
+                venue: String::new(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                account_tier: Some("standard".into()),
+                max_leverage: None,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("clear cap");
+        assert_eq!(cleared.max_leverage, None);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_effective_leverage_takes_min() {
+        let state = AppEngineState::new();
+        state.strategy_params.write().insert(
+            "futures".to_string(),
+            StrategyParamsDto {
+                user_target_leverage: 5,
+                ..StrategyParamsDto::defaults_for("futures")
+            },
+        );
+        let (eff, cap) = resolve_effective_leverage(
+            &state,
+            "futures",
+            "futures",
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            None,
+        )
+        .expect("no accounts means unlimited");
+        assert_eq!((eff, cap), (5, None));
+        state
+            .state_store
+            .upsert_account("hl-main", "hyperliquid", "Main", true, true, "standard", Some(2))
+            .expect("capped account");
+        state
+            .state_store
+            .upsert_account("lt-main", "lighter", "Main", true, true, "standard", None)
+            .expect("uncapped account");
+        let (eff, cap) = resolve_effective_leverage(
+            &state,
+            "futures",
+            "futures",
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            None,
+        )
+        .expect("resolve");
+        assert_eq!(eff, 2, "tighter leg cap must win");
+        assert_eq!(cap, Some(2));
+        state.strategy_params.write().insert(
+            "futures".to_string(),
+            StrategyParamsDto {
+                user_target_leverage: 1,
+                ..StrategyParamsDto::defaults_for("futures")
+            },
+        );
+        let (eff, _) = resolve_effective_leverage(
+            &state,
+            "futures",
+            "futures",
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            None,
+        )
+        .expect("resolve");
+        assert_eq!(eff, 1, "strategy target below the cap must win");
+    }
+
+    #[tokio::test]
+    async fn test_autotune_empty_history_is_all_held() {
+        // Fixture-free store: no samples at all must yield an honest
+        // all-HELD report, never fabricated numbers.
+        let state = AppEngineState::new();
+        let rep = get_autotune_recommendation_impl("BTC-USDC", &state)
+            .await
+            .expect("recommendation");
+        assert_eq!(rep.symbol, "BTC-USDC");
+        assert_eq!(rep.rows.len(), 7);
+        assert_eq!(rep.banner.total, 7);
+        assert_eq!(rep.banner.ready_count, 0);
+        assert_eq!(rep.banner.regime_verdict, "INSUFFICIENT");
+        for r in &rep.rows {
+            assert_eq!(r.status, "HELD");
+            assert_eq!(r.recommended, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_autotune_seeded_history_roundtrip() {
+        // 400 oscillating pair observations (period 8, 60s cadence):
+        // identical shape to the math-crate accept fixture, so the
+        // walk-forward economics validate end to end.
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let n = 400usize;
+        for i in 0..n {
+            let phase =
+                2.0 * std::f64::consts::PI * (i % 8) as f64 / 8.0;
+            let mid_a = 100.0 + 0.4 * phase.sin();
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - ((n - i) as i64) * 60_000,
+                &[("hyperliquid", mid_a), ("lighter", 100.4)],
+            );
+        }
+        let rep = get_autotune_recommendation_impl("BTC-USDC", &state)
+            .await
+            .expect("recommendation");
+        assert_eq!(rep.rows.len(), 7);
+        assert_eq!(rep.banner.total, 7);
+        assert!(rep.pair_observations >= 120);
+        assert!(rep.buy_venue.is_some() && rep.sell_venue.is_some());
+        assert!(rep.banner.fit_from_ms > 0 && rep.banner.validate_to_ms > 0);
+        assert!(rep.banner.fit_to_ms <= rep.banner.validate_from_ms);
+        let mut seen = std::collections::HashSet::new();
+        for r in &rep.rows {
+            assert!(seen.insert(r.param.clone()), "duplicate row {}", r.param);
+            assert!(matches!(r.status.as_str(), "READY" | "HELD"));
+            assert_eq!(r.recommended.is_some(), r.status == "READY");
+            assert!(!r.formula_id.is_empty() && !r.rationale.is_empty());
+            assert!(!r.fit_metric.is_empty() && !r.validated_metric.is_empty());
+        }
+        for want in [
+            "slidingWindowSecs",
+            "targetProfitBps",
+            "windowPercentile",
+            "stepSizeMult",
+            "maxStepUsd",
+            "maxTickerEquityPct",
+            "userTargetLeverage",
+        ] {
+            assert!(seen.contains(want), "missing row {want}");
+        }
+        // Current values are wired from StrategyParamsDto (futures defaults).
+        let target = rep.rows.iter().find(|r| r.param == "targetProfitBps").unwrap();
+        assert!((target.current - 1.0).abs() < 1e-12);
+        let lev = rep.rows.iter().find(|r| r.param == "userTargetLeverage").unwrap();
+        if let Some(v) = lev.recommended {
+            assert!(v <= lev.current, "leverage must never increase");
+        }
+        let pct = rep.rows.iter().find(|r| r.param == "windowPercentile").unwrap();
+        if let Some(v) = pct.recommended {
+            assert!((50.0..=95.0).contains(&v), "percentile snap range");
+        }
+        // Seeded economics validate: at least the target row is READY.
+        let ready: Vec<_> = rep.rows.iter().filter(|r| r.status == "READY").collect();
+        assert!(!ready.is_empty(), "seeded fixture should validate");
+        assert_eq!(rep.banner.ready_count, ready.len());
+    }
+
+    #[tokio::test]
+    async fn test_save_strategy_params_rejects_invalid_sizing() {
+        let state = AppEngineState::new();
+        for mult in [0.0, -1.0, 0.999, f64::NAN, f64::INFINITY] {
+            let mut bad = StrategyParamsDto::defaults_for("futures");
+            bad.step_size_mult = mult;
+            assert!(
+                save_strategy_params_impl(bad, &state).is_err(),
+                "mult {mult} must reject"
+            );
+        }
+        for cap in [0.0, -100.0, f64::NAN, f64::INFINITY] {
+            let mut bad = StrategyParamsDto::defaults_for("futures");
+            bad.max_step_usd = cap;
+            assert!(
+                save_strategy_params_impl(bad, &state).is_err(),
+                "max_step_usd {cap} must reject"
+            );
+        }
+        for pct in [0.0, -2.0, 100.0001, 101.0, f64::NAN, f64::INFINITY] {
+            let mut bad = StrategyParamsDto::defaults_for("futures");
+            bad.max_ticker_equity_pct = pct;
+            assert!(
+                save_strategy_params_impl(bad, &state).is_err(),
+                "pct {pct} must reject"
+            );
+        }
+        assert!(state.strategy_params.read().is_empty());
+
+        let mut ok = StrategyParamsDto::defaults_for("futures");
+        ok.step_size_mult = 1.0;
+        ok.max_step_usd = 0.01;
+        ok.max_ticker_equity_pct = 100.0;
+        assert!(save_strategy_params_impl(ok, &state).is_ok());
+    }
+
+    fn autotune_fixture_report(ready: &[(&str, f64)]) -> AutotuneRecommendationDto {
+        let is_ready = |p: &str| ready.iter().find(|(q, _)| *q == p).map(|(_, v)| *v);
+        let row = |param: &str, current: f64| {
+            let rec = is_ready(param);
+            AutotuneRowDto {
+                param: param.to_string(),
+                current,
+                recommended: rec,
+                status: if rec.is_some() { "READY".to_string() } else { "HELD".to_string() },
+                fit_metric: "fit_ok".to_string(),
+                validated_metric: "val_ok".to_string(),
+                n: 64,
+                rationale: "fixture".to_string(),
+                formula_id: param.to_string(),
+                confidence: "high".to_string(),
+            }
+        };
+        AutotuneRecommendationDto {
+            symbol: "BTC-USDC".to_string(),
+            buy_venue: Some("hyperliquid".to_string()),
+            sell_venue: Some("lighter".to_string()),
+            pair_observations: 400,
+            rows: vec![
+                row("slidingWindowSecs", 86_400.0),
+                row("targetProfitBps", 1.0),
+                row("windowPercentile", 50.0),
+                row("stepSizeMult", 10.0),
+                row("maxStepUsd", 2500.0),
+                row("maxTickerEquityPct", 20.0),
+                row("userTargetLeverage", 5.0),
+            ],
+            banner: AutotuneBannerDto {
+                fit_from_ms: 1_000,
+                fit_to_ms: 2_000,
+                validate_from_ms: 2_000,
+                validate_to_ms: 3_000,
+                regime_verdict: "STABLE".to_string(),
+                ready_count: ready.len(),
+                total: 7,
+            },
+            session_tau_scale: 1.0,
+            session_sigma_scale: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_apply_selected_writes_only_ready_rows() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let report = autotune_fixture_report(&[
+            ("targetProfitBps", 8.5),
+            ("windowPercentile", 80.0),
+            ("slidingWindowSecs", 43_200.0),
+        ]);
+        let selected = vec![
+            "targetProfitBps".to_string(),
+            "maxStepUsd".to_string(),
+            "windowPercentile".to_string(),
+            "slidingWindowSecs".to_string(),
+        ];
+        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+            .await
+            .expect("apply");
+        assert_eq!(res.applied, vec!["slidingWindowSecs", "targetProfitBps", "windowPercentile"]);
+        assert_eq!(res.skipped_held, vec!["maxStepUsd".to_string()]);
+        let audit_id = res.audit_id.expect("audit row");
+        assert!(audit_id > 0);
+        let strategy = get_strategy_params_impl("futures", &state).expect("strategy");
+        assert!((strategy.target_profit_bps - 8.5).abs() < 1e-12);
+        assert_eq!(strategy.window_percentile, 80);
+        assert_eq!(strategy.sliding_window_secs, 43_200);
+        assert_eq!(strategy.max_step_usd, 2500.0, "HELD row must keep manual value");
+        let ticker = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("ticker");
+        assert!((ticker.target_profit_bps - 8.5).abs() < 1e-12);
+        assert_eq!(ticker.window_percentile, 80);
+        assert_eq!(ticker.sliding_window, "12h");
+        let events = state
+            .state_store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .expect("audit read");
+        assert_eq!(events.len(), 1);
+        let applied: serde_json::Value =
+            serde_json::from_str(&events[0].applied_json).expect("applied json");
+        assert_eq!(applied["targetProfitBps"], serde_json::json!(8.5));
+        let detail: serde_json::Value =
+            serde_json::from_str(&events[0].detail_json).expect("detail json");
+        assert_eq!(detail["regime_verdict"], serde_json::json!("STABLE"));
+        assert_eq!(detail["fit_from_ms"], serde_json::json!(1_000));
+        assert_eq!(detail["validate_to_ms"], serde_json::json!(3_000));
+        assert_eq!(detail["rows"].as_array().expect("rows").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_apply_selected_all_held_writes_nothing() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let report = autotune_fixture_report(&[]);
+        let selected = vec!["targetProfitBps".to_string(), "maxStepUsd".to_string()];
+        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+            .await
+            .expect("apply");
+        assert!(res.applied.is_empty());
+        assert_eq!(res.skipped_held, vec!["maxStepUsd".to_string(), "targetProfitBps".to_string()]);
+        assert_eq!(res.audit_id, None);
+        assert!(state.strategy_params.read().is_empty(), "no writes on all-HELD");
+        assert!(state
+            .state_store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .expect("audit read")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_apply_selected_rejects_unknown_param_atomically() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let report = autotune_fixture_report(&[("targetProfitBps", 8.5)]);
+        let selected = vec!["targetProfitBps".to_string(), "bogusParam".to_string()];
+        assert!(apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+            .await
+            .is_err());
+        assert!(state.strategy_params.read().is_empty(), "unknown param: no writes");
+        assert!(state
+            .state_store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .expect("audit read")
+            .is_empty());
+        assert!(apply_autotune_rows_inner(&state, "BTC-USDC", &report, &[], 0)
+            .await
+            .is_err(), "broken clock must refuse");
+    }
+
+    #[tokio::test]
+    async fn test_apply_selected_concurrent_serializes() {
+        use std::sync::Arc;
+        let state = Arc::new(AppEngineState::new());
+        let now = Utc::now().timestamp_millis();
+        let report = autotune_fixture_report(&[("targetProfitBps", 8.5)]);
+        let selected = vec!["targetProfitBps".to_string()];
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let s = state.clone();
+            let r = AutotuneRecommendationDto {
+                symbol: report.symbol.clone(),
+                buy_venue: report.buy_venue.clone(),
+                sell_venue: report.sell_venue.clone(),
+                pair_observations: report.pair_observations,
+                rows: report.rows.clone(),
+                banner: AutotuneBannerDto {
+                    fit_from_ms: report.banner.fit_from_ms,
+                    fit_to_ms: report.banner.fit_to_ms,
+                    validate_from_ms: report.banner.validate_from_ms,
+                    validate_to_ms: report.banner.validate_to_ms,
+                    regime_verdict: report.banner.regime_verdict.clone(),
+                    ready_count: report.banner.ready_count,
+                    total: report.banner.total,
+                },
+                session_tau_scale: 1.0,
+                session_sigma_scale: 1.0,
+            };
+            let sel = selected.clone();
+            handles.push(tokio::spawn(async move {
+                apply_autotune_rows_inner(&s, "BTC-USDC", &r, &sel, now).await
+            }));
+        }
+        for h in handles {
+            let res = h.await.expect("task join").expect("apply");
+            assert_eq!(res.applied, vec!["targetProfitBps".to_string()]);
+        }
+        let strategy = get_strategy_params_impl("futures", &state).expect("strategy");
+        assert!((strategy.target_profit_bps - 8.5).abs() < 1e-12);
+        let events = state
+            .state_store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .expect("audit read");
+        assert_eq!(events.len(), 4, "every apply writes its own audit line");
+    }
+
+    #[tokio::test]
+    async fn test_autotune_coupling_neutral_without_profiles() {
+        let state = AppEngineState::new();
+        let rep = get_autotune_recommendation_impl("BTC-USDC", &state)
+            .await
+            .expect("recommendation");
+        assert!((rep.session_tau_scale - 1.0).abs() < 1e-12);
+        assert!((rep.session_sigma_scale - 1.0).abs() < 1e-12);
+    }
+
+    #[tokio::test]
+    async fn test_session_profile_fail_closed_without_promotion() {
+        let state = AppEngineState::new();
+        let prof = get_session_profile_impl("BTC-USDC", &state).expect("profile");
+        assert_eq!(prof.promotion, None, "no promotion row: Phase-1 baseline");
+        assert!(prof.provisional);
+        assert!(prof.sessions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_session_profile_rescale_only_when_promoted() {
+        use chrono::TimeZone;
+        let state = AppEngineState::new();
+        let base_day = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+            .single()
+            .expect("fixture day")
+            .timestamp_millis();
+        for hour in [2u32, 10, 15, 19, 23] {
+            for i in 0..40 {
+                let ts = base_day + (hour as i64) * 3_600_000 + (i as i64) * 60_000;
+                let wave = ((i as f64) * 0.7).sin() * 3.0;
+                seed_samples(
+                    &state,
+                    "BTC-USDC",
+                    ts,
+                    &[("hyperliquid", 60_000.0 + wave), ("lighter", 60_000.0 - wave)],
+                );
+            }
+        }
+        let from = base_day;
+        let to = base_day + 86_400_000;
+        let written = state
+            .state_store
+            .rollup_session_profiles("BTC-USDC", from, to, to)
+            .expect("rollup");
+        assert_eq!(written, 5);
+        let stored = state.state_store.session_profiles("BTC-USDC").expect("rows");
+        assert!(stored.iter().any(|r| r.rv_bps.is_some()), "rollup must emit rv");
+        let now = Utc::now().timestamp_millis();
+        state
+            .state_store
+            .phase2_upsert_har_anchor(&crate::state_store::HarAnchorRow {
+                symbol: "BTC-USDC".to_string(),
+                intercept: 0.1,
+                b_daily: 0.5,
+                b_weekly: 0.3,
+                b_monthly: 0.1,
+                r2: 0.9,
+                n_days: 60,
+                forecast_rv_bps: 12.0,
+                trailing_mean_rv_bps: 10.0,
+                updated_ts: now,
+            })
+            .expect("anchor");
+        state
+            .state_store
+            .phase2_upsert_promotion_state(&crate::state_store::PromotionStateRow {
+                symbol: "BTC-USDC".to_string(),
+                status: "demoted".to_string(),
+                fit_delta_bps: 2.0,
+                val_delta_bps: -1.5,
+                reason: "sign disagreement".to_string(),
+                updated_ts: now,
+            })
+            .expect("promotion");
+        let demoted = get_session_profile_impl("BTC-USDC", &state).expect("profile");
+        let promo = demoted.promotion.expect("promotion served");
+        assert_eq!(promo.status, "demoted");
+        assert!(!promo.rescaled);
+        for s in &demoted.sessions {
+            let base = stored.iter().find(|r| r.session_id == s.session_id).expect("row");
+            assert_eq!(s.rv_bps, base.rv_bps, "demoted serves Phase-1 values");
+        }
+        state
+            .state_store
+            .phase2_upsert_promotion_state(&crate::state_store::PromotionStateRow {
+                symbol: "BTC-USDC".to_string(),
+                status: "promoted".to_string(),
+                fit_delta_bps: 2.0,
+                val_delta_bps: 1.5,
+                reason: "agree".to_string(),
+                updated_ts: now,
+            })
+            .expect("promotion");
+        let promoted = get_session_profile_impl("BTC-USDC", &state).expect("profile");
+        let promo = promoted.promotion.expect("promotion served");
+        assert_eq!(promo.status, "promoted");
+        assert!(promo.rescaled);
+        for s in &promoted.sessions {
+            let base = stored.iter().find(|r| r.session_id == s.session_id).expect("row");
+            match (s.rv_bps, base.rv_bps) {
+                (Some(v), Some(b)) => {
+                    assert!((v - b * 1.2).abs() < 1e-9, "promoted rescales rv x1.2");
+                }
+                _ => panic!("expected rv on both sides"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_spatial_rejects_entry_at_grid_cap() {
+        let state = setup_test_state_with_venues();
+        // Step beyond the derived cap rejects before any orderbook work.
+        let err = execute_spatial_arbitrage_inner(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(4),
+            Some(3),
+            None,
+            None,
+            "futures",
+            &state,
+        )
+        .await
+        .expect_err("step 4 of max 3 must reject");
+        assert!(err.contains("Grid cap"), "unexpected err: {err}");
+
+        // Zero cap is not a valid grid.
+        let err = execute_spatial_arbitrage_inner(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(0),
+            None,
+            None,
+            "futures",
+            &state,
+        )
+        .await
+        .expect_err("max_units 0 must reject");
+        assert!(err.contains("max_units"), "unexpected err: {err}");
+
+        // Ticker already at its accumulated cap rejects even a step-1 entry.
+        state.strategy_configs.write().insert(
+            "BTC-USDC".to_string(),
+            TickerStrategyConfigDto {
+                symbol: "BTC-USDC".into(),
+                current_accumulated_units: 3,
+                max_accumulated_units: 3,
+                ..TickerStrategyConfigDto::default()
+            },
+        );
+        let err = execute_spatial_arbitrage_inner(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            None,
+            None,
+            "futures",
+            &state,
+        )
+        .await
+        .expect_err("3/3 accumulated must reject");
+        assert!(err.contains("Grid cap"), "unexpected err: {err}");
     }
 
     #[tokio::test]
@@ -8331,12 +12730,7 @@ mod tests {
         let base = EngineSettingsDto::default();
 
         let bad = EngineSettingsDto {
-            max_slippage_bps: f64::NAN,
-            ..base.clone()
-        };
-        assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto {
-            max_slippage_bps: 0.0,
+            min_depth_ratio: 0.0,
             ..base.clone()
         };
         assert!(save_engine_settings_impl(bad, &state).is_err());
@@ -8384,8 +12778,8 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 400000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 400000.0);
+        assert_eq!(before.total_portfolio_value_usd, 800000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 800000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -8775,6 +13169,8 @@ mod tests {
                     expected_net_usd: Some(8.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
                 SpatialCandidateInput {
                     symbol: "BTC-USDC".into(),
@@ -8784,6 +13180,8 @@ mod tests {
                     expected_net_usd: Some(15.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
                 SpatialCandidateInput {
                     symbol: "ETH-USDC".into(),
@@ -8793,6 +13191,8 @@ mod tests {
                     expected_net_usd: Some(20.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
             ],
             &state,
@@ -8882,6 +13282,8 @@ mod tests {
                     expected_net_usd: Some(99.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
                 SpatialCandidateInput {
                     symbol: "BTC-USDC".into(),
@@ -8891,6 +13293,8 @@ mod tests {
                     expected_net_usd: Some(50.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
                 SpatialCandidateInput {
                     symbol: "ETH-USDC".into(),
@@ -8900,6 +13304,8 @@ mod tests {
                     expected_net_usd: Some(20.0),
                     route_id: None,
                     direction: None,
+                    position_step: None,
+                    max_units: None,
                 },
             ],
             &state,
@@ -8931,7 +13337,7 @@ mod tests {
         let state = setup_test_state_with_venues();
         let account = state
             .state_store
-            .upsert_account("hl-main", "hyperliquid", "Main", true, false, "standard")
+            .upsert_account("hl-main", "hyperliquid", "Main", true, false, "standard", None)
             .expect("account");
 
         state
@@ -9153,12 +13559,12 @@ mod tests {
     #[tokio::test]
     async fn test_risk_overview_drawdown_pct_uses_day_start() {
         let state = setup_test_state_with_venues();
-        state.circuit_breaker.update_equity(dec!(500000.0));
+        state.circuit_breaker.update_equity(dec!(1000000.0));
         state.circuit_breaker.reset();
-        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(500000.0));
+        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(1000000.0));
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        assert_eq!(risk.current_drawdown_usd, 100000.0);
+        assert_eq!(risk.current_drawdown_usd, 200000.0);
         assert_eq!(risk.drawdown_pct, 20.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
@@ -9233,6 +13639,30 @@ mod tests {
             (band - 99.5025).abs() < 0.01,
             "band height = gross spread bps"
         );
+    }
+
+    #[tokio::test]
+    async fn test_signal_series_merges_monitor_and_ui_keys() {
+        // Gadget queries "BTC-USDC" but background recording lands under
+        // "BTC": the series must merge both or unselected tickers show an
+        // empty trailing window despite fresh background samples.
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        seed_samples(&state, "BTC", now - 2_000, &[("hyperliquid", 100.0)]);
+        seed_samples(&state, "BTC", now - 1_000, &[("lighter", 101.0)]);
+        seed_samples(
+            &state,
+            "BTC-USDC",
+            now - 3_000,
+            &[("hyperliquid", 99.0)],
+        );
+
+        let s = get_signal_series_impl("BTC-USDC", "consensus", 300, &state)
+            .await
+            .expect("series");
+        assert_eq!(s.sample_count, 3);
+        assert_eq!(s.earliest_ts_ms, Some(now - 3_000));
+        assert!(!s.ts_ms.is_empty());
     }
 
     #[tokio::test]
@@ -9340,6 +13770,315 @@ mod tests {
             (
                 "execute_spatial_candidates",
                 serde_json::json!({"candidates": []}),
+            ),
+        ] {
+            let response = tauri::test::get_ipc_response(
+                &webview,
+                tauri::webview::InvokeRequest {
+                    cmd: cmd.into(),
+                    callback: tauri::ipc::CallbackFn(0),
+                    error: tauri::ipc::CallbackFn(1),
+                    url: "tauri://localhost".parse().expect("invoke url"),
+                    body: tauri::ipc::InvokeBody::Json(body),
+                    headers: Default::default(),
+                    invoke_key: tauri::test::INVOKE_KEY.to_string(),
+                },
+            );
+            assert!(
+                response.is_ok(),
+                "{cmd} must resolve the managed Arc<AppEngineState>: {:?}",
+                response.err()
+            );
+        }
+    }
+
+    fn seed_closed_family(
+        state: &AppEngineState,
+        root_id: &str,
+        strategy: &str,
+        entry_long_px: f64,
+        entry_short_px: f64,
+        exit_long_px: f64,
+        exit_short_px: f64,
+    ) {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+        let legs = |venue_long: &str, venue_short: &str| {
+            vec![
+                NewSignalLeg {
+                    account_id: None,
+                    venue: venue_long.to_string(),
+                    side: LegSide::Long,
+                    intended_qty: 1.0,
+                },
+                NewSignalLeg {
+                    account_id: None,
+                    venue: venue_short.to_string(),
+                    side: LegSide::Short,
+                    intended_qty: 1.0,
+                },
+            ]
+        };
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: root_id.to_string(),
+                strategy_id: strategy.to_string(),
+                symbol: "BTC-USDC".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: legs("hyperliquid", "lighter"),
+            })
+            .expect("root records");
+        state
+            .state_store
+            .apply_leg_fill(root_id, LegSide::Long, 1.0, entry_long_px, 2.0, None)
+            .expect("entry long fills");
+        state
+            .state_store
+            .apply_leg_fill(root_id, LegSide::Short, 1.0, entry_short_px, 2.0, None)
+            .expect("entry short fills");
+        let close_id = format!("flat-{root_id}-0001");
+        // Child legs carry the closing trade side (opposite of entry), so
+        // side-signed cash flows net entry against exit exactly like the
+        // production flatten path.
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: close_id.clone(),
+                strategy_id: strategy.to_string(),
+                symbol: "BTC-USDC".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".to_string(),
+                        side: LegSide::Short,
+                        intended_qty: 1.0,
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".to_string(),
+                        side: LegSide::Long,
+                        intended_qty: 1.0,
+                    },
+                ],
+            })
+            .expect("close child records");
+        // Sell to close the long @ exit_long_px; buy back the short @
+        // exit_short_px.
+        state
+            .state_store
+            .apply_leg_fill(&close_id, LegSide::Short, 1.0, exit_long_px, 1.0, None)
+            .expect("exit short fills");
+        state
+            .state_store
+            .apply_leg_fill(&close_id, LegSide::Long, 1.0, exit_short_px, 1.0, None)
+            .expect("exit long fills");
+        state
+            .state_store
+            .update_signal_status(root_id, SignalStatus::Closed, None)
+            .expect("root closes");
+        state
+            .state_store
+            .update_signal_status(&close_id, SignalStatus::Closed, None)
+            .expect("child closes");
+    }
+
+    #[test]
+    fn test_strategy_fill_pnl_spatial_round_trip_fees_included() {
+        let state = setup_test_state_with_venues();
+        // Long 1.0 @ 60000 / short 1.0 @ 60120; sell the long @ 60050 (+50),
+        // buy back the short @ 60100 (+20). Gross 70, fees 2 + 2 + 1 + 1 = 6
+        // -> net 64.
+        seed_closed_family(&state, "sig-spatial-1", "futures", 60000.0, 60120.0, 60050.0, 60100.0);
+        let pnl = get_strategy_fill_pnl_impl("futures", &state).expect("pnl");
+        assert_eq!(pnl.strategy_id, "futures");
+        assert_eq!(pnl.closed_families, 1);
+        assert_eq!(pnl.unattributed_closed_families, 0);
+        assert!((pnl.net_profit_usd - 64.0).abs() < 1e-9, "net {:?}", pnl);
+        assert!(pnl.net_profit_bps.is_some());
+        // Radar sees none of the futures family's dollars.
+        let radar = get_strategy_fill_pnl_impl("radar", &state).expect("radar pnl");
+        assert_eq!(radar.closed_families, 0);
+        assert_eq!(radar.net_profit_usd, 0.0);
+        assert_eq!(radar.unattributed_log_entries, 0);
+    }
+
+    #[test]
+    fn test_strategy_fill_pnl_radar_and_triangle_paths() {
+        let state = setup_test_state_with_venues();
+        seed_closed_family(&state, "sig-radar-1", "radar", 60000.0, 60120.0, 60050.0, 60100.0);
+        seed_closed_family(&state, "tri-leg0", "triangle", 100.0, 101.0, 100.5, 100.5);
+        let radar = get_strategy_fill_pnl_impl("RADAR", &state).expect("radar pnl");
+        assert_eq!(radar.closed_families, 1);
+        assert!((radar.net_profit_usd - 64.0).abs() < 1e-9);
+        let tri = get_strategy_fill_pnl_impl("triangle", &state).expect("tri pnl");
+        assert_eq!(tri.closed_families, 1);
+        // Cash: -100 + 101 + 100.5 - 100.5 = 1; fees 6 -> net -5.
+        assert!((tri.net_profit_usd - (-5.0)).abs() < 1e-9, "net {:?}", tri);
+        let futures = get_strategy_fill_pnl_impl("futures", &state).expect("futures pnl");
+        assert_eq!(futures.closed_families, 0);
+    }
+
+    #[test]
+    fn test_strategy_fill_pnl_unvalued_families_quarantined() {
+        use crate::state_store::{NewSignalExecution, NewSignalLeg, SignalStatus};
+        let state = setup_test_state_with_venues();
+        // Closed with no fills at all: nothing valuable, excluded and counted.
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: "sig-empty".to_string(),
+                strategy_id: "futures".to_string(),
+                symbol: "BTC-USDC".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![NewSignalLeg {
+                    account_id: None,
+                    venue: "hyperliquid".to_string(),
+                    side: crate::state_store::LegSide::Long,
+                    intended_qty: 1.0,
+                }],
+            })
+            .expect("empty root records");
+        state
+            .state_store
+            .update_signal_status("sig-empty", SignalStatus::Closed, None)
+            .expect("empty root closes");
+        // Open families never enter the sums either way.
+        seed_closed_family(&state, "sig-open", "futures", 60000.0, 60120.0, 60050.0, 60100.0);
+        state
+            .state_store
+            .update_signal_status("sig-open", SignalStatus::Imbalanced, None)
+            .expect("reopen root");
+        let pnl = get_strategy_fill_pnl_impl("futures", &state).expect("pnl");
+        assert_eq!(pnl.closed_families, 0);
+        assert_eq!(pnl.open_families, 1);
+        assert_eq!(pnl.unattributed_closed_families, 1);
+        assert_eq!(pnl.net_profit_usd, 0.0);
+        assert_eq!(pnl.net_profit_bps, None);
+    }
+
+    #[test]
+    fn test_strategy_fill_pnl_counts_unattributed_log_rows() {
+        let state = setup_test_state_with_venues();
+        // Pre-attribution history: no strategy tag (serde default path).
+        let legacy: crate::state::ExecutionLogEntry =
+            serde_json::from_str(r#"{"id":"exec-old","timestamp":"2026-01-01T00:00:00Z","trade_type":"Flatten","symbol":"BTC-USDC","venue_a":"hyperliquid","venue_b":"lighter","leg_a_status":"-","leg_b_status":"-","success":true,"gross_profit":0.0,"fees":0.0,"net_profit":12.5,"latency_us":0,"note":"old"}"#)
+                .expect("legacy log row deserializes");
+        assert_eq!(
+            legacy.strategy_id,
+            crate::attribution::UNATTRIBUTED_STRATEGY_ID
+        );
+        state.execution_logs.write().push(legacy);
+        let pnl = get_strategy_fill_pnl_impl("futures", &state).expect("pnl");
+        assert_eq!(pnl.unattributed_log_entries, 1);
+        assert_eq!(pnl.closed_families, 0);
+        assert_eq!(pnl.net_profit_usd, 0.0, "legacy dollars never absorbed");
+    }
+
+    #[test]
+    fn test_strategy_fill_pnl_deterministic() {
+        let state = setup_test_state_with_venues();
+        seed_closed_family(&state, "sig-det-1", "spot", 60000.0, 60120.0, 60050.0, 60100.0);
+        seed_closed_family(&state, "sig-det-2", "spot", 60000.0, 60120.0, 60050.0, 60100.0);
+        let first = get_strategy_fill_pnl_impl("spot", &state).expect("first");
+        let second = get_strategy_fill_pnl_impl("spot", &state).expect("second");
+        assert_eq!(first, second);
+        assert_eq!(first.closed_families, 2);
+    }
+
+    #[tokio::test]
+    async fn test_margin_snapshot_cadence_caps_frequency() {
+        let state = setup_test_state_with_venues();
+        let venues: Vec<String> = state
+            .paper_exchanges()
+            .iter()
+            .map(|(vid, _)| vid.to_string())
+            .collect();
+        assert!(!venues.is_empty(), "test state must admit paper venues");
+        let count_all = || {
+            venues
+                .iter()
+                .map(|vid| {
+                    state
+                        .state_store
+                        .list_margin_snapshots(vid, 0)
+                        .expect("snapshots list")
+                        .len()
+                })
+                .sum::<usize>()
+        };
+        let now = 1_700_000_000_000_i64;
+        maybe_record_margin_snapshots(&state, now).await;
+        maybe_record_margin_snapshots(&state, now).await;
+        maybe_record_margin_snapshots(&state, now + 1_000).await;
+        assert_eq!(
+            count_all(),
+            venues.len(),
+            "one row per venue: repeats inside the cap window drop"
+        );
+        maybe_record_margin_snapshots(
+            &state,
+            now + crate::commands::MARGIN_SNAPSHOT_MIN_INTERVAL_MS,
+        )
+        .await;
+        assert_eq!(count_all(), venues.len() * 2, "next window writes again");
+    }
+
+    #[test]
+    fn test_utilisation_history_partial_window_labeled() {
+        let state = setup_test_state_with_venues();
+        let now = chrono::Utc::now().timestamp_millis();
+        let hour = 3_600_000_i64;
+        // 20% holds [now-2h, now-1h), 40% holds [now-1h, now] -> mean 30.
+        state
+            .state_store
+            .record_margin_snapshot("lighter", "lighter", now - 2 * hour, 10_000.0, 2_000.0, 20.0)
+            .expect("snapshot");
+        state
+            .state_store
+            .record_margin_snapshot("lighter", "lighter", now - hour, 10_000.0, 4_000.0, 40.0)
+            .expect("snapshot");
+        let hist = get_utilisation_history_impl("lighter", Some(24), &state).expect("history");
+        assert!(hist.avg_rate_pct.is_some());
+        assert!(hist.partial, "2h of snapshots must not pose as 24h");
+        assert!(hist.covered_ms < hist.window_ms);
+        assert_eq!(hist.point_count, 2);
+        let avg = hist.avg_rate_pct.expect("avg");
+        assert!((avg - 30.0).abs() < 1e-9, "time-weighted mean {avg}");
+        let empty = get_utilisation_history_impl("vanta", Some(24), &state).expect("empty");
+        assert_eq!(empty.avg_rate_pct, None);
+        assert!(empty.partial);
+        assert_eq!(empty.covered_ms, 0);
+    }
+
+    #[test]
+    fn test_attribution_ipc_commands_resolve() {
+        let app = tauri::test::mock_builder()
+            .manage(Arc::new(AppEngineState::new()))
+            .invoke_handler(tauri::generate_handler![
+                get_strategy_fill_pnl,
+                get_utilisation_history
+            ])
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("mock app builds");
+        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
+            .build()
+            .expect("webview builds");
+
+        for (cmd, body) in [
+            (
+                "get_strategy_fill_pnl",
+                serde_json::json!({"strategyId": "radar"}),
+            ),
+            (
+                "get_utilisation_history",
+                serde_json::json!({"venue": "lighter", "windowHours": 24}),
             ),
         ] {
             let response = tauri::test::get_ipc_response(
@@ -9530,6 +14269,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_flatten_sweep_closes_sub_step_residual() {
+        let state = AppEngineState::new();
+        state.strategy_configs.write().insert(
+            "BTC-USDC".to_string(),
+            TickerStrategyConfigDto {
+                symbol: "BTC-USDC".into(),
+                unit_size: 1.0,
+                ..TickerStrategyConfigDto::default()
+            },
+        );
+        let step = flatten_step_qty(&state, "BTC-USDC");
+        assert_eq!(step, dec!(1));
+        // 1.4-step residual on a 1-unit close: the strand would be 0.4
+        // steps, so the sweep closes the entire residual.
+        assert_eq!(sweep_flatten_qty(dec!(1.4), dec!(1), step), dec!(1.4));
+        // Normal exact-unit close is unchanged.
+        assert_eq!(sweep_flatten_qty(dec!(1), dec!(1), step), dec!(1));
+        // A real multi-step remainder still closes in part.
+        assert_eq!(sweep_flatten_qty(dec!(2.4), dec!(1), step), dec!(1));
+        // Unknown symbol: no usable step, plain capped close (fail closed).
+        assert_eq!(flatten_step_qty(&state, "ETH-USDC"), dec!(0));
+        assert_eq!(sweep_flatten_qty(dec!(1.4), dec!(1), dec!(0)), dec!(1));
+    }
+
+    #[tokio::test]
     async fn test_flatten_futures_root_preserves_other_strategy_position() {
         use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
@@ -9631,6 +14395,172 @@ mod tests {
         }
         assert_eq!(res.residual_signals, 0);
         assert_eq!(res.signals_closed, 1);
+    }
+
+    fn enable_futures_passive(state: &AppEngineState, percentile: f64, timeout_secs: u64) {
+        let mut p = StrategyParamsDto::defaults_for("futures");
+        p.futures_passive_unwind.enabled = true;
+        p.futures_passive_unwind.spread_percentile = percentile;
+        p.futures_passive_unwind.timeout_secs = timeout_secs;
+        p.futures_passive_unwind.max_tries = 2;
+        p.futures_passive_unwind.max_spread_bps = 50.0;
+        p.futures_passive_unwind.max_fast_vol_bps = 50.0;
+        state
+            .strategy_params
+            .write()
+            .insert("futures".to_string(), p);
+    }
+
+    async fn seed_long_for_flatten(state: &AppEngineState) {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
+        seed_test_book(
+            state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(64200.0),
+            dec!(64205.0),
+        );
+        let mut paper_book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        paper_book.bids.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64200.0),
+            dec!(10.0),
+        ));
+        paper_book.asks.push(arbitrager_core::quote::BookLevel::new(
+            dec!(64205.0),
+            dec!(10.0),
+        ));
+        state
+            .ex_hl
+            .replace_orderbook(paper_book)
+            .expect("seed paper book");
+        let open = arbitrager_core::order::OrderRequest::new_market(
+            state.ex_hl.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.1),
+        );
+        state.ex_hl.place_order(open).await.expect("open position");
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: "root-passive".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![NewSignalLeg {
+                    account_id: None,
+                    venue: "hyperliquid".into(),
+                    side: LegSide::Long,
+                    intended_qty: 0.1,
+                }],
+            })
+            .expect("record root");
+        state
+            .state_store
+            .apply_leg_fill("root-passive", LegSide::Long, 0.1, 64205.0, 0.0, None)
+            .expect("root fill");
+    }
+
+    #[tokio::test]
+    async fn test_flatten_passive_limit_fills_at_aggressive_touch() {
+        let state = setup_test_state_with_venues();
+        // Percentile 0 sells at the bid (64200): touchable in the sim, so
+        // the reduce closes via limit with no market fallback.
+        enable_futures_passive(&state, 0.0, 1);
+        seed_long_for_flatten(&state).await;
+
+        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("flatten futures");
+        assert_eq!(res.legs_closed, 1);
+        assert_eq!(res.signals_closed, 1);
+        assert!(
+            res.notes.iter().any(|n| n.contains("passively closed")),
+            "expected passive note, got {:?}",
+            res.notes
+        );
+        assert!(
+            res.notes.iter().all(|n| !n.contains("market exit")),
+            "no market fallback expected, got {:?}",
+            res.notes
+        );
+        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        assert!(
+            acc.get_position("BTC-USDC").is_none(),
+            "position must be fully closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_flatten_passive_falls_back_when_untouchable() {
+        let state = setup_test_state_with_venues();
+        // Percentile 100 sells at the ask (64205): above every bid, so both
+        // limit tries miss (timeout 0) and the driver falls back to market.
+        enable_futures_passive(&state, 100.0, 0);
+        seed_long_for_flatten(&state).await;
+
+        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("flatten futures");
+        assert_eq!(res.legs_closed, 1);
+        assert_eq!(res.signals_closed, 1);
+        assert!(
+            res.notes.iter().any(|n| n.contains("market exit")),
+            "expected fallback note, got {:?}",
+            res.notes
+        );
+        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        assert!(
+            acc.get_position("BTC-USDC").is_none(),
+            "fallback must still close the position"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_strategy_params_validates_passive_unwind() {
+        // Bad percentile / tries / gates reject the whole record.
+        for mutate in [
+            |p: &mut StrategyParamsDto| p.futures_passive_unwind.spread_percentile = 101.0,
+            |p: &mut StrategyParamsDto| p.futures_passive_unwind.spread_percentile = f64::NAN,
+            |p: &mut StrategyParamsDto| p.funding_passive_unwind.max_tries = 0,
+            |p: &mut StrategyParamsDto| p.spot_passive_unwind.max_tries = 11,
+            |p: &mut StrategyParamsDto| p.futures_passive_unwind.max_spread_bps = 0.0,
+            |p: &mut StrategyParamsDto| p.spot_passive_unwind.max_fast_vol_bps = f64::INFINITY,
+        ] {
+            let state = AppEngineState::new();
+            let mut p = StrategyParamsDto::defaults_for("futures");
+            mutate(&mut p);
+            assert!(
+                save_strategy_params_impl(p, &state).is_err(),
+                "passive guard must reject"
+            );
+        }
+        // Enabled with zero timeout is rejected at the save path (core
+        // allows 0 for tests; operators must pick 1..=300).
+        {
+            let state = AppEngineState::new();
+            let mut p = StrategyParamsDto::defaults_for("spot");
+            p.spot_passive_unwind.enabled = true;
+            p.spot_passive_unwind.timeout_secs = 0;
+            assert!(save_strategy_params_impl(p, &state).is_err());
+        }
+        // A valid enabled record saves and reads back exactly.
+        {
+            let state = AppEngineState::new();
+            let mut p = StrategyParamsDto::defaults_for("funding");
+            p.funding_passive_unwind.enabled = true;
+            p.funding_passive_unwind.spread_percentile = 50.0;
+            p.funding_passive_unwind.timeout_secs = 10;
+            p.funding_passive_unwind.max_tries = 3;
+            save_strategy_params_impl(p, &state).expect("valid passive saves");
+            let got = get_strategy_params_impl("funding", &state).expect("read back");
+            assert!(got.funding_passive_unwind.enabled);
+            assert_eq!(got.funding_passive_unwind.spread_percentile, 50.0);
+            assert_eq!(got.funding_passive_unwind.timeout_secs, 10);
+            assert_eq!(got.funding_passive_unwind.max_tries, 3);
+        }
     }
 
     fn baseline_sample(venue: &str, ts_ms: i64, mid: f64) -> crate::state_store::SpreadSample {
@@ -9849,5 +14779,499 @@ mod tests {
             .expect("pair row");
         assert_eq!(p.sample_count, 1, "duplicate alias rows deduplicated");
         assert!(p.mean_gross_bps.is_none(), "one obs is not a baseline");
+    }
+
+    fn lighter_only_state() -> AppEngineState {
+        let state = AppEngineState::new();
+        state.settings.write().lighter_enabled = true;
+        state
+    }
+
+    fn seed_triangle_books(state: &AppEngineState) {
+        // Profitable USDC -> BTC -> ETH -> USDC cycle on lighter:
+        // 10k USDC buys BTC @60,000, sells BTC for ETH @20/BTC,
+        // sells ETH @3,100 -> ~10,333 USDC before fees. The middle leg is
+        // the "{A}-{B}" book the planner routes; depth must cover the
+        // chained quantity or evaluation fails closed.
+        seed_test_book(state, "lighter", "BTC-USDC", dec!(59990.0), dec!(60000.0));
+        seed_book_depth(
+            state,
+            "lighter",
+            "BTC-ETH",
+            dec!(20.0),
+            dec!(100.0),
+            dec!(20.01),
+            dec!(100.0),
+        );
+        seed_test_book(state, "lighter", "ETH-BTC", dec!(0.05), dec!(0.0501));
+        seed_test_book(state, "lighter", "ETH-USDC", dec!(3100.0), dec!(3101.0));
+    }
+
+    fn seed_aligned_triangle_books(state: &AppEngineState) {
+        // Cross rates agree: no mispricing, so venue fees eat the cycle.
+        seed_test_book(state, "lighter", "BTC-USDC", dec!(59990.0), dec!(60000.0));
+        seed_book_depth(
+            state,
+            "lighter",
+            "BTC-ETH",
+            dec!(19.3),
+            dec!(100.0),
+            dec!(19.31),
+            dec!(100.0),
+        );
+        seed_test_book(state, "lighter", "ETH-BTC", dec!(0.0510), dec!(0.0511));
+        seed_test_book(state, "lighter", "ETH-USDC", dec!(3100.0), dec!(3101.0));
+    }
+
+    #[tokio::test]
+    async fn test_scan_triangle_finds_profitable_cycle() {
+        let state = lighter_only_state();
+        seed_triangle_books(&state);
+
+        let opps = scan_triangular_opportunities_impl("", &state)
+            .await
+            .expect("triangle scan");
+        // Live venue books may complete additional real cycles; pin the
+        // seeded one by id instead of asserting an exact count.
+        let opp = opps
+            .iter()
+            .find(|o| o.id == "lighter-TRI-BTC-ETH-USDC")
+            .expect("seeded BTC/ETH cycle must be listed");
+        assert_eq!(opp.venue, "Lighter");
+        assert_eq!(opp.leg1.symbol, "BTC-USDC");
+        assert_eq!(opp.leg1.action, "BUY");
+        assert_eq!(opp.leg2.symbol, "BTC-ETH");
+        assert_eq!(opp.leg2.action, "SELL");
+        assert_eq!(opp.leg3.symbol, "ETH-USDC");
+        assert_eq!(opp.leg3.action, "SELL");
+        assert!(opp.gross_spread_bps > 300.0, "gross {}", opp.gross_spread_bps);
+        assert!(opp.net_spread_bps > 300.0, "net {}", opp.net_spread_bps);
+        assert!(opp.is_executable);
+        // Results arrive sorted by net edge, descending.
+        for pair in opps.windows(2) {
+            assert!(
+                pair[0].net_spread_bps >= pair[1].net_spread_bps,
+                "scan must sort by net edge: {} then {}",
+                pair[0].id,
+                pair[1].id
+            );
+        }
+
+        // Asset filter narrows to cycles containing the asset…
+        let btc = scan_triangular_opportunities_impl("BTC", &state)
+            .await
+            .expect("filtered scan");
+        assert!(!btc.is_empty());
+        assert!(btc.iter().all(|o| o.intermediate_a == "BTC"
+            || o.intermediate_b == "BTC"));
+        assert!(btc
+            .iter()
+            .any(|o| o.id == "lighter-TRI-BTC-ETH-USDC"));
+        // …while an unknown asset fails closed to empty.
+        let unknown = scan_triangular_opportunities_impl("ZZZ", &state)
+            .await
+            .expect("filtered scan");
+        assert!(unknown.is_empty());
+
+        // Determinism: re-seed (refreshing hub timestamps) and rescan —
+        // the seeded cycle is listed identically.
+        seed_triangle_books(&state);
+        let again = scan_triangular_opportunities_impl("", &state)
+            .await
+            .expect("rescan");
+        let re = again
+            .iter()
+            .find(|o| o.id == "lighter-TRI-BTC-ETH-USDC")
+            .expect("seeded cycle must persist across scans");
+        assert_eq!(re.net_spread_bps, opp.net_spread_bps);
+    }
+
+    #[tokio::test]
+    async fn test_scan_triangle_fee_eaten_cycle_not_executable() {
+        let state = lighter_only_state();
+        seed_aligned_triangle_books(&state);
+
+        let opps = scan_triangular_opportunities_impl("", &state)
+            .await
+            .expect("triangle scan");
+        let opp = opps
+            .iter()
+            .find(|o| o.id == "lighter-TRI-BTC-ETH-USDC")
+            .expect("aligned cycle must still be listed");
+        assert!(
+            !opp.is_executable,
+            "fee-eaten cycle must not be executable: net {}",
+            opp.net_spread_bps
+        );
+        assert!(opp.net_spread_bps < 1.0);
+    }
+
+    #[tokio::test]
+    async fn test_scan_triangle_missing_leg_fail_closed() {
+        let state = lighter_only_state();
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(59990.0), dec!(60000.0));
+        // A leg symbol no venue lists fails the whole resolution: no
+        // fabricated cycle, regardless of the other legs.
+        let adapter = state.get_adapter("lighter").expect("lighter admitted");
+        let vid = adapter.venue_id();
+        let missing = resolve_triangle_books(
+            &state,
+            &adapter,
+            &vid,
+            &[
+                "BTC-USDC".to_string(),
+                "ZZZ-QQQ".to_string(),
+                "ETH-USDC".to_string(),
+            ],
+        )
+        .await;
+        assert!(missing.is_none());
+
+        // No admitted venues at all: empty, not an error.
+        let bare = AppEngineState::new();
+        let opps = scan_triangular_opportunities_impl("", &bare)
+            .await
+            .expect("scan without venues");
+        assert!(opps.is_empty());
+
+        // Invalid filter rejected.
+        assert!(scan_triangular_opportunities_impl("BTC!", &state)
+            .await
+            .is_err());
+    }
+
+    fn find_triangle_opp(opps: &[TriangleOpportunityDto], id: &str) -> TriangleOpportunityDto {
+        opps.iter().find(|o| o.id == id).cloned().expect("seeded cycle")
+    }
+
+    #[tokio::test]
+    async fn test_execute_triangle_success_records_legs_and_blocks_reentry() {
+        let state = lighter_only_state();
+        seed_triangle_books(&state);
+
+        let opps = scan_triangular_opportunities_impl("", &state)
+            .await
+            .expect("scan");
+        let opp = find_triangle_opp(&opps, "lighter-TRI-BTC-ETH-USDC");
+        let id = opp.id.clone();
+
+        let res = execute_triangle_arbitrage_impl(
+            TriangleExecutionParams {
+                id: id.clone(),
+                venue: "lighter".into(),
+                path: opp.path.clone(),
+                trade_size_usd: 1000.0,
+                min_profit_bps: 1.0,
+                net_spread_bps: None,
+            },
+            &state,
+        )
+        .await
+        .expect("triangle execute");
+        assert_eq!(res.trade_type, "Triangle");
+        assert!(res.execution_success);
+        assert!(res.spread_bps > 200.0, "spread {}", res.spread_bps);
+
+        // Paper account holds the three spread legs.
+        let acc = state
+            .get_paper_exchange("lighter")
+            .expect("lighter paper")
+            .fetch_account()
+            .await
+            .expect("account");
+        assert!(acc.get_position("BTC-USDC").is_some());
+        assert!(acc.get_position("BTC-ETH").is_some());
+        assert!(acc.get_position("ETH-USDC").is_some());
+
+        // Three imbalanced triangle signals block the leg symbols.
+        for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
+            let blockers = state
+                .state_store
+                .blocking_signals(sym)
+                .expect("blocking signals");
+            assert_eq!(blockers.len(), 1, "one triangle residual on {sym}");
+            assert_eq!(blockers[0].strategy_id, "triangle");
+        }
+
+        // Re-entry on the same cycle is refused while legs are open.
+        let again = execute_triangle_arbitrage_impl(
+            TriangleExecutionParams {
+                id,
+                venue: "lighter".into(),
+                path: "USDC → BTC → ETH → USDC".into(),
+                trade_size_usd: 1000.0,
+                min_profit_bps: 1.0,
+                net_spread_bps: None,
+            },
+            &state,
+        )
+        .await;
+        assert!(again.is_err(), "open legs must block re-entry");
+
+        // Each leg unwinds through the existing flatten path, freeing the slot.
+        for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
+            let flat = flatten_ticker_positions_impl(Some(sym), "triangle", &state)
+                .await
+                .expect("flatten leg");
+            assert_eq!(flat.residual_signals, 0, "flatten notes: {:?}", flat.notes);
+        }
+        let acc = state
+            .get_paper_exchange("lighter")
+            .expect("lighter paper")
+            .fetch_account()
+            .await
+            .expect("account");
+        assert!(acc.positions.is_empty(), "all legs flattened: {:?}", acc.positions);
+    }
+
+    #[tokio::test]
+    async fn test_execute_triangle_fail_closed_paths() {
+        let state = lighter_only_state();
+        seed_triangle_books(&state);
+        let opps = scan_triangular_opportunities_impl("", &state)
+            .await
+            .expect("scan");
+        let opp = find_triangle_opp(&opps, "lighter-TRI-BTC-ETH-USDC");
+        let mk = |id: String, venue: &str, size: f64, hurdle: f64| TriangleExecutionParams {
+            id,
+            venue: venue.into(),
+            path: "USDC → BTC → ETH → USDC".into(),
+            trade_size_usd: size,
+            min_profit_bps: hurdle,
+            net_spread_bps: Some(99999.0),
+        };
+
+        // Unknown opportunity id (caller-supplied spread is never trusted).
+        assert!(execute_triangle_arbitrage_impl(mk("lighter-TRI-X-Y-USDC".into(), "lighter", 1000.0, 1.0), &state)
+            .await
+            .is_err());
+        // Hurdle above the live edge refuses dispatch.
+        assert!(execute_triangle_arbitrage_impl(
+            mk(opp.id.clone(), "lighter", 1000.0, 100_000.0),
+            &state
+        )
+        .await
+        .is_err());
+        // Unadmitted venue refused.
+        assert!(execute_triangle_arbitrage_impl(
+            mk(opp.id.clone(), "kraken", 1000.0, 1.0),
+            &state
+        )
+        .await
+        .is_err());
+        // Invalid sizes refused.
+        assert!(execute_triangle_arbitrage_impl(
+            mk(opp.id.clone(), "lighter", f64::NAN, 1.0),
+            &state
+        )
+        .await
+        .is_err());
+        // Live mode hard-refuses paper dispatch.
+        *state.is_live_mode.write() = true;
+        assert!(execute_triangle_arbitrage_impl(
+            mk(opp.id.clone(), "lighter", 1000.0, 1.0),
+            &state
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_convergence_hold_then_converge_close_reentry() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+
+        execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            Some("Divergence Entry".into()),
+            Some(18.5),
+            Some(12.0),
+            Some(1),
+            Some(3),
+            Some(15.0),
+            &state,
+        )
+        .await
+        .expect("spatial open");
+
+        // Edge still wide: hold, slot stays occupied.
+        let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("convergence check");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "hold");
+        assert!(!checks[0].unwound);
+        assert!(checks[0].entry_net_bps.expect("baseline recorded") > 15.0);
+        let blocked = execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            None,
+            &state,
+        )
+        .await;
+        assert!(blocked.is_err(), "open pair must keep the slot blocked");
+
+        // Compress the spread: the edge is gone, so the check unwinds.
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64201.0), dec!(64206.0));
+        let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("convergence recheck");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "exit");
+        assert_eq!(checks[0].trigger.as_deref(), Some("converged"));
+        assert!(checks[0].unwound);
+
+        // Slot freed: the pair can be re-entered (books still overlap enough
+        // for the economics gate? re-seed the wide edge first).
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            None,
+            &state,
+        )
+        .await
+        .expect("re-entry after unwind");
+    }
+
+    #[tokio::test]
+    async fn test_convergence_stop_and_timeout_unwind() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            None,
+            &state,
+        )
+        .await
+        .expect("spatial open");
+
+        // Adverse excursion: live edge ~10 bps vs ~20 entry -> stopped.
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64275.0), dec!(64280.0));
+        let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("stop check");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "exit");
+        assert_eq!(checks[0].trigger.as_deref(), Some("stopped"));
+        assert!(checks[0].unwound);
+
+        // Re-open, then backdate the baseline past the hold deadline.
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(64200.0), dec!(64205.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            Some(1),
+            Some(3),
+            None,
+            &state,
+        )
+        .await
+        .expect("second open");
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("signals");
+        let open = sigs
+            .iter()
+            .find(|s| s.status.counts_as_open())
+            .expect("one open signal");
+        let old = state
+            .state_store
+            .spatial_baseline_for_signal(&open.id)
+            .expect("baseline read")
+            .expect("baseline present");
+        state
+            .state_store
+            .record_spatial_baseline(&crate::state_store::SpatialEntryBaseline {
+                entry_ts_ms: Utc::now().timestamp_millis() - 2 * 86_400_000,
+                ..old
+            })
+            .expect("backdate baseline");
+        // Keep the edge wide so only the deadline fires.
+        let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("timeout check");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "exit");
+        assert_eq!(checks[0].trigger.as_deref(), Some("timed_out"));
+        assert!(checks[0].unwound);
+    }
+
+    #[tokio::test]
+    async fn test_convergence_unwatched_without_baseline() {
+        let state = setup_test_state_with_venues();
+        // In-flight signal with no baseline row: never auto-exited.
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-nobaseline".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        intended_qty: 0.1,
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        intended_qty: 0.1,
+                    },
+                ],
+            })
+            .expect("record signal");
+        let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
+            .await
+            .expect("check");
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].verdict, "unwatched");
+        assert!(!checks[0].unwound);
+        // Non-futures strategies are rejected, not guessed.
+        assert!(check_spatial_convergence_impl(Some("BTC-USDC"), "radar", &state)
+            .await
+            .is_err());
     }
 }

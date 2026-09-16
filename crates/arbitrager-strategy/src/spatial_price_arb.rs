@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use tracing::debug;
 use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_core::order::OrderRequest;
 use arbitrager_core::types::{dec, Decimal, Side};
 use arbitrager_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrager_math::rolling_stats::RollingWindowStats;
@@ -150,29 +149,30 @@ impl SpatialPriceArbStrategy {
                 let ref_a = ticker_a.map(|t| t.ask).unwrap_or(dec!(0));
                 let ref_b = ticker_b.map(|t| t.bid).unwrap_or(dec!(0));
 
-                let order_a = if ref_a > dec!(0) {
-                    coordinator.router().build_ioc_order(
-                        self.exchange_a.venue_id(),
-                        &self.symbol,
-                        Side::Buy,
-                        ref_a,
-                        signal.executable_qty,
-                    )
-                } else {
-                    OrderRequest::new_ioc(self.exchange_a.venue_id(), &self.symbol, Side::Buy, dec!(99999999), signal.executable_qty)
-                };
+                // Fail closed: a missing reference price must never become an
+                // extreme IOC price (unbounded buy / dust sell). Reject cleanly.
+                if ref_a <= dec!(0) || ref_b <= dec!(0) {
+                    return ArbitrageExecutionResult::BothFailed {
+                        error_a: format!("missing reference ask for {}", self.symbol),
+                        error_b: format!("missing reference bid for {}", self.symbol),
+                    };
+                }
 
-                let order_b = if ref_b > dec!(0) {
-                    coordinator.router().build_ioc_order(
-                        self.exchange_b.venue_id(),
-                        &self.symbol,
-                        Side::Sell,
-                        ref_b,
-                        signal.executable_qty,
-                    )
-                } else {
-                    OrderRequest::new_ioc(self.exchange_b.venue_id(), &self.symbol, Side::Sell, dec!(0.0001), signal.executable_qty)
-                };
+                let order_a = coordinator.router().build_ioc_order(
+                    self.exchange_a.venue_id(),
+                    &self.symbol,
+                    Side::Buy,
+                    ref_a,
+                    signal.executable_qty,
+                );
+
+                let order_b = coordinator.router().build_ioc_order(
+                    self.exchange_b.venue_id(),
+                    &self.symbol,
+                    Side::Sell,
+                    ref_b,
+                    signal.executable_qty,
+                );
 
                 coordinator.execute_two_leg(&self.exchange_a, order_a, &self.exchange_b, order_b).await
             }
@@ -184,29 +184,28 @@ impl SpatialPriceArbStrategy {
                 let ref_b = ticker_b.map(|t| t.ask).unwrap_or(dec!(0));
                 let ref_a = ticker_a.map(|t| t.bid).unwrap_or(dec!(0));
 
-                let order_b = if ref_b > dec!(0) {
-                    coordinator.router().build_ioc_order(
-                        self.exchange_b.venue_id(),
-                        &self.symbol,
-                        Side::Buy,
-                        ref_b,
-                        signal.executable_qty,
-                    )
-                } else {
-                    OrderRequest::new_ioc(self.exchange_b.venue_id(), &self.symbol, Side::Buy, dec!(99999999), signal.executable_qty)
-                };
+                if ref_b <= dec!(0) || ref_a <= dec!(0) {
+                    return ArbitrageExecutionResult::BothFailed {
+                        error_a: format!("missing reference bid for {}", self.symbol),
+                        error_b: format!("missing reference ask for {}", self.symbol),
+                    };
+                }
 
-                let order_a = if ref_a > dec!(0) {
-                    coordinator.router().build_ioc_order(
-                        self.exchange_a.venue_id(),
-                        &self.symbol,
-                        Side::Sell,
-                        ref_a,
-                        signal.executable_qty,
-                    )
-                } else {
-                    OrderRequest::new_ioc(self.exchange_a.venue_id(), &self.symbol, Side::Sell, dec!(0.0001), signal.executable_qty)
-                };
+                let order_b = coordinator.router().build_ioc_order(
+                    self.exchange_b.venue_id(),
+                    &self.symbol,
+                    Side::Buy,
+                    ref_b,
+                    signal.executable_qty,
+                );
+
+                let order_a = coordinator.router().build_ioc_order(
+                    self.exchange_a.venue_id(),
+                    &self.symbol,
+                    Side::Sell,
+                    ref_a,
+                    signal.executable_qty,
+                );
 
                 coordinator.execute_two_leg(&self.exchange_b, order_b, &self.exchange_a, order_a).await
             }

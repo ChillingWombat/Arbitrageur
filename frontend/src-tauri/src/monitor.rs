@@ -23,10 +23,17 @@ use std::time::{Duration, Instant};
 
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::quote::OrderBook;
+use arbitrager_core::types::{dec, Decimal};
 use arbitrager_math::ou_process::OuModelParams;
 use arbitrager_math::pair_monitor::{
-    build_pair_series, build_pwin_curve, capacity_ladder, funding_carry_bps, p_win_at_deviation,
-    reversion_stats,
+    above_threshold_ratio, build_pair_series, build_pwin_curve, capacity_ladder,
+    effective_coverage, funding_carry_bps, p_win_at_deviation, reversion_stats,
+    PairObservation, PAIR_BUCKET_MS,
+};
+use arbitrager_math::session::{
+    apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_ondo_venue,
+    is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma,
+    SessionId, FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -101,6 +108,16 @@ pub struct MonitorConfigDto {
     /// value relaxes the filter to include losing rows.
     #[serde(default)]
     pub min_expected_profit_bps: f64,
+    /// Persistence floor: fraction of in-window observed buckets that must
+    /// sit at/above the entry threshold for qualification (default 0.2).
+    /// 0.0 disables the gate.
+    #[serde(default = "d_min_ratio")]
+    pub min_threshold_ratio: f64,
+    /// Data-quality floor: fraction of expected window buckets that must
+    /// contain a both-venues observation for qualification (default 0.5).
+    /// 0.0 disables the gate.
+    #[serde(default = "d_min_coverage")]
+    pub min_coverage: f64,
 }
 
 fn d_true() -> bool {
@@ -148,6 +165,12 @@ fn d_hist_window() -> u64 {
 fn d_max_interval() -> u64 {
     300
 }
+fn d_min_ratio() -> f64 {
+    0.2
+}
+fn d_min_coverage() -> f64 {
+    0.5
+}
 fn d_min_interval() -> u64 {
     5
 }
@@ -172,6 +195,8 @@ impl Default for MonitorConfigDto {
             max_symbol_interval_secs: d_max_interval(),
             min_symbol_interval_secs: d_min_interval(),
             min_expected_profit_bps: 0.0,
+            min_threshold_ratio: d_min_ratio(),
+            min_coverage: d_min_coverage(),
         }
     }
 }
@@ -231,6 +256,23 @@ pub struct MonitorRowDto {
     /// Whether Execute is allowed right now (paper path only).
     pub executable: bool,
     pub block_reason: Option<String>,
+    /// Current UTC session id ("asia" | "europe" | "overlap" | "us_late" | "dead").
+    pub session_id: String,
+    /// True when the session aggregate is missing or provisional: every
+    /// session multiplier on this row is neutral x1.0, flagged here.
+    pub session_provisional: bool,
+    /// Session size-allowance factor (overlap 1.0 … dead 0.4, weekend x0.5,
+    /// funding mask 0.0). Always present; neutral regimes read 1.0.
+    pub session_allow: f64,
+    /// Combined session sizing multiplier (allow x inverse-vol x depth,
+    /// halved on fast-vol breach). Applied to optimal/breakeven sizes.
+    pub session_size_mult: f64,
+    /// Persistence: fraction of in-window observed buckets with directional
+    /// dev >= entry threshold. `None` when uncomputable (never fabricated).
+    pub threshold_ratio: Option<f64>,
+    /// Data quality: fraction of expected window buckets holding a
+    /// both-venues observation. `None` when uncomputable (never fabricated).
+    pub coverage: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,6 +298,491 @@ pub struct MonitorSnapshotDto {
     pub exempted: Vec<String>,
 }
 
+/// Per-session aggregate snapshot for one IPC response row.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProfileEntryDto {
+    pub session_id: String,
+    pub n_episodes: i64,
+    pub med_abs_spread_bps: Option<f64>,
+    pub p90_spread_bps: Option<f64>,
+    pub rv_bps: Option<f64>,
+    pub win_rate: Option<f64>,
+    pub mean_hold_s: Option<f64>,
+    pub provisional: bool,
+}
+
+/// Snapshot behind `get_session_profile`: per-session rows, the current
+/// session, and the active multipliers. Display only in Phase 1.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPromotionDto {
+    pub status: String,
+    pub fit_delta_bps: f64,
+    pub val_delta_bps: f64,
+    pub reason: String,
+    pub har_r2: Option<f64>,
+    pub rescaled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProfileDto {
+    pub symbol: String,
+    pub current_session: String,
+    pub is_weekend: bool,
+    pub in_funding_mask: bool,
+    pub us_cash_open: bool,
+    pub session_allow: f64,
+    pub provisional: bool,
+    pub sessions: Vec<SessionProfileEntryDto>,
+    pub promotion: Option<SessionPromotionDto>,
+}
+
+/* ------------------------------------------------------------------------ */
+/* Session seasonality (Phase 1)                                             */
+/* ------------------------------------------------------------------------ */
+
+/// Seeded funding cadence per venue, hours. Hyperliquid funds hourly;
+/// every other venue defaults to the 8h stamps (fail closed: unknown
+/// cadences mask 00/08/16 UTC rather than nothing).
+fn venue_funding_intervals(venue: &str) -> Vec<u32> {
+    match venue.trim().to_lowercase().as_str() {
+        "hyperliquid" => vec![1],
+        _ => vec![8],
+    }
+}
+
+/// Per-hour funding from a signed rate string and its interval. `None` when
+/// the rate is unparseable or the result is non-finite — callers skip the
+/// sample rather than fold unknown funding into the EMA as zero carry.
+fn funding_per_hour(rate: &str, interval_hours: u32) -> Option<f64> {
+    let hours = interval_hours.max(1) as f64;
+    let rate_f: f64 = rate.parse().ok()?;
+    let per_hour = rate_f / hours;
+    per_hour.is_finite().then_some(per_hour)
+}
+
+/// True inside the funding mask of either leg's venue.
+fn pair_in_funding_mask(ts_ms: i64, buy_v: &str, sell_v: &str) -> bool {
+    let mut intervals = venue_funding_intervals(buy_v);
+    intervals.extend(venue_funding_intervals(sell_v));
+    in_funding_mask(ts_ms, &intervals)
+}
+
+/// Resolved session inputs for one ordered pair at one timestamp.
+/// Provisional or missing aggregates degrade every multiplier to neutral.
+#[derive(Debug, Clone)]
+struct SessionCtx {
+    session: SessionId,
+    funding_mask: bool,
+    allow: f64,
+    /// Additive entry-threshold delta (shrunk session med minus global
+    /// med); exactly 0.0 when provisional or unknown.
+    entry_delta_bps: f64,
+    provisional: bool,
+    /// Shrunk session median magnitude; `None` when unusable, which also
+    /// disables the spread stand-down (no reference, no block).
+    session_med: Option<f64>,
+    /// Session vol norm for the inverse-vol factor; `None` reads 1.0.
+    session_rv: Option<f64>,
+    /// Calibrated session win rate for the confidence gate.
+    win_rate: Option<f64>,
+}
+
+fn session_context(
+    state: &AppEngineState,
+    symbol: &str,
+    buy_v: &str,
+    sell_v: &str,
+    now_ms: i64,
+) -> SessionCtx {
+    let session = session_of(now_ms);
+    let weekend = is_weekend(now_ms);
+    let funding_mask = pair_in_funding_mask(now_ms, buy_v, sell_v);
+    let allow = session_allow(session, weekend, funding_mask);
+    let neutral = SessionCtx {
+        session,
+        funding_mask,
+        allow,
+        entry_delta_bps: 0.0,
+        provisional: true,
+        session_med: None,
+        session_rv: None,
+        win_rate: None,
+    };
+    let profiles = match state.state_store.session_profiles(symbol) {
+        Ok(p) => p,
+        Err(_) => return neutral,
+    };
+    let meds: Vec<f64> = profiles
+        .iter()
+        .filter(|r| !r.provisional)
+        .filter_map(|r| r.med_abs_spread_bps)
+        .filter(|m| m.is_finite() && *m > 0.0)
+        .collect();
+    let global = winsorized_median(&meds).filter(|g| g.is_finite() && *g > 0.0);
+    let row = profiles
+        .iter()
+        .find(|r| r.session_id == session.as_str());
+    let (row, global) = match (row, global) {
+        (Some(r), Some(g)) => (r, g),
+        _ => return neutral,
+    };
+    if row.provisional {
+        return neutral;
+    }
+    let med = match row.med_abs_spread_bps {
+        Some(m) if m.is_finite() && m > 0.0 => m,
+        _ => return neutral,
+    };
+    SessionCtx {
+        session,
+        funding_mask,
+        allow,
+        entry_delta_bps: med - global,
+        provisional: false,
+        session_med: Some(med),
+        session_rv: row.rv_bps.filter(|v| v.is_finite() && *v > 0.0),
+        win_rate: row.win_rate.filter(|w| w.is_finite()),
+    }
+}
+
+/// First matching session stand-down, in precedence order: funding mask,
+/// Ondo-closed equity legs, spread beyond 3x the session median,
+/// persistent fast-vol breach. `None` means no session block.
+fn session_standdown(
+    funding_mask: bool,
+    ondo_closed: bool,
+    dev_abs_bps: Option<f64>,
+    session_med_bps: Option<f64>,
+    fast_vol_halted: bool,
+) -> Option<String> {
+    if funding_mask {
+        return Some("funding window stand-down".into());
+    }
+    if ondo_closed {
+        return Some("ondo equity market closed".into());
+    }
+    if let (Some(dev), Some(med)) = (dev_abs_bps, session_med_bps) {
+        if dev.is_finite() && med.is_finite() && med > 0.0 && dev > med * SPREAD_STANDDOWN_MULT {
+            return Some("spread exceeds 3x session median".into());
+        }
+    }
+    if fast_vol_halted {
+        return Some("fast-vol above 3x session norm (halted)".into());
+    }
+    None
+}
+
+/// Halve-then-halt transition for one eval tick. Returns the consecutive
+/// breach count, the size factor (0.5 on breach, 1.0 otherwise), and
+/// whether the pair halts (second consecutive breach).
+fn vol_halt_next(breaches: u32, ratio_above_halt: bool) -> (u32, f64, bool) {
+    if !ratio_above_halt {
+        return (0, 1.0, false);
+    }
+    let next = breaches.saturating_add(1);
+    if next >= 2 {
+        (next, 0.5, true)
+    } else {
+        (next, 0.5, false)
+    }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Shared win-probability (monitor evaluate_pair + scan path)                 */
+/* ------------------------------------------------------------------------ */
+
+/// R² floor for the OU fallback — mirrors the matrix-baseline gate
+/// (`OU_MIN_R2`) so the scan never applies a second, weaker standard.
+pub(crate) const PAIR_OU_MIN_R2: f64 = 0.6;
+/// Stop-band multiplier for episode segmentation, shared by both paths.
+pub(crate) const PAIR_STOP_MULT: f64 = 3.0;
+/// Series alignment gap (ms) shared by both paths.
+pub(crate) const PAIR_ALIGN_GAP_MS: i64 = 30_000;
+
+/// Standard normal CDF via the Abramowitz-Stegun erf approximation
+/// (|error| <= 1.5e-7). No extra dependency for one closed-form call.
+fn normal_cdf(x: f64) -> f64 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs() / std::f64::consts::SQRT_2;
+    let t = 1.0 / (1.0 + 0.3275911 * ax);
+    let poly = ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t
+        + 0.254829592)
+        * t;
+    let erf = 1.0 - poly * (-ax * ax).exp();
+    0.5 * (1.0 + sign * erf)
+}
+
+/// OU first-passage fallback: when the episode count is below `min_episodes`
+/// but the OU fit qualifies (`R² >= PAIR_OU_MIN_R2`), approximate
+/// Mean inter-observation spacing of a pair series, seconds. Zero on any
+/// degenerate input — the OU fit behind it treats non-positive dt as unusable.
+fn series_mean_dt_secs(series: &[PairObservation]) -> f64 {
+    let (Some(first), Some(last)) = (series.first(), series.last()) else {
+        return 0.0;
+    };
+    if series.len() < 2 {
+        return 0.0;
+    }
+    ((last.ts_ms - first.ts_ms) as f64 / 1000.0) / (series.len() - 1) as f64
+}
+
+/// `P(hit the μ-band before the stop within one half-life)` from the
+/// conditional distribution at horizon `H = half-life`:
+/// `P(|X_H − μ| <= band)`. `None` on any unmeasurable input (fail closed).
+fn ou_fallback_p_win(
+    vals: &[f64],
+    series: &[PairObservation],
+    mu: f64,
+    current_spread_bps: f64,
+    band_bps: f64,
+) -> Option<f64> {
+    if vals.len() < 10 || series.len() < 2 {
+        return None;
+    }
+    let first_ts = series.first().map(|o| o.ts_ms)?;
+    let last_ts = series.last().map(|o| o.ts_ms)?;
+    let span_secs = (last_ts - first_ts) as f64 / 1000.0;
+    if !span_secs.is_finite() || span_secs <= 0.0 {
+        return None;
+    }
+    let dt = span_secs / (series.len() - 1) as f64;
+    if !dt.is_finite() || dt <= 0.0 {
+        return None;
+    }
+    let ou = OuModelParams::fit(vals, dt).filter(|p| {
+        p.half_life.is_finite()
+            && p.half_life > 0.0
+            && p.theta.is_finite()
+            && p.theta > 0.0
+            && p.sigma.is_finite()
+            && p.sigma > 0.0
+            && p.r_squared.is_finite()
+            && p.r_squared >= PAIR_OU_MIN_R2
+    })?;
+    let horizon = ou.half_life;
+    if !horizon.is_finite() || horizon <= 0.0 {
+        return None;
+    }
+    if !current_spread_bps.is_finite() {
+        return None;
+    }
+    let mean = ou.conditional_mean(current_spread_bps, horizon);
+    let var = ou.conditional_variance(horizon);
+    if !mean.is_finite() || !var.is_finite() || var <= 0.0 {
+        return None;
+    }
+    let sd = var.sqrt();
+    if !sd.is_finite() || sd <= 0.0 {
+        return None;
+    }
+    let upper = (mu + band_bps - mean) / sd;
+    let lower = (mu - band_bps - mean) / sd;
+    if !upper.is_finite() || !lower.is_finite() {
+        return None;
+    }
+    let p = normal_cdf(upper) - normal_cdf(lower);
+    if !p.is_finite() {
+        return None;
+    }
+    Some(p.clamp(0.0, 1.0))
+}
+
+/// Empirical win probability for one ordered pair at one current spread —
+/// the single statistical standard shared by the monitor and the scan.
+///
+/// Primary: episode segmentation + conditional hit-rate
+/// (`build_pwin_curve` / `p_win_at_deviation`) behind the `min_episodes`
+/// gate. Fallback: OU first-passage approximation behind the `PAIR_OU_MIN_R2`
+/// gate. Otherwise `None` (fail closed — callers render "—").
+///
+/// `current_spread_bps` is the executable edge for the ordered direction
+/// (sell bid vs buy ask); the baseline `μ` is the series mean, exactly as
+/// `evaluate_pair` derives it. Informational only — never gates execution.
+pub(crate) fn pair_win_probability(
+    series: &[PairObservation],
+    current_spread_bps: f64,
+    friction_bps: f64,
+    min_episodes: usize,
+) -> Option<f64> {
+    if !current_spread_bps.is_finite() || !friction_bps.is_finite() {
+        return None;
+    }
+    if series.len() < 2 {
+        return None;
+    }
+    let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
+    if vals.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let n = vals.len();
+    let mu = vals.iter().sum::<f64>() / n as f64;
+    if !mu.is_finite() {
+        return None;
+    }
+    let var = vals.iter().map(|x| (x - mu).powi(2)).sum::<f64>() / (n - 1) as f64;
+    if !var.is_finite() || var < 0.0 {
+        return None;
+    }
+    let sigma = var.sqrt();
+    if !sigma.is_finite() || sigma < 0.0 {
+        return None;
+    }
+    let band_bps = friction_bps.max(2.0);
+    if !band_bps.is_finite() || band_bps <= 0.0 {
+        return None;
+    }
+    let curve = build_pwin_curve(series, mu, sigma, band_bps, PAIR_STOP_MULT);
+    if curve.episodes >= min_episodes {
+        return match p_win_at_deviation(&curve, (current_spread_bps - mu).abs()) {
+            Some(p) if p.is_finite() && (0.0..=1.0).contains(&p) => Some(p),
+            // Qualified episode count but no historical evidence at this
+            // magnitude — fail closed rather than extrapolating.
+            _ => None,
+        };
+    }
+    ou_fallback_p_win(&vals, series, mu, current_spread_bps, band_bps)
+}
+
+/* ------------------------------------------------------------------------ */
+/* Two-way exit walk (depth-dependent, mirrors route economics)            */
+/* ------------------------------------------------------------------------ */
+
+fn dec_opt_f64(v: Decimal) -> Option<f64> {
+    let f: f64 = v.to_string().parse().ok()?;
+    if f.is_finite() {
+        Some(f)
+    } else {
+        None
+    }
+}
+
+/// Configured close quantity for the two-way exit walk, in base units: the
+/// smallest positive capacity tier (USD) divided by the buy-side ask. The
+/// walk prices the minimum executable close, so a thin reverse side fails
+/// closed instead of hiding behind a top-of-book floor. `None` when no tier
+/// or reference price is usable.
+pub(crate) fn monitor_exit_qty(
+    tiers_usd: &[f64],
+    ref_price: Option<Decimal>,
+) -> Option<Decimal> {
+    let tier = tiers_usd
+        .iter()
+        .copied()
+        .filter(|t| t.is_finite() && *t > 0.0)
+        .fold(None::<f64>, |best, t| {
+            Some(best.map(|b: f64| b.min(t)).unwrap_or(t))
+        })?;
+    let price = dec_opt_f64(ref_price?)?;
+    if !price.is_finite() || price <= 0.0 {
+        return None;
+    }
+    let qty = Decimal::from_f64_retain(tier / price)?;
+    if qty <= dec!(0) {
+        return None;
+    }
+    dec_opt_f64(qty).filter(|f| f.is_finite() && *f > 0.0).map(|_| qty)
+}
+
+/// Expected two-way exit friction in bps: exit VWAP slippage on BOTH reverse
+/// sides at `qty` + exit fees + closing spread. Formula-for-formula the exit
+/// half of `compute_route_economics` (no second model): the buy leg unwinds
+/// into the buy book's bids, the sell leg lifts the sell book's asks.
+///
+/// Fail-closed `None` when either reverse side lacks depth at `qty`, a book
+/// is empty/crossed, `qty` is non-positive, or any input is non-finite — the
+/// caller must then treat the route as uncostable for two-way mode.
+pub(crate) fn two_way_exit_estimate(
+    book_buy: &OrderBook,
+    book_sell: &OrderBook,
+    qty: Decimal,
+    exit_fee_bps: f64,
+) -> Option<f64> {
+    if qty <= dec!(0) || !exit_fee_bps.is_finite() || exit_fee_bps < 0.0 {
+        return None;
+    }
+    let buy_best_bid = dec_opt_f64(book_buy.best_bid_price()?).filter(|p| *p > 0.0)?;
+    let sell_best_ask = dec_opt_f64(book_sell.best_ask_price()?).filter(|p| *p > 0.0)?;
+    let buy_best_ask = dec_opt_f64(book_buy.best_ask_price()?).filter(|p| *p > 0.0)?;
+    let sell_best_bid = dec_opt_f64(book_sell.best_bid_price()?).filter(|p| *p > 0.0)?;
+    if !(buy_best_ask > buy_best_bid && sell_best_ask > sell_best_bid) {
+        return None;
+    }
+    let (buy_exit, rem, _) = book_buy.sell_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let (sell_exit, rem, _) = book_sell.buy_execution_vwap(qty)?;
+    if rem > dec!(0) {
+        return None;
+    }
+    let buy_exit_vwap = dec_opt_f64(buy_exit)?;
+    let sell_exit_vwap = dec_opt_f64(sell_exit)?;
+    let exit_slippage_bps =
+        ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
+            + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
+    let buy_spread_bps =
+        (buy_best_ask - buy_best_bid) / ((buy_best_ask + buy_best_bid) / 2.0) * 10_000.0;
+    let sell_spread_bps =
+        (sell_best_ask - sell_best_bid) / ((sell_best_ask + sell_best_bid) / 2.0) * 10_000.0;
+    let out = exit_fee_bps + exit_slippage_bps + buy_spread_bps + sell_spread_bps;
+    if out.is_finite() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// Composes the exit-friction input for one pair evaluation from the
+/// execution mode. One-way mode never prices a close (`Some(0.0)` whatever
+/// the books hold — untouched by the depth walk). Two-way mode walks both
+/// reverse sides at the configured close qty; `None` marks the route
+/// uncostable and the caller must fail closed (cap at signaled, block
+/// execution, record it in the audit snapshot).
+pub(crate) fn exit_estimate_for_mode(
+    execution_mode: &str,
+    buy_book: &Option<OrderBook>,
+    sell_book: &Option<OrderBook>,
+    tiers_usd: &[f64],
+    exit_fee_bps: f64,
+) -> Option<f64> {
+    if execution_mode != "two_way" {
+        return Some(0.0);
+    }
+    let (bk, sk) = buy_book.as_ref().zip(sell_book.as_ref())?;
+    let qty = monitor_exit_qty(tiers_usd, bk.best_ask_price())?;
+    two_way_exit_estimate(bk, sk, qty, exit_fee_bps)
+}
+
+/// Which audit write one pair evaluation owes the log, if any: first
+/// sighting and status changes log a `transition`; a still-active signal
+/// re-logs one `heartbeat` per minute bucket; everything else (same-minute
+/// re-polls, inactive steady state) logs nothing — idempotent by
+/// construction so repeated polls can never duplicate events.
+pub(crate) fn audit_trigger(
+    prev_status: Option<PairStatus>,
+    status: PairStatus,
+    signal_active: bool,
+    window_met: bool,
+    prev_last_seen_ms: Option<i64>,
+    now_ms: i64,
+) -> Option<&'static str> {
+    match prev_status {
+        None => Some("transition"),
+        Some(prev) if prev != status => Some("transition"),
+        Some(_)
+            if signal_active
+                && window_met
+                && (prev_last_seen_ms.unwrap_or(0) / 60_000) != (now_ms / 60_000) =>
+        {
+            Some("heartbeat")
+        }
+        _ => None,
+    }
+}
+
 /* ------------------------------------------------------------------------ */
 /* Venue lane: shared-IP budget + round-robin scheduler                      */
 /* ------------------------------------------------------------------------ */
@@ -275,7 +802,7 @@ fn lighter_tier_budget_per_min(tier: &str) -> f64 {
 /// Total per-venue read budget (requests/min) before the transaction
 /// reserve is subtracted. Hyperliquid's documented 1200 weight/min with
 /// weight-2 `l2Book` calls yields a 600/min book budget; we keep margin.
-fn venue_budget_per_min(venue: &str, tiers: &[String], flag_enabled: bool) -> (f64, String) {
+fn venue_budget_per_min(venue: &str, tiers: &[String], _flag_enabled: bool) -> (f64, String) {
     match venue {
         "lighter" | "robinhood" => {
             // Lighter applies the lowest account limit across an IP.
@@ -283,7 +810,7 @@ fn venue_budget_per_min(venue: &str, tiers: &[String], flag_enabled: bool) -> (f
                 .iter()
                 .map(String::as_str)
                 .min_by_key(|t| lighter_tier_budget_per_min(t) as u64)
-                .unwrap_or(if flag_enabled { "standard" } else { "standard" });
+                .unwrap_or("standard");
             (lighter_tier_budget_per_min(tier), tier.to_string())
         }
         "hyperliquid" => (500.0, "standard".into()),
@@ -370,8 +897,11 @@ impl VenueLane {
     }
 
     /// Symbols whose book is due for a refresh, in round-robin order.
+    /// The fair-share interval carries ±20% jitter so lanes sharing an IP
+    /// do not poll in lockstep; `symbol_interval` itself stays pure.
     fn due_symbols(&mut self, cfg: &MonitorConfigDto) -> Vec<String> {
-        let interval = self.symbol_interval(cfg);
+        let interval =
+            arbitrager_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
         let now = Instant::now();
         let n = self.symbols.len();
         let mut due = Vec::new();
@@ -396,7 +926,7 @@ impl VenueLane {
 /* ------------------------------------------------------------------------ */
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PairStatus {
+pub(crate) enum PairStatus {
     Collecting,
     Watching,
     Signaled,
@@ -436,6 +966,26 @@ struct PairRuntime {
     last_dev_bps: Option<f64>,
 }
 
+/// One audit-log write derived from a pair evaluation: a lifecycle
+/// transition (status changed, or first sighting with `old_status = None`)
+/// or a minute-bucketed heartbeat while the signal stays active. Same-tick
+/// re-evaluations inside one minute bucket produce no draft, so repeated
+/// polls are idempotent and the log cannot spam.
+#[derive(Debug, Clone)]
+struct SignalEventDraft {
+    symbol: String,
+    buy_venue: String,
+    sell_venue: String,
+    ts_ms: i64,
+    old_status: Option<String>,
+    new_status: String,
+    edge_bps: Option<f64>,
+    dev_bps: Option<f64>,
+    p_win: Option<f64>,
+    economics_json: String,
+    trigger: &'static str,
+}
+
 /* ------------------------------------------------------------------------ */
 /* Engine                                                                    */
 /* ------------------------------------------------------------------------ */
@@ -453,32 +1003,24 @@ pub struct SpreadMonitorEngine {
     venue_symbols: Mutex<HashMap<String, Vec<String>>>,
     last_watchlist_at: Mutex<Option<Instant>>,
     last_snapshot: Mutex<Option<MonitorSnapshotDto>>,
+    /// In-memory EWMA fast vol per ordered pair (O(1)/tick). Durable
+    /// session norms live in SQLite; this tracker resets on restart.
+    fast_vol: Mutex<HashMap<(String, String, String), FastVolEwma>>,
+    /// Consecutive fast-vol breaches per ordered pair (halve-then-halt).
+    vol_halt: Mutex<HashMap<(String, String, String), u32>>,
+    /// Last hourly session-rollup pass over the trailing spread log.
+    last_rollup_at: Mutex<Option<Instant>>,
+    /// Last nightly seasonality-promotion pass (HAR anchors + walk-forward
+    /// verdicts). At most one pass per 24h; manual IPC shares the same
+    /// runner — never a second code path.
+    last_promotion_at: Mutex<Option<Instant>>,
     /// Dedup guard for durable signal writes (only persist transitions).
+    #[allow(clippy::type_complexity)]
     persisted: Mutex<HashMap<(String, String, String), (PairStatus, i64, i64)>>,
     shutdown: Mutex<bool>,
 }
 
-/// Canonical base asset for cross-venue pairing: uppercase, quote suffixes
-/// stripped ("BTC-USD"/"BTC-USDC"/"BTCUSDT"/"btc" -> "BTC").
-///
-/// Separator-suffixed quotes ("-USDC" etc.) strip freely; *bare* quote
-/// suffixes (Binance-style "BTCUSD") only strip when at least 3 chars of
-/// base remain — otherwise real tickers like "TUSD"/"SUSD"/"BUSD" would
-/// collapse to a single letter.
-pub fn canonical_base(raw: &str) -> String {
-    let up = raw.trim().to_uppercase();
-    for suf in ["-USDC", "-USDT", "-USD", "/USDC", "/USDT", "/USD", "-PERP"] {
-        if up.len() > suf.len() && up.ends_with(suf) {
-            return up[..up.len() - suf.len()].to_string();
-        }
-    }
-    for suf in ["USDC", "USDT", "USD"] {
-        if up.ends_with(suf) && up.len() - suf.len() >= 3 {
-            return up[..up.len() - suf.len()].to_string();
-        }
-    }
-    up
-}
+pub use crate::state_store::canonical_base;
 
 impl SpreadMonitorEngine {
     pub fn new(state: &AppEngineState) -> Arc<Self> {
@@ -498,6 +1040,10 @@ impl SpreadMonitorEngine {
             venue_symbols: Mutex::new(HashMap::new()),
             last_watchlist_at: Mutex::new(None),
             last_snapshot: Mutex::new(None),
+            fast_vol: Mutex::new(HashMap::new()),
+            vol_halt: Mutex::new(HashMap::new()),
+            last_rollup_at: Mutex::new(None),
+            last_promotion_at: Mutex::new(None),
             persisted: Mutex::new(HashMap::new()),
             shutdown: Mutex::new(false),
         });
@@ -552,6 +1098,16 @@ impl SpreadMonitorEngine {
         cfg.tx_reserve_pct = cfg.tx_reserve_pct.clamp(0.0, 0.9);
         cfg.min_episodes = cfg.min_episodes.clamp(1, 500);
         cfg.min_expected_profit_bps = cfg.min_expected_profit_bps.clamp(-10_000.0, 10_000.0);
+        cfg.min_threshold_ratio = if cfg.min_threshold_ratio.is_finite() {
+            cfg.min_threshold_ratio.clamp(0.0, 1.0)
+        } else {
+            d_min_ratio()
+        };
+        cfg.min_coverage = if cfg.min_coverage.is_finite() {
+            cfg.min_coverage.clamp(0.0, 1.0)
+        } else {
+            d_min_coverage()
+        };
         cfg.capacity_tiers_usd = cfg
             .capacity_tiers_usd
             .iter()
@@ -589,6 +1145,26 @@ impl SpreadMonitorEngine {
         self.last_snapshot.lock().clone()
     }
 
+    /// Venues currently listing `base` in the derived >= 2-venue
+    /// intersection — the in-scope set for per-strategy auto-filters.
+    pub fn in_scope_venues(&self, base: &str) -> Vec<String> {
+        let wanted = canonical_base(base);
+        let map = self.venue_symbols.lock();
+        let mut out: Vec<String> = map
+            .iter()
+            .filter(|(_, symbols)| symbols.iter().any(|s| s == &wanted))
+            .map(|(venue, _)| venue.clone())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Test seam: install a fabricated snapshot without running the loop.
+    #[cfg(test)]
+    pub fn inject_snapshot(&self, snap: MonitorSnapshotDto) {
+        *self.last_snapshot.lock() = Some(snap);
+    }
+
     /// Seam for the future auto-trading bot: only fully qualified rows.
     /// Not consumed by the v1 UI — the bot contract is part of the spec.
     #[allow(dead_code)]
@@ -621,6 +1197,8 @@ impl SpreadMonitorEngine {
             self.maybe_refresh_watchlist(&state).await;
             self.poll_due_books(&state).await;
             self.poll_funding(&state).await;
+            self.maybe_rollup_sessions(&state);
+            self.maybe_promote_sessions(&state);
 
             if eval_at <= Instant::now() {
                 self.evaluate(&state).await;
@@ -789,9 +1367,69 @@ impl SpreadMonitorEngine {
         let _ = state.state_store.prune_monitor_signals(&keep);
     }
 
+    /// Hourly session-rollup pass: rebuild every sampled symbol's session
+    /// aggregates over the trailing 7 days. At most one pass per hour;
+    /// failures only log (a missed rollup retries next hour).
+    fn maybe_rollup_sessions(&self, state: &AppEngineState) {
+        let due = self
+            .last_rollup_at
+            .lock()
+            .map(|t| t.elapsed() >= Duration::from_secs(3600))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        *self.last_rollup_at.lock() = Some(Instant::now());
+        let now_ms = Utc::now().timestamp_millis();
+        let from_ms = now_ms - 7 * 86_400_000;
+        let symbols = match state.state_store.distinct_sample_symbols() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("session rollup: symbol scan failed: {e}");
+                return;
+            }
+        };
+        for symbol in symbols.iter().take(500) {
+            if let Err(e) =
+                state
+                    .state_store
+                    .rollup_session_profiles(symbol, from_ms, now_ms, now_ms)
+            {
+                tracing::warn!("session rollup failed for {symbol}: {e}");
+            }
+        }
+    }
+
+    fn maybe_promote_sessions(&self, state: &AppEngineState) {
+        let due = self
+            .last_promotion_at
+            .lock()
+            .map(|t| t.elapsed() >= Duration::from_secs(86_400))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        *self.last_promotion_at.lock() = Some(Instant::now());
+        let now_ms = Utc::now().timestamp_millis();
+        match crate::seasonality::run_seasonality_promotion(state, now_ms) {
+            Ok(summary) => tracing::info!(
+                "seasonality promotion: scanned={} anchors={} promoted={} demoted={} held={} skipped={}",
+                summary.symbols_scanned,
+                summary.anchors_written,
+                summary.promoted,
+                summary.demoted,
+                summary.held,
+                summary.skipped,
+            ),
+            Err(e) => tracing::warn!("seasonality promotion failed: {e}"),
+        }
+    }
+
     /// Spend each lane's usable budget on its due symbols, one fetch per
-    /// (venue, symbol). Books go to the hub; top-of-book is persisted to
-    /// `spread_samples` for the historical baseline.
+    /// (venue, symbol). WS-fresh hub books skip the REST fetch entirely
+    /// (no budget spent) but are still validated and sampled. Books go to
+    /// the hub; top-of-book is persisted to `spread_samples` for the
+    /// historical baseline. Funding cadence is unchanged (no WS channel).
     async fn poll_due_books(&self, state: &AppEngineState) {
         struct Job {
             venue: String,
@@ -799,6 +1437,7 @@ impl SpreadMonitorEngine {
             adapter: Arc<dyn ExchangeAdapter>,
         }
         let mut jobs: Vec<Job> = Vec::new();
+        let mut ws_hits: Vec<(String, String, OrderBook)> = Vec::new();
         {
             let cfg = self.cfg.lock().clone();
             let mut lanes = self.lanes.lock();
@@ -810,7 +1449,7 @@ impl SpreadMonitorEngine {
                     "lighter" | "robinhood" => 2,
                     _ => 1,
                 };
-                while lane.can_spend_n(cost) {
+                loop {
                     let due = lane.due_symbols(&cfg);
                     if due.is_empty() {
                         break;
@@ -819,6 +1458,23 @@ impl SpreadMonitorEngine {
                     // Advance the cursor past this symbol.
                     if let Some(pos) = lane.symbols.iter().position(|s| *s == sym) {
                         lane.cursor = (pos + 1) % lane.symbols.len().max(1);
+                    }
+                    let venue_id = lane.adapter.venue_id();
+                    if let Some(book) =
+                        state.market_data_hub.get_valid_ws_book(&venue_id, &sym, None)
+                    {
+                        if validate_monitor_book(&book, &venue_id, &sym).is_ok() {
+                            // Mark the symbol fetched: without this stamp
+                            // `due_symbols()` keeps returning it and this
+                            // loop never terminates on a WS-fresh lane.
+                            // No budget is spent (no REST fetch ran).
+                            lane.last_fetch.insert(sym.clone(), Instant::now());
+                            ws_hits.push((lane.venue.clone(), sym, book));
+                            continue;
+                        }
+                    }
+                    if !lane.can_spend_n(cost) {
+                        break;
                     }
                     lane.spend_weighted(cost);
                     lane.last_fetch.insert(sym.clone(), Instant::now());
@@ -830,19 +1486,30 @@ impl SpreadMonitorEngine {
                 }
             }
         }
+        let now_ms = Utc::now().timestamp_millis();
+        for (venue, symbol, book) in ws_hits {
+            if let Some(entry) = book_sample(&book, &venue) {
+                let _ = state
+                    .state_store
+                    .record_spread_samples(&symbol, now_ms, &[entry]);
+            }
+        }
         if jobs.is_empty() {
             return;
         }
         // Fetches run concurrently — a slow venue must not serialize the
         // whole cycle; each job's lane is keyed back on completion.
+        // Concurrent identical keys share one request via the single-flight
+        // map instead of firing N.
+        let flights = state.orderbook_flights.clone();
         let mut set = tokio::task::JoinSet::new();
         for job in jobs {
+            let flights = flights.clone();
             set.spawn(async move {
-                let res = job.adapter.fetch_orderbook(&job.symbol).await;
+                let res = flights.fetch(&job.adapter, &job.symbol).await;
                 (job.venue, job.symbol, res)
             });
         }
-        let now_ms = Utc::now().timestamp_millis();
         while let Some(joined) = set.join_next().await {
             let (venue, symbol, res) = match joined {
                 Ok(v) => v,
@@ -895,11 +1562,11 @@ impl SpreadMonitorEngine {
                     let mut ema = self.funding_ema.lock();
                     for fr in rates {
                         let base = canonical_base(&fr.symbol);
-                        let hours = fr.interval_hours.max(1) as f64;
-                        let per_hour = fr.rate.to_string().parse::<f64>().unwrap_or(0.0) / hours;
-                        if !per_hour.is_finite() {
+                        let Some(per_hour) =
+                            funding_per_hour(&fr.rate.to_string(), fr.interval_hours)
+                        else {
                             continue;
-                        }
+                        };
                         let key = (venue.clone(), base);
                         let next = match ema.get(&key) {
                             Some(prev) => 0.7 * prev + 0.3 * per_hour,
@@ -958,6 +1625,11 @@ impl SpreadMonitorEngine {
         // Participation-cap volume map (cached 5 min upstream).
         let volumes = crate::commands::cached_venue_volumes(state).await;
 
+        // Session depth snapshot: trailing-7d volume series per symbol and
+        // venue, read once per eval pass so every pair shares one query.
+        let depth_from_ms = now_ms - 7 * 86_400_000;
+        let mut depth_snapshots: HashMap<String, HashMap<String, (f64, f64)>> = HashMap::new();
+
         let stale_ms = {
             // A book is stale after ~3 refresh intervals (bounded 30..300s).
             let max_iv = lane_meta
@@ -969,6 +1641,7 @@ impl SpreadMonitorEngine {
 
         let history_from = now_ms - (cfg.history_window_secs as i64) * 1000;
         let mut rows: Vec<MonitorRowDto> = Vec::new();
+        #[allow(clippy::type_complexity)]
         let mut persist_batch: Vec<(
             String,
             String,
@@ -979,29 +1652,19 @@ impl SpreadMonitorEngine {
             Option<f64>,
             Option<f64>,
         )> = Vec::new();
+        let mut event_batch: Vec<SignalEventDraft> = Vec::new();
 
         for symbol in &watchlist {
-            // Per-venue samples for this symbol over the history window.
-            // The monitor records under the canonical base ("BTC"); the
-            // legacy ticker-flow path records under the UI symbol
-            // ("BTC-USDC") — merge both so the whole history feeds the
-            // baseline regardless of which path produced it.
-            let mut samples = Vec::new();
-            let mut ok_any = false;
-            for key in [
-                symbol.clone(),
-                format!("{symbol}-USDC"),
-                format!("{symbol}-USD"),
-            ] {
-                if let Ok(mut s) = state.state_store.spread_samples(&key, history_from, now_ms) {
-                    ok_any = true;
-                    samples.append(&mut s);
-                }
-            }
-            if !ok_any {
-                continue;
-            }
-            samples.sort_by_key(|s| (s.ts_ms, s.venue_id.clone()));
+            // Alias-aware read merges the monitor/feed base key ("BTC")
+            // with UI full-symbol keys ("BTC-USDC") so the whole history
+            // feeds the baseline regardless of which path produced it.
+            let samples = match state
+                .state_store
+                .spread_samples(symbol, history_from, now_ms)
+            {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
             for s in &samples {
                 if s.mid.is_finite() && s.mid > 0.0 {
@@ -1019,12 +1682,32 @@ impl SpreadMonitorEngine {
             if venues_here.len() < 2 {
                 continue;
             }
+            let mut depth_snapshot: HashMap<String, (f64, f64)> = HashMap::new();
+            for venue in &venues_here {
+                if let Ok(series) =
+                    state
+                        .state_store
+                        .venue_volume_series(symbol, venue, depth_from_ms, now_ms)
+                {
+                    let vols: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
+                    if let (Some((_, cur)), Some(med)) =
+                        (series.last(), winsorized_median(&vols))
+                    {
+                        if cur.is_finite() && *cur > 0.0 && med.is_finite() && med > 0.0 {
+                            depth_snapshot.insert(venue.clone(), (*cur, med));
+                        }
+                    }
+                }
+            }
+            depth_snapshots.insert(symbol.clone(), depth_snapshot);
 
             for (i, buy_v) in venues_here.iter().enumerate() {
                 for (j, sell_v) in venues_here.iter().enumerate() {
                     if i == j {
                         continue;
                     }
+                    let empty_depths: HashMap<String, (f64, f64)> = HashMap::new();
+                    let depths = depth_snapshots.get(symbol).unwrap_or(&empty_depths);
                     if let Some(row) = self.evaluate_pair(
                         state,
                         &cfg,
@@ -1036,9 +1719,13 @@ impl SpreadMonitorEngine {
                         &mids_by_venue,
                         &volumes,
                         &fee_map,
+                        depths,
                     ) {
                         if let Some(p) = &row.1 {
                             persist_batch.push(p.clone());
+                        }
+                        if let Some(ev) = row.2 {
+                            event_batch.push(ev);
                         }
                         rows.push(row.0);
                     }
@@ -1062,16 +1749,36 @@ impl SpreadMonitorEngine {
                     .get(&key)
                     .map(|(s, f, l)| *s != status || *f != fs || (*l / 60_000) != (ls / 60_000))
                     .unwrap_or(true);
-                if changed {
-                    if state
+                if changed
+                    && state
                         .state_store
                         .upsert_monitor_signal(&sym, &bv, &sv, status.as_str(), fs, ls, edge, dev)
                         .is_ok()
-                    {
-                        persisted.insert(key, (status, fs, ls));
-                    }
+                {
+                    persisted.insert(key, (status, fs, ls));
                 }
             }
+        }
+
+        // Audit history: one row per transition/heartbeat draft. Best-effort
+        // like the lifecycle upsert above — a store failure must never break
+        // the eval pass. Drafts are already deduped at construction
+        // (transitions + one heartbeat per minute per active pair), so this
+        // loop never spams on repeated polls.
+        for ev in event_batch {
+            let _ = state.state_store.record_monitor_signal_event(
+                &ev.symbol,
+                &ev.buy_venue,
+                &ev.sell_venue,
+                ev.ts_ms,
+                ev.old_status.as_deref(),
+                &ev.new_status,
+                ev.edge_bps,
+                ev.dev_bps,
+                ev.p_win,
+                Some(ev.economics_json.as_str()),
+                ev.trigger,
+            );
         }
 
         let exempted = state.state_store.exempt_tickers().unwrap_or_default();
@@ -1101,8 +1808,10 @@ impl SpreadMonitorEngine {
     }
 
     /// Evaluate one ordered pair direction. Returns the row plus an optional
-    /// persist tuple when lifecycle state changed materially.
-    #[allow(clippy::too_many_arguments)]
+    /// persist tuple when lifecycle state changed materially, plus an audit
+    /// draft on transitions and minute-bucketed heartbeats (idempotent —
+    /// same-minute re-polls yield no draft).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn evaluate_pair(
         &self,
         state: &AppEngineState,
@@ -1115,6 +1824,7 @@ impl SpreadMonitorEngine {
         mids_by_venue: &HashMap<String, Vec<(i64, f64)>>,
         volumes: &HashMap<String, HashMap<String, f64>>,
         fee_map: &HashMap<String, f64>,
+        depths: &HashMap<String, (f64, f64)>,
     ) -> Option<(
         MonitorRowDto,
         Option<(
@@ -1127,8 +1837,15 @@ impl SpreadMonitorEngine {
             Option<f64>,
             Option<f64>,
         )>,
+        Option<SignalEventDraft>,
     )> {
         let key = (symbol.to_string(), buy_v.to_string(), sell_v.to_string());
+
+        // Session regime for this pair at this timestamp. Provisional or
+        // missing aggregates degrade every multiplier below to neutral.
+        let sess = session_context(state, symbol, buy_v, sell_v, now_ms);
+        let ondo_closed = (is_ondo_venue(buy_v) || is_ondo_venue(sell_v))
+            && !us_cash_open(now_ms);
 
         // --- live books ------------------------------------------------
         let buy_book = state.market_data_hub.get_valid_orderbook(
@@ -1160,12 +1877,7 @@ impl SpreadMonitorEngine {
 
         // --- qualification window --------------------------------------
         let half_life_secs = if n >= 10 {
-            let dt = if series.len() >= 2 {
-                ((series.last().unwrap().ts_ms - series[0].ts_ms) as f64 / 1000.0)
-                    / (series.len() - 1) as f64
-            } else {
-                0.0
-            };
+            let dt = series_mean_dt_secs(&series);
             OuModelParams::fit(&vals, dt).map(|p| p.half_life)
         } else {
             None
@@ -1209,24 +1921,15 @@ impl SpreadMonitorEngine {
         let t_hold_secs = half_life_secs.or(stats_for_t.and_then(|s| s.median_converge_secs));
         let carry = funding_carry_bps(fr_a, fr_b, t_hold_secs);
         let funding_unknown = carry.is_none();
-        // Top-of-book crossing cost per venue — full spread paid to exit.
-        let crossing = |b: &Option<OrderBook>| -> Option<f64> {
-            let bk = b.as_ref()?;
-            let ask = bk.asks.first()?.price.to_string().parse::<f64>().ok()?;
-            let bid = bk.bids.first()?.price.to_string().parse::<f64>().ok()?;
-            let mid = (ask + bid) / 2.0;
-            (mid > 0.0 && ask > bid).then_some((ask - bid) / mid * 10_000.0)
-        };
-        let exit_est = if cfg.execution_mode == "two_way" {
-            // Mirror-image unwind: same fee schedule on both legs plus an
-            // estimated crossing of each book's current spread. Books at
-            // depth may be worse — documented floor, not a guarantee.
-            let cross = crossing(&buy_book).unwrap_or(0.0) + crossing(&sell_book).unwrap_or(0.0);
-            fee_bps + cross
-        } else {
-            0.0
-        };
-        let friction_bps = fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est;
+        // Depth-dependent unwind for two-way mode: walk BOTH reverse sides
+        // at the configured close qty — exit VWAP slippage + exit fees +
+        // closing spread, the exit half of `compute_route_economics` with no
+        // second model. Either reverse side thin at that qty => route
+        // uncostable (fail closed below). One-way mode is untouched.
+        let exit_est_opt =
+            exit_estimate_for_mode(&cfg.execution_mode, &buy_book, &sell_book, &cfg.capacity_tiers_usd, fee_bps);
+        let exit_uncostable = exit_est_opt.is_none();
+        let friction_bps = fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est_opt.unwrap_or(0.0);
 
         // --- current executable edge ------------------------------------
         let (edge_bps, dev_bps) = match (&buy_book, &sell_book, mu) {
@@ -1234,13 +1937,11 @@ impl SpreadMonitorEngine {
                 let ask = bk
                     .asks
                     .first()
-                    .map(|l| l.price.to_string().parse::<f64>().ok())
-                    .flatten();
+                    .and_then(|l| l.price.to_string().parse::<f64>().ok());
                 let bid = sk
                     .bids
                     .first()
-                    .map(|l| l.price.to_string().parse::<f64>().ok())
-                    .flatten();
+                    .and_then(|l| l.price.to_string().parse::<f64>().ok());
                 match (ask, bid) {
                     (Some(a), Some(b)) if a > 0.0 => {
                         let edge = (b - a) / a * 10_000.0;
@@ -1254,9 +1955,8 @@ impl SpreadMonitorEngine {
 
         // --- win probability + capacity ---------------------------------
         let band_bps = friction_bps.max(2.0);
-        let stop_mult = 3.0;
         let pwin_curve = if let (Some(m), Some(s)) = (mu, sigma) {
-            build_pwin_curve(&series, m, s, band_bps, stop_mult)
+            build_pwin_curve(&series, m, s, band_bps, PAIR_STOP_MULT)
         } else {
             arbitrager_math::pair_monitor::PWinCurve {
                 points: Vec::new(),
@@ -1264,12 +1964,11 @@ impl SpreadMonitorEngine {
             }
         };
         let episodes = pwin_curve.episodes;
-        let p_win = dev_bps.and_then(|d| {
-            if episodes >= cfg.min_episodes {
-                p_win_at_deviation(&pwin_curve, d.abs())
-            } else {
-                None
-            }
+        // Single statistical standard shared with the scan path: empirical
+        // hit-rate behind the min-episodes gate, OU first-passage fallback
+        // behind the R² gate, else fail-closed None.
+        let p_win = edge_bps.and_then(|e| {
+            pair_win_probability(&series, e, friction_bps, cfg.min_episodes)
         });
 
         // Capacity ladder over both books — requires a real historical
@@ -1345,11 +2044,69 @@ impl SpreadMonitorEngine {
             _ => (Vec::new(), None, None, None, None),
         };
 
+        let dev_abs_bps = dev_bps.map(|d| d.abs());
+        let mut ewma = self
+            .fast_vol
+            .lock()
+            .remove(&key)
+            .unwrap_or_default();
+        if let Some(dev) = dev_abs_bps {
+            ewma.update(dev);
+        }
+        let fast_ratio = sess.session_rv.and_then(|norm| ewma.ratio_to(norm));
+        let breached = fast_ratio
+            .map(|r| r.is_finite() && r > FAST_VOL_HALT_MULT)
+            .unwrap_or(false);
+        let prior_flags = self.vol_halt.lock().get(&key).copied().unwrap_or(0);
+        let (next_flags, halve_factor, fast_halted) = vol_halt_next(prior_flags, breached);
+        if breached || prior_flags > 0 {
+            self.vol_halt.lock().insert(key.clone(), next_flags);
+        }
+        self.fast_vol.lock().insert(key.clone(), ewma.clone());
+        let fast_value = ewma.value();
+        let inv_vol = match (sess.session_rv, fast_value) {
+            (Some(norm), Some(fast)) => inverse_vol_mult(norm, fast),
+            _ => 1.0,
+        };
+        let depth_factor = match (depths.get(buy_v), depths.get(sell_v)) {
+            (Some((cur_b, med_b)), Some((cur_s, med_s))) => {
+                depth_mult(cur_b.min(*cur_s), med_b.min(*med_s))
+            }
+            _ => 1.0,
+        };
+        let session_size_mult = sess.allow * inv_vol * depth_factor * halve_factor;
+        let scale_opt = |v: Option<f64>| {
+            v.map(|x| {
+                if x.is_finite() {
+                    x * session_size_mult
+                } else {
+                    x
+                }
+            })
+        };
+        let optimal = scale_opt(optimal);
+        let breakeven = scale_opt(breakeven);
+        let exp_usd = scale_opt(exp_usd);
+        let session_block = session_standdown(
+            sess.funding_mask,
+            ondo_closed,
+            dev_abs_bps,
+            sess.session_med,
+            fast_halted,
+        );
+        let session_conf_ok = sess.provisional
+            || sess
+                .win_rate
+                .map(|w| w >= cfg.min_win_probability)
+                .unwrap_or(true);
+
         // --- status + lifecycle ------------------------------------------
         // Directional: a positive dev means this ordered pair (buy A / sell
         // B) is the profitable side; a negative dev belongs to the reverse
-        // pair row, so it must not trigger here.
-        let entry_thresh = friction_bps.max(1.0);
+        // pair row, so it must not trigger here. The session aggregate
+        // shifts the hurdle additively (capped at 2x); provisional reads 0.
+        let entry_thresh =
+            apply_entry_adjust_bps(friction_bps.max(1.0), sess.entry_delta_bps);
         let signal_active = dev_bps.map(|d| d >= entry_thresh).unwrap_or(false);
         let variation_ok = window_met
             && variation_covers_friction(
@@ -1360,13 +2117,72 @@ impl SpreadMonitorEngine {
                 friction_bps,
             );
 
+        // Persistence (above-threshold ratio) + data-quality (effective
+        // coverage) gates over the trailing qualification window ending now.
+        // Pure helpers in pair_monitor (documented there): directional
+        // dev >= entry_thresh, buckets of PAIR_BUCKET_MS, None when
+        // uncomputable, never fabricated. Floors at 0.0 disable each gate;
+        // uncomputable with an active floor blocks (never force-qualifies).
+        let threshold_ratio = match mu {
+            Some(m) => above_threshold_ratio(&series, m, entry_thresh, window_secs, now_ms),
+            None => None,
+        };
+        let coverage = effective_coverage(&series, window_secs, now_ms, PAIR_BUCKET_MS);
+        let ratio_floor = if cfg.min_threshold_ratio.is_finite() {
+            cfg.min_threshold_ratio.max(0.0)
+        } else {
+            d_min_ratio()
+        };
+        let cov_floor = if cfg.min_coverage.is_finite() {
+            cfg.min_coverage.max(0.0)
+        } else {
+            d_min_coverage()
+        };
+        let ratio_ok = if ratio_floor <= 0.0 {
+            true
+        } else {
+            threshold_ratio.map(|r| r >= ratio_floor).unwrap_or(false)
+        };
+        let coverage_ok = if cov_floor <= 0.0 {
+            true
+        } else {
+            coverage.map(|c| c >= cov_floor).unwrap_or(false)
+        };
+        let mut gate_reasons: Vec<String> = Vec::new();
+        if !ratio_ok {
+            match threshold_ratio {
+                Some(r) => gate_reasons.push(format!(
+                    "persistence {r:.2} < floor {ratio_floor:.2}"
+                )),
+                None => gate_reasons.push(format!(
+                    "persistence unknown < floor {ratio_floor:.2}"
+                )),
+            }
+        }
+        if !coverage_ok {
+            match coverage {
+                Some(c) => {
+                    gate_reasons.push(format!("coverage {c:.2} < floor {cov_floor:.2}"));
+                }
+                None => gate_reasons.push(format!("coverage unknown < floor {cov_floor:.2}")),
+            }
+        }
+
         let status = if !books_ok {
             PairStatus::Stale
         } else if !window_met {
             PairStatus::Collecting
         } else if !signal_active {
             PairStatus::Watching
-        } else if !variation_ok || p_win.is_none() || funding_unknown || ladder.is_empty() {
+        } else if exit_uncostable
+            || !variation_ok
+            || p_win.is_none()
+            || funding_unknown
+            || ladder.is_empty()
+            || !session_conf_ok
+            || !ratio_ok
+            || !coverage_ok
+        {
             PairStatus::Signaled
         } else {
             PairStatus::Qualified
@@ -1374,6 +2190,12 @@ impl SpreadMonitorEngine {
 
         // Lifecycle timestamps: discover on transition into an active signal;
         // keep last_seen updated while it remains active.
+        let (prev_status, prev_last_seen): (Option<PairStatus>, Option<i64>) = self
+            .pairs
+            .lock()
+            .get(&key)
+            .map(|r| (Some(r.status), r.last_seen_ms))
+            .unwrap_or((None, None));
         let mut rt = self.pairs.lock().get(&key).cloned().unwrap_or(PairRuntime {
             status: PairStatus::Collecting,
             first_seen_ms: None,
@@ -1406,18 +2228,63 @@ impl SpreadMonitorEngine {
             )
         });
 
+        // Audit draft via the shared idempotency rule (transitions +
+        // minute-bucketed heartbeats only).
+        let trigger = audit_trigger(
+            prev_status,
+            status,
+            signal_active,
+            window_met,
+            prev_last_seen,
+            now_ms,
+        );
+        let event = trigger.map(|t| {
+            let economics_json = serde_json::json!({
+                "friction_bps": friction_bps.is_finite().then_some(friction_bps),
+                "exit_est_bps": exit_est_opt.filter(|e| e.is_finite()),
+                "exit_uncostable": exit_uncostable,
+                "execution_mode": cfg.execution_mode,
+                "funding_carry_bps": carry.filter(|c| c.is_finite()),
+                "fee_bps": fee_bps.is_finite().then_some(fee_bps),
+            })
+            .to_string();
+            SignalEventDraft {
+                symbol: symbol.to_string(),
+                buy_venue: buy_v.to_string(),
+                sell_venue: sell_v.to_string(),
+                ts_ms: now_ms,
+                old_status: prev_status.map(|s| s.as_str().to_string()),
+                new_status: status.as_str().to_string(),
+                edge_bps,
+                dev_bps,
+                p_win,
+                economics_json,
+                trigger: t,
+            }
+        });
+
         // --- executability ------------------------------------------------
-        let (executable, block_reason) = execution_gate(
+        let (executable, mut block_reason) = execution_gate(
             status,
             books_ok,
+            session_block,
             signal_active,
             p_win,
             cfg.min_win_probability,
             funding_unknown,
+            exit_uncostable,
             optimal,
             state,
             symbol,
         );
+        if !gate_reasons.is_empty()
+            && status == PairStatus::Signaled
+            && books_ok
+            && window_met
+            && signal_active
+        {
+            block_reason = Some(gate_reasons.join("; "));
+        }
 
         let row = MonitorRowDto {
             symbol: symbol.to_string(),
@@ -1454,9 +2321,35 @@ impl SpreadMonitorEngine {
             observed_episodes: episodes,
             executable,
             block_reason,
+            threshold_ratio,
+            coverage,
+            session_id: sess.session.as_str().to_string(),
+            session_provisional: sess.provisional,
+            session_allow: sess.allow,
+            session_size_mult,
         };
-        Some((row, persist))
+        Some((row, persist, event))
     }
+}
+
+fn validate_monitor_book(
+    book: &OrderBook,
+    expected_venue: &arbitrager_core::types::VenueId,
+    expected_symbol: &str,
+) -> Result<(), String> {
+    if &book.venue != expected_venue {
+        return Err(format!(
+            "order book venue '{}' does not match expected venue '{}'",
+            book.venue, expected_venue
+        ));
+    }
+    if book.symbol != expected_symbol {
+        return Err(format!(
+            "order book symbol '{}' does not match requested symbol '{}'",
+            book.symbol, expected_symbol
+        ));
+    }
+    book.validate_for_execution()
 }
 
 /// Whether the book snapshot yields a persistable top-of-book sample.
@@ -1491,10 +2384,13 @@ fn variation_covers_friction(
         (window_secs / cfg.half_life_multiplier.max(1.0)).max(60.0)
     };
     let need = (friction_bps * cfg.friction_cover_mult).max(1e-6);
-    let t_end = series.last().unwrap().ts_ms;
+    let Some(last) = series.last() else {
+        return false;
+    };
+    let t_end = last.ts_ms;
     let chunks = ((window_secs / chunk_secs).ceil() as i64).clamp(1, 64);
     for k in 0..chunks {
-        let c_end = t_end - (k as i64) * (chunk_secs * 1000.0) as i64;
+        let c_end = t_end - k * (chunk_secs * 1000.0) as i64;
         let c_start = c_end - (chunk_secs * 1000.0) as i64;
         let max_dev = series
             .iter()
@@ -1514,10 +2410,12 @@ fn variation_covers_friction(
 fn execution_gate(
     status: PairStatus,
     books_ok: bool,
+    session_block: Option<String>,
     signal_active: bool,
     p_win: Option<f64>,
     p_min: f64,
     funding_unknown: bool,
+    exit_uncostable: bool,
     optimal: Option<f64>,
     state: &AppEngineState,
     symbol: &str,
@@ -1534,6 +2432,9 @@ fn execution_gate(
     if !books_ok {
         return (false, Some("orderbook stale or missing".into()));
     }
+    if let Some(reason) = session_block {
+        return (false, Some(reason));
+    }
     if status != PairStatus::Qualified || !signal_active {
         return (false, Some("signal not qualified".into()));
     }
@@ -1549,6 +2450,12 @@ fn execution_gate(
     }
     if funding_unknown {
         return (false, Some("funding adjustment unknown".into()));
+    }
+    if exit_uncostable {
+        return (
+            false,
+            Some("exit depth insufficient for two-way close".into()),
+        );
     }
     if optimal.map(|s| s <= 0.0).unwrap_or(true) {
         return (false, Some("no profitable capacity".into()));
@@ -1593,6 +2500,16 @@ mod tests {
             ts_ms: ts,
             spread_bps: bps,
         }
+    }
+
+    #[test]
+    fn mean_dt_secs_degrades_to_zero() {
+        assert_eq!(series_mean_dt_secs(&[]), 0.0);
+        assert_eq!(series_mean_dt_secs(&[obs(1_000, 1.0)]), 0.0);
+        assert_eq!(
+            series_mean_dt_secs(&[obs(0, 1.0), obs(30_000, 1.0), obs(60_000, 1.0)]),
+            30.0
+        );
     }
 
     #[test]
@@ -1704,6 +2621,42 @@ mod tests {
         assert!(lane2.can_spend() || lane2.used_last_min() as f64 >= lane2.usable_per_min);
     }
 
+    #[tokio::test]
+    async fn poll_due_books_terminates_with_ws_fresh_lane() {
+        let state = AppEngineState::new();
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut lanes = engine.lanes.lock();
+            lanes.push(VenueLane {
+                venue: "test".into(),
+                adapter: Arc::new(DummyAdapter),
+                symbols: vec!["A".into(), "B".into()],
+                requests: VecDeque::new(),
+                budget_per_min: 60.0,
+                usable_per_min: 45.0,
+                account_tier: "standard".into(),
+                cursor: 0,
+                last_fetch: HashMap::new(),
+                backoff_until: None,
+                fail_streak: 0,
+                next_funding_at: Instant::now(),
+            });
+        }
+        state
+            .market_data_hub
+            .update_orderbook_from_ws(book("test", "A", 99.0, 101.0, 2));
+        state
+            .market_data_hub
+            .update_orderbook_from_ws(book("test", "B", 99.0, 101.0, 2));
+        tokio::time::timeout(std::time::Duration::from_secs(10), engine.poll_due_books(&state))
+            .await
+            .expect("poll_due_books must terminate when every due symbol is WS-fresh");
+        let lanes = engine.lanes.lock();
+        let lane = lanes.iter().find(|l| l.venue == "test").expect("lane");
+        assert!(lane.last_fetch.contains_key("A"));
+        assert!(lane.last_fetch.contains_key("B"));
+    }
+
     #[test]
     fn variation_gate_rejects_noise() {
         let cfg = MonitorConfigDto {
@@ -1736,14 +2689,25 @@ mod tests {
     }
 
     #[test]
+    fn funding_per_hour_skips_unparseable_and_scales_by_interval() {
+        assert_eq!(funding_per_hour("0.0004", 8), Some(0.00005));
+        assert_eq!(funding_per_hour("0.0004", 0), Some(0.0004));
+        assert_eq!(funding_per_hour("NaN", 8), None);
+        assert_eq!(funding_per_hour("not-a-number", 8), None);
+        assert_eq!(funding_per_hour("inf", 8), None);
+    }
+
+    #[test]
     fn execution_gate_blocks_unqualified() {
         let state = AppEngineState::new();
         let (ok, why) = execution_gate(
             PairStatus::Signaled,
             true,
+            None,
             true,
             Some(0.95),
             0.9,
+            false,
             false,
             Some(1000.0),
             &state,
@@ -1755,9 +2719,11 @@ mod tests {
         let (ok, why) = execution_gate(
             PairStatus::Qualified,
             true,
+            None,
             true,
             Some(0.5),
             0.9,
+            false,
             false,
             Some(1000.0),
             &state,
@@ -1769,10 +2735,12 @@ mod tests {
         let (ok, _) = execution_gate(
             PairStatus::Qualified,
             true,
+            None,
             true,
             Some(0.95),
             0.9,
             true,
+            false,
             Some(1000.0),
             &state,
             "BTC",
@@ -1782,15 +2750,218 @@ mod tests {
         let (ok, why) = execution_gate(
             PairStatus::Qualified,
             true,
+            None,
             true,
             Some(0.95),
             0.9,
+            false,
             false,
             Some(1000.0),
             &state,
             "BTC",
         );
         assert!(ok, "gate should open: {why:?}");
+    }
+
+    #[test]
+    fn execution_gate_blocks_uncostable_two_way_exit() {
+        let state = AppEngineState::new();
+        // A fully qualified row with an uncostable two-way exit is blocked
+        // on the exit reason (checked before capacity/ticker gates).
+        let (ok, why) = execution_gate(
+            PairStatus::Qualified,
+            true,
+            None,
+            true,
+            Some(0.95),
+            0.9,
+            false,
+            true,
+            Some(1000.0),
+            &state,
+            "BTC",
+        );
+        assert!(!ok);
+        assert_eq!(why.unwrap(), "exit depth insufficient for two-way close");
+        // Same row with a priced exit opens.
+        let (ok, _) = execution_gate(
+            PairStatus::Qualified,
+            true,
+            None,
+            true,
+            Some(0.95),
+            0.9,
+            false,
+            false,
+            Some(1000.0),
+            &state,
+            "BTC",
+        );
+        assert!(ok);
+    }
+
+    #[test]
+    fn execution_gate_session_block_precedes_signal_checks() {
+        let state = AppEngineState::new();
+        let (ok, why) = execution_gate(
+            PairStatus::Qualified,
+            true,
+            Some("funding window stand-down".into()),
+            true,
+            Some(0.95),
+            0.9,
+            false,
+            false,
+            Some(1000.0),
+            &state,
+            "BTC",
+        );
+        assert!(!ok);
+        assert_eq!(why.unwrap(), "funding window stand-down");
+    }
+
+    #[test]
+    fn session_standdown_precedence() {
+        assert_eq!(
+            session_standdown(true, true, Some(999.0), Some(1.0), true),
+            Some("funding window stand-down".into())
+        );
+        assert_eq!(
+            session_standdown(false, true, Some(999.0), Some(1.0), true),
+            Some("ondo equity market closed".into())
+        );
+        assert_eq!(
+            session_standdown(false, false, Some(9.0), Some(2.0), true),
+            Some("spread exceeds 3x session median".into())
+        );
+        assert_eq!(
+            session_standdown(false, false, Some(5.9), Some(2.0), true),
+            Some("fast-vol above 3x session norm (halted)".into())
+        );
+        assert_eq!(
+            session_standdown(false, false, Some(5.9), Some(2.0), false),
+            None
+        );
+        assert_eq!(session_standdown(false, false, None, Some(2.0), false), None);
+        assert_eq!(session_standdown(false, false, Some(5.0), None, false), None);
+    }
+
+    #[test]
+    fn vol_halt_halves_then_halts() {
+        assert_eq!(vol_halt_next(0, false), (0, 1.0, false));
+        assert_eq!(vol_halt_next(7, false), (0, 1.0, false));
+        assert_eq!(vol_halt_next(0, true), (1, 0.5, false));
+        assert_eq!(vol_halt_next(1, true), (2, 0.5, true));
+        assert_eq!(vol_halt_next(2, true), (3, 0.5, true));
+    }
+
+    #[test]
+    fn session_context_neutral_without_profiles() {
+        use chrono::TimeZone;
+        let state = AppEngineState::new();
+        let ts = |y: i32, mo: u32, d: u32, h: u32, mi: u32| {
+            chrono::Utc
+                .with_ymd_and_hms(y, mo, d, h, mi, 0)
+                .single()
+                .unwrap()
+                .timestamp_millis()
+        };
+        // Overlap on a weekday, clear of 8h stamps (8h venues only).
+        let ctx = session_context(&state, "BTC", "lighter", "vanta", ts(2026, 1, 15, 14, 0));
+        assert_eq!(ctx.session, SessionId::Overlap);
+        assert!(!ctx.funding_mask);
+        assert!(ctx.provisional);
+        assert_eq!(ctx.entry_delta_bps, 0.0);
+        assert_eq!(ctx.allow, 1.0);
+        assert_eq!(ctx.session_med, None);
+        // 08:00 stamp blocks 8h venues.
+        let ctx = session_context(&state, "BTC", "lighter", "vanta", ts(2026, 1, 15, 8, 0));
+        assert!(ctx.funding_mask);
+        assert_eq!(ctx.allow, 0.0);
+        // Weekend halves the overlap allowance.
+        let ctx = session_context(&state, "BTC", "lighter", "vanta", ts(2026, 1, 17, 14, 0));
+        assert!(is_weekend(ts(2026, 1, 17, 14, 0)));
+        assert_eq!(ctx.allow, 0.5);
+        assert!(ctx.provisional);
+        // Hourly-funding venue masks every hour.
+        let ctx = session_context(
+            &state,
+            "BTC",
+            "hyperliquid",
+            "lighter",
+            ts(2026, 1, 15, 14, 1),
+        );
+        assert!(ctx.funding_mask);
+    }
+
+    #[test]
+    fn session_context_uses_calibrated_profiles() {
+        use chrono::TimeZone;
+        let state = AppEngineState::new();
+        let base = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let peak_for_hour = |h: i64| match h % 24 {
+            0..=7 => 4.0,
+            8..=12 => 12.0,
+            13..=16 => 22.0,
+            17..=21 => 14.0,
+            _ => 3.0,
+        };
+        for i in 0..(16 * 24) {
+            let ts = base + i * 3_600_000 + 60_000;
+            let spread_bps = if i % 2 == 0 { peak_for_hour(i) } else { 7.0 };
+            state
+                .state_store
+                .record_spread_samples(
+                    "BTC",
+                    ts,
+                    &[
+                        crate::state_store::VenueSampleEntry {
+                            venue_id: "lighter".into(),
+                            mid: 100.0,
+                            best_bid: 99.9,
+                            best_ask: 100.1,
+                        },
+                        crate::state_store::VenueSampleEntry {
+                            venue_id: "vanta".into(),
+                            mid: 100.0 * (1.0 + spread_bps / 10_000.0),
+                            best_bid: 99.9,
+                            best_ask: 100.1,
+                        },
+                    ],
+                )
+                .unwrap();
+        }
+        let to = base + 16 * 24 * 3_600_000;
+        state
+            .state_store
+            .rollup_session_profiles("BTC", base - 1_000, to + 1_000, to)
+            .unwrap();
+        let overlap_ts = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 20, 14, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let ctx = session_context(&state, "BTC", "lighter", "vanta", overlap_ts);
+        assert_eq!(ctx.session, SessionId::Overlap);
+        assert!(!ctx.provisional);
+        assert!(ctx.session_med.unwrap() > 0.0);
+        assert!(ctx.win_rate.is_some());
+        assert_eq!(ctx.allow, 1.0);
+        assert_ne!(ctx.entry_delta_bps, 0.0);
+        let dead_ts = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 20, 23, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis();
+        let ctx = session_context(&state, "BTC", "lighter", "vanta", dead_ts);
+        assert_eq!(ctx.session, SessionId::Dead);
+        assert!(ctx.provisional);
+        assert_eq!(ctx.entry_delta_bps, 0.0);
+        assert_eq!(ctx.session_med, None);
     }
 
     #[tokio::test]
@@ -1811,7 +2982,7 @@ mod tests {
         // Seed 2h of converging pair samples (span > auto floor 30min).
         let now = Utc::now().timestamp_millis();
         for i in 0..=72 {
-            let ts = now - (7200_000 - i * 100_000);
+            let ts = now - (7_200_000 - i * 100_000);
             let wiggle = if i % 12 == 6 { 8.0 } else { 0.5 };
             state
                 .state_store
@@ -1862,5 +3033,554 @@ mod tests {
         let snap2 = engine.snapshot().unwrap();
         assert!(snap2.rows.iter().all(|r| r.status == "stale"));
         assert!(snap2.rows.iter().all(|r| !r.executable));
+    }
+
+    fn win_series(spreads: &[f64], step_ms: i64) -> Vec<PairObservation> {
+        spreads
+            .iter()
+            .enumerate()
+            .map(|(i, s)| PairObservation {
+                ts_ms: i as i64 * step_ms,
+                spread_bps: *s,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pair_win_probability_empirical_hit_rate() {
+        // Six clean win episodes: six flats then a +12bps spike, band 5.0.
+        // The spike pulls the mean to ~1.7, so flats sit below the band
+        // while every spike excursion reverts -> P_win exactly 1.0.
+        let mut spreads = Vec::new();
+        for _ in 0..6 {
+            spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0]);
+        }
+        // Trailing flats let the final episode resolve instead of ending open.
+        spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let series = win_series(&spreads, 1_000);
+        let p = pair_win_probability(&series, 12.0, 5.0, 5);
+        assert_eq!(p, Some(1.0));
+    }
+
+    #[test]
+    fn pair_win_probability_thin_history_is_none() {
+        let empty: Vec<PairObservation> = Vec::new();
+        assert_eq!(pair_win_probability(&empty, 20.0, 2.0, 5), None);
+        let one = win_series(&[5.0], 1_000);
+        assert_eq!(pair_win_probability(&one, 5.0, 2.0, 5), None);
+        // Three points: one episode at most, below min_episodes, and too
+        // few points for the OU fallback (needs >= 10).
+        let few = win_series(&[0.0, 20.0, 0.0], 1_000);
+        assert_eq!(pair_win_probability(&few, 20.0, 2.0, 5), None);
+    }
+
+    #[test]
+    fn pair_win_probability_ou_fallback_when_episodes_thin() {
+        // Smooth sine around mu=10, amplitude far below the 8.5 band: zero
+        // episodes, but a near-perfect AR(1) fit -> fallback yields Some.
+        let spreads: Vec<f64> = (0..60).map(|k| 10.0 + 1.5 * ((k as f64) * 0.25).sin()).collect();
+        let series = win_series(&spreads, 1_000);
+        let p = pair_win_probability(&series, 18.0, 8.5, 5).expect("OU fallback must qualify");
+        assert!(p > 0.5 && p <= 1.0, "fallback P_win in range, got {p}");
+    }
+
+    #[test]
+    fn pair_win_probability_beyond_evidence_is_none() {
+        // Qualified episodes exist, but the current deviation exceeds every
+        // observed peak -> no bucket, fail closed.
+        let mut spreads = Vec::new();
+        for _ in 0..6 {
+            spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0]);
+        }
+        // Trailing flats let the final episode resolve instead of ending open.
+        spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let series = win_series(&spreads, 1_000);
+        assert_eq!(pair_win_probability(&series, 100.0, 5.0, 5), None);
+    }
+
+    #[test]
+    fn pair_win_probability_nan_guards() {
+        let mut spreads = Vec::new();
+        for _ in 0..6 {
+            spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0]);
+        }
+        // Trailing flats let the final episode resolve instead of ending open.
+        spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let series = win_series(&spreads, 1_000);
+        assert_eq!(pair_win_probability(&series, f64::NAN, 5.0, 5), None);
+        assert_eq!(pair_win_probability(&series, 12.0, f64::NAN, 5), None);
+        assert_eq!(
+            pair_win_probability(&series, f64::INFINITY, 5.0, 5),
+            None
+        );
+    }
+
+    #[test]
+    fn pair_win_probability_deterministic() {
+        let mut spreads = Vec::new();
+        for _ in 0..6 {
+            spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 12.0]);
+        }
+        // Trailing flats let the final episode resolve instead of ending open.
+        spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let series = win_series(&spreads, 1_000);
+        let a = pair_win_probability(&series, 8.0, 5.0, 5);
+        let b = pair_win_probability(&series, 8.0, 5.0, 5);
+        assert_eq!(a, b);
+        assert!(a.is_some());
+    }
+
+    fn levels_book(
+        venue: &str,
+        symbol: &str,
+        bids: &[(f64, f64)],
+        asks: &[(f64, f64)],
+    ) -> OrderBook {
+        let mut b = OrderBook::new(VenueId::new(venue), symbol.to_string());
+        for (p, s) in bids {
+            b.bids.push(BookLevel::new(
+                rust_decimal::Decimal::from_f64_retain(*p).unwrap(),
+                rust_decimal::Decimal::from_f64_retain(*s).unwrap(),
+            ));
+        }
+        for (p, s) in asks {
+            b.asks.push(BookLevel::new(
+                rust_decimal::Decimal::from_f64_retain(*p).unwrap(),
+                rust_decimal::Decimal::from_f64_retain(*s).unwrap(),
+            ));
+        }
+        b.timestamp = Utc::now();
+        b
+    }
+
+    #[test]
+    fn two_way_exit_walk_matches_hand_computed_values() {
+        // Buy book: best bid 100 (1) / 99 (3), best ask 101.
+        // Sell book: best bid 120, best ask 121 (1) / 122 (3).
+        let buy = levels_book(
+            "a",
+            "BTC",
+            &[(100.0, 1.0), (99.0, 3.0)],
+            &[(101.0, 5.0), (102.0, 5.0)],
+        );
+        let sell = levels_book(
+            "b",
+            "BTC",
+            &[(120.0, 5.0), (119.0, 5.0)],
+            &[(121.0, 1.0), (122.0, 3.0)],
+        );
+        let qty = rust_decimal::Decimal::from_f64_retain(2.0).unwrap();
+        let got = two_way_exit_estimate(&buy, &sell, qty, 4.0).expect("deep books price");
+        // Buy exit sells 2 into bids: (1*100 + 1*99)/2 = 99.5 -> 50 bps.
+        // Sell exit buys 2 from asks: (1*121 + 1*122)/2 = 121.5 -> 0.5/121.
+        // Closing: buy (101-100)/100.5 + sell (121-120)/120.5, all x1e4.
+        let expected = 4.0
+            + 50.0
+            + (0.5 / 121.0 * 10_000.0)
+            + (1.0 / 100.5 * 10_000.0)
+            + (1.0 / 120.5 * 10_000.0);
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "exit walk got {got}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn two_way_exit_thin_reverse_side_fails_closed() {
+        let qty = rust_decimal::Decimal::from_f64_retain(2.0).unwrap();
+        // Thin buy bids: unwind needs 2, only 0.5 rests.
+        let buy = levels_book("a", "BTC", &[(100.0, 0.5)], &[(101.0, 100.0)]);
+        let sell = levels_book("b", "BTC", &[(120.0, 100.0)], &[(121.0, 100.0)]);
+        assert!(two_way_exit_estimate(&buy, &sell, qty, 4.0).is_none());
+        // Thin sell asks, mirror image.
+        let buy2 = levels_book("a", "BTC", &[(100.0, 100.0)], &[(101.0, 100.0)]);
+        let sell2 = levels_book("b", "BTC", &[(120.0, 100.0)], &[(121.0, 0.5)]);
+        assert!(two_way_exit_estimate(&buy2, &sell2, qty, 4.0).is_none());
+        // Exact-depth boundary still fills (remainder zero).
+        let exact = rust_decimal::Decimal::from_f64_retain(0.5).unwrap();
+        assert!(two_way_exit_estimate(&buy, &sell, exact, 4.0).is_some());
+        // Both deep prices.
+        assert!(two_way_exit_estimate(&buy2, &sell, qty, 4.0).is_some());
+    }
+
+    #[test]
+    fn two_way_exit_rejects_degenerate_books_and_inputs() {
+        let good_buy = levels_book("a", "BTC", &[(100.0, 10.0)], &[(101.0, 10.0)]);
+        let good_sell = levels_book("b", "BTC", &[(120.0, 10.0)], &[(121.0, 10.0)]);
+        let qty = rust_decimal::Decimal::from_f64_retain(1.0).unwrap();
+        let empty = OrderBook::new(VenueId::new("x"), "BTC".into());
+        assert!(two_way_exit_estimate(&empty, &good_sell, qty, 4.0).is_none());
+        assert!(two_way_exit_estimate(&good_buy, &empty, qty, 4.0).is_none());
+        // Crossed/locked books fail closed (never a negative spread credit).
+        let crossed = levels_book("a", "BTC", &[(102.0, 10.0)], &[(101.0, 10.0)]);
+        assert!(two_way_exit_estimate(&crossed, &good_sell, qty, 4.0).is_none());
+        let crossed_s = levels_book("b", "BTC", &[(120.0, 10.0)], &[(119.0, 10.0)]);
+        assert!(two_way_exit_estimate(&good_buy, &crossed_s, qty, 4.0).is_none());
+        // Zero qty and non-finite/negative fees.
+        assert!(two_way_exit_estimate(&good_buy, &good_sell, dec!(0), 4.0).is_none());
+        assert!(two_way_exit_estimate(&good_buy, &good_sell, qty, f64::NAN).is_none());
+        assert!(two_way_exit_estimate(&good_buy, &good_sell, qty, -1.0).is_none());
+        // Zero-fee schedule is legitimate and prices.
+        assert!(two_way_exit_estimate(&good_buy, &good_sell, qty, 0.0).is_some());
+    }
+
+    #[test]
+    fn monitor_exit_qty_uses_smallest_tier() {
+        let ask = rust_decimal::Decimal::from_f64_retain(100.0).unwrap();
+        let q = monitor_exit_qty(&[10_000.0, 1_000.0, 5_000.0], Some(ask)).unwrap();
+        assert_eq!(q, rust_decimal::Decimal::from_f64_retain(10.0).unwrap());
+        assert!(monitor_exit_qty(&[], Some(ask)).is_none());
+        assert!(monitor_exit_qty(&[1_000.0], None).is_none());
+        assert!(monitor_exit_qty(&[1_000.0], Some(dec!(0))).is_none());
+        assert!(monitor_exit_qty(&[f64::NAN, f64::INFINITY, -5.0], Some(ask)).is_none());
+    }
+
+    #[test]
+    fn exit_mode_composition_one_way_untouched_two_way_depth_gated() {
+        let thin_buy = levels_book("a", "BTC", &[(100.0, 0.1)], &[(101.0, 100.0)]);
+        let thin_sell = levels_book("b", "BTC", &[(120.0, 100.0)], &[(121.0, 0.1)]);
+        let bb = Some(thin_buy);
+        let sb = Some(thin_sell);
+        // One-way never prices a close, however thin the reverse sides are.
+        assert_eq!(
+            exit_estimate_for_mode("one_way", &bb, &sb, &[1_000.0], 4.0),
+            Some(0.0)
+        );
+        assert_eq!(
+            exit_estimate_for_mode("other", &bb, &sb, &[1_000.0], 4.0),
+            Some(0.0)
+        );
+        // Two-way on the same thin books is uncostable...
+        assert!(exit_estimate_for_mode("two_way", &bb, &sb, &[1_000.0], 4.0).is_none());
+        // ...as are missing books — while one-way still reads 0.0.
+        let none: Option<OrderBook> = None;
+        assert!(exit_estimate_for_mode("two_way", &none, &sb, &[1_000.0], 4.0).is_none());
+        assert_eq!(
+            exit_estimate_for_mode("one_way", &none, &sb, &[1_000.0], 4.0),
+            Some(0.0)
+        );
+        // Deep books price in two-way mode.
+        let deep_buy = levels_book("a", "BTC", &[(100.0, 100.0)], &[(101.0, 100.0)]);
+        let deep_sell = levels_book("b", "BTC", &[(120.0, 100.0)], &[(121.0, 100.0)]);
+        let est = exit_estimate_for_mode(
+            "two_way",
+            &Some(deep_buy),
+            &Some(deep_sell),
+            &[1_000.0],
+            4.0,
+        )
+        .expect("deep books price");
+        assert!(est > 4.0, "walk adds slippage + spread over fees: {est}");
+    }
+
+    #[test]
+    fn audit_trigger_transitions_heartbeat_idempotency() {
+        // First sighting always logs.
+        assert_eq!(
+            audit_trigger(None, PairStatus::Collecting, false, false, None, 60_001),
+            Some("transition")
+        );
+        // Status change logs with the previous status attached.
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Watching),
+                PairStatus::Signaled,
+                true,
+                true,
+                Some(60_000),
+                120_000
+            ),
+            Some("transition")
+        );
+        // Same status, active, new minute bucket -> one heartbeat.
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Signaled),
+                PairStatus::Signaled,
+                true,
+                true,
+                Some(60_000),
+                120_000
+            ),
+            Some("heartbeat")
+        );
+        // Same status, active, same minute -> silent (idempotent re-poll).
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Signaled),
+                PairStatus::Signaled,
+                true,
+                true,
+                Some(120_001),
+                120_500
+            ),
+            None
+        );
+        // Inactive steady state never heartbeats.
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Watching),
+                PairStatus::Watching,
+                false,
+                true,
+                Some(60_000),
+                120_000
+            ),
+            None
+        );
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Collecting),
+                PairStatus::Collecting,
+                false,
+                false,
+                None,
+                120_000
+            ),
+            None
+        );
+        // Active but qualification window unmet -> silent.
+        assert_eq!(
+            audit_trigger(
+                Some(PairStatus::Signaled),
+                PairStatus::Signaled,
+                true,
+                false,
+                Some(60_000),
+                120_000
+            ),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn evaluate_appends_audit_events_without_duplicates() {
+        let state = AppEngineState::new();
+        let engine = SpreadMonitorEngine::new(&state);
+        *engine.watchlist.lock() = vec!["BTC".into()];
+        engine
+            .venue_symbols
+            .lock()
+            .insert("hyperliquid".into(), vec!["BTC".into()]);
+        engine
+            .venue_symbols
+            .lock()
+            .insert("lighter".into(), vec!["BTC".into()]);
+        // No books and no samples: every pair reports stale (inactive) — the
+        // first pass logs one first-sighting transition per ordered pair and
+        // re-polls log nothing.
+        engine.evaluate(&state).await;
+        let first = state.state_store.monitor_signal_event_count().unwrap();
+        assert_eq!(first, 2, "one first-sighting event per ordered pair");
+        engine.evaluate(&state).await;
+        let second = state.state_store.monitor_signal_event_count().unwrap();
+        assert_eq!(second, 2, "same-minute re-poll must not duplicate events");
+        let evs = state
+            .state_store
+            .recent_monitor_signal_events(None, None, None, 10)
+            .unwrap();
+        assert_eq!(evs.len(), 2);
+        for ev in &evs {
+            assert_eq!(ev.old_status, None);
+            assert_eq!(ev.new_status, "stale");
+            assert_eq!(ev.trigger, "transition");
+            let econ: serde_json::Value =
+                serde_json::from_str(ev.economics_json.as_ref().unwrap()).unwrap();
+            assert_eq!(econ["execution_mode"], serde_json::json!("one_way"));
+        }
+    }
+
+    fn gate_cfg(ratio_floor: f64, cov_floor: f64) -> MonitorConfigDto {
+        MonitorConfigDto {
+            qualification_mode: "manual".into(),
+            manual_window_secs: 1500,
+            half_life_multiplier: 2.0,
+            friction_cover_mult: 0.1,
+            min_episodes: 1,
+            min_threshold_ratio: ratio_floor,
+            min_coverage: cov_floor,
+            execution_mode: "one_way".into(),
+            ..Default::default()
+        }
+    }
+
+    fn gate_now_ms() -> i64 {
+        use chrono::TimeZone;
+        chrono::Utc
+            .with_ymd_and_hms(2026, 1, 15, 14, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    fn gate_eval(
+        engine: &SpreadMonitorEngine,
+        state: &AppEngineState,
+        cfg: &MonitorConfigDto,
+        spreads: &[(i64, f64)],
+        now_ms: i64,
+    ) -> MonitorRowDto {
+        let mut mids_a: Vec<(i64, f64)> = Vec::new();
+        let mut mids_b: Vec<(i64, f64)> = Vec::new();
+        for (ts, sp) in spreads {
+            mids_a.push((*ts, 100.0));
+            mids_b.push((*ts, 100.0 * (1.0 + sp / 10_000.0)));
+        }
+        let mut mids: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+        mids.insert("a".into(), mids_a);
+        mids.insert("b".into(), mids_b);
+        engine.funding_ema.lock().insert(("a".into(), "BTC".into()), 0.0);
+        engine.funding_ema.lock().insert(("b".into(), "BTC".into()), 0.0);
+        state
+            .market_data_hub
+            .update_orderbook(book("a", "BTC", 99.8, 100.0, 5));
+        state
+            .market_data_hub
+            .update_orderbook(book("b", "BTC", 100.12, 100.3, 5));
+        let mut fees: HashMap<String, f64> = HashMap::new();
+        fees.insert("a".into(), 1.0);
+        fees.insert("b".into(), 1.0);
+        let volumes: HashMap<String, HashMap<String, f64>> = HashMap::new();
+        let depths: HashMap<String, (f64, f64)> = HashMap::new();
+        let (row, _, _) = engine
+            .evaluate_pair(
+                state,
+                cfg,
+                "BTC",
+                "a",
+                "b",
+                now_ms,
+                Duration::from_secs(300),
+                &mids,
+                &volumes,
+                &fees,
+                &depths,
+            )
+            .expect("pair evaluates");
+        row
+    }
+
+    fn window_spreads(now_ms: i64, n: usize, step_ms: i64, f: impl Fn(usize) -> f64) -> Vec<(i64, f64)> {
+        (0..n)
+            .map(|i| (now_ms - ((n - 1 - i) as i64) * step_ms, f(i)))
+            .collect()
+    }
+
+    #[test]
+    fn persistence_gate_persistent_qualifies_flicker_blocked() {
+        let state = AppEngineState::new();
+        let now = gate_now_ms();
+        // Full 60-bucket window (1800s/30s), same 12bps peak.
+        // Persistent holds 48/60 above; flicker holds 3/60 above with one
+        // spike per 900s chunk so variation still passes for both.
+        let persistent = window_spreads(now, 60, 30_000, |i| {
+            if i % 5 == 4 { 0.0 } else { 12.0 }
+        });
+        let flicker = window_spreads(now, 60, 30_000, |i| {
+            if i == 10 || i == 35 || i == 55 { 12.0 } else { 0.0 }
+        });
+        let cfg = gate_cfg(0.2, 0.0);
+        let engine_p = SpreadMonitorEngine::new(&state);
+        let row_p = gate_eval(&engine_p, &state, &cfg, &persistent, now);
+        assert_eq!(row_p.status, "qualified", "persistent must qualify: {:?}", row_p.block_reason);
+        assert!(row_p.threshold_ratio.unwrap() >= 0.2);
+        let engine_f = SpreadMonitorEngine::new(&state);
+        let row_f = gate_eval(&engine_f, &state, &cfg, &flicker, now);
+        assert_eq!(row_f.status, "signaled", "flicker must stay signaled");
+        assert!(row_f.threshold_ratio.unwrap() < 0.2);
+        assert!(
+            row_f.block_reason.as_deref().unwrap_or("").contains("persistence"),
+            "explicit persistence reason, got {:?}", row_f.block_reason
+        );
+    }
+
+    #[test]
+    fn coverage_gate_full_qualifies_thin_blocked() {
+        let state = AppEngineState::new();
+        let now = gate_now_ms();
+        // Shared flat prefix keeps mu low so the recent 12bps prints read
+        // as real deviations; recent window differs only in density: full
+        // occupies ~50/50 buckets, thin ~10/50.
+        let prefix: Vec<(i64, f64)> = (0..60)
+            .map(|i| (now - 3_600_000 - (59 - i as i64) * 30_000, 0.0))
+            .collect();
+        let mut full = prefix.clone();
+        full.extend(window_spreads(now, 60, 30_000, |_| 12.0));
+        let mut thin = prefix;
+        thin.extend(window_spreads(now, 12, 150_000, |_| 12.0));
+        let cfg = gate_cfg(0.0, 0.5);
+        let engine_full = SpreadMonitorEngine::new(&state);
+        let row_full = gate_eval(&engine_full, &state, &cfg, &full, now);
+        assert_eq!(row_full.status, "qualified", "full coverage must qualify: {:?}", row_full.block_reason);
+        assert!(row_full.coverage.unwrap() >= 0.5);
+        let engine_thin = SpreadMonitorEngine::new(&state);
+        let row_thin = gate_eval(&engine_thin, &state, &cfg, &thin, now);
+        assert_eq!(row_thin.status, "signaled", "thin coverage must not qualify");
+        assert!(row_thin.coverage.unwrap() < 0.5);
+        assert!(
+            row_thin.block_reason.as_deref().unwrap_or("").contains("coverage"),
+            "explicit coverage reason, got {:?}", row_thin.block_reason
+        );
+    }
+
+    #[test]
+    fn signal_gates_deterministic_uncomputable_never_qualifies() {
+        let state = AppEngineState::new();
+        let now = gate_now_ms();
+        let cfg = gate_cfg(0.2, 0.5);
+        let spreads = window_spreads(now, 60, 30_000, |i| {
+            if i % 5 == 4 { 0.0 } else { 12.0 }
+        });
+        let engine = SpreadMonitorEngine::new(&state);
+        let a = gate_eval(&engine, &state, &cfg, &spreads, now);
+        let engine2 = SpreadMonitorEngine::new(&state);
+        let b = gate_eval(&engine2, &state, &cfg, &spreads, now);
+        assert_eq!(a.status, b.status);
+        assert_eq!(a.threshold_ratio, b.threshold_ratio);
+        assert_eq!(a.coverage, b.coverage);
+        // Stale history (all observations older than the window): ratio has
+        // zero denominator -> None, must never force-qualify.
+        let stale: Vec<(i64, f64)> = (0..20)
+            .map(|i| (now - 7_200_000 + i as i64 * 30_000, 12.0))
+            .collect();
+        let engine3 = SpreadMonitorEngine::new(&state);
+        let row = gate_eval(&engine3, &state, &cfg, &stale, now);
+        assert_ne!(row.status, "qualified", "uncomputable gates never qualify");
+        assert!(row.threshold_ratio.is_none());
+    }
+
+    #[test]
+    fn signal_gates_backward_compat_zero_disables() {
+        let state = AppEngineState::new();
+        let now = gate_now_ms();
+        // Flicker + thin would fail active floors; with both at 0.0 the
+        // gates disable and the same series qualifies on other merits.
+        let flicker_thin = window_spreads(now, 12, 150_000, |i| {
+            if i == 5 { 12.0 } else { 0.0 }
+        });
+        let active = gate_cfg(0.2, 0.5);
+        let engine_a = SpreadMonitorEngine::new(&state);
+        let blocked = gate_eval(&engine_a, &state, &active, &flicker_thin, now);
+        assert_eq!(blocked.status, "signaled");
+        let disabled = gate_cfg(0.0, 0.0);
+        let engine_b = SpreadMonitorEngine::new(&state);
+        let row = gate_eval(&engine_b, &state, &disabled, &flicker_thin, now);
+        assert_eq!(row.status, "qualified", "zero floors disable gates: {:?}", row.block_reason);
+        // Old persisted JSON without the new keys falls back to sane defaults.
+        let old_json = serde_json::json!({"enabled": true, "qualificationMode": "auto"});
+        let cfg: MonitorConfigDto = serde_json::from_value(old_json).unwrap();
+        assert!((cfg.min_threshold_ratio - 0.2).abs() < 1e-9);
+        assert!((cfg.min_coverage - 0.5).abs() < 1e-9);
+        // set_config clamps floors into 0..=1 and rejects NaN with defaults.
+        let engine_c = SpreadMonitorEngine::new(&state);
+        let bad = MonitorConfigDto {
+            min_threshold_ratio: 9.0,
+            min_coverage: f64::NAN,
+            ..Default::default()
+        };
+        engine_c.set_config(bad, &state).expect("clamp ok");
+        let got = engine_c.config();
+        assert!((got.min_threshold_ratio - 1.0).abs() < 1e-9);
+        assert!((got.min_coverage - 0.5).abs() < 1e-9);
     }
 }

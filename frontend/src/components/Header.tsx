@@ -45,8 +45,8 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <>
       <header className="h-12 border-b border-surface-border bg-surface flex items-stretch select-none">
-        {/* Left: Minimalist Branding (w-72 aligned with TickerExplorer's right border) */}
-        <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
+      {/* Left: Minimalist Branding (w-72 aligned with PositionsPanel's right border) */}
+      <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
           <div
             className="flex items-center space-x-2.5 cursor-default"
             title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER"}

@@ -134,6 +134,45 @@ impl AccountRequestCoordinator {
         self.record_success_path("default", payload);
     }
 
+    /// Record an edge challenge (WAF CAPTCHA / IP flag). Unlike transient
+    /// failures, retrying a challenge wall only extends the flag — cool down
+    /// hard so the venue can recover. Subsequent callers bail at acquire
+    /// (no log spam) until the cool-down expires.
+    pub fn record_challenge(&self) {
+        let mut state = self.state.lock();
+        state.consecutive_failures += 1;
+        state.backoff_until = Some(Instant::now() + Duration::from_secs(30 * 60));
+        warn!(
+            "[{}] edge challenge detected (WAF/CAPTCHA) — cooling down for 30m",
+            self.venue_name
+        );
+    }
+}
+
+/// True when an HTTP response is an edge challenge wall (AWS WAF CAPTCHA
+/// or similar IP flag) rather than a venue API answer. Retrying these is
+/// counterproductive — callers must cool down, not spin.
+pub fn is_waf_challenge(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body_start: &str,
+) -> bool {
+    let waf_header = headers
+        .get("x-amzn-waf-action")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if waf_header {
+        return true;
+    }
+    let htmlish = body_start.contains("<html")
+        || body_start.contains("Human Verification")
+        || body_start.contains("awsWaf")
+        || body_start.contains("gokuProps");
+    htmlish && (status == 403 || status == 405)
+}
+
+impl AccountRequestCoordinator {
     /// Record an error or 429 Rate Limit.
     pub fn record_failure(&self, is_rate_limit: bool) {
         let mut state = self.state.lock();
@@ -154,5 +193,40 @@ impl AccountRequestCoordinator {
             "[{}] API request failure #{} (rate_limit={}), backing off for {:?}",
             self.venue_name, state.consecutive_failures, is_rate_limit, backoff
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers_with_waf() -> reqwest::header::HeaderMap {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert("x-amzn-waf-action", "captcha".parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn test_waf_challenge_detection() {
+        let empty = reqwest::header::HeaderMap::new();
+        assert!(is_waf_challenge(405, &headers_with_waf(), ""));
+        assert!(is_waf_challenge(
+            405,
+            &empty,
+            "<html><title>Human Verification</title>"
+        ));
+        assert!(is_waf_challenge(403, &empty, "window.gokuProps = {}"));
+        assert!(!is_waf_challenge(429, &empty, ""));
+        assert!(!is_waf_challenge(200, &empty, "{\"code\":200}"));
+        assert!(!is_waf_challenge(405, &empty, "{\"code\":-4021}"));
+    }
+
+    #[test]
+    fn test_challenge_cooldown_is_long() {
+        let c = AccountRequestCoordinator::new("test", 200, 3000, 500, 10_000);
+        c.record_challenge();
+        let state = c.state.lock();
+        let until = state.backoff_until.expect("cooldown set");
+        assert!(until > Instant::now() + Duration::from_secs(29 * 60));
     }
 }

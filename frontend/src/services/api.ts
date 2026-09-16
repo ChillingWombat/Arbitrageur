@@ -5,11 +5,15 @@ import type {
   VenueVolumesDto,
   SignalSeriesDto,
   MatrixBaselineSnapshotDto,
+  AutotuneRecommendationDto,
+  AutotuneApplyResultDto,
+  SeasonalityRunSummaryDto,
   SpatialOpportunityDto,
   SpotOpportunityDto,
   SpotExecutionParams,
   TriangleOpportunityDto,
   TriangleExecutionParams,
+  ConvergenceCheckDto,
   FundingOpportunityDto,
   PredictionOpportunityDto,
   StatArbStepResultDto,
@@ -23,15 +27,20 @@ import type {
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
   StrategyParamsDto,
+  PassiveUnwindDto,
   VaultStatus,
   VenueBalanceInfo,
   StrategyMetrics,
+  StrategyFillPnl,
+  UtilisationHistory,
   WfoOptimizationResult,
   AccountDto,
   AccountUpsertInput,
   AccountCredentialInput,
   StrategyAccountRouteDto,
   StrategyRouteUpsertInput,
+  StrategyTickerDto,
+  AccountEquityEventDto,
   SpatialCandidateInput,
   CandidateOutcomeDto,
   SignalExecutionDto,
@@ -40,7 +49,11 @@ import type {
   FlattenResultDto,
   MonitorSnapshotDto,
   MonitorConfigDto,
+  RadarBotConfigDto,
+  RadarBotStatusDto,
+  SessionProfileDto,
 } from "../types/index.ts";
+import { DEFAULT_PASSIVE_UNWIND } from "../types/index.ts";
 
 // Check if running inside Tauri IPC environment
 function isTauriEnvironment(): boolean {
@@ -68,8 +81,9 @@ export async function invokeDesktop<T>(
 }
 
 // Commands registered in the desktop invoke handler (src-tauri/src/main.rs).
-// Triangle scan/execute are intentionally absent: no authenticated three-leg
-// coordinator exists, so those API methods fail closed on desktop.
+// Triangle scan/execute and the spatial convergence check are native
+// paper-only commands; in the browser they fail closed with the
+// desktop-required error instead of serving synthetic data.
 const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_system_status",
   "refresh_venue_latencies",
@@ -79,6 +93,9 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_signal_series",
   "get_matrix_baselines",
   "scan_spatial_opportunities",
+  "scan_triangle_opportunities",
+  "execute_triangle_arbitrage",
+  "check_spatial_convergence",
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
   "scan_funding_opportunities",
@@ -105,6 +122,12 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_strategy_params",
   "save_strategy_params",
   "get_all_strategy_params",
+  "get_strategy_tickers",
+  "get_account_equity_events",
+  "get_autotune_recommendation",
+  "apply_autotune_selected",
+  "run_seasonality_promotion",
+  "get_session_profile",
   "get_vault_status",
   "initialize_vault",
   "unlock_vault",
@@ -122,9 +145,21 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "eligible_strategy_routes",
   "get_venue_balances",
   "get_strategy_performance",
+  "get_strategy_fill_pnl",
+  "get_utilisation_history",
   "run_wfo_calibration",
   "flatten_ticker_positions",
   "execute_spatial_candidates",
+  "get_monitor_snapshot",
+  "get_monitor_config",
+  "set_monitor_config",
+  "set_ticker_exempted",
+  "get_exempted_tickers",
+  "reveal_all_tickers",
+  "execute_monitor_opportunity",
+  "get_radar_bot_config",
+  "set_radar_bot_config",
+  "get_radar_bot_status",
   "list_signal_executions",
   "get_ticker_position_state",
   "get_open_positions",
@@ -161,6 +196,227 @@ export function normalizeTickerStrategyConfig(c: any): TickerStrategyConfigDto {
     unitSize: Number(c.unitSize ?? c.unit_size ?? 0.005),
     userTargetLeverage: Number(c.userTargetLeverage ?? c.user_target_leverage ?? 5),
     slidingWindow,
+  };
+}
+
+export function normalizeStrategyParams(p: any): StrategyParamsDto {
+  const num = (v: unknown, fb: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
+  };
+  const optThreshold = (v: unknown): number | null => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+  const normalizePassive = (v: any): PassiveUnwindDto => {
+    if (!v || typeof v !== "object") return { ...DEFAULT_PASSIVE_UNWIND };
+    const b = { ...DEFAULT_PASSIVE_UNWIND };
+    return {
+      enabled: (v.enabled ?? false) === true,
+      spreadPercentile: num(v.spreadPercentile ?? v.spread_percentile, b.spreadPercentile),
+      timeoutSecs: Math.round(num(v.timeoutSecs ?? v.timeout_secs, b.timeoutSecs)),
+      maxTries: Math.round(num(v.maxTries ?? v.max_tries, b.maxTries)),
+      maxSpreadBps: num(v.maxSpreadBps ?? v.max_spread_bps, b.maxSpreadBps),
+      maxFastVolBps: num(v.maxFastVolBps ?? v.max_fast_vol_bps, b.maxFastVolBps),
+    };
+  };
+  if (!p) {
+    return {
+      strategyId: "futures",
+      targetProfitBps: 1.0,
+      windowPercentile: 50,
+      slidingWindow: "24h",
+      slidingWindowMode: "manual",
+      slidingWindowSecs: 86400,
+      stepSizeMult: 10,
+      maxStepUsd: 2500,
+      maxTickerEquityPct: 20,
+      executionMode: "SINGLE_WAY",
+      userTargetLeverage: 5,
+      autoMinVolumeUsd: null,
+      autoMinPriceUsd: null,
+      autoMinEventVolumeUsd: null,
+      fundingTradeSizeUsd: 25000,
+      fundingMinAprPct: 8.0,
+      fundingHoldingDays: 14,
+      futuresMaxSlippageBps: 15.0,
+      fundingMaxSlippageBps: 15.0,
+      predictionMaxSlippageBps: 15.0,
+      fundingMaxEntrySpreadBps: 50.0,
+      fundingAutoExitSpreadPct: null,
+      fundingLiqTrimPct: null,
+      fundingAutoRebalance: false,
+      fundingRotationThresholdBps: null,
+      futuresLiqTrimPct: null,
+      spotLiqTrimPct: null,
+      predictionLiqTrimPct: null,
+      spotTradeSizeUsd: 1000,
+      spotMaxSlippageBps: 5.0,
+      spotMinNetSpreadBps: 15.0,
+      futuresPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
+      fundingPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
+      spotPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
+    };
+  }
+  return {
+    strategyId: p.strategyId ?? p.strategy_id ?? "futures",
+    targetProfitBps: num(p.targetProfitBps ?? p.target_profit_bps, 1.0),
+    windowPercentile: num(p.windowPercentile ?? p.window_percentile, 50),
+    slidingWindow: p.slidingWindow ?? p.sliding_window ?? "24h",
+    slidingWindowMode: p.slidingWindowMode === "auto" ? "auto" : "manual",
+    slidingWindowSecs: num(p.slidingWindowSecs ?? p.sliding_window_secs, 86400),
+    stepSizeMult: num(p.stepSizeMult ?? p.step_size_mult, 10),
+    maxStepUsd: num(p.maxStepUsd ?? p.max_step_usd, 2500),
+    maxTickerEquityPct: num(p.maxTickerEquityPct ?? p.max_ticker_equity_pct, 20),
+    executionMode: p.executionMode || p.execution_mode || "SINGLE_WAY",
+    userTargetLeverage: num(p.userTargetLeverage ?? p.user_target_leverage, 5),
+    autoMinVolumeUsd: optThreshold(p.autoMinVolumeUsd ?? p.auto_min_volume_usd),
+    autoMinPriceUsd: optThreshold(p.autoMinPriceUsd ?? p.auto_min_price_usd),
+    autoMinEventVolumeUsd: optThreshold(p.autoMinEventVolumeUsd ?? p.auto_min_event_volume_usd),
+    fundingTradeSizeUsd: num(p.fundingTradeSizeUsd ?? p.funding_trade_size_usd, 25000),
+    fundingMinAprPct: num(p.fundingMinAprPct ?? p.funding_min_apr_pct, 8.0),
+    fundingHoldingDays: num(p.fundingHoldingDays ?? p.funding_holding_days, 14),
+    futuresMaxSlippageBps: num(p.futuresMaxSlippageBps ?? p.futures_max_slippage_bps, 15.0),
+    fundingMaxSlippageBps: num(p.fundingMaxSlippageBps ?? p.funding_max_slippage_bps, 15.0),
+    predictionMaxSlippageBps: num(p.predictionMaxSlippageBps ?? p.prediction_max_slippage_bps, 15.0),
+    fundingMaxEntrySpreadBps: num(p.fundingMaxEntrySpreadBps ?? p.funding_max_entry_spread_bps, 50.0),
+    fundingAutoExitSpreadPct: optThreshold(p.fundingAutoExitSpreadPct ?? p.funding_auto_exit_spread_pct),
+    fundingLiqTrimPct: optThreshold(p.fundingLiqTrimPct ?? p.funding_liq_trim_pct),
+    fundingAutoRebalance: (p.fundingAutoRebalance ?? p.funding_auto_rebalance) === true,
+    fundingRotationThresholdBps: optThreshold(p.fundingRotationThresholdBps ?? p.funding_rotation_threshold_bps),
+    futuresLiqTrimPct: optThreshold(p.futuresLiqTrimPct ?? p.futures_liq_trim_pct),
+    spotLiqTrimPct: optThreshold(p.spotLiqTrimPct ?? p.spot_liq_trim_pct),
+    predictionLiqTrimPct: optThreshold(p.predictionLiqTrimPct ?? p.prediction_liq_trim_pct),
+    spotTradeSizeUsd: num(p.spotTradeSizeUsd ?? p.spot_trade_size_usd, 1000),
+    spotMaxSlippageBps: num(p.spotMaxSlippageBps ?? p.spot_max_slippage_bps, 5.0),
+    spotMinNetSpreadBps: num(p.spotMinNetSpreadBps ?? p.spot_min_net_spread_bps, 15.0),
+    futuresPassiveUnwind: normalizePassive(p.futuresPassiveUnwind ?? p.futures_passive_unwind),
+    fundingPassiveUnwind: normalizePassive(p.fundingPassiveUnwind ?? p.funding_passive_unwind),
+    spotPassiveUnwind: normalizePassive(p.spotPassiveUnwind ?? p.spot_passive_unwind),
+  };
+}
+
+export function normalizeStrategyTicker(r: any): StrategyTickerDto {
+  return {
+    base: String(r?.base ?? r?.symbol ?? "").toUpperCase(),
+    venues: Array.isArray(r?.venues) ? r.venues.filter((v: unknown) => typeof v === "string") : [],
+    passes: r?.passes !== false,
+    blockReason: typeof (r?.blockReason ?? r?.block_reason) === "string"
+      ? (r.blockReason ?? r.block_reason)
+      : null,
+  };
+}
+
+export function normalizeEquityEvent(e: any): AccountEquityEventDto {
+  return {
+    id: Number(e?.id ?? 0),
+    accountId: String(e?.accountId ?? e?.account_id ?? ""),
+    tsMs: Number(e?.tsMs ?? e?.ts_ms ?? 0),
+    expected: Number(e?.expected ?? 0),
+    actual: Number(e?.actual ?? 0),
+    delta: Number(e?.delta ?? 0),
+    kind: String(e?.kind ?? "unknown"),
+    note: typeof e?.note === "string" ? e.note : "",
+  };
+}
+
+export const AUTOTUNE_PARAMS = [  "slidingWindowSecs",
+  "targetProfitBps",
+  "windowPercentile",
+  "stepSizeMult",
+  "maxStepUsd",
+  "maxTickerEquityPct",
+  "userTargetLeverage",
+] as const;
+
+export function normalizeAutotuneRecommendation(r: any, symbol: string): AutotuneRecommendationDto {
+  const num = (v: unknown, fb: number): number => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fb;
+  };
+  const rows = Array.isArray(r?.rows) ? r.rows : [];
+  const byParam = new Map<string, any>(rows.map((row: any) => [row?.param, row]));
+  const normRows = AUTOTUNE_PARAMS.map((param) => {
+    const row: any = byParam.get(param) ?? {};
+    const rawRec = Number(row.recommended);
+    // READY with a non-numeric recommendation is a backend bug — demote to
+    // HELD rather than render a fabricated row.
+    const status: "READY" | "HELD" =
+      row.status === "READY" && Number.isFinite(rawRec) ? "READY" : "HELD";
+    const recommended = status === "READY" ? rawRec : null;
+    return {
+      param,
+      current: num(row.current, 0),
+      recommended,
+      status,
+      fit_metric: typeof row.fit_metric === "string" ? row.fit_metric : "n/a",
+      validated_metric:
+        typeof row.validated_metric === "string" ? row.validated_metric : "n/a",
+      n: Math.max(0, Math.floor(num(row.n, 0))),
+      rationale: typeof row.rationale === "string" ? row.rationale : "held",
+      formula_id: typeof row.formula_id === "string" ? row.formula_id : param,
+      confidence: typeof row.confidence === "string" ? row.confidence : "low",
+    };
+  });
+  const banner = r?.banner ?? {};
+  const readyCount = normRows.filter((row) => row.status === "READY").length;
+  const scale = (v: unknown): number => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 1.0;
+  };
+  return {
+    symbol: typeof r?.symbol === "string" ? r.symbol : symbol,
+    buy_venue: typeof r?.buy_venue === "string" ? r.buy_venue : null,
+    sell_venue: typeof r?.sell_venue === "string" ? r.sell_venue : null,
+    pair_observations: Math.max(0, Math.floor(num(r?.pair_observations, 0))),
+    rows: normRows,
+    banner: {
+      fit_from_ms: Math.floor(num(banner.fit_from_ms, 0)),
+      fit_to_ms: Math.floor(num(banner.fit_to_ms, 0)),
+      validate_from_ms: Math.floor(num(banner.validate_from_ms, 0)),
+      validate_to_ms: Math.floor(num(banner.validate_to_ms, 0)),
+      regime_verdict:
+        typeof banner.regime_verdict === "string" ? banner.regime_verdict : "INSUFFICIENT",
+      ready_count: readyCount,
+      total: normRows.length,
+    },
+    session_tau_scale: scale(r?.session_tau_scale ?? r?.sessionTauScale),
+    session_sigma_scale: scale(r?.session_sigma_scale ?? r?.sessionSigmaScale),
+  };
+}
+
+export function normalizeSessionProfile(p: any, symbol: string): SessionProfileDto {
+  const sessions = Array.isArray(p?.sessions) ? p.sessions : [];
+  const promo = p?.promotion;
+  return {
+    symbol: typeof p?.symbol === "string" ? p.symbol : symbol,
+    currentSession: typeof p?.currentSession === "string" ? p.currentSession : "dead",
+    isWeekend: p?.isWeekend === true,
+    inFundingMask: p?.inFundingMask === true,
+    usCashOpen: p?.usCashOpen === true,
+    sessionAllow: Number.isFinite(Number(p?.sessionAllow)) ? Number(p.sessionAllow) : 1.0,
+    provisional: p?.provisional !== false,
+    sessions: sessions.map((s: any) => ({
+      sessionId: typeof s?.sessionId === "string" ? s.sessionId : "?",
+      nEpisodes: Math.max(0, Math.floor(Number(s?.nEpisodes) || 0)),
+      medAbsSpreadBps: Number.isFinite(Number(s?.medAbsSpreadBps)) ? Number(s.medAbsSpreadBps) : null,
+      p90SpreadBps: Number.isFinite(Number(s?.p90SpreadBps)) ? Number(s.p90SpreadBps) : null,
+      rvBps: Number.isFinite(Number(s?.rvBps)) ? Number(s.rvBps) : null,
+      winRate: Number.isFinite(Number(s?.winRate)) ? Number(s.winRate) : null,
+      meanHoldS: Number.isFinite(Number(s?.meanHoldS)) ? Number(s.meanHoldS) : null,
+      provisional: s?.provisional !== false,
+    })),
+    promotion:
+      promo != null && typeof promo === "object"
+        ? {
+            status: typeof promo.status === "string" ? promo.status : "held",
+            fitDeltaBps: Number.isFinite(Number(promo.fitDeltaBps)) ? Number(promo.fitDeltaBps) : 0,
+            valDeltaBps: Number.isFinite(Number(promo.valDeltaBps)) ? Number(promo.valDeltaBps) : 0,
+            reason: typeof promo.reason === "string" ? promo.reason : "",
+            harR2: Number.isFinite(Number(promo.harR2)) ? Number(promo.harR2) : null,
+            rescaled: promo.rescaled === true,
+          }
+        : null,
   };
 }
 
@@ -224,19 +480,23 @@ export const api = {
   },
 
   async scanTriangleOpportunities(filterAsset?: string): Promise<TriangleOpportunityDto[]> {
-    const tauri = await getTauriCore();
-    if (!tauri) throw new Error(DESKTOP_REQUIRED_ERROR);
-    if (!nativeCommandAvailable("scan_triangle_opportunities")) return [];
-    return tauri.invoke<TriangleOpportunityDto[]>("scan_triangle_opportunities", { filterAsset });
+    return invokeDesktop<TriangleOpportunityDto[]>("scan_triangle_opportunities", {
+      filterAsset: filterAsset ?? "",
+    });
   },
 
   async executeTriangleArbitrage(params: TriangleExecutionParams): Promise<SimStepResultDto> {
-    const tauri = await getTauriCore();
-    if (!tauri) throw new Error(DESKTOP_REQUIRED_ERROR);
-    if (!nativeCommandAvailable("execute_triangle_arbitrage")) {
-      throw new Error("Native triangular execution is unavailable until an authenticated three-leg coordinator is implemented");
-    }
-    return tauri.invoke<SimStepResultDto>("execute_triangle_arbitrage", { params });
+    return invokeDesktop<SimStepResultDto>("execute_triangle_arbitrage", { params });
+  },
+
+  async checkSpatialConvergence(
+    symbol: string | null,
+    strategyId: string,
+  ): Promise<ConvergenceCheckDto[]> {
+    return invokeDesktop<ConvergenceCheckDto[]>("check_spatial_convergence", {
+      symbol,
+      strategyId,
+    });
   },
 
   async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
@@ -381,7 +641,8 @@ export const api = {
   },
 
   async getStrategyParams(strategyId: string): Promise<StrategyParamsDto> {
-    return invokeDesktop<StrategyParamsDto>("get_strategy_params", { strategyId });
+    const res = await invokeDesktop<StrategyParamsDto>("get_strategy_params", { strategyId });
+    return normalizeStrategyParams(res);
   },
 
   async saveStrategyParams(params: StrategyParamsDto): Promise<void> {
@@ -389,7 +650,51 @@ export const api = {
   },
 
   async getAllStrategyParams(): Promise<StrategyParamsDto[]> {
-    return invokeDesktop<StrategyParamsDto[]>("get_all_strategy_params");
+    const res = await invokeDesktop<StrategyParamsDto[]>("get_all_strategy_params");
+    return (res || []).map(normalizeStrategyParams);
+  },
+
+  async getAutotuneRecommendation(symbol: string): Promise<AutotuneRecommendationDto> {
+    const res = await invokeDesktop<AutotuneRecommendationDto>("get_autotune_recommendation", {
+      symbol,
+    });
+    return normalizeAutotuneRecommendation(res, symbol);
+  },
+
+  async applyAutotuneSelected(symbol: string, selected: string[]): Promise<AutotuneApplyResultDto> {
+    const res = await invokeDesktop<AutotuneApplyResultDto>("apply_autotune_selected", {
+      symbol,
+      selected,
+    });
+    const applied = Array.isArray(res?.applied) ? res.applied.filter((p) => typeof p === "string") : [];
+    const skipped = Array.isArray(res?.skipped_held)
+      ? res.skipped_held.filter((p) => typeof p === "string")
+      : [];
+    return {
+      symbol: typeof res?.symbol === "string" ? res.symbol : symbol,
+      applied,
+      skipped_held: skipped,
+      audit_id: Number.isFinite(Number(res?.audit_id)) ? Number(res.audit_id) : null,
+    };
+  },
+
+  async runSeasonalityPromotion(): Promise<SeasonalityRunSummaryDto> {
+    const res = await invokeDesktop<Record<string, number | null | undefined>>(
+      "run_seasonality_promotion",
+    );
+    const num = (v: unknown): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+    return {
+      symbolsScanned: Math.max(0, Math.floor(num(res?.symbolsScanned ?? res?.symbols_scanned))),
+      anchorsWritten: Math.max(0, Math.floor(num(res?.anchorsWritten ?? res?.anchors_written))),
+      promoted: Math.max(0, Math.floor(num(res?.promoted))),
+      demoted: Math.max(0, Math.floor(num(res?.demoted))),
+      held: Math.max(0, Math.floor(num(res?.held))),
+      skipped: Math.max(0, Math.floor(num(res?.skipped))),
+      runTsMs: Math.max(0, Math.floor(num(res?.runTsMs ?? res?.run_ts_ms))),
+    };
   },
 
   async getVaultStatus(): Promise<VaultStatus> {
@@ -497,6 +802,17 @@ export const api = {
     return invokeDesktop<StrategyMetrics[]>("get_strategy_performance", { strategyId });
   },
 
+  async getStrategyFillPnl(strategyId: string): Promise<StrategyFillPnl> {
+    return invokeDesktop<StrategyFillPnl>("get_strategy_fill_pnl", { strategyId });
+  },
+
+  async getUtilisationHistory(venue: string, windowHours?: number): Promise<UtilisationHistory> {
+    return invokeDesktop<UtilisationHistory>("get_utilisation_history", {
+      venue,
+      windowHours: windowHours ?? null,
+    });
+  },
+
   async runWfoCalibration(symbol: string): Promise<WfoOptimizationResult> {
     return invokeDesktop<WfoOptimizationResult>("run_wfo_calibration", { symbol });
   },
@@ -526,6 +842,19 @@ export const api = {
     return invokeDesktop<number>("reveal_all_tickers");
   },
 
+  async getStrategyTickers(strategyId: string): Promise<StrategyTickerDto[]> {
+    const res = await invokeDesktop<any[]>("get_strategy_tickers", { strategyId });
+    return (res || []).map(normalizeStrategyTicker);
+  },
+
+  async getAccountEquityEvents(accountId?: string, limit?: number): Promise<AccountEquityEventDto[]> {
+    const res = await invokeDesktop<any[]>("get_account_equity_events", {
+      accountId: accountId ?? null,
+      limit: limit ?? null,
+    });
+    return (res || []).map(normalizeEquityEvent);
+  },
+
   async executeMonitorOpportunity(
     symbol: string,
     buyVenue: string,
@@ -538,6 +867,25 @@ export const api = {
       sellVenue,
       sizeUsd,
     });
+  },
+
+  // ---- Autonomous convergence bot (opt-in, paper-only) ----
+  async getRadarBotConfig(): Promise<RadarBotConfigDto> {
+    return invokeDesktop<RadarBotConfigDto>("get_radar_bot_config");
+  },
+
+  async setRadarBotConfig(config: RadarBotConfigDto): Promise<void> {
+    return invokeDesktop<void>("set_radar_bot_config", { config });
+  },
+
+  async getRadarBotStatus(): Promise<RadarBotStatusDto> {
+    return invokeDesktop<RadarBotStatusDto>("get_radar_bot_status");
+  },
+
+  // ---- Session seasonality (Phase 1, display only) ----
+  async getSessionProfile(symbol: string): Promise<SessionProfileDto> {
+    const res = await invokeDesktop<SessionProfileDto>("get_session_profile", { symbol });
+    return normalizeSessionProfile(res, symbol);
   },
 };
 

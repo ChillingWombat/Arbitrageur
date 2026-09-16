@@ -536,5 +536,146 @@ Deliberately kept `rounded-lg`: card panels, list tiles (exchange rows, position
 **Working tree state & open items**: (1) everything above is uncommitted local work — no PR/merge state; (2) Vite Fast Refresh warnings persist for non-component exports (`EXCHANGES_ALPHABETICAL`, `ACCOUNT_CREDENTIAL_FIELDS`) — cosmetic, non-blocking; (3) `get_market_quotes` per-quote `fee_bps` still uses the base schedule (display-only, not execution economics); (4) dev env relaunched this session via `pixi run desktop` after a stale Vite held :1420 — kill stray `vite` processes before relaunching.
 
 ---
+
+## 10. Session Handoff — 2026-09-16 (WS Feeds, Durable Retention, Radar Canon, Venue Short Names)
+
+### 10.1 Theme
+Two user-driven workstreams: (a) price ingestion moves WebSocket-first with
+REST fallback plus always-on history under user-controlled retention;
+(b) visual consistency sweep (radar configurator canon, short venue names,
+legend/ticker cleanups from prior turns).
+
+### 10.2 WebSocket feeds + retention (spec `SPEC_WS_FEED_AND_RETENTION.md`)
+- Rate-limit truth verified against live venue docs: WS does not bypass
+  limits (Lighter rate-limits WS alongside abused REST) — it relieves them
+  (Lighter books cost 2 REST slots today; HL one info conn/IP push-on-change;
+  Orderly ~1 s snapshot pushes at `wss://ws-evm.orderly.org/ws/stream/{account_id}`).
+- New `crates/arbitrager-exchanges/src/ws.rs` (pure parse helpers, fixture
+  tests) + `frontend/src-tauri/src/feed.rs` per-venue supervisors writing to
+  `MarketDataHub`; REST `fetch_orderbooks_impl` untouched as fallback;
+  disconnects go `stale` via hub TTL. Vanta WS skipped without account_id.
+- Retention: `spread_samples_max_days`/`spread_samples_max_gb` (`None` =
+  unlimited, `0`→`None`) on `EngineSettingsDto` + TS mirror, V7 `kv` table,
+  boot-load, hourly enforce (time cutoff + `page_count×page_size` batch
+  evict); Execution-tab Historical Price Data card. Replaces hardcoded
+  30-day/4M-row prune.
+- Fail-closed throughout; live execution still disabled.
+
+### 10.3 Radar configurator canon + venue short names
+- `OpportunityRadar` drawer + ribbon recomposed to `TickerConfigModal` /
+  `FundingRadar` canon (modal chrome, section sidebar, gadget cards,
+  SwitchToggle, InfoTooltips, Reset Defaults, ribbon chips + action group).
+- `get_venues` display names shortened (`Hyperliquid`, `Lighter`,
+  `Robinhood Lighter`, `Vanta`); long forms kept as `canonical_venue_id`
+  aliases. Follow-ups from prior turns also landed: hover-synced legend
+  (no side box, no Buy/Sell tags), ticker toggle + Off badge + sliders
+  button removed, right-click hide, tab typography step-down.
+
+### 10.4 Verification (all green at handoff)
+`cargo test --workspace` (263 pass incl. 142 desktop + 44 exchanges),
+`cargo clippy --workspace -- -D warnings` clean, `tsc --noEmit` clean,
+`npm test` 71 pass. Working tree uncommitted; rebuild desktop binary before
+relaunching.
+
+---
+
+## 11. Session Handoff — 2026-09-16 (Aster, Ondo Perps, GRVT, edgeX Venue Support)
+
+New adapters in `crates/arbitrager-exchanges/src/`: `aster.rs` (fapi/v3,
+quote parsed from exchangeInfo — USDT/USD1/U, never hardcoded),
+`ondoperps.rs` (`BASE→BASE-USD.P`, `success:true` envelope, 1100 ms
+coordinator), `grvt.rs` (depth allowlist {10,50,100} per live 3031 probe),
+`edgex.rs` (docs-derived paths, live host `edgex-prod-v2.edgex.exchange`,
+metadata-resolved contract ids). All REST-only (WS stubbed),
+account/order/leverage fail-closed. Admitted to `get_venues`: Aster + Ondo
+Perps (both serve live public books, probed 2026-09-15). GRVT/edgeX wired
+(probes, fees, accounts UI) but unadmitted pending payload-shape
+verification. Ondo Finance proper (USDY/OUSG mint-redeem) is NOT an exchange
+— documented only (§9 of integration guide). Fees: aster/ondo 3.5,
+grvt 2.0, edgex 4.5 BPS. Verification: workspace 291 pass (142 desktop +
+72 exchanges), clippy clean, tsc clean, npm 71 pass. Uncommitted; rebuild
+desktop binary before relaunching.
+
+---
+
+## 12. Session Handoff — 2026-09-16 (Equity-Bounded Step Sizing)
+
+`StrategyParamsDto` drops authored `unit_size_usd`/`max_accumulated_units`
+for `step_size_mult` (× venue min lot, default 10), `max_step_usd` (cap,
+default $2,500, lower wins, quantized up to venue step, floored at
+min-compatible), and `max_ticker_equity_pct` (default 2% of total paper
+equity). Max steps auto-derive: `max(1, floor(equity×pct/stepUsd))`,
+read-only in Sizing & Grid alongside the effective-step preview.
+Canonical `deriveStepSizing` feeds both scan and execution qty; backend
+`execute_spatial_arbitrage_inner` now enforces the grid cap fail-fast
+(previously accepted-but-ignored `max_units`). Accumulated-units lifecycle
+unchanged. Verification: workspace 297 pass (146 desktop + 72 exchanges),
+clippy clean, tsc clean, npm 77 pass. Uncommitted; rebuild desktop binary
+before relaunching.
+
+---
+
+## 13. Session Handoff — 2026-09-16 (Auto-Tune Phase 1, Recommend-Only)
+
+New pure module `crates/arbitrager-math/src/autotune.rs`: 70/30
+chronological walk-forward over alias-aware spread history; 7 candidates
+fit-only (window 2×OU half-life; target friction+margin; percentile
+inverted-CDF snapped down; step/maxStep from capacity ladder + 0.5%
+participation cap; equity inverse-vol [2,20]; leverage decrease-only);
+per-parameter validation (E[net]>0 + Wilson-lower P_win, R²/half-life
+stability, regime gate aborts-all); rejects stay HELD on manual values,
+never fabricated. IPC `get_autotune_recommendation(symbol)` (live-book
+ladder from hub cache only, no network). UI: Auto-tune button in futures
+hurdle header (disabled <24h history or zero qualifying pairs), read-only
+`AutotunePreviewModal` with fit-vs-validated rows + Copy/Close only — no
+auto-apply writes. Prerequisite fix included: reset default
+`maxTickerEquityPct` 2→20 to match `defaults_for`. Verification: 14 Rust
+suites ok, clippy `--all-targets -D warnings` clean, tsc clean, npm
+83 pass. Phase 2 (one-click apply) gated on Phase-1 acceptance data; no
+schedules or background recalibration. Uncommitted; rebuild desktop binary
+before relaunching.
+
+---
+
+## 14. Session Handoff — 2026-09-16 (Session-Aware Seasonality, Phase 1)
+
+New `arbitrager-math/src/session.rs`: UTC session clock (Asia 00–08 /
+Europe 08–13 / overlap 13–17 / US-late 17–22 / dead 22–24 + weekend),
+funding masks (±120s around 00/08/16 + 04/12/20 + hourly), DST-aware US
+cash hours + seeded NYSE holidays, winsorized empirical-Bayes shrinkage
+(n0=150, provisional flags, weekend 2× floors), EWMA fast vol (λ=0.96).
+Migration V8: `venue_volume_samples` (sampler on volume refresh) +
+`session_profiles`/`session_hour_bins` (hourly 7-day rollup, prune-safe,
+alias-normalized). Monitor `evaluate_pair`: additive entry adjust (2×
+cap), sizing via allow × inverse-vol × depth, confidence gate,
+stand-downs with explicit block reasons (funding → Ondo-closed → 3×
+median → fast-vol halve-then-halt). IPC `get_session_profile` + Radar
+badge/column, SignalTrend regime overlay, configurator SessionProfileCard
+(display only). Verification: 348 Rust tests pass, clippy all-targets
+clean, tsc clean, npm 93 pass. Profiles need a week of accumulation
+before promotion review; Phase 2 (HAR anchor, autotune coupling) later.
+Uncommitted; rebuild desktop binary before relaunching.
+
+---
+
+## 15. Session Handoff — 2026-09-16 (Gap-Closure Program)
+
+Closed GitHub #1/#2/#4/#6/#7 (verified story-by-story) and #5 (bot
+built); #3 left open (presets + full analytics scope remain). Win
+probability wired into scan (shared episode/OU helper, informational).
+GRVT + edgeX live-verified and admitted (8 paper venues; portfolios
+rebased 600k→800k). Two-way exits now depth-walked; signal audit log
+(v9). Autonomous convergence bot (paper-only, opt-in, gated entries,
+managed exits, full audit; v11 positions; fixed radar ledger CHECK).
+Seasonality Phase 2 (HAR anchor, promotion scheduler) + autotune
+one-click apply (v12). Triangle backend (native scan/execute, paper);
+convergence lifecycle with entry baselines (v13) — one-pair cap kept by
+design (shared paper margin can't attribute per pair). Cloud deploy
+bundle (ops/deploy: systemd template, env sample, backup, runbook).
+Also: WAF-challenge cool-down (30m) ending the retry storm; WS-primary
+(provenance + single-flight + jitter). Verification: 459 workspace tests
+pass, clippy all-targets clean, tsc clean, npm 103 pass. Uncommitted;
+rebuild desktop binary before relaunching.
+
 ---
 *Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*

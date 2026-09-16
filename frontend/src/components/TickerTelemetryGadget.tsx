@@ -6,11 +6,17 @@ import { formatCurrencyPnl } from "../types/tickers";
 interface TickerTelemetryGadgetProps {
   symbol: string;
   logs: ExecutionLogEntry[];
+  routeHurdleBps?: number | null;
+  gridCurrentUnits?: number;
+  gridMaxUnits?: number;
 }
 
 export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
   symbol,
   logs,
+  routeHurdleBps = null,
+  gridCurrentUnits = 0,
+  gridMaxUnits = 0,
 }) => {
   // All executions for this ticker (unfiltered — telemetry aggregates everything)
   const tickerLogs = useMemo(() => {
@@ -60,7 +66,7 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
   return (
     <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs transition">
       {/* Ticker KPI Summary Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 text-xs font-mono">
         <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
           <div className="text-xs text-slate-500 tracking-wider font-semibold">Total Trades</div>
           <div className="text-sm font-bold text-slate-900 mt-1">
@@ -98,6 +104,20 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
           <div className="text-xs text-slate-500 tracking-wider font-semibold">Spread Dislocation Δ</div>
           <div className={`text-sm font-bold mt-1 ${metrics.avgDislocation >= 0 ? "text-emerald-700" : "text-slate-700"}`}>
             {metrics.avgDislocation !== 0 ? `+${metrics.avgDislocation.toFixed(1)} BPS` : "—"}
+          </div>
+        </div>
+
+        <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Hurdle</div>
+          <div className="text-sm font-bold text-slate-900 mt-1">
+            {routeHurdleBps != null ? `${routeHurdleBps.toFixed(1)} BPS` : "—"}
+          </div>
+        </div>
+
+        <div className="bg-surface-raised border border-surface-border rounded-md p-2.5">
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Grid Status</div>
+          <div className="text-sm font-bold text-slate-900 mt-1">
+                  {gridCurrentUnits}/{gridMaxUnits} steps
           </div>
         </div>
       </div>

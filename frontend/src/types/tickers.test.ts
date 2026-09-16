@@ -6,6 +6,9 @@ import {
   getEnabledConnectedVenueCodes,
   getTickerActiveVenues,
   getTickerAvgVolumeUsd,
+  getTickerMinVolumeUsd,
+  autoFilterBlockReason,
+  applyTickerVisibility,
   filterAvailableTickers,
   applyMarketUniverse,
   tickerUnavailabilityReason,
@@ -18,7 +21,7 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT in paper mode", () => {
+test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT/AST/ONDO/GRVT/EDGX in paper mode", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
@@ -29,12 +32,16 @@ test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT in paper 
     robinhood_enabled: true,
     arcus_enabled: true,
     popdex_enabled: true,
+    aster_enabled: true,
+    ondoperps_enabled: true,
+    grvt_enabled: true, // admitted to paper read-only
+    edgex_enabled: true, // admitted to paper read-only
     kraken_enabled: true,
     polymarket_enabled: true,
     kalshi_enabled: true,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT", "RH", "VNT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "EDGX", "GRVT", "HL", "LGT", "ONDO", "RH", "VNT"]);
 });
 
 test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {
@@ -307,4 +314,102 @@ test("applyMarketUniverse admits a ticker listed by two real venues", () => {
   ]);
   assert.strictEqual(out.length, 1);
   assert.deepStrictEqual(out[0].venues.sort(), ["HL", "RH"]);
+});
+
+test("getTickerMinVolumeUsd takes the MIN across in-scope venues", () => {
+  const vols = [
+    { venue_id: "hyperliquid", volumes: { BTC: 1_000_000_000 } },
+    { venue_id: "lighter", volumes: { BTC: 50_000 } },
+  ];
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "lighter"], vols), 50_000);
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid"], vols), 1_000_000_000);
+});
+
+test("getTickerMinVolumeUsd excludes on any missing venue (fail-closed)", () => {
+  const vols = [{ venue_id: "hyperliquid", volumes: { BTC: 1_000_000 } }];
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "vanta"], vols), undefined);
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "lighter"], vols), undefined);
+  assert.strictEqual(
+    getTickerMinVolumeUsd("BTC", ["hyperliquid"], [{ venue_id: "hyperliquid", volumes: { ETH: 5 } }]),
+    undefined
+  );
+});
+
+test("getTickerMinVolumeUsd honors K/1000 normalization like the mean helper", () => {
+  const vols: { venue_id: string; volumes: Record<string, number> }[] = [
+    { venue_id: "hyperliquid", volumes: { kPEPE: 12_000_000 } },
+    { venue_id: "lighter", volumes: { PEPE: 8_000_000 } },
+  ];
+  assert.strictEqual(getTickerMinVolumeUsd("PEPE", ["hyperliquid", "lighter"], vols), 8_000_000);
+});
+
+test("autoFilterBlockReason enforces MIN volume and MIN mid with missing-metric exclusion", () => {
+  const vols = [
+    { venue_id: "hyperliquid", volumes: { BTC: 1_000_000 } },
+    { venue_id: "lighter", volumes: { BTC: 900_000 } },
+  ];
+  const scope = ["hyperliquid", "lighter"];
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100, lighter: 101 }, { minVolumeUsd: 500_000, minPriceUsd: 50 }),
+    null
+  );
+  assert.ok(
+    (autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100, lighter: 101 }, { minVolumeUsd: 950_000, minPriceUsd: null }) ?? "").includes("volume"),
+    "MIN aggregation must fail on the smaller venue"
+  );
+  assert.ok(
+    (autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100, lighter: 40 }, { minVolumeUsd: null, minPriceUsd: 50 }) ?? "").includes("price"),
+    "price uses the minimum mid"
+  );
+  assert.ok(
+    (autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100 }, { minVolumeUsd: null, minPriceUsd: 50 }) ?? "").includes("price"),
+    "missing mid excludes fail-closed"
+  );
+  assert.ok(
+    autoFilterBlockReason("BTC", ["hyperliquid", "vanta"], vols, { hyperliquid: 100, vanta: 100 }, { minVolumeUsd: 1, minPriceUsd: null }) !== null,
+    "missing venue volume excludes fail-closed"
+  );
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", scope, vols, {}, { minVolumeUsd: null, minPriceUsd: null }),
+    null,
+    "disabled filters always pass"
+  );
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", scope, vols, {}, { minVolumeUsd: 0, minPriceUsd: -1 }),
+    null,
+    "zero/negative thresholds are off"
+  );
+});
+
+test("autoFilterBlockReason ignores the inert prediction event-volume field", () => {
+  const vols = [{ venue_id: "hyperliquid", volumes: { BTC: 1 } }];
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", ["hyperliquid"], vols, { hyperliquid: 1 }, { minVolumeUsd: null, minPriceUsd: null }),
+    null
+  );
+});
+
+test("applyTickerVisibility applies manual AFTER auto and manages them separately", () => {
+  const universe: PerpTicker[] = [
+    { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT"], basePrice: 70000 },
+    { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT"], basePrice: 3000 },
+    { symbol: "SOL-USDC", base: "SOL", quote: "USDC", name: "Solana", venues: ["HL", "LGT"], basePrice: 100 },
+  ];
+  const auto = new Set(["ETH"]);
+  const manual = new Set(["SOL"]);
+  const out = applyTickerVisibility(universe, auto, manual);
+  assert.deepStrictEqual(out.map((t) => t.base), ["BTC"]);
+  assert.deepStrictEqual(applyTickerVisibility(universe, null, manual).map((t) => t.base), ["BTC", "ETH"]);
+  assert.deepStrictEqual(applyTickerVisibility(universe, auto, new Set()).map((t) => t.base), ["BTC", "SOL"]);
+  assert.deepStrictEqual(applyTickerVisibility(universe, new Set(["BTC", "ETH", "SOL"]), new Set()).length, 0);
+});
+
+test("manual hide UI lives in the Single Spread configurator, not EngineSettings", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const modal = await readFile(new URL("../components/TickerConfigModal.tsx", import.meta.url), "utf8");
+  const settings = await readFile(new URL("../components/EngineSettings.tsx", import.meta.url), "utf8");
+  for (const token of ["getExemptedTickers", "revealAllTickers", "Reveal All", "Hidden Tickers"]) {
+    assert.ok(modal.includes(token), `configurator must own ${token}`);
+    assert.ok(!settings.includes(token), `EngineSettings must not reference ${token}`);
+  }
 });

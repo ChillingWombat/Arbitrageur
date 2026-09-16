@@ -17,6 +17,8 @@ arbitrager-risk = { path = "../../crates/arbitrager-risk" }
 arbitrager-execution = { path = "../../crates/arbitrager-execution" }
 arbitrager-strategy = { path = "../../crates/arbitrager-strategy" }
 tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rust_decimal = { workspace = true }

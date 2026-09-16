@@ -74,7 +74,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
             />
           </div>
 
-          <div className="flex items-center bg-surface-raised p-0.5 rounded-md border border-surface-border text-xs font-mono">
+          <div className="flex items-center bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px] font-mono">
             <button
               onClick={() => setFilterStatus("ALL")}
               className={`px-2 py-1 rounded transition ${
@@ -117,9 +117,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
       {/* History Table */}
       <div className="mt-4 overflow-x-auto">
-        <table className="w-full text-left text-xs font-mono border-collapse">
+        <table className="w-full text-left text-[11px] font-mono border-collapse">
           <thead>
-            <tr className="border-b border-surface-border text-slate-500 text-xs tracking-wider bg-surface-raised/40">
+            <tr className="border-b border-surface-border text-slate-500 text-[11px] tracking-wider bg-surface-raised/40">
               <th className="py-2.5 px-3 font-semibold">DateTime</th>
               <th className="py-2.5 px-3 font-semibold">Direction & Action</th>
               <th className="py-2.5 px-3 font-semibold">Venues (Buy ➔ Sell)</th>
@@ -179,14 +179,14 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     {/* DateTime */}
                     <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
                       <div className="font-medium text-slate-900">{timeFormatted}</div>
-                      <div className="text-xs text-slate-400">{dateFormatted}</div>
+                      <div className="text-[11px] text-slate-400">{dateFormatted}</div>
                     </td>
 
                     {/* Direction & Action */}
                     <td className="py-2.5 px-3 whitespace-nowrap">
                       <div className="flex items-center space-x-1.5">
                         <span
-                          className={`px-2 py-0.5 rounded-sm text-xs font-mono font-medium border ${
+                          className={`px-2 py-0.5 rounded-sm text-[11px] font-mono font-medium border ${
                             isConvergence
                               ? "bg-emerald-50 text-emerald-700 border-emerald-200"
                               : isCarry
@@ -215,7 +215,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="font-bold text-slate-900">
                             {triggerSpread > 0 ? `+${triggerSpread.toFixed(1)}` : triggerSpread.toFixed(1)} BPS
                           </div>
-                          <div className="text-xs text-slate-400">instantaneous</div>
+                          <div className="text-[11px] text-slate-400">instantaneous</div>
                         </div>
                       ) : (
                         <span className="text-slate-400">—</span>
@@ -229,7 +229,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="text-slate-700 font-medium">{baselineMean.toFixed(1)} BPS</div>
                           {dislocation !== null && (
                             <div
-                              className={`text-xs font-medium ${
+                              className={`text-[11px] font-medium ${
                                 dislocation >= 0 ? "text-emerald-600" : "text-rose-600"
                               }`}
                             >
@@ -244,7 +244,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
                     {/* Position Step Number */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-center">
-                      <div className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-sm bg-surface-raised border border-surface-border text-xs font-mono font-medium text-slate-700">
+                      <div className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-sm bg-surface-raised border border-surface-border text-[11px] font-mono font-medium text-slate-700">
                         <Layers className="w-3 h-3 text-slate-400" />
                         <span>
                           Step {step} / {maxUnits}
@@ -259,7 +259,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="text-slate-700">{hurdle.toFixed(1)} BPS</div>
                           {hurdleBuffer !== null && (
                             <div
-                              className={`text-xs ${
+                              className={`text-[11px] ${
                                 hurdleBuffer >= 0 ? "text-emerald-600" : "text-rose-600"
                               }`}
                             >
@@ -277,7 +277,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                       <div className={`font-bold ${log.net_profit >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
                         {formatCurrencyPnl(log.net_profit)}
                       </div>
-                      <div className="text-xs text-slate-400">{log.latency_us} µs</div>
+                      <div className="text-[11px] text-slate-400">{log.latency_us} µs</div>
                     </td>
 
                     {/* Diagnostic Note / Status */}
@@ -288,7 +288,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                         ) : (
                           <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
                         )}
-                        <span className="truncate text-xs text-slate-600" title={log.note}>
+                        <span className="truncate text-[11px] text-slate-600" title={log.note}>
                           {log.note}
                         </span>
                       </div>

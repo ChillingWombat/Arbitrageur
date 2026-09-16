@@ -2,11 +2,13 @@ pub mod smart_routing;
 pub mod emergency_unwind;
 pub mod coordinator;
 pub mod virtual_ledger;
+pub mod passive_unwind;
 
 pub use smart_routing::*;
 pub use emergency_unwind::*;
 pub use coordinator::*;
 pub use virtual_ledger::*;
+pub use passive_unwind::*;
 
 #[cfg(test)]
 mod tests {
@@ -222,8 +224,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_incomplete_fills_unwind_both_legs() {
-        // Leg A partially fills 0.4 of 1.0; Leg B fills fully -> both nonzero fills unwound
+    async fn test_incomplete_fills_trim_to_matched_pair() {
+        // Leg A partially fills 0.4 of 1.0; Leg B fills fully -> B's 0.6
+        // excess is trimmed and the matched 0.4 pair stays open.
         let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
         let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
         let log_a = mock_a.call_log();
@@ -238,27 +241,49 @@ mod tests {
 
         let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
         match res {
-            ArbitrageExecutionResult::BothFailed { error_a, error_b } => {
-                assert!(error_a.contains("PartiallyFilled"), "error_a: {}", error_a);
-                assert!(error_a.contains("0.4/1"));
-                assert!(error_b.contains("unwound"), "error_b: {}", error_b);
+            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+                assert_eq!(matched_qty, dec!(0.4));
+                assert!(unwind_a.is_none());
+                assert_eq!(unwind_b.expect("B excess must trim").filled_qty, dec!(0.6));
             }
-            other => panic!("Expected BothFailed, got {:?}", other),
+            other => panic!("Expected PartialPairKept, got {:?}", other),
         }
         assert!(!cb.is_tripped());
 
-        // Both venues received the original order plus an opposite-side unwind
+        // A saw only its original order; B saw original plus the trim.
         let calls_a = log_a.lock().unwrap();
-        assert_eq!(calls_a.len(), 2);
+        assert_eq!(calls_a.len(), 1);
         assert_eq!(calls_a[0].side, Side::Buy);
-        assert_eq!(calls_a[1].side, Side::Sell);
-        assert_eq!(calls_a[1].quantity, dec!(0.4));
 
         let calls_b = log_b.lock().unwrap();
         assert_eq!(calls_b.len(), 2);
         assert_eq!(calls_b[0].side, Side::Sell);
         assert_eq!(calls_b[1].side, Side::Buy);
-        assert_eq!(calls_b[1].quantity, dec!(1.0));
+        assert_eq!(calls_b[1].quantity, dec!(0.6));
+    }
+
+    #[tokio::test]
+    async fn test_partial_pair_kept_includes_trim_price_pnl() {
+        // Same shape as above: A buys 0.4 @60000, B sells 1.0 @60100, the
+        // 0.6 short excess is bought back by the market trim (mock: @100).
+        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, _) = make_coordinator();
+
+        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
+        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+
+        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        match res {
+            ArbitrageExecutionResult::PartialPairKept { matched_qty, realized_profit, .. } => {
+                assert_eq!(matched_qty, dec!(0.4));
+                assert_eq!(realized_profit, dec!(36000) - dec!(0.3));
+            }
+            other => panic!("Expected PartialPairKept, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -537,5 +562,91 @@ mod tests {
         let mut bad_unwind = filled_response("ex_a", "BTC-USDC", dec!(1.0));
         bad_unwind.client_order_id = "not-the-unwind-order".into();
         assert_bad_unwind_unresolved(bad_unwind).await;
+    }
+
+    #[tokio::test]
+    async fn test_both_partial_keeps_min_fill() {
+        // A 0.4/1.0, B 0.6/1.0: matched 0.4 kept; only B's 0.2 excess unwinds.
+        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let log_a = mock_a.call_log();
+        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Partial(dec!(0.6))], MockResponse::Full);
+        let log_b = mock_b.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
+        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+
+        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        match res {
+            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+                assert_eq!(matched_qty, dec!(0.4));
+                assert!(unwind_a.is_none());
+                assert_eq!(unwind_b.expect("B excess must trim").filled_qty, dec!(0.2));
+            }
+            other => panic!("Expected PartialPairKept, got {:?}", other),
+        }
+        assert!(!cb.is_tripped());
+        assert_eq!(log_a.lock().unwrap().len(), 1);
+        let calls_b = log_b.lock().unwrap();
+        assert_eq!(calls_b.len(), 2);
+        assert_eq!(calls_b[1].quantity, dec!(0.2));
+    }
+
+    #[tokio::test]
+    async fn test_trim_of_excess_failure_is_unresolved_exposure() {
+        // A partial 0.4, B full 1.0, but B's 0.6 trim fails outright.
+        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_b = MockExchange::new(
+            "ex_b",
+            vec![MockResponse::Full, MockResponse::Fail],
+            MockResponse::Fail,
+        );
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
+        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+
+        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        match res {
+            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, leg_b_fill, error_b, .. } => {
+                assert_eq!(leg_a_fill.expect("A fill reported").filled_qty, dec!(0.4));
+                assert_eq!(leg_b_fill.expect("B fill reported").filled_qty, dec!(1.0));
+                assert!(error_b.contains("unwind failed"), "error_b: {}", error_b);
+            }
+            other => panic!("Expected UnresolvedExposure, got {:?}", other),
+        }
+        assert!(cb.is_tripped());
+    }
+
+    #[tokio::test]
+    async fn test_equal_partial_fills_keep_pair_without_trim() {
+        // Both legs partial at the same 0.4: matched 0.4, no excess to trim.
+        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let log_a = mock_a.call_log();
+        let log_b = mock_b.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
+        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+
+        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        match res {
+            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+                assert_eq!(matched_qty, dec!(0.4));
+                assert!(unwind_a.is_none());
+                assert!(unwind_b.is_none());
+            }
+            other => panic!("Expected PartialPairKept, got {:?}", other),
+        }
+        assert!(!cb.is_tripped());
+        assert_eq!(log_a.lock().unwrap().len(), 1);
+        assert_eq!(log_b.lock().unwrap().len(), 1);
     }
 }

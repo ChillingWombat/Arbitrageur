@@ -14,12 +14,17 @@ import {
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
+import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
 import { formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
+import { computeExchangeStats } from "../services/exchangeStats";
 import type {
+  ExecutionLogEntry,
   RiskOverviewDto,
   SystemStatusDto,
   StrategyMetrics,
+  UtilisationHistory,
+  VenueBalanceInfo,
   WfoOptimizationResult,
 } from "../types";
 
@@ -32,7 +37,7 @@ interface PortfolioMonitorProps {
   onTriggerKillswitch: () => void;
 }
 
-export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
+const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   activeSymbol,
   riskData,
   status,
@@ -43,6 +48,13 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   const [calibrating, setCalibrating] = useState(false);
   const [wfoResult, setWfoResult] = useState<WfoOptimizationResult | null>(null);
+  // Per-venue inputs for the exchange gadget. Null until the first
+  // successful read (never an empty fake).
+  const [execLogs, setExecLogs] = useState<ExecutionLogEntry[] | null>(null);
+  const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[] | null>(null);
+  // Per-venue 24h utilisation histories keyed by lowercase venue id. Absent
+  // until the first successful read — the gadget keeps the "—" fallback.
+  const [utilHistories, setUtilHistories] = useState<Record<string, UtilisationHistory | null>>({});
 
   const loadStrategyMetrics = async () => {
     try {
@@ -50,6 +62,33 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
       setMetrics(data);
     } catch (err) {
       console.error("Failed to load strategy performance:", err);
+    }
+  };
+
+  const loadExchangeInputs = async () => {
+    try {
+      const [logs, balances] = await Promise.all([
+        api.getExecutionLogs(),
+        api.getVenueBalances().catch(() => null),
+      ]);
+      setExecLogs(logs);
+      if (balances) {
+        setVenueBalances(balances);
+        const venues = [...new Set(balances.map((b) => (b.venue ?? "").trim().toLowerCase()).filter((v) => v !== ""))];
+        const settled = await Promise.all(
+          venues.map(async (venue) => {
+            try {
+              const hist = await api.getUtilisationHistory(venue, 24);
+              return [venue, hist] as const;
+            } catch {
+              return [venue, null] as const;
+            }
+          }),
+        );
+        setUtilHistories(Object.fromEntries(settled));
+      }
+    } catch (err) {
+      console.error("Failed to load exchange stats inputs:", err);
     }
   };
 
@@ -70,9 +109,21 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
   // already update on the app's 3s poll; mirror that cadence here.
   useEffect(() => {
     loadStrategyMetrics();
-    const interval = setInterval(loadStrategyMetrics, 3000);
+    loadExchangeInputs();
+    const interval = setInterval(() => {
+      loadStrategyMetrics();
+      loadExchangeInputs();
+    }, 3000);
     return () => clearInterval(interval);
   }, [activeSymbol]);
+
+  const exchangeRows = useMemo(
+    () =>
+      execLogs == null && venueBalances == null
+        ? null
+        : computeExchangeStats(execLogs, venueBalances, utilHistories),
+    [execLogs, venueBalances, utilHistories],
+  );
 
   const isTripped = status?.circuit_breaker_tripped ?? riskData?.is_halted ?? false;
   const isPaused = status?.is_paused ?? false;
@@ -365,6 +416,9 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
         </div>
       </div>
 
+      {/* 3b. Per-Exchange Stats (per venue, existing IPC only) */}
+      <ExchangeVenueGadget rows={exchangeRows} />
+
       {/* 4. Strategy Performance Attribution Breakdown */}
       <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
         <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
@@ -520,3 +574,5 @@ export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = ({
     </div>
   );
 };
+
+export const PortfolioMonitor: React.FC<PortfolioMonitorProps> = React.memo(PortfolioMonitorInner);

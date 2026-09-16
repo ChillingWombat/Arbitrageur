@@ -91,6 +91,10 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   vanta: "VNT",
   robinhood: "RH",
   arcus: "ARC",
+  aster: "AST",
+  ondoperps: "ONDO",
+  grvt: "GRVT",
+  edgex: "EDGX",
   popdex: "POP",
   kraken: "KRK",
 };
@@ -101,6 +105,10 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   VNT: "vanta",
   RH: "robinhood",
   ARC: "arcus",
+  AST: "aster",
+  ONDO: "ondoperps",
+  GRVT: "grvt",
+  EDGX: "edgex",
   POP: "popdex",
   KRK: "kraken",
 };
@@ -124,6 +132,10 @@ export interface VenueSettingsFilter {
   robinhood_private_key?: string;
   arcus_enabled?: boolean;
   arcus_api_key?: string;
+  aster_enabled?: boolean;
+  ondoperps_enabled?: boolean;
+  grvt_enabled?: boolean;
+  edgex_enabled?: boolean;
   popdex_enabled?: boolean;
   popdex_api_key?: string;
   kraken_enabled?: boolean;
@@ -142,9 +154,10 @@ export interface VenueSettingsFilter {
 
 /**
  * Determines the set of natively connected venue codes from sanitized engine settings.
- * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), and Vanta/Orderly
- * ("VNT") expose read-only native market-data adapters in this phase, and only
- * outside live trading mode.
+ * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), Vanta/Orderly
+ * ("VNT"), Aster ("AST"), Ondo Perps ("ONDO"), GRVT ("GRVT"), and edgeX ("EDGX")
+ * expose read-only native market-data adapters in this phase, and only outside
+ * live trading mode.
  * Public read-only feeds require the venue's enable toggle, not secrets; connectivity
  * is never inferred from credential-looking strings.
  *
@@ -171,6 +184,18 @@ export function getEnabledConnectedVenueCodes(
   }
   if (settings.vanta_enabled === true) {
     active.add("VNT");
+  }
+  if (settings.aster_enabled === true) {
+    active.add("AST");
+  }
+  if (settings.ondoperps_enabled === true) {
+    active.add("ONDO");
+  }
+  if (settings.grvt_enabled === true) {
+    active.add("GRVT");
+  }
+  if (settings.edgex_enabled === true) {
+    active.add("EDGX");
   }
 
   return active;
@@ -365,6 +390,100 @@ export function getTickerAvgVolumeUsd(
   }
   if (found.length === 0) return undefined;
   return found.reduce((a, c) => a + c, 0) / found.length;
+}
+
+/**
+ * MIN 24h notional volume (USD) across the ticker's in-scope venues.
+ * Returns undefined when ANY in-scope venue is missing from the volume maps
+ * or reports no volume for the asset (fail-closed). MIN bounds executable
+ * size and defeats single-venue wash inflation.
+ */
+export function getTickerMinVolumeUsd(
+  base: string,
+  inScopeVenueIds: string[],
+  venueVolumes: { venue_id?: string; venueId?: string; volumes: Record<string, number> }[]
+): number | undefined {
+  const byId = new Map<string, Record<string, number>>();
+  for (const v of venueVolumes) {
+    const id = String(v.venue_id ?? v.venueId ?? "").toLowerCase();
+    if (id) byId.set(id, v.volumes);
+  }
+  let min: number | undefined;
+  for (const vid of inScopeVenueIds) {
+    const vols = byId.get(vid.toLowerCase());
+    if (!vols) return undefined;
+    const v = getVenueAssetVolumeUsd(vols, base);
+    if (v === undefined) return undefined;
+    min = min === undefined ? v : Math.min(min, v);
+  }
+  return min;
+}
+
+export interface AutoFilterThresholds {
+  minVolumeUsd: number | null | undefined;
+  minPriceUsd: number | null | undefined;
+}
+
+const thresholdOn = (v: number | null | undefined): v is number =>
+  typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/**
+ * Frontend mirror of the backend auto-filter for configurator previews:
+ * every active threshold must pass on the MIN across in-scope venues, and a
+ * missing venue metric excludes the ticker. Returns the first block reason,
+ * or null when the ticker passes.
+ */
+export function autoFilterBlockReason(
+  base: string,
+  inScopeVenueIds: string[],
+  venueVolumes: { venue_id?: string; venueId?: string; volumes: Record<string, number> }[],
+  priceByVenueId: Record<string, number>,
+  thresholds: AutoFilterThresholds
+): string | null {
+  if (thresholdOn(thresholds.minVolumeUsd)) {
+    const floor = thresholds.minVolumeUsd as number;
+    const min = getTickerMinVolumeUsd(base, inScopeVenueIds, venueVolumes);
+    if (min === undefined) {
+      return `${base} blocked by auto volume filter: a venue reports no 24h volume`;
+    }
+    if (min < floor) {
+      return `${base} blocked by auto volume filter: min venue volume below floor`;
+    }
+  }
+  if (thresholdOn(thresholds.minPriceUsd)) {
+    const floor = thresholds.minPriceUsd as number;
+    let min: number | undefined;
+    for (const vid of inScopeVenueIds) {
+      const p = priceByVenueId[vid.toLowerCase()] ?? priceByVenueId[vid];
+      if (typeof p !== "number" || !Number.isFinite(p) || p <= 0) {
+        return `${base} blocked by auto price filter: a venue reports no mid price`;
+      }
+      min = min === undefined ? p : Math.min(min, p);
+    }
+    if (min === undefined || min < floor) {
+      return `${base} blocked by auto price filter: min venue mid below floor`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Ticker visibility pipeline: universe minus the active strategy's
+ * auto-filtered set, minus the global manual exemption set. Manual applies
+ * AFTER auto and is managed separately. `autoBlocked` null means no
+ * auto-filter is active (or not yet loaded) — only manual applies.
+ */
+export function applyTickerVisibility<T extends { symbol: string; base: string }>(
+  universe: T[],
+  autoBlocked: Set<string> | null,
+  exempted: Set<string>
+): T[] {
+  return universe.filter((t) => {
+    const base = t.base.toUpperCase();
+    if (autoBlocked?.has(base)) return false;
+    if (exempted.has(base)) return false;
+    return true;
+  });
 }
 
 // Complete list of the union of available tickers across perp DEXes (Hyperliquid, Lighter, Vanta, Robinhood, Kraken)

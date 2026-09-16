@@ -26,6 +26,11 @@ pub struct SimulatedExchange {
     /// P&L is measured against. Updated by `reset_account` when the
     /// configured starting balance changes.
     initial_equity: RwLock<Decimal>,
+    /// Per-account leverage ceiling (1..=5, `None` = unlimited). New
+    /// positions are booked at min(symbol leverage, cap) and `set_leverage`
+    /// above the cap is refused, so order-time min(strategy, account, venue)
+    /// holds even if a caller passes the raw strategy target.
+    max_leverage_cap: RwLock<Option<u32>>,
 }
 
 impl SimulatedExchange {
@@ -66,6 +71,7 @@ impl SimulatedExchange {
             leverages: DashMap::new(),
             account: Arc::new(RwLock::new(account)),
             initial_equity: RwLock::new(initial_equity),
+            max_leverage_cap: RwLock::new(None),
         }
     }
 
@@ -73,6 +79,38 @@ impl SimulatedExchange {
     /// for realized P&L, not the current equity.
     pub fn initial_equity(&self) -> Decimal {
         *self.initial_equity.read()
+    }
+
+    /// Current per-account leverage ceiling (`None` = unlimited).
+    pub fn max_leverage_cap(&self) -> Option<u32> {
+        *self.max_leverage_cap.read()
+    }
+
+    /// Set the per-account leverage ceiling. `None` clears it (unlimited,
+    /// still bounded by the backend hard ceiling of 5); `Some(v)` must be
+    /// within 1..=5. The cap survives `reset_account`: resets move equity,
+    /// not account policy.
+    pub fn set_max_leverage_cap(&self, cap: Option<u32>) -> anyhow::Result<()> {
+        if let Some(v) = cap {
+            if !(1..=5).contains(&v) {
+                anyhow::bail!(
+                    "[{}] max leverage cap {} out of range; must be 1..=5 or unset",
+                    self.name,
+                    v
+                );
+            }
+        }
+        *self.max_leverage_cap.write() = cap;
+        Ok(())
+    }
+
+    /// Effective booking leverage for a symbol: min(configured, cap, 5).
+    fn effective_leverage_for(&self, symbol: &str) -> u32 {
+        let configured = self.leverages.get(symbol).map(|v| *v).unwrap_or(5).clamp(1, 5);
+        match self.max_leverage_cap() {
+            Some(cap) => configured.min(cap.clamp(1, 5)),
+            None => configured,
+        }
     }
 
     /// Seed a market with an orderbook and funding rate.
@@ -348,9 +386,7 @@ impl ExchangeAdapter for SimulatedExchange {
         let fill_px = fill_px_opt.unwrap_or(dec!(0));
         let notional = filled_qty * fill_px;
         let fee = notional * (self.fee_bps / dec!(10000));
-        let leverage_dec = Decimal::from(
-            self.leverages.get(&order.symbol).map(|v| *v).unwrap_or(5),
-        );
+        let leverage_dec = Decimal::from(self.effective_leverage_for(&order.symbol));
 
         // Opening additional exposure requires incremental initial margin;
         // reducing or flipping a position only needs margin on the new side's
@@ -501,6 +537,16 @@ impl ExchangeAdapter for SimulatedExchange {
         if !(1..=5).contains(&leverage) {
             anyhow::bail!("[{}] Leverage {} out of range; must be 1..=5", self.name, leverage);
         }
+        if let Some(cap) = self.max_leverage_cap() {
+            if leverage > cap {
+                anyhow::bail!(
+                    "[{}] Leverage {} exceeds this account's max leverage cap of {}",
+                    self.name,
+                    leverage,
+                    cap
+                );
+            }
+        }
         self.leverages.insert(symbol.to_string(), leverage);
         let mut acc = self.account.write();
         let leverage_dec = Decimal::from(leverage);
@@ -588,8 +634,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reduce_only_oversized_close_caps_at_position() {
-        let ex = seeded();
+    async fn reduce_only_oversized_close_caps_at_position() {        let ex = seeded();
         ex.place_order(market_order(&ex, Side::Buy, dec!(0.5), false))
             .await
             .expect("opening order");
@@ -613,5 +658,89 @@ mod tests {
             "reduce-only must not leave a residual or reverse position: {:?}",
             acc.positions
         );
+    }
+
+    #[test]
+    fn max_leverage_cap_validation_bounds() {
+        let ex = seeded();
+        assert_eq!(ex.max_leverage_cap(), None);
+        assert!(ex.set_max_leverage_cap(Some(0)).is_err());
+        assert!(ex.set_max_leverage_cap(Some(6)).is_err());
+        ex.set_max_leverage_cap(Some(3)).expect("valid cap");
+        assert_eq!(ex.max_leverage_cap(), Some(3));
+        ex.set_max_leverage_cap(None).expect("clear");
+        assert_eq!(ex.max_leverage_cap(), None);
+    }
+
+    #[tokio::test]
+    async fn set_leverage_above_cap_is_refused() {
+        let ex = seeded();
+        ex.set_max_leverage_cap(Some(2)).expect("cap");
+        assert!(ex.set_leverage("BTC-USDC", 3).await.is_err());
+        assert!(ex.set_leverage("BTC-USDC", 5).await.is_err());
+        ex.set_leverage("BTC-USDC", 2).await.expect("at cap ok");
+        ex.set_leverage("BTC-USDC", 1).await.expect("below cap ok");
+    }
+
+    #[tokio::test]
+    async fn sim_margin_books_at_capped_leverage() {
+        let ex = seeded();
+        ex.set_max_leverage_cap(Some(2)).expect("cap");
+        ex.place_order(market_order(&ex, Side::Buy, dec!(1.0), false))
+            .await
+            .expect("opening order");
+        let acc = ex.fetch_account().await.expect("account");
+        let pos = acc.get_position("BTC-USDC").expect("position");
+        assert_eq!(pos.leverage, dec!(2), "booking must use min(configured, cap)");
+        let px = pos.entry_price;
+        assert_eq!(
+            pos.initial_margin,
+            (dec!(1.0) * px) / dec!(2),
+            "initial margin must reflect the capped leverage"
+        );
+        let total_im: Decimal = acc.positions.iter().map(|p| p.initial_margin).sum();
+        assert_eq!(acc.free_margin, (acc.equity - total_im).max(dec!(0)));
+    }
+
+    #[tokio::test]
+    async fn fills_only_equity_with_exact_fee_accounting() {
+        let ex = SimulatedExchange::new("sim", "Simulated", 0, dec!(10.0), dec!(100000.0));
+        ex.seed_market("BTC-USDC", dec!(100.0), dec!(101.0), dec!(5.0), dec!(0.0));
+        let start = ex.fetch_account().await.expect("account").equity;
+        assert_eq!(start, dec!(100000.0));
+
+        let open = ex
+            .place_order(market_order(&ex, Side::Buy, dec!(1.0), false))
+            .await
+            .expect("open");
+        assert_eq!(open.status, OrderStatus::Filled);
+        let after_open = ex.fetch_account().await.expect("account").equity;
+        let open_fee = dec!(1.0) * dec!(101.0) * dec!(10.0) / dec!(10000);
+        assert_eq!(
+            after_open,
+            start - open_fee,
+            "opening only pays the fee; no PnL while flat-to-long"
+        );
+
+        let close = ex
+            .place_order(market_order(&ex, Side::Sell, dec!(1.0), false))
+            .await
+            .expect("close");
+        assert_eq!(close.status, OrderStatus::Filled);
+        let after_close = ex.fetch_account().await.expect("account").equity;
+        let close_fee = dec!(1.0) * dec!(100.0) * dec!(10.0) / dec!(10000);
+        let realized = (dec!(100.0) - dec!(101.0)) * dec!(1.0);
+        assert_eq!(
+            after_close,
+            start - open_fee - close_fee + realized,
+            "equity moves only by fills (realized PnL) minus fees"
+        );
+        assert!(ex.fetch_account().await.expect("account").positions.is_empty());
+
+        ex.reset_account(dec!(250000.0));
+        let reset = ex.fetch_account().await.expect("account");
+        assert_eq!(reset.equity, dec!(250000.0));
+        assert_eq!(ex.initial_equity(), dec!(250000.0));
+        assert!(reset.positions.is_empty());
     }
 }

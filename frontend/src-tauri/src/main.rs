@@ -1,10 +1,17 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod attribution;
+mod auto_exec;
+mod equity_attribution;
+mod feed;
 mod monitor;
+mod seasonality;
 mod state;
 mod state_store;
+mod strategy_filters;
 mod vault;
+mod ws_primary;
 
 use state::AppEngineState;
 use std::sync::Arc;
@@ -13,14 +20,23 @@ use tauri::Manager;
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        std::env::set_var("GDK_BACKEND", "x11");
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-        std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+        // Native Wayland + GPU compositing is the fast path: scrolling
+        // repaints on the GPU instead of the CPU. The legacy X11/software
+        // fallback stays one env var away (ARBITRAGER_X11=1) for drivers
+        // where native compositing misbehaves.
+        if std::env::var_os("ARBITRAGER_X11").is_some() {
+            std::env::set_var("GDK_BACKEND", "x11");
+            std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+            std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+            std::env::set_var("__NV_DISABLE_EXPLICIT_SYNC", "1");
+        }
     }
 
     tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     let engine_state = Arc::new(
@@ -34,6 +50,19 @@ fn main() {
         let bg_state = engine_state.clone();
         tauri::async_runtime::spawn(async move { monitor.run(bg_state).await });
     }
+
+    // Install and spawn the autonomous convergence bot (opt-in, paper-only,
+    // inert until explicitly armed via the radar bot config).
+    {
+        let bot = auto_exec::OpportunityExecutor::new();
+        *engine_state.radar_bot.lock() = Some(bot.clone());
+        let bg_state = engine_state.clone();
+        tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
+    }
+
+    // Spawn the WebSocket-first orderbook feed supervisors. REST polling
+    // stays as the cold-start/stale fallback; dead WS lanes go stale.
+    feed::spawn_all(engine_state.clone());
 
     tauri::Builder::default()
         .manage(engine_state)
@@ -52,6 +81,9 @@ fn main() {
             commands::get_signal_series,
             commands::get_matrix_baselines,
             commands::scan_spatial_opportunities,
+            commands::scan_triangle_opportunities,
+            commands::execute_triangle_arbitrage,
+            commands::check_spatial_convergence,
             commands::scan_spot_opportunities,
             commands::execute_spot_arbitrage,
             commands::scan_funding_opportunities,
@@ -79,6 +111,11 @@ fn main() {
             commands::get_strategy_params,
             commands::save_strategy_params,
             commands::get_all_strategy_params,
+            commands::get_strategy_tickers,
+            commands::get_account_equity_events,
+            commands::get_autotune_recommendation,
+            commands::apply_autotune_selected,
+            commands::run_seasonality_promotion,
             commands::get_vault_status,
             commands::initialize_vault,
             commands::unlock_vault,
@@ -100,14 +137,21 @@ fn main() {
             commands::get_open_positions,
             commands::get_venue_balances,
             commands::get_strategy_performance,
+            commands::get_strategy_fill_pnl,
+            commands::get_utilisation_history,
             commands::run_wfo_calibration,
             commands::get_monitor_snapshot,
             commands::get_monitor_config,
             commands::set_monitor_config,
+            commands::get_monitor_signal_events,
+            commands::get_session_profile,
             commands::set_ticker_exempted,
             commands::get_exempted_tickers,
             commands::reveal_all_tickers,
             commands::execute_monitor_opportunity,
+            auto_exec::get_radar_bot_config,
+            auto_exec::set_radar_bot_config,
+            auto_exec::get_radar_bot_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrager Tauri desktop application");

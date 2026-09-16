@@ -99,6 +99,10 @@ export interface SpatialOpportunityDto {
   direction?: string;
   trigger_spread_bps?: number;
   baseline_mean_spread_bps?: number;
+  /** Empirical convergence probability (0-1) from the pair's episode
+   *  history, scored to the monitor's standard. Null when history is thin
+   *  — the Ranked Opportunities Win % column renders "—" until then. */
+  win_probability?: number | null;
   position_step?: number;
   max_units?: number;
   nominal_hurdle_bps?: number;
@@ -133,6 +137,29 @@ export interface TickerStrategyConfigDto {
 /** Universal strategy parameters — one record per strategyId ("futures" |
  * "funding" | "spot"), shared across all tickers. Per-ticker contract/runtime
  * state stays in TickerStrategyConfigDto. */
+
+/** Passive limit unwind/rebalance controls (paper-only, fail-closed).
+ * Peg `spreadPercentile` 0 = aggressive touch … 50 = mid … 100 = passive
+ * edge; `timeoutSecs` bounds every limit attempt; `maxTries` bounds retries
+ * before market fallback; the calm gate skips passive when the spread or
+ * fast vol exceeds its cap. Prediction carries no instance (inert). */
+export interface PassiveUnwindDto {
+  enabled: boolean;
+  spreadPercentile: number;
+  timeoutSecs: number;
+  maxTries: number;
+  maxSpreadBps: number;
+  maxFastVolBps: number;
+}
+
+export const DEFAULT_PASSIVE_UNWIND: PassiveUnwindDto = {
+  enabled: false,
+  spreadPercentile: 50,
+  timeoutSecs: 10,
+  maxTries: 3,
+  maxSpreadBps: 15,
+  maxFastVolBps: 10,
+};
 export interface StrategyParamsDto {
   strategyId: string;
   // Single Spread (futures)
@@ -141,18 +168,57 @@ export interface StrategyParamsDto {
   slidingWindow: string;
   slidingWindowMode: "manual" | "auto";
   slidingWindowSecs: number;
-  maxAccumulatedUnits: number;
+  // Single Spread sizing: one grid step = min(mult x venue min lot,
+  // maxStepUsd / price); max steps derive per ticker from paper equity x pct.
+  stepSizeMult: number;
+  maxStepUsd: number;
+  maxTickerEquityPct: number;
   executionMode: ArbitrageExecutionMode;
-  unitSizeUsd: number; // USD notional per grid unit per leg — converted to base units per ticker
   userTargetLeverage: number;
+  // Per-strategy auto-hide filters (None/0 = off). MIN aggregation across
+  // the ticker's in-scope venues; any missing venue excludes the ticker.
+  autoMinVolumeUsd: number | null;
+  autoMinPriceUsd: number | null;
+  // Prediction event-volume threshold: defined but inert (no venue volume
+  // data — prediction adapters are scaffolds).
+  autoMinEventVolumeUsd: number | null;
   // Funding Rate
   fundingTradeSizeUsd: number;
   fundingMinAprPct: number;
   fundingHoldingDays: number;
+  // Per-strategy max slippage (bps): each strategy enforces its own gate.
+  // No global setting. Prediction carries the field for schema parity but
+  // it is inert (no execution path — prediction adapters are scaffolds),
+  // like autoMinEventVolumeUsd.
+  futuresMaxSlippageBps: number;
+  fundingMaxSlippageBps: number;
+  predictionMaxSlippageBps: number;
+  // Funding configurator: max allowed gap (bps) between venues' execution
+  // prices at entry; auto-exit when live inter-venue spread (percent) drops
+  // below threshold; trim both legs when either nears liquidation; optional
+  // rebalance-to-neutral; rotation on net-of-friction improvement (bps).
+  // Null = gate off.
+  fundingMaxEntrySpreadBps: number;
+  fundingAutoExitSpreadPct: number | null;
+  fundingLiqTrimPct: number | null;
+  fundingAutoRebalance: boolean;
+  fundingRotationThresholdBps: number | null;
+  // Universal trim block: every bot configurator surfaces the same
+  // threshold (percent, null = off) with identical trim-both/close-both
+  // semantics. Prediction is defined-but-disabled.
+  futuresLiqTrimPct: number | null;
+  spotLiqTrimPct: number | null;
+  predictionLiqTrimPct: number | null;
   // Spatial (spot)
   spotTradeSizeUsd: number;
   spotMaxSlippageBps: number;
   spotMinNetSpreadBps: number;
+  // Passive limit unwinds: one control set per strategy with a live reduce
+  // path. Optional in persisted rows (older saves) — callers must fall back
+  // to DEFAULT_PASSIVE_UNWIND when absent.
+  futuresPassiveUnwind?: PassiveUnwindDto;
+  fundingPassiveUnwind?: PassiveUnwindDto;
+  spotPassiveUnwind?: PassiveUnwindDto;
 }
 
 export interface MatrixCellDto {
@@ -227,6 +293,51 @@ export interface MatrixBaselineSnapshotDto {
   max_history_span_secs: number;
   using_manual_fallback: boolean;
   pairs: PairBaselineDto[];
+}
+
+/** Auto-tune Phase 1 (recommend-only) preview DTOs. `recommended` is null
+ * exactly when `status === "HELD"` — the manual value stays authoritative. */
+export interface AutotuneRowDto {
+  param: string;
+  current: number;
+  recommended: number | null;
+  status: "READY" | "HELD";
+  fit_metric: string;
+  validated_metric: string;
+  n: number;
+  rationale: string;
+  formula_id: string;
+  confidence: string;
+}
+
+export interface AutotuneBannerDto {
+  fit_from_ms: number;
+  fit_to_ms: number;
+  validate_from_ms: number;
+  validate_to_ms: number;
+  regime_verdict: "STABLE" | "SHIFT" | "INSUFFICIENT" | string;
+  ready_count: number;
+  total: number;
+}
+
+export interface AutotuneRecommendationDto {
+  symbol: string;
+  buy_venue: string | null;
+  sell_venue: string | null;
+  pair_observations: number;
+  rows: AutotuneRowDto[];
+  banner: AutotuneBannerDto;
+  session_tau_scale: number;
+  session_sigma_scale: number;
+}
+
+/** One-click apply result: only READY rows are ever written; HELD rows are
+ * reported in skippedHeld and never touch the DTOs. */
+export interface AutotuneApplyResultDto {
+  symbol: string;
+  applied: string[];
+  skipped_held: string[];
+  audit_id: number | null;
 }
 
 export interface TickerMarketQuoteDto {
@@ -356,6 +467,9 @@ export interface ExecutionLogEntry {
   id: string;
   timestamp: string;
   trade_type: string;
+  /** Owning strategy; absent or "unattributed" rows predate attribution and
+   *  are excluded from per-strategy sums, counted separately. */
+  strategy_id?: string;
   symbol: string;
   venue_a: string;
   venue_b: string;
@@ -380,8 +494,8 @@ export interface EngineSettingsDto {
   hsm_url: string;
   hmac_token: string;
 
-  // Smart Order Routing & Execution Guardrails
-  max_slippage_bps: number;
+  // Smart Order Routing & Execution Guardrails (no global slippage:
+  // each strategy enforces its own per-strategy max_slippage_bps gate)
   min_depth_ratio: number;
 
   // Exchange Enablement Toggles
@@ -402,6 +516,9 @@ export interface EngineSettingsDto {
   binance_enabled?: boolean;
   okx_enabled?: boolean;
   aster_enabled?: boolean;
+  ondoperps_enabled?: boolean;
+  grvt_enabled?: boolean;
+  edgex_enabled?: boolean;
   variational_enabled?: boolean;
   coinbase_enabled?: boolean;
 
@@ -473,6 +590,10 @@ export interface EngineSettingsDto {
   vanta_subaccount_index?: number;
   robinhood_subaccount_index?: number;
 
+  // Historical retention (None/null = unlimited; 0 normalizes to unlimited)
+  spread_samples_max_days?: number | null;
+  spread_samples_max_gb?: number | null;
+
   // Vault-derived credential configuration state (venue IDs only, no secrets)
   configured_venues: string[];
 
@@ -523,6 +644,10 @@ export interface AccountDto {
   /** "standard" | "plus" | "premium" | "builder" — drives the venue's
    *  shared-IP rate budget and Lighter Plus fee adjustment. */
   accountTier: string;
+  /** Per-account leverage ceiling 1..=5; null = unlimited (backend hard
+   *  ceiling of 5 still applies). Effective leverage is
+   *  min(strategy, account, venue). */
+  maxLeverage: number | null;
 }
 
 export interface AccountCredentialInput {
@@ -547,6 +672,10 @@ export interface AccountUpsertInput {
   makeDefault?: boolean;
   /** Omit to preserve the stored tier on update (standard on create). */
   accountTier?: string | null;
+  /** Per-account leverage ceiling 1..=5; null = unlimited. Updates are
+   *  authoritative: sending null clears a stored cap. Partial updaters must
+   *  echo the current value (see AccountDto.maxLeverage). */
+  maxLeverage?: number | null;
   credentials?: AccountCredentialInput | null;
 }
 
@@ -613,6 +742,41 @@ export interface SignalExecutionDto {
   closedAt: string | null;
 }
 
+/** Attributed realized PnL for one strategy, from durable signal-leg fills
+ *  (fees included). Unattributed rows are excluded from the sums and
+ *  reported in the unattributed counters — never absorbed. */
+export interface StrategyFillPnl {
+  strategyId: string;
+  netProfitUsd: number;
+  netProfitBps: number | null;
+  closedFamilies: number;
+  openFamilies: number;
+  unattributedClosedFamilies: number;
+  unattributedLogEntries: number;
+}
+
+/** Time-weighted average utilisation for one venue over a trailing window.
+ *  `partial` means snapshots cover less than the full window — the UI must
+ *  label the shorter window honestly. */
+export interface UtilisationHistory {
+  venue: string;
+  avgRatePct: number | null;
+  coveredMs: number;
+  windowMs: number;
+  partial: boolean;
+  pointCount: number;
+}
+
+/** Durable margin-utilisation observation for a paper venue. */
+export interface MarginSnapshot {
+  venue: string;
+  accountId: string;
+  tsMs: number;
+  equity: number;
+  usedMargin: number;
+  ratePct: number;
+}
+
 /** One venue's signed net filled quantity inside an aggregated position.
  *  Positive = net long (buy side), negative = net short (sell side). */
 export interface PositionVenueDto {
@@ -650,6 +814,9 @@ export interface SpatialCandidateInput {
   /** Explicit strategy-level account route override. */
   routeId?: string | null;
   direction?: string | null;
+  /** Grid-cap context for the backend execution gate. */
+  positionStep?: number | null;
+  maxUnits?: number | null;
 }
 
 export interface CandidateOutcomeDto {
@@ -787,6 +954,18 @@ export interface TriangleExecutionParams {
   net_spread_bps?: number;
 }
 
+/** One position-aware exit verdict from check_spatial_convergence. */
+export interface ConvergenceCheckDto {
+  signal_id: string;
+  symbol: string;
+  verdict: "hold" | "unwatched" | "exit" | string;
+  trigger: string | null;
+  reason: string;
+  live_net_bps: number | null;
+  entry_net_bps: number | null;
+  unwound: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Spread Range Monitor (Opportunity Radar)
 // ---------------------------------------------------------------------------
@@ -831,6 +1010,18 @@ export interface MonitorRowDto {
   observedEpisodes: number;
   executable: boolean;
   blockReason: string | null;
+  thresholdRatio: number | null;
+  coverage: number | null;
+  /** Current UTC session ("asia" | "europe" | "overlap" | "us_late" | "dead"). */
+  sessionId: string;
+  /** True when the session aggregate is missing/provisional: all session
+   * multipliers on the row are neutral x1.0, flagged here. */
+  sessionProvisional: boolean;
+  /** Session size-allowance factor (overlap 1.0 … dead 0.4, weekend x0.5,
+   * funding mask 0.0). */
+  sessionAllow: number;
+  /** Combined session sizing multiplier applied to optimal/breakeven sizes. */
+  sessionSizeMult: number;
 }
 
 export interface VenueLaneStatusDto {
@@ -852,6 +1043,30 @@ export interface MonitorSnapshotDto {
   exempted: string[];
 }
 
+/** One row of the get_strategy_tickers IPC: the ticker's in-scope venues,
+ *  whether it passes the strategy's auto-filters, and the explicit block
+ *  reason when it does not. Manual hiding applies after this auto-filter. */
+export interface StrategyTickerDto {
+  base: string;
+  venues: string[];
+  passes: boolean;
+  blockReason: string | null;
+}
+
+/** One external-delta balance attribution event: actual equity disagreed
+ *  with the fills-derived baseline, so the move was classified and the
+ *  baseline rebased to actual. */
+export interface AccountEquityEventDto {
+  id: number;
+  accountId: string;
+  tsMs: number;
+  expected: number;
+  actual: number;
+  delta: number;
+  kind: "deposit" | "withdrawal" | "transfer" | "funding" | string;
+  note: string;
+}
+
 export interface MonitorConfigDto {
   enabled: boolean;
   watchlistRefreshSecs: number;
@@ -870,6 +1085,112 @@ export interface MonitorConfigDto {
   maxSymbolIntervalSecs: number;
   minSymbolIntervalSecs: number;
   minExpectedProfitBps: number;
+  minThresholdRatio: number;
+  minCoverage: number;
 }
 
-export * from "./tickers";
+/** One shrunk per-session aggregate (get_session_profile row). Provisional
+ * rows read as neutral x1.0 everywhere — never as tuned multipliers. */
+export interface SessionProfileEntryDto {
+  sessionId: string;
+  nEpisodes: number;
+  medAbsSpreadBps: number | null;
+  p90SpreadBps: number | null;
+  rvBps: number | null;
+  winRate: number | null;
+  meanHoldS: number | null;
+  provisional: boolean;
+}
+
+/** Snapshot behind get_session_profile: per-session rows, the current
+ * session, and the active multipliers. Display only in Phase 1. */
+export interface SessionProfileDto {
+  symbol: string;
+  currentSession: string;
+  isWeekend: boolean;
+  inFundingMask: boolean;
+  usCashOpen: boolean;
+  sessionAllow: number;
+  provisional: boolean;
+  sessions: SessionProfileEntryDto[];
+  promotion: SessionPromotionDto | null;
+}
+
+/** Walk-forward promotion verdict. Null (absent) means the Phase-1
+ * baseline is served: profile RV is unscaled and nothing is promoted. */
+export interface SessionPromotionDto {
+  status: "promoted" | "held" | "demoted" | string;
+  fitDeltaBps: number;
+  valDeltaBps: number;
+  reason: string;
+  harR2: number | null;
+  rescaled: boolean;
+}
+
+/** Shared nightly/manual seasonality run summary. */
+export interface SeasonalityRunSummaryDto {
+  symbolsScanned: number;
+  anchorsWritten: number;
+  promoted: number;
+  demoted: number;
+  held: number;
+  skipped: number;
+  runTsMs: number;
+}
+
+/** Autonomous convergence bot config (get/set_radar_bot_config). Opt-in:
+ * entries only when enabled && mode === "auto". Ships inert. */
+export interface RadarBotConfigDto {
+  enabled: boolean;
+  mode: "off" | "auto" | "paused" | "reduce_only";
+  pollIntervalSecs: number;
+  minPWin: number;
+  minExpectedProfitBps: number;
+  maxConcurrentPositions: number;
+  maxNotionalPerPositionUsd: number;
+  maxNotionalPerVenueUsd: number;
+  maxNotionalPerSymbolUsd: number;
+  pairCooldownSecs: number;
+  holdTimeoutMult: number;
+  stopMult: number;
+  staleUnwindSecs: number;
+}
+
+export interface BotOpenPositionDto {
+  symbol: string;
+  buyVenue: string;
+  sellVenue: string;
+  entryTsMs: number;
+  entryDevBps: number;
+  baselineBps: number | null;
+  sizeUsd: number;
+  deadlineMs: number;
+  liveDevBps: number | null;
+  liveStatus: string | null;
+  unwatched: boolean;
+}
+
+export interface BotDecisionDto {
+  tsMs: number;
+  pair: string;
+  decision: string;
+  reason: string;
+}
+
+/** Status surface for the Spread Radar auto-bot gadget. Missing backend
+ * data renders as "—", never fabricated. */
+export interface RadarBotStatusDto {
+  enabled: boolean;
+  mode: string;
+  openPositions: BotOpenPositionDto[];
+  entersToday: number;
+  exitsToday: number;
+  skipsToday: number;
+  lastDecision: BotDecisionDto | null;
+  lastError: string | null;
+  auditErrors: number;
+  monitorRunning: boolean;
+  snapshotPresent: boolean;
+}
+
+export * from "./tickers.ts";

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../services/api.ts";
+import { flattenResidualMessage } from "../services/flatten.ts";
 
 /**
  * Per-strategy bot lifecycle: the durable signal ledger is the source of
@@ -14,6 +15,82 @@ import { api } from "../services/api.ts";
 export type BotPhase = "idle" | "running" | "paused" | "reduce_only" | "stopping";
 
 const OPEN_STATUSES = new Set(["in_flight", "balanced", "imbalanced", "unresolved"]);
+
+/* ------------------------------------------------------------------ */
+/* Shared bot-phase registry (in-memory only, never persisted).         */
+/*                                                                     */
+/* Each mounted useBotLifecycle publishes its current phase under       */
+/* `${strategyId}:${symbol ?? "all"}`. Unmounted bots publish idle on   */
+/* cleanup — intervals die with the page, so idle is truthful.         */
+/* Consumers (e.g. the ticker explorer filter) read via                */
+/* tickerBotStatus() and re-render via useSyncExternalStore with the    */
+/* subscribe/getSnapshot helpers below. Additive only: the hook        */
+/* signature and lifecycle semantics are unchanged.                     */
+/* ------------------------------------------------------------------ */
+
+const botPhaseRegistry = new Map<string, BotPhase>();
+const botPhaseListeners = new Set<() => void>();
+let botPhaseVersion = 0;
+
+function botRegistryKey(strategyId: string, symbol?: string | null): string {
+  return `${strategyId}:${symbol ?? "all"}`;
+}
+
+function publishBotPhase(strategyId: string, symbol: string | null | undefined, phase: BotPhase): void {
+  const key = botRegistryKey(strategyId, symbol);
+  if (botPhaseRegistry.get(key) === phase) return;
+  botPhaseRegistry.set(key, phase);
+  botPhaseVersion += 1;
+  for (const listener of botPhaseListeners) listener();
+}
+
+/** useSyncExternalStore subscribe fn — re-renders consumers on any phase publish. */
+export function subscribeBotPhaseRegistry(listener: () => void): () => void {
+  botPhaseListeners.add(listener);
+  return () => {
+    botPhaseListeners.delete(listener);
+  };
+}
+
+/** useSyncExternalStore snapshot — a monotonically increasing version. */
+export function getBotPhaseRegistryVersion(): number {
+  return botPhaseVersion;
+}
+
+/** Aggregated per-ticker bot status for explorer filtering. */
+export type TickerBotStatus = "running" | "paused" | "reducing" | "stopped";
+
+function baseOf(sym: string): string {
+  return sym.split(/[-_/]/)[0];
+}
+
+/**
+ * Aggregate every registry entry whose symbol part matches `baseOrSymbol`
+ * (exact, case-insensitive, plus base-symbol variants in both directions)
+ * into a single status. Priority: running > reduce_only/stopping
+ * (reducing) > paused > idle/unknown (stopped). Strategy-wide entries
+ * keyed `:all` never match a concrete ticker.
+ */
+export function tickerBotStatus(baseOrSymbol: string): TickerBotStatus {
+  const want = baseOrSymbol.toUpperCase();
+  const wantBase = baseOf(want);
+  let seenPaused = false;
+  let seenReducing = false;
+  for (const [key, phase] of botPhaseRegistry) {
+    const regSymbol = key.slice(key.indexOf(":") + 1).toUpperCase();
+    if (regSymbol === "ALL") continue;
+    const regBase = baseOf(regSymbol);
+    const matches =
+      regSymbol === want || regBase === want || regSymbol === wantBase || regBase === wantBase;
+    if (!matches) continue;
+    if (phase === "running") return "running";
+    if (phase === "reduce_only" || phase === "stopping") seenReducing = true;
+    else if (phase === "paused") seenPaused = true;
+  }
+  if (seenReducing) return "reducing";
+  if (seenPaused) return "paused";
+  return "stopped";
+}
 
 export interface BotControlAvailability {
   start: boolean;
@@ -54,12 +131,39 @@ interface UseBotLifecycleOptions {
   externalOpenPositions?: boolean;
 }
 
+/**
+ * Fail-closed emergency-stop predicate: flatten must be attempted unless
+ * positions are affirmatively known-flat (fresh ledger, zero open signals,
+ * no external position source). A stale/unknown ledger always flattens.
+ */
+export function shouldAttemptFlattenOnStop(args: {
+  ledgerFresh: boolean;
+  openSignalCount: number;
+  externalOpenPositions?: boolean;
+}): boolean {
+  if (args.externalOpenPositions === true) return true;
+  if (!args.ledgerFresh) return true;
+  return args.openSignalCount > 0;
+}
+
 export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: UseBotLifecycleOptions) {
   const [phase, setPhase] = useState<BotPhase>("idle");
   const [openSignalCount, setOpenSignalCount] = useState(0);
+  const [ledgerFresh, setLedgerFresh] = useState(false);
   const [lastError, setLastError] = useState<string | null>(null);
   const phaseRef = useRef(phase);
   phaseRef.current = phase;
+  const ledgerFreshRef = useRef(ledgerFresh);
+  ledgerFreshRef.current = ledgerFresh;
+  const openSignalCountRef = useRef(openSignalCount);
+  openSignalCountRef.current = openSignalCount;
+
+  // Publish to the shared in-memory registry; idle on unmount is truthful
+  // because the bot's intervals die with the page.
+  useEffect(() => {
+    publishBotPhase(strategyId, symbol, phase);
+    return () => publishBotPhase(strategyId, symbol, "idle");
+  }, [strategyId, symbol, phase]);
 
   // Poll durable signal ledger for this strategy's open positions.
   useEffect(() => {
@@ -76,8 +180,10 @@ export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: U
               s.legs.some((l) => l.filledQty > 0)
           ).length
         );
+        setLedgerFresh(true);
       } catch {
-        // Outside Tauri / backend down — ledger stays empty, never fabricate.
+        if (cancelled) return;
+        setLedgerFresh(false);
       }
     };
     void load();
@@ -111,11 +217,22 @@ export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: U
     setPhase("stopping");
     setLastError(null);
     try {
-      if (openSignalCount > 0) {
+      const ledgerWasStale = !ledgerFreshRef.current;
+      if (shouldAttemptFlattenOnStop({
+        ledgerFresh: ledgerFreshRef.current,
+        openSignalCount: openSignalCountRef.current,
+        externalOpenPositions,
+      })) {
         const res = await api.flattenTickerPositions(symbol ?? null, strategyId);
-        if (res.residualSignals > 0) {
+        const residual = flattenResidualMessage(res);
+        if (residual !== null) {
+          setLastError(residual);
+          setPhase("paused");
+          return;
+        }
+        if (ledgerWasStale) {
           setLastError(
-            `Flatten incomplete: ${res.residualSignals} signal(s) still hold residual exposure`
+            "Signal ledger was unavailable during stop — flatten attempted with no residual; confirm flat before restarting"
           );
           setPhase("paused");
           return;
@@ -127,12 +244,13 @@ export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: U
       // Flatten failed — halt entries but keep the incident visible.
       setPhase("paused");
     }
-  }, [openSignalCount, symbol, strategyId]);
+  }, [symbol, strategyId, externalOpenPositions]);
 
   return {
     phase,
     hasOpenPositions,
     openSignalCount,
+    ledgerFresh,
     lastError,
     start,
     pause,

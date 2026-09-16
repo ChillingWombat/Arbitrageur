@@ -69,8 +69,15 @@ impl LighterAdapter {
 
         if !resp.status().is_success() {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            let headers = resp.headers().clone();
+            let status = resp.status().as_u16();
+            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
+                self.rate_limiter.record_challenge();
+                anyhow::bail!("Lighter edge challenge (WAF) on {} — cooling down", path);
+            }
             self.rate_limiter.record_failure(is_429);
-            anyhow::bail!("Lighter API error: {} {}", resp.status(), path);
+            anyhow::bail!("Lighter API error: {} {}", status, path);
         }
 
         let text = resp.text().await?;
@@ -101,7 +108,14 @@ impl ExchangeAdapter for LighterAdapter {
         let url = format!("{}/api/v1/orderBookDetails?cb={}", self.base_url, nonce);
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
-            anyhow::bail!("Lighter ping failed: {}", resp.status());
+            let headers = resp.headers().clone();
+            let status = resp.status().as_u16();
+            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
+                self.rate_limiter.record_challenge();
+                anyhow::bail!("Lighter ping hit edge challenge — cooling down");
+            }
+            anyhow::bail!("Lighter ping failed: {}", status);
         }
         // A WAF challenge page can return 200 HTML — only a real JSON
         // response counts as reaching the exchange.
@@ -169,37 +183,7 @@ impl ExchangeAdapter for LighterAdapter {
             .await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        if let Some(bids) = res.get("bids").and_then(|b| b.as_array()) {
-            for b in bids {
-                let px_opt = b.get("price").and_then(|p| p.as_str());
-                let sz_opt = b.get("remaining_base_amount")
-                    .or_else(|| b.get("size"))
-                    .or_else(|| b.get("initial_base_amount"))
-                    .and_then(|s| s.as_str());
-
-                if let (Some(px), Some(sz)) = (px_opt, sz_opt) {
-                    if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
-                        book.bids.push(BookLevel::new(p, s));
-                    }
-                }
-            }
-        }
-
-        if let Some(asks) = res.get("asks").and_then(|a| a.as_array()) {
-            for a in asks {
-                let px_opt = a.get("price").and_then(|p| p.as_str());
-                let sz_opt = a.get("remaining_base_amount")
-                    .or_else(|| a.get("size"))
-                    .or_else(|| a.get("initial_base_amount"))
-                    .and_then(|s| s.as_str());
-
-                if let (Some(px), Some(sz)) = (px_opt, sz_opt) {
-                    if let (Ok(p), Ok(s)) = (Decimal::from_str(px), Decimal::from_str(sz)) {
-                        book.asks.push(BookLevel::new(p, s));
-                    }
-                }
-            }
-        }
+        append_lighter_levels(&mut book, &res);
 
         book.timestamp = Utc::now();
         Ok(book)
@@ -434,6 +418,38 @@ impl ExchangeAdapter for LighterAdapter {
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+    }
+}
+
+/// Parse one Lighter price-size entry: `price` plus
+/// `remaining_base_amount` / `size` / `initial_base_amount` (all strings).
+/// Returns `None` for malformed entries so callers skip rather than fabricate.
+pub fn parse_lighter_price_size(entry: &serde_json::Value) -> Option<(Decimal, Decimal)> {
+    let px = entry.get("price").and_then(|p| p.as_str())?;
+    let sz = entry
+        .get("remaining_base_amount")
+        .or_else(|| entry.get("size"))
+        .or_else(|| entry.get("initial_base_amount"))
+        .and_then(|s| s.as_str())?;
+    Some((Decimal::from_str(px).ok()?, Decimal::from_str(sz).ok()?))
+}
+
+/// Append REST/WS `bids` + `asks` arrays onto a book via
+/// [`parse_lighter_price_size`].
+pub fn append_lighter_levels(book: &mut OrderBook, payload: &serde_json::Value) {
+    if let Some(bids) = payload.get("bids").and_then(|b| b.as_array()) {
+        for b in bids {
+            if let Some((p, s)) = parse_lighter_price_size(b) {
+                book.bids.push(BookLevel::new(p, s));
+            }
+        }
+    }
+    if let Some(asks) = payload.get("asks").and_then(|a| a.as_array()) {
+        for a in asks {
+            if let Some((p, s)) = parse_lighter_price_size(a) {
+                book.asks.push(BookLevel::new(p, s));
+            }
+        }
     }
 }
 

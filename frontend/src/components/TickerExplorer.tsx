@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from "react";
+import React, { useState, useMemo, useRef, useEffect, useSyncExternalStore, useCallback } from "react";
 import {
   Search,
   X,
@@ -6,11 +6,12 @@ import {
   Activity,
   DollarSign,
   Settings,
-  SlidersHorizontal,
   ArrowUpDown,
   Check,
   AlertTriangle,
   Droplets,
+  Filter,
+  EyeOff,
 } from "lucide-react";
 import {
   PERP_TICKERS,
@@ -22,18 +23,26 @@ import {
   type TickerSortOption,
   type TickerWithStats,
 } from "../types/tickers";
-import { SwitchToggle } from "./SwitchToggle";
 import { EmptyState } from "./EmptyState";
-import type { ExecutionLogEntry, TickerStrategyConfigDto, RiskOverviewDto, SystemStatusDto, VenueVolumesDto } from "../types";
+import { api } from "../services/api";
+import {
+  getBotPhaseRegistryVersion,
+  subscribeBotPhaseRegistry,
+  tickerBotStatus,
+  type TickerBotStatus,
+} from "../hooks/useBotLifecycle";
+import type { ExecutionLogEntry, TickerStrategyConfigDto, RiskOverviewDto, SystemStatusDto, VenueVolumesDto, StrategyParamsDto } from "../types";
+import { deriveStepSizing } from "../services/contractSpecs";
 
 interface TickerExplorerProps {
   selectedSymbol: string | null;
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
-  /** Universal Single Spread max grid units — strategy params are now global;
-   *  the per-symbol config copy is only a fallback. */
-  futuresMaxUnits?: number;
+  /** Universal Single Spread sizing params + paper equity — the per-ticker
+   *  grid cap derives from these, not from an authored max. */
+  futuresParams?: StrategyParamsDto | null;
+  totalEquityUsd?: number | null;
   riskData?: RiskOverviewDto | null;
   enabledTickers?: Set<string>;
   onToggleTicker?: (symbol: string) => void;
@@ -48,6 +57,7 @@ interface TickerExplorerProps {
    *  live market-universe response and the pre-exemption intersection —
    *  the component alone cannot tell "no overlap" from "all hidden". */
   tickerUnavailableReason?: string;
+  onHideTicker?: (base: string) => void;
 }
 
 const formatCompactUsd = (v: number): string => {
@@ -57,41 +67,230 @@ const formatCompactUsd = (v: number): string => {
   return `$${v.toFixed(0)}`;
 };
 
-export const TickerExplorer: React.FC<TickerExplorerProps> = ({
+interface TickerRowProps {
+  symbol: string;
+  base: string;
+  isSelected: boolean;
+  isEnabled: boolean;
+  hasIssue: boolean | undefined;
+  issueDescription: string | undefined;
+  tradeCount: number;
+  netProfit: number;
+  netProfitBps: number | undefined;
+  avgVolumeUsd: number | undefined;
+  showLiquidity: boolean;
+  onSelect: (symbol: string) => void;
+  onContextMenu: (e: React.MouseEvent, symbol: string, base: string) => void;
+}
+
+const TickerRow: React.FC<TickerRowProps> = React.memo(
+  ({
+    symbol,
+    base,
+    isSelected,
+    isEnabled,
+    hasIssue,
+    issueDescription,
+    tradeCount,
+    netProfit,
+    netProfitBps,
+    avgVolumeUsd,
+    showLiquidity,
+    onSelect,
+    onContextMenu,
+  }) => {
+    const hasTrades = tradeCount > 0;
+    const isProfit = netProfit > 0;
+    const isLoss = netProfit < 0;
+    const handleContextMenu = useCallback(
+      (e: React.MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu(e, symbol, base);
+      },
+      [onContextMenu, symbol, base],
+    );
+    const handleKeyDown = useCallback(
+      (e: React.KeyboardEvent) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect(symbol);
+        }
+      },
+      [onSelect, symbol],
+    );
+    const handleSelect = useCallback(() => onSelect(symbol), [onSelect, symbol]);
+    return (
+      <div
+        role="button"
+        tabIndex={0}
+        title="Right-click to hide"
+        onClick={handleSelect}
+        onContextMenu={handleContextMenu}
+        onKeyDown={handleKeyDown}
+        className={`w-full px-2.5 py-2 rounded-md border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
+          hasIssue
+            ? "bg-red-50/90 border-red-300 text-red-900 shadow-2xs hover:bg-red-100/90"
+            : isSelected
+            ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
+            : !isEnabled
+            ? "opacity-40 grayscale bg-slate-100/60 border-slate-200 hover:opacity-60"
+            : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300"
+        }`}
+      >
+        {/* Left: Symbol & Status */}
+        <div className="flex items-center space-x-2 min-w-0 pr-1">
+          {hasIssue ? (
+            <span title={issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
+              <AlertTriangle className="w-3.5 h-3.5 text-loss animate-pulse" />
+            </span>
+          ) : null}
+          <div className="flex items-center space-x-1">
+            <span className={`font-bold text-xs tracking-tight ${hasIssue ? "text-red-950 font-black" : "text-slate-900"}`}>
+              {base}
+            </span>
+            <span className="text-[8px] px-1 py-0.2 rounded-sm bg-slate-200/70 text-slate-600 font-semibold">
+              Perp
+            </span>
+          </div>
+          {hasIssue && (
+            <span className="text-[8px] font-bold px-1.5 py-0.2 rounded-sm bg-red-100 text-red-700 border border-red-200">
+              Issue
+            </span>
+          )}
+        </div>
+
+        {/* Right: Net PnL (USD + BPS) & Actions */}
+        <div className="flex items-center space-x-2 shrink-0">
+          <div className="flex flex-col items-end">
+            <span
+              className={`text-xs font-bold tabular-nums ${
+                isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-700"
+              }`}
+              title={hasTrades ? `${tradeCount} txs · ${formatCurrencyPnl(netProfit)}` : "No trades executed"}
+            >
+              {formatCurrencyPnl(netProfit)}
+            </span>
+            <span
+              className={`text-xs font-mono tabular-nums leading-none ${
+                showLiquidity
+                  ? "text-slate-500"
+                  : isProfit
+                  ? "text-profit"
+                  : isLoss
+                  ? "text-loss"
+                  : "text-slate-400"
+              }`}
+            >
+              {showLiquidity
+                ? avgVolumeUsd !== undefined
+                  ? `${formatCompactUsd(avgVolumeUsd)} 24h`
+                  : "vol —"
+                : netProfitBps && netProfitBps > 0
+                ? `+${netProfitBps.toFixed(1)} bps`
+                : netProfitBps && netProfitBps < 0
+                ? `${netProfitBps.toFixed(1)} bps`
+                : "0.0 bps"}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  },
+);
+
+const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
   selectedSymbol,
   onSelectTicker,
   executionLogs,
   strategyConfigs: _strategyConfigs,
-  futuresMaxUnits,
+  futuresParams = null,
+  totalEquityUsd = null,
   riskData,
   enabledTickers,
-  onToggleTicker,
+  onToggleTicker: _onToggleTicker,
   onOpenSettings,
-  onOpenTickerConfig,
+  onOpenTickerConfig: _onOpenTickerConfig,
   availableTickers,
   activeVenueCodes,
   tickerVolumes,
   systemStatus,
   tickerUnavailableReason,
+  onHideTicker,
 }) => {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOption, setSortOption] = useState<TickerSortOption>("alpha");
   const [showSortMenu, setShowSortMenu] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
+  const [botFilter, setBotFilter] = useState<TickerBotStatus | "all">("all");
+  const [showBotMenu, setShowBotMenu] = useState(false);
+  const botMenuRef = useRef<HTMLDivElement>(null);
+  const [contextMenu, setContextMenu] = useState<{ symbol: string; base: string; x: number; y: number } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
+  // Live bot phases — re-render whenever any mounted bot publishes.
+  const botPhaseVersion = useSyncExternalStore(subscribeBotPhaseRegistry, getBotPhaseRegistryVersion);
+
+  const handleTickerContextMenu = useCallback((e: React.MouseEvent, symbol: string, base: string) => {
+    const MENU_W = 208; // w-52
+    const MENU_H = 48; // single-row estimate; clamped below
+    const MARGIN = 8;
+    const x = Math.min(Math.max(e.clientX, MARGIN), Math.max(MARGIN, window.innerWidth - MENU_W - MARGIN));
+    const y = Math.min(Math.max(e.clientY, MARGIN), Math.max(MARGIN, window.innerHeight - MENU_H - MARGIN));
+    setContextMenu({ symbol, base, x, y });
+  }, []);
+
+  const handleSelectContextItem = useCallback(
+    (id: string) => {
+      const target = contextMenu;
+      setContextMenu(null);
+      if (!target) return;
+      switch (id) {
+        case "hide": {
+          const b = target.base.toUpperCase();
+          void api.setTickerExempted(b, true).catch(() => {});
+          onHideTicker?.(b);
+          break;
+        }
+        default:
+          break;
+      }
+    },
+    [contextMenu, onHideTicker],
+  );
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
       if (sortMenuRef.current && !sortMenuRef.current.contains(event.target as Node)) {
         setShowSortMenu(false);
       }
+      if (botMenuRef.current && !botMenuRef.current.contains(event.target as Node)) {
+        setShowBotMenu(false);
+      }
+      if (contextMenuRef.current && !contextMenuRef.current.contains(event.target as Node)) {
+        setContextMenu(null);
+      }
     };
-    if (showSortMenu) {
+    if (showSortMenu || showBotMenu || contextMenu) {
       document.addEventListener("mousedown", handleClickOutside);
     }
     return () => {
       document.removeEventListener("mousedown", handleClickOutside);
     };
-  }, [showSortMenu]);
+  }, [showSortMenu, showBotMenu, contextMenu]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    const handleScroll = () => setContextMenu(null);
+    document.addEventListener("keydown", handleKey);
+    window.addEventListener("scroll", handleScroll, true);
+    return () => {
+      document.removeEventListener("keydown", handleKey);
+      window.removeEventListener("scroll", handleScroll, true);
+    };
+  }, [contextMenu]);
 
   // Compute stats (transaction count, net profit, net bps, and risk/balance issues) per ticker
   const tickersWithStats: TickerWithStats[] = useMemo(() => {
@@ -135,7 +334,11 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         netDelta && (!netDelta.is_neutral || Math.abs(netDelta.net_quantity) > 0.0001)
       );
       const config = _strategyConfigs?.get(t.symbol);
-      const maxUnits = futuresMaxUnits ?? config?.maxAccumulatedUnits ?? 3;
+      const maxUnits = deriveStepSizing(t.symbol, t.venues, t.basePrice, totalEquityUsd, {
+        stepSizeMult: futuresParams?.stepSizeMult ?? 10,
+        maxStepUsd: futuresParams?.maxStepUsd ?? 2500,
+        maxTickerEquityPct: futuresParams?.maxTickerEquityPct ?? 20,
+      }).maxSteps;
       const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > maxUnits);
       const hasIssue = hasUnbalancedPosition || hasConfigIssue;
       const issueDescription = hasUnbalancedPosition
@@ -155,11 +358,11 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         avgVolumeUsd: getTickerAvgVolumeUsd(t.base, tickerVolumes ?? []),
       };
     });
-  }, [availableTickers, executionLogs, riskData, _strategyConfigs, futuresMaxUnits, tickerVolumes]);
+  }, [availableTickers, executionLogs, riskData, _strategyConfigs, futuresParams, totalEquityUsd, tickerVolumes]);
 
-  // Filter and sort the tickers
-  const processedTickers = useMemo(() => {
-    // 1. Filter by query
+  // Filter by search query (bot-status filter applied separately so the
+  // popover counts stay scoped to the search, not to the active filter).
+  const searchFilteredTickers = useMemo(() => {
     let list = tickersWithStats;
     const query = searchQuery.trim().toLowerCase();
     if (query) {
@@ -174,6 +377,30 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
           activeVenues.some((v) => v.toLowerCase().includes(query))
         );
       });
+    }
+    return list;
+  }, [tickersWithStats, searchQuery, activeVenueCodes]);
+
+  const botStatusCounts = useMemo(() => {
+    const counts: Record<TickerBotStatus | "all", number> = {
+      all: searchFilteredTickers.length,
+      running: 0,
+      paused: 0,
+      reducing: 0,
+      stopped: 0,
+    };
+    for (const t of searchFilteredTickers) {
+      counts[tickerBotStatus(t.symbol)] += 1;
+    }
+    return counts;
+  }, [searchFilteredTickers, botPhaseVersion]);
+
+  // Filter and sort the tickers
+  const processedTickers = useMemo(() => {
+    // 1. Filter by bot status
+    let list = searchFilteredTickers;
+    if (botFilter !== "all") {
+      list = list.filter((t) => tickerBotStatus(t.symbol) === botFilter);
     }
 
     // 2. Sort: Issues ALWAYS prioritized at the top of the list!
@@ -242,9 +469,21 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
 
       return 0;
     });
-  }, [tickersWithStats, searchQuery, sortOption, activeVenueCodes]);
+  }, [searchFilteredTickers, botFilter, sortOption, botPhaseVersion]);
 
-  const totalAvailableCount = (availableTickers ?? PERP_TICKERS).length;
+  const BOT_FILTER_OPTIONS: { value: TickerBotStatus | "all"; label: string }[] = [
+    { value: "all", label: "All bots" },
+    { value: "running", label: "Active" },
+    { value: "paused", label: "Paused" },
+    { value: "reducing", label: "Reducing" },
+    { value: "stopped", label: "Stopped" },
+  ];
+
+  // Future context-menu items plug in here — each entry maps to a row below
+  // and is handled in handleSelectContextItem(id). Hide keeps current behavior exactly.
+  const CONTEXT_MENU_ITEMS: { id: string; label: string; Icon: typeof EyeOff }[] = [
+    { id: "hide", label: "Hide", Icon: EyeOff },
+  ];
 
   return (
     <div className="w-full h-full bg-surface border border-surface-border rounded-lg shadow-2xs flex flex-col select-none overflow-hidden">
@@ -253,19 +492,6 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
         <div className="flex items-center justify-between">
           <div className="text-[13px] font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
             <span>Tickers</span>
-            <span className="text-xs font-normal text-slate-600">({processedTickers.length}/{totalAvailableCount})</span>
-          </div>
-          <div className="flex items-center space-x-1.5">
-            <span
-              className={`text-xs font-mono font-semibold px-2 py-0.5 rounded-full border transition ${
-                (enabledTickers?.size ?? 0) > 0
-                  ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                  : "bg-slate-100 text-slate-500 border-slate-200"
-              }`}
-              title="Active running ticker bots (manual user activation required)"
-            >
-              {enabledTickers?.size ?? 0} Active Bots
-            </span>
           </div>
         </div>
 
@@ -277,7 +503,8 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={`Search ${totalAvailableCount} tickers...`}
+              placeholder=""
+              aria-label="Search tickers"
               className="w-full pl-8 pr-7 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent transition"
             />
             {searchQuery && (
@@ -287,6 +514,62 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
               >
                 <X className="w-3 h-3" />
               </button>
+            )}
+          </div>
+
+          {/* Tiny Bot-Status Filter Button & Popover */}
+          <div className="relative" ref={botMenuRef}>
+            <button
+              onClick={() => setShowBotMenu((prev) => !prev)}
+              aria-label="Filter by bot status"
+              title={`Bot status filter: ${
+                BOT_FILTER_OPTIONS.find((o) => o.value === botFilter)?.label ?? "All bots"
+              }`}
+              className={`p-1.5 rounded-md border transition flex items-center justify-center relative ${
+                showBotMenu
+                  ? "bg-accent/10 border-accent text-accent"
+                  : botFilter !== "all"
+                  ? "bg-accent/5 border-accent-line text-accent"
+                  : "bg-surface-raised border-surface-border text-slate-600 hover:text-slate-900 hover:border-slate-300"
+              }`}
+            >
+              <Filter className="w-3.5 h-3.5" />
+              {botFilter !== "all" && (
+                <span className="absolute -top-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-accent" />
+              )}
+            </button>
+
+            {/* Floating Popover Menu */}
+            {showBotMenu && (
+              <div className="absolute right-0 top-full mt-1.5 w-56 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
+                <div className="px-3.5 py-1 -mx-1 text-xs font-bold text-slate-600 border-b border-surface-border/60">
+                  Filter by Bot Status
+                </div>
+
+                {BOT_FILTER_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    onClick={() => {
+                      setBotFilter(option.value);
+                      setShowBotMenu(false);
+                    }}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
+                      botFilter === option.value
+                        ? "bg-accent/10 text-accent font-semibold"
+                        : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2">
+                      <span>{option.label}</span>
+                      <span className="text-[10px] tabular-nums text-slate-400">
+                        {botStatusCounts[option.value]}
+                      </span>
+                    </div>
+                    {botFilter === option.value && <Check className="w-3.5 h-3.5 text-accent" />}
+                  </button>
+                ))}
+
+              </div>
             )}
           </div>
 
@@ -412,7 +695,7 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
       {/* Scrollable Ticker List */}
       <div className="flex-1 overflow-y-auto px-2 py-1.5 space-y-1">
         {processedTickers.length === 0 ? (
-          searchQuery ? (
+          searchQuery || botFilter !== "all" ? (
             <EmptyState
               title={<>No tickers matching &quot;{searchQuery}&quot;</>}
               hint="Adjust or clear the search to list all markets."
@@ -438,131 +721,54 @@ export const TickerExplorer: React.FC<TickerExplorerProps> = ({
             </EmptyState>
           )
         ) : (
-          processedTickers.map((ticker) => {
-            const isSelected = selectedSymbol === ticker.symbol;
-            const hasTrades = ticker.tradeCount > 0;
-            const isProfit = ticker.netProfit > 0;
-            const isLoss = ticker.netProfit < 0;
-            const isEnabled = enabledTickers ? enabledTickers.has(ticker.symbol) : false;
-            const hasIssue = ticker.hasIssue;
-
-            return (
-              <div
-                key={ticker.symbol}
-                role="button"
-                tabIndex={0}
-                onClick={() => onSelectTicker(ticker.symbol)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelectTicker(ticker.symbol);
-                  }
-                }}
-                className={`w-full px-2.5 py-2 rounded-md border text-left transition relative group font-mono cursor-pointer flex items-center justify-between ${
-                  hasIssue
-                    ? "bg-red-50/90 border-red-300 text-red-900 shadow-2xs hover:bg-red-100/90"
-                    : isSelected
-                    ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
-                    : !isEnabled
-                    ? "opacity-40 grayscale bg-slate-100/60 border-slate-200 hover:opacity-60"
-                    : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300"
-                }`}
-              >
-                {/* Left: Symbol & Status */}
-                <div className="flex items-center space-x-2 min-w-0 pr-1">
-                  {hasIssue ? (
-                    <span title={ticker.issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
-                      <AlertTriangle className="w-3.5 h-3.5 text-loss animate-pulse" />
-                    </span>
-                  ) : null}
-                  <div className="flex items-center space-x-1">
-                    <span className={`font-bold text-xs tracking-tight ${hasIssue ? "text-red-950 font-black" : "text-slate-900"}`}>
-                      {ticker.base}
-                    </span>
-                    <span className="text-[8px] px-1 py-0.2 rounded-sm bg-slate-200/70 text-slate-600 font-semibold">
-                      Perp
-                    </span>
-                  </div>
-                  {hasIssue && (
-                    <span className="text-[8px] font-bold px-1.5 py-0.2 rounded-sm bg-red-100 text-red-700 border border-red-200">
-                      Issue
-                    </span>
-                  )}
-                  {!isEnabled && (
-                    <span className="text-[8px] font-medium px-1 py-0.2 rounded-sm bg-slate-200/60 text-slate-500">
-                      Off
-                    </span>
-                  )}
-                </div>
-
-                {/* Right: Net PnL (USD + BPS) & Actions */}
-                <div className="flex items-center space-x-2 shrink-0">
-                  <div className="flex flex-col items-end">
-                    <span
-                      className={`text-xs font-bold tabular-nums ${
-                        isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-700"
-                      }`}
-                      title={hasTrades ? `${ticker.tradeCount} txs · ${formatCurrencyPnl(ticker.netProfit)}` : "No trades executed"}
-                    >
-                      {formatCurrencyPnl(ticker.netProfit)}
-                    </span>
-                    <span
-                      className={`text-xs font-mono tabular-nums leading-none ${
-                        sortOption === "liquidity"
-                          ? "text-slate-500"
-                          : isProfit
-                          ? "text-profit"
-                          : isLoss
-                          ? "text-loss"
-                          : "text-slate-400"
-                      }`}
-                    >
-                      {sortOption === "liquidity"
-                        ? ticker.avgVolumeUsd !== undefined
-                          ? `${formatCompactUsd(ticker.avgVolumeUsd)} 24h`
-                          : "vol —"
-                        : ticker.netProfitBps && ticker.netProfitBps > 0
-                        ? `+${ticker.netProfitBps.toFixed(1)} bps`
-                        : ticker.netProfitBps && ticker.netProfitBps < 0
-                        ? `${ticker.netProfitBps.toFixed(1)} bps`
-                        : "0.0 bps"}
-                    </span>
-                  </div>
-
-                  {/* On/Off Switch Toggle */}
-                  {onToggleTicker && (
-                    <div
-                      onClick={(e) => e.stopPropagation()}
-                      title={isEnabled ? `Switch off ${ticker.symbol}` : `Switch on ${ticker.symbol}`}
-                      className="shrink-0 flex items-center"
-                    >
-                      <SwitchToggle
-                        checked={isEnabled}
-                        onChange={() => onToggleTicker(ticker.symbol)}
-                        size="sm"
-                      />
-                    </div>
-                  )}
-
-                  {/* Configure strategy button */}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onOpenTickerConfig?.(ticker.symbol);
-                    }}
-                    className="p-1 rounded-sm text-slate-600 hover:text-accent hover:bg-surface border border-transparent hover:border-surface-border transition cursor-pointer opacity-70 group-hover:opacity-100"
-                    title={`Configure ${ticker.symbol} parameters`}
-                  >
-                    <SlidersHorizontal className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            );
-          })
+          processedTickers.map((ticker) => (
+            <TickerRow
+              key={ticker.symbol}
+              symbol={ticker.symbol}
+              base={ticker.base}
+              isSelected={selectedSymbol === ticker.symbol}
+              isEnabled={enabledTickers ? enabledTickers.has(ticker.symbol) : false}
+              hasIssue={ticker.hasIssue}
+              issueDescription={ticker.issueDescription}
+              tradeCount={ticker.tradeCount}
+              netProfit={ticker.netProfit}
+              netProfitBps={ticker.netProfitBps}
+              avgVolumeUsd={ticker.avgVolumeUsd}
+              showLiquidity={sortOption === "liquidity"}
+              onSelect={onSelectTicker}
+              onContextMenu={handleTickerContextMenu}
+            />
+          ))
         )}
       </div>
+
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          role="menu"
+          className="fixed w-52 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
+        >
+          {CONTEXT_MENU_ITEMS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              role="menuitem"
+              onClick={() => handleSelectContextItem(id)}
+              className="w-full flex items-center space-x-2 px-2.5 py-1.5 text-left transition rounded-sm text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+            >
+              <Icon className="w-3.5 h-3.5 text-slate-600" />
+              <span>{label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
     </div>
   );
 };
+
+export const TickerExplorer: React.FC<TickerExplorerProps> = React.memo(TickerExplorerInner);

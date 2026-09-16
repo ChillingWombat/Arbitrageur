@@ -60,7 +60,7 @@ const formatQty = (q: number): string => {
   return `${q < 0 ? "-" : "+"}${abs.toFixed(digits)}`;
 };
 
-export const PositionsPanel: React.FC<PositionsPanelProps> = ({
+const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   positions,
   currentStrategyId,
   currentStrategyLabel,
@@ -119,7 +119,7 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({
 
         <div className="flex items-center space-x-1.5">
           {/* Scope toggle: all strategies vs the strategy of the active tab */}
-          <div className="flex flex-1 items-center bg-surface-raised border border-surface-border rounded-md p-0.5 text-xs font-mono">
+          <div className="flex flex-1 items-center bg-surface-raised border border-surface-border rounded-md p-0.5 text-[11px] font-mono">
             <button
               type="button"
               onClick={() => setScope("all")}
@@ -392,3 +392,5 @@ export const PositionsPanel: React.FC<PositionsPanelProps> = ({
     </aside>
   );
 };
+
+export const PositionsPanel: React.FC<PositionsPanelProps> = React.memo(PositionsPanelInner);

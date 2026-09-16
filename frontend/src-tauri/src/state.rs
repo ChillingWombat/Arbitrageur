@@ -2,13 +2,18 @@ use crate::vault::ExchangeCredentials;
 use arbitrager_core::hub::MarketDataHub;
 use arbitrager_core::types::{dec, Decimal};
 use arbitrager_exchanges::arcus::ArcusAdapter;
+use arbitrager_exchanges::aster::AsterAdapter;
+use arbitrager_exchanges::edgex::EdgeXAdapter;
+use arbitrager_exchanges::grvt::GrvtAdapter;
 use arbitrager_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrager_exchanges::lighter::LighterAdapter;
 use arbitrager_exchanges::popdex::PopDexAdapter;
+use arbitrager_exchanges::ondoperps::OndoPerpsAdapter;
 use arbitrager_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrager_exchanges::simulated::SimulatedExchange;
 use arbitrager_exchanges::vanta::VantaAdapter;
 use arbitrager_execution::coordinator::AtomicArbitrageCoordinator;
+use arbitrager_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrager_execution::smart_routing::SmartOrderRouter;
 use arbitrager_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrager_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
@@ -24,6 +29,12 @@ pub struct ExecutionLogEntry {
     pub id: String,
     pub timestamp: String,
     pub trade_type: String, // "Spatial" or "Funding" or "Prediction"
+    /// Owning strategy for this fill event (`futures`, `radar`, `triangle`,
+    /// ...). Rows that predate attribution carry `"unattributed"`: they are
+    /// excluded from per-strategy sums and counted separately, never
+    /// absorbed. `serde(default)` keeps old serialized rows loadable.
+    #[serde(default = "default_unattributed_strategy")]
+    pub strategy_id: String,
     pub symbol: String,
     pub venue_a: String,
     pub venue_b: String,
@@ -47,6 +58,10 @@ pub struct ExecutionLogEntry {
     pub max_units: Option<u32>,
     #[serde(default)]
     pub nominal_hurdle_bps: Option<f64>,
+}
+
+fn default_unattributed_strategy() -> String {
+    crate::attribution::UNATTRIBUTED_STRATEGY_ID.to_string()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -76,6 +91,18 @@ fn default_sliding_window_secs() -> u64 {
     86_400
 }
 
+fn default_step_size_mult() -> f64 {
+    10.0
+}
+
+fn default_max_step_usd() -> f64 {
+    2500.0
+}
+
+fn default_max_ticker_equity_pct() -> f64 {
+    20.0
+}
+
 /// Universal, strategy-scoped parameters — one record per strategy_id
 /// ("futures" | "funding" | "spot"), shared across all tickers. Per-ticker
 /// contract specifics (unit size in base units, accumulated grid units) stay in
@@ -92,19 +119,100 @@ pub struct StrategyParamsDto {
     pub sliding_window_mode: String,
     #[serde(default = "default_sliding_window_secs")]
     pub sliding_window_secs: u64,
-    pub max_accumulated_units: u32,
+    /// Single Spread sizing redesign: one grid step = min(mult ×
+    /// venue-compatible min lot, maxStepUsd / price), quantized UP to the
+    /// venue step. Max steps derive per ticker from total paper equity × pct.
+    /// `max_accumulated_units` is therefore DERIVED, not authored.
+    /// `serde(default)` on each field keeps old persisted rows (which carry
+    /// the removed `unit_size_usd`/`max_accumulated_units` keys) loadable —
+    /// unknown keys are ignored, missing new keys fall back to defaults.
+    #[serde(default = "default_step_size_mult")]
+    pub step_size_mult: f64,
+    #[serde(default = "default_max_step_usd")]
+    pub max_step_usd: f64,
+    #[serde(default = "default_max_ticker_equity_pct")]
+    pub max_ticker_equity_pct: f64,
     pub execution_mode: String,
-    /// USD notional per grid unit per leg — converted to base units per ticker.
-    pub unit_size_usd: f64,
     pub user_target_leverage: u32,
+    // Per-strategy auto-hide filters (paper/research visibility + bot/scan
+    // targeting). None (or <= 0) disables the filter. Aggregation is the MIN
+    // across the ticker's in-scope venues (the >= 2-venue intersection that
+    // lists it); any in-scope venue missing the metric excludes the ticker
+    // (fail-closed). MIN bounds executable size and defeats single-venue
+    // wash inflation — a mean would let one inflated venue whitelist meme
+    // coins. Price uses the minimum mid across in-scope venues.
+    #[serde(default)]
+    pub auto_min_volume_usd: Option<f64>,
+    #[serde(default)]
+    pub auto_min_price_usd: Option<f64>,
+    // Prediction-market event-volume threshold. Defined for schema parity
+    // but inert: prediction adapters are scaffolds with no venue volume
+    // data, so no code path reads this field yet.
+    #[serde(default)]
+    pub auto_min_event_volume_usd: Option<f64>,
     // Funding Rate
     pub funding_trade_size_usd: f64,
     pub funding_min_apr_pct: f64,
     pub funding_holding_days: u32,
+    // Per-strategy max slippage (bps). Each strategy enforces its own gate
+    // through the shared slippage standard
+    // (verify_pre_execution_slippage / route-economics); there is no global
+    // setting. Prediction carries the field for schema parity but it is
+    // inert: prediction adapters are scaffolds with no execution path, like
+    // auto_min_event_volume_usd.
+    #[serde(default = "default_max_slippage")]
+    pub futures_max_slippage_bps: f64,
+    #[serde(default = "default_max_slippage")]
+    pub funding_max_slippage_bps: f64,
+    #[serde(default = "default_max_slippage")]
+    pub prediction_max_slippage_bps: f64,
+    // Funding configurator: max allowed gap (bps) between the venues'
+    // execution prices at entry; wider gaps refuse.
+    #[serde(default = "default_funding_max_entry_spread")]
+    pub funding_max_entry_spread_bps: f64,
+    // Funding auto-exit: exit when the live inter-venue spread (percent)
+    // falls below this value. None disables the gate.
+    #[serde(default)]
+    pub funding_auto_exit_spread_pct: Option<f64>,
+    // Funding liquidation-distance trim: when EITHER leg comes within this
+    // percent of liquidation, trim BOTH legs by the same qty to stay
+    // neutral (close both when the remainder would drop below one step).
+    // None disables the block. This is the funding instance of the
+    // universal trim block (same semantics, shared helper).
+    #[serde(default)]
+    pub funding_liq_trim_pct: Option<f64>,
+    // Funding auto-rebalance: reduce the overweight leg back to neutral.
+    #[serde(default)]
+    pub funding_auto_rebalance: bool,
+    // Funding opportunity rotation: exit the current position for a
+    // higher-yield one only when the net-of-friction improvement exceeds
+    // this (bps). None disables rotation.
+    #[serde(default)]
+    pub funding_rotation_threshold_bps: Option<f64>,
+    // Universal trim block: every bot configurator surfaces the same
+    // threshold with the same trim-both/close-both semantics via the shared
+    // helper. Prediction is defined-but-disabled (no execution path).
+    #[serde(default)]
+    pub futures_liq_trim_pct: Option<f64>,
+    #[serde(default)]
+    pub spot_liq_trim_pct: Option<f64>,
+    #[serde(default)]
+    pub prediction_liq_trim_pct: Option<f64>,
     // Spatial (spot)
     pub spot_trade_size_usd: f64,
     pub spot_max_slippage_bps: f64,
     pub spot_min_net_spread_bps: f64,
+    // Passive limit unwinds/rebalances: one control set per strategy with a
+    // live reduce path (futures/spread, funding, spot). Disabled by default
+    // (opt-in). Prediction carries no instance: prediction adapters are
+    // scaffolds with no execution path, so passive unwind is inert there.
+    // `serde(default)` keeps rows persisted before this block loadable.
+    #[serde(default)]
+    pub futures_passive_unwind: PassiveUnwindConfig,
+    #[serde(default)]
+    pub funding_passive_unwind: PassiveUnwindConfig,
+    #[serde(default)]
+    pub spot_passive_unwind: PassiveUnwindConfig,
 }
 
 impl StrategyParamsDto {
@@ -116,16 +224,34 @@ impl StrategyParamsDto {
             sliding_window: "24h".into(),
             sliding_window_mode: "manual".into(),
             sliding_window_secs: 86_400,
-            max_accumulated_units: 3,
+            step_size_mult: 10.0,
             execution_mode: "SINGLE_WAY".into(),
-            unit_size_usd: 2500.0,
+            max_step_usd: 2500.0,
+            max_ticker_equity_pct: 20.0,
             user_target_leverage: 5,
+            auto_min_volume_usd: None,
+            auto_min_price_usd: None,
+            auto_min_event_volume_usd: None,
             funding_trade_size_usd: 25000.0,
             funding_min_apr_pct: 8.0,
             funding_holding_days: 14,
+            futures_max_slippage_bps: default_max_slippage(),
+            funding_max_slippage_bps: default_max_slippage(),
+            prediction_max_slippage_bps: default_max_slippage(),
+            funding_max_entry_spread_bps: default_funding_max_entry_spread(),
+            funding_auto_exit_spread_pct: None,
+            funding_liq_trim_pct: None,
+            funding_auto_rebalance: false,
+            funding_rotation_threshold_bps: None,
+            futures_liq_trim_pct: None,
+            spot_liq_trim_pct: None,
+            prediction_liq_trim_pct: None,
             spot_trade_size_usd: 1000.0,
             spot_max_slippage_bps: 5.0,
             spot_min_net_spread_bps: 15.0,
+            futures_passive_unwind: PassiveUnwindConfig::default(),
+            funding_passive_unwind: PassiveUnwindConfig::default(),
+            spot_passive_unwind: PassiveUnwindConfig::default(),
         }
     }
 }
@@ -154,6 +280,9 @@ fn default_hmac_token() -> String {
 }
 fn default_max_slippage() -> f64 {
     15.0
+}
+fn default_funding_max_entry_spread() -> f64 {
+    50.0
 }
 fn default_min_depth_ratio() -> f64 {
     3.0
@@ -255,8 +384,6 @@ pub struct EngineSettingsDto {
     pub hsm_url: String,
     #[serde(default = "default_hmac_token")]
     pub hmac_token: String,
-    #[serde(default = "default_max_slippage")]
-    pub max_slippage_bps: f64,
     #[serde(default = "default_min_depth_ratio")]
     pub min_depth_ratio: f64,
 
@@ -311,6 +438,12 @@ pub struct EngineSettingsDto {
     pub okx_enabled: bool,
     #[serde(default)]
     pub aster_enabled: bool,
+    #[serde(default)]
+    pub ondoperps_enabled: bool,
+    #[serde(default)]
+    pub grvt_enabled: bool,
+    #[serde(default)]
+    pub edgex_enabled: bool,
     #[serde(default)]
     pub variational_enabled: bool,
     #[serde(default)]
@@ -414,6 +547,12 @@ pub struct EngineSettingsDto {
     #[serde(default)]
     pub configured_venues: Vec<String>,
 
+    // Historical retention (durable via state_store kv; None = unlimited)
+    #[serde(default)]
+    pub spread_samples_max_days: Option<u32>,
+    #[serde(default)]
+    pub spread_samples_max_gb: Option<f64>,
+
     // Referrals, About & Sponsor Links
     #[serde(default = "default_referral_lighter")]
     pub referral_lighter: String,
@@ -432,7 +571,6 @@ impl Default for EngineSettingsDto {
         Self {
             hsm_url: default_hsm_url(),
             hmac_token: default_hmac_token(),
-            max_slippage_bps: default_max_slippage(),
             min_depth_ratio: default_min_depth_ratio(),
             engine_rpc_port: default_engine_rpc_port(),
             engine_ws_port: default_engine_ws_port(),
@@ -450,6 +588,9 @@ impl Default for EngineSettingsDto {
             binance_enabled: false,
             okx_enabled: false,
             aster_enabled: false,
+            ondoperps_enabled: false,
+            grvt_enabled: false,
+            edgex_enabled: false,
             variational_enabled: false,
             coinbase_enabled: false,
             kraken_enabled: false,
@@ -498,6 +639,8 @@ impl Default for EngineSettingsDto {
             popdex_api_key: "".into(),
             popdex_url: default_popdex_url(),
             configured_venues: Vec::new(),
+            spread_samples_max_days: None,
+            spread_samples_max_gb: None,
             referral_lighter: default_referral_lighter(),
             referral_robinhood: default_referral_robinhood(),
             sponsor_link: default_sponsor_link(),
@@ -802,12 +945,20 @@ pub struct AppEngineState {
     pub ex_robinhood: Arc<SimulatedExchange>,
     pub ex_arcus: Arc<SimulatedExchange>,
     pub ex_popdex: Arc<SimulatedExchange>,
+    pub ex_aster: Arc<SimulatedExchange>,
+    pub ex_ondoperps: Arc<SimulatedExchange>,
+    pub ex_grvt: Arc<SimulatedExchange>,
+    pub ex_edgex: Arc<SimulatedExchange>,
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
     pub live_robinhood: Arc<LighterAdapter>,
     pub live_arcus: Arc<ArcusAdapter>,
     pub live_popdex: Arc<PopDexAdapter>,
+    pub live_aster: Arc<AsterAdapter>,
+    pub live_ondoperps: Arc<OndoPerpsAdapter>,
+    pub live_grvt: Arc<GrvtAdapter>,
+    pub live_edgex: Arc<EdgeXAdapter>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -831,8 +982,13 @@ pub struct AppEngineState {
     pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
+    pub autotune_apply_lock: tokio::sync::Mutex<()>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
+    /// Last margin-snapshot write per venue (epoch ms). Bounds the snapshot
+    /// cadence: fills and heartbeats record at most one row per venue per
+    /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`.
+    pub margin_snapshot_at: Mutex<std::collections::HashMap<String, i64>>,
     /// Exponentially-smoothed round-trip latency (ms) per venue, updated on
     /// each successful probe so the displayed value is a rolling average
     /// rather than a single jumpy sample. Entries are removed when a probe
@@ -847,6 +1003,13 @@ pub struct AppEngineState {
     /// Spread Range Monitor engine, installed by main() after construction
     /// (it needs a fully-built state to hydrate from).
     pub monitor: Mutex<Option<Arc<crate::monitor::SpreadMonitorEngine>>>,
+    /// Autonomous convergence bot, installed by main() after construction.
+    /// `None` until installed; IPC reports "not running" rather than a
+    /// fabricated status.
+    pub radar_bot: Mutex<Option<Arc<crate::auto_exec::OpportunityExecutor>>>,
+    /// In-flight dedup for orderbook REST fetches, keyed by
+    /// (venue, symbol). Concurrent callers share one request.
+    pub orderbook_flights: Arc<crate::ws_primary::OrderbookSingleFlight>,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented
@@ -866,6 +1029,10 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "vanta" | "vnt" | "vanta.exchange" | "vanta (orderly)" | "vanta (orderly, read-only)" => {
             Some("vanta")
         }
+        "aster" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
+        "ondo" | "ondoperps" | "ondo perps" | "ondo perps (read-only)" => Some("ondoperps"),
+        "grvt" | "grvt (perp dex)" | "grvt (perp dex, read-only)" => Some("grvt"),
+        "edgex" | "edge_x" | "edgex (starkex)" | "edgex (starkex, read-only)" => Some("edgex"),
         _ => None,
     }
 }
@@ -904,6 +1071,15 @@ impl AppEngineState {
             crate::vault::SecureVault::default_path(),
             state_store,
         ))
+    }
+
+    #[cfg(test)]
+    pub fn new_inner_for_test(state_store: Arc<crate::state_store::StateStore>) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "arbitrager_retention_vault_{}",
+            rand::random::<u64>()
+        ));
+        Self::new_inner(dir.join("vault.enc"), state_store)
     }
 
     #[cfg(test)]
@@ -958,6 +1134,34 @@ impl AppEngineState {
             dec!(2.0),
             dec!(100000.0),
         ));
+        let ex_aster = Arc::new(SimulatedExchange::new(
+            "aster",
+            "Aster",
+            3,
+            dec!(3.5),
+            dec!(100000.0),
+        ));
+        let ex_ondoperps = Arc::new(SimulatedExchange::new(
+            "ondoperps",
+            "Ondo Perps",
+            4,
+            dec!(3.5),
+            dec!(100000.0),
+        ));
+        let ex_grvt = Arc::new(SimulatedExchange::new(
+            "grvt",
+            "GRVT",
+            4,
+            dec!(2.0),
+            dec!(100000.0),
+        ));
+        let ex_edgex = Arc::new(SimulatedExchange::new(
+            "edgex",
+            "edgeX",
+            4,
+            dec!(4.5),
+            dec!(100000.0),
+        ));
 
         // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
         // from live venue APIs once API credentials are configured by the user.
@@ -975,6 +1179,10 @@ impl AppEngineState {
         ));
         let live_arcus = Arc::new(ArcusAdapter::new(None, None, None));
         let live_popdex = Arc::new(PopDexAdapter::new(None, None, None));
+        let live_aster = Arc::new(AsterAdapter::new(None, None, None));
+        let live_ondoperps = Arc::new(OndoPerpsAdapter::new(None));
+        let live_grvt = Arc::new(GrvtAdapter::new(None));
+        let live_edgex = Arc::new(EdgeXAdapter::new(None));
         let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
         let market_data_hub = MarketDataHub::new(1024, 400);
@@ -991,7 +1199,22 @@ impl AppEngineState {
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
 
-        let settings = RwLock::new(EngineSettingsDto::default());
+        let mut initial_settings = EngineSettingsDto::default();
+        if let Ok(Some(raw)) = state_store.kv_get("retention.max_days") {
+            if let Ok(days) = raw.parse::<u32>() {
+                if days > 0 {
+                    initial_settings.spread_samples_max_days = Some(days);
+                }
+            }
+        }
+        if let Ok(Some(raw)) = state_store.kv_get("retention.max_gb") {
+            if let Ok(gb) = raw.parse::<f64>() {
+                if gb.is_finite() && gb > 0.0 {
+                    initial_settings.spread_samples_max_gb = Some(gb);
+                }
+            }
+        }
+        let settings = RwLock::new(initial_settings);
 
         let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
@@ -1006,12 +1229,20 @@ impl AppEngineState {
             ex_robinhood,
             ex_arcus,
             ex_popdex,
+            ex_aster,
+            ex_ondoperps,
+            ex_grvt,
+            ex_edgex,
             live_hl,
             live_lighter,
             live_vanta,
             live_robinhood,
             live_arcus,
             live_popdex,
+            live_aster,
+            live_ondoperps,
+            live_grvt,
+            live_edgex,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1031,11 +1262,15 @@ impl AppEngineState {
             virtual_ledger,
             is_paused: RwLock::new(false),
             execution_lock: tokio::sync::Mutex::new(()),
+            autotune_apply_lock: tokio::sync::Mutex::new(()),
             sample_prune_at: Mutex::new(0),
+            margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),
             volume_cache: Mutex::new(None),
             monitor: Mutex::new(None),
+            radar_bot: Mutex::new(None),
+            orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
         }
     }
 
@@ -1046,10 +1281,10 @@ impl AppEngineState {
     }
 
     /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
-    /// Lighter, and Vanta (Orderly) are exposed as read-only native
-    /// market-data adapters, and only in paper mode; no adapter is admitted
-    /// while live mode is active. Public read-only feeds require enablement,
-    /// not secrets.
+    /// Lighter, Vanta (Orderly), Aster, Ondo Perps, GRVT, and edgeX are
+    /// exposed as read-only native market-data adapters, and only in paper
+    /// mode; no adapter is admitted while live mode is active. Public
+    /// read-only feeds require enablement, not secrets.
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -1073,29 +1308,57 @@ impl AppEngineState {
         if s.hyperliquid_enabled || account_enabled("hyperliquid") {
             list.push((
                 "hyperliquid",
-                "Hyperliquid (L1, Read-Only)",
+                "Hyperliquid",
                 self.live_hl.clone(),
             ));
         }
         if s.lighter_enabled || account_enabled("lighter") {
             list.push((
                 "lighter",
-                "Lighter (zkDEX, Read-Only)",
+                "Lighter",
                 self.live_lighter.clone(),
             ));
         }
         if s.robinhood_enabled || account_enabled("robinhood") {
             list.push((
                 "robinhood",
-                "Robinhood Lighter (Read-Only)",
+                "Robinhood Lighter",
                 self.live_robinhood.clone(),
             ));
         }
         if s.vanta_enabled || account_enabled("vanta") {
             list.push((
                 "vanta",
-                "Vanta (Orderly, Read-Only)",
+                "Vanta",
                 self.live_vanta.clone(),
+            ));
+        }
+        if s.aster_enabled || account_enabled("aster") {
+            list.push((
+                "aster",
+                "Aster",
+                self.live_aster.clone(),
+            ));
+        }
+        if s.ondoperps_enabled || account_enabled("ondoperps") {
+            list.push((
+                "ondoperps",
+                "Ondo Perps",
+                self.live_ondoperps.clone(),
+            ));
+        }
+        if s.grvt_enabled || account_enabled("grvt") {
+            list.push((
+                "grvt",
+                "GRVT",
+                self.live_grvt.clone(),
+            ));
+        }
+        if s.edgex_enabled || account_enabled("edgex") {
+            list.push((
+                "edgex",
+                "edgeX",
+                self.live_edgex.clone(),
             ));
         }
         list
@@ -1133,6 +1396,10 @@ impl AppEngineState {
             "lighter" => Some(self.ex_lighter.clone()),
             "robinhood" => Some(self.ex_robinhood.clone()),
             "vanta" => Some(self.ex_vanta.clone()),
+            "aster" => Some(self.ex_aster.clone()),
+            "ondoperps" => Some(self.ex_ondoperps.clone()),
+            "grvt" => Some(self.ex_grvt.clone()),
+            "edgex" => Some(self.ex_edgex.clone()),
             _ => None,
         }
     }
@@ -1154,6 +1421,10 @@ impl AppEngineState {
             ("lighter", self.ex_lighter.clone()),
             ("robinhood", self.ex_robinhood.clone()),
             ("vanta", self.ex_vanta.clone()),
+            ("aster", self.ex_aster.clone()),
+            ("ondoperps", self.ex_ondoperps.clone()),
+            ("grvt", self.ex_grvt.clone()),
+            ("edgex", self.ex_edgex.clone()),
         ]
     }
 }
@@ -1161,6 +1432,45 @@ impl AppEngineState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_strategy_params_old_rows_load_with_sizing_defaults() {
+        let old = serde_json::json!({
+            "strategyId": "futures",
+            "targetProfitBps": 1.0,
+            "windowPercentile": 50,
+            "slidingWindow": "24h",
+            "slidingWindowMode": "manual",
+            "slidingWindowSecs": 86400,
+            "maxAccumulatedUnits": 3,
+            "executionMode": "SINGLE_WAY",
+            "unitSizeUsd": 2500.0,
+            "userTargetLeverage": 5,
+            "fundingTradeSizeUsd": 25000.0,
+            "fundingMinAprPct": 8.0,
+            "fundingHoldingDays": 14,
+            "spotTradeSizeUsd": 1000.0,
+            "spotMaxSlippageBps": 5.0,
+            "spotMinNetSpreadBps": 15.0
+        });
+        let p: StrategyParamsDto =
+            serde_json::from_value(old).expect("old rows must still load");
+        assert_eq!(p.step_size_mult, 10.0);
+        assert_eq!(p.max_step_usd, 2500.0);
+        assert_eq!(p.max_ticker_equity_pct, 20.0);
+        assert_eq!(p.strategy_id, "futures");
+        assert_eq!(p.futures_max_slippage_bps, 15.0);
+        assert_eq!(p.funding_max_slippage_bps, 15.0);
+        assert_eq!(p.prediction_max_slippage_bps, 15.0);
+        assert_eq!(p.funding_max_entry_spread_bps, 50.0);
+        assert_eq!(p.funding_auto_exit_spread_pct, None);
+        assert_eq!(p.funding_liq_trim_pct, None);
+        assert!(!p.funding_auto_rebalance);
+        assert_eq!(p.funding_rotation_threshold_bps, None);
+        assert_eq!(p.futures_liq_trim_pct, None);
+        assert_eq!(p.spot_liq_trim_pct, None);
+        assert_eq!(p.prediction_liq_trim_pct, None);
+    }
 
     #[test]
     fn test_load_strategy_params_skips_malformed_and_mismatched_rows() {
@@ -1237,23 +1547,49 @@ mod tests {
             s.popdex_enabled = true;
             s.polymarket_enabled = true;
             s.kalshi_enabled = true;
+            s.aster_enabled = true;
+            s.ondoperps_enabled = true;
+            s.grvt_enabled = true;
+            s.edgex_enabled = true;
         }
         let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 4);
+        assert_eq!(venues_paper.len(), 8);
         assert_eq!(venues_paper[0].0, "hyperliquid");
         assert_eq!(venues_paper[1].0, "lighter");
         assert_eq!(venues_paper[2].0, "robinhood");
         assert_eq!(venues_paper[3].0, "vanta");
+        assert_eq!(venues_paper[4].0, "aster");
+        assert_eq!(venues_paper[5].0, "ondoperps");
+        assert_eq!(venues_paper[6].0, "grvt");
+        assert_eq!(venues_paper[6].1, "GRVT");
+        assert_eq!(venues_paper[7].0, "edgex");
+        assert_eq!(venues_paper[7].1, "edgeX");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
         assert!(state.get_adapter("robinhood").is_some());
         assert!(state.get_adapter("vanta").is_some());
+        assert!(state.get_adapter("aster").is_some());
+        assert!(state.get_adapter("ondo").is_some());
+        assert!(state.get_adapter("ondoperps").is_some());
         assert!(state.get_adapter("arcus").is_none());
         assert!(state.get_adapter("popdex").is_none());
+        // GRVT + edgeX are admitted to paper read-only with live-verified
+        // parsing; every documented alias resolves to an adapter and a
+        // paper exchange.
+        assert!(state.get_adapter("grvt").is_some());
+        assert!(state.get_adapter("GRVT (Perp DEX, Read-Only)").is_some());
+        assert!(state.get_adapter("edgex").is_some());
+        assert!(state.get_adapter("edge_x").is_some());
+        assert!(state.get_adapter("edgeX (StarkEx, Read-Only)").is_some());
         assert!(state.get_adapter("polymarket").is_none());
         assert!(state.get_adapter("kalshi").is_none());
         assert!(state.get_adapter("nonexistent").is_none());
+        assert!(state.get_paper_exchange("aster").is_some());
+        assert!(state.get_paper_exchange("ondoperps").is_some());
+        assert!(state.get_paper_exchange("grvt").is_some());
+        assert!(state.get_paper_exchange("edgex").is_some());
+        assert!(state.get_paper_exchange("edge_x").is_some());
 
         *state.is_live_mode.write() = true;
         assert_eq!(state.get_venues().len(), 0);
@@ -1327,7 +1663,6 @@ mod tests {
     async fn test_engine_settings_defaults() {
         let state = AppEngineState::new();
         let s = state.settings.read().clone();
-        assert_eq!(s.max_slippage_bps, 15.0);
         assert_eq!(s.min_depth_ratio, 3.0);
         assert!(!s.hsm_url.is_empty());
         assert!(s.hmac_token.is_empty());

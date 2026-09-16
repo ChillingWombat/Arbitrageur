@@ -70,13 +70,13 @@ impl PredictionMarketArbStrategy {
             self.kalshi_exchange.fetch_orderbook(&self.kalshi_no_symbol)
         )?;
 
-        // Polymarket YES ask / NO ask
-        let poly_yes_ask = poly_book.best_ask_price().unwrap_or(dec!(1.0));
-        let poly_no_ask = (dec!(1.0) - poly_book.best_bid_price().unwrap_or(dec!(0.0))).min(dec!(1.0));
+        let Some(poly_yes_ask) = poly_book.best_ask_price() else { return Ok(None) };
+        let Some(poly_bid) = poly_book.best_bid_price() else { return Ok(None) };
+        let poly_no_ask = (dec!(1.0) - poly_bid).min(dec!(1.0));
 
-        // Kalshi YES ask / NO ask
-        let kalshi_no_ask = kalshi_book.best_ask_price().unwrap_or(dec!(1.0));
-        let kalshi_yes_ask = (dec!(1.0) - kalshi_book.best_bid_price().unwrap_or(dec!(0.0))).min(dec!(1.0));
+        let Some(kalshi_no_ask) = kalshi_book.best_ask_price() else { return Ok(None) };
+        let Some(kalshi_bid) = kalshi_book.best_bid_price() else { return Ok(None) };
+        let kalshi_yes_ask = (dec!(1.0) - kalshi_bid).min(dec!(1.0));
 
         if let Some(opp) = evaluate_prediction_cross_venue(
             self.poly_exchange.name(),

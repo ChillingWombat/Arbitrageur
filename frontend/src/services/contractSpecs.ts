@@ -198,23 +198,123 @@ export function getMinCompatibleSize(
 }
 
 /**
- * Converts a universal USD-notional unit size into this ticker's base-unit
- * quantity: rounded up to the compatible step size and clamped to the
- * venue-compatible minimum lot.
+ * Single Spread step-sizing parameters (authored once per strategy).
+ * Session fields are display/execution multipliers from the session
+ * profile (Phase 1): each defaults to neutral 1.0 when the aggregate is
+ * provisional or unknown — never a fabricated value.
  */
-export function deriveUnitSize(
+export interface StepSizingParams {
+  stepSizeMult: number;
+  maxStepUsd: number;
+  maxTickerEquityPct: number;
+  /** Session size-allowance (overlap 1.0 … dead 0.4, weekend x0.5, mask 0). */
+  sessionAllow?: number;
+  /** Inverse-vol factor clamp(sigma_med / sigma_h, 0.5, 1.5). */
+  sessionInvVol?: number;
+  /** Depth factor clamp(depth_h / depth_med, 0.25, 1.0). */
+  sessionDepth?: number;
+}
+
+export interface StepSizingResult {
+  /** Venue-compatible minimum lot, in base units. */
+  minCompatBase: number;
+  /** One grid step in base units: min(mult x min lot, maxStepUsd / price),
+   *  quantized UP to the venue step, never below the min lot. */
+  stepBaseQty: number;
+  /** stepBaseQty x price. */
+  stepUsd: number;
+  /** max(1, floor(known equity x pct/100 / stepUsd)); 0 when equity is unknown. */
+  maxSteps: number;
+}
+
+export const DEFAULT_STEP_SIZING: StepSizingParams = {
+  stepSizeMult: 10,
+  maxStepUsd: 2500,
+  maxTickerEquityPct: 20,
+};
+
+/** Sum of live venue paper equities, or null when balances are unavailable
+ *  (empty, non-finite, or zero-sum). Callers must treat null as unknown and
+ *  fail closed — never substitute a hardcoded seed. */
+export function resolveTotalPaperEquity(
+  balances: { equity_usd: number }[]
+): number | null {
+  const sum = (balances ?? []).reduce(
+    (acc, b) => acc + (Number.isFinite(b?.equity_usd) ? b.equity_usd : 0),
+    0
+  );
+  return sum > 0 ? sum : null;
+}
+
+/**
+ * Canonical Single Spread step sizing. Single helper consumed by BOTH the
+ * LiveMatrix orderQty derivation AND the App refreshAllData scan qty so
+ * scan/execute cannot diverge.
+ */
+function sessionFactor(value: number | undefined, lo: number, hi: number): number {
+  const v = Number(value);
+  if (!Number.isFinite(v)) return 1.0;
+  return Math.min(hi, Math.max(lo, v));
+}
+
+export function deriveStepSizing(
   symbol: string,
   venues: string[],
   basePrice: number,
-  unitSizeUsd: number
-): number {
+  totalEquityUsd: number | null,
+  params: StepSizingParams
+): StepSizingResult {
   const { minCompatibleSize, stepSize } = getMinCompatibleSize(symbol, venues, basePrice);
-  if (basePrice <= 0 || !Number.isFinite(unitSizeUsd) || unitSizeUsd <= 0) {
-    return minCompatibleSize;
-  }
+  const mult =
+    Number.isFinite(params?.stepSizeMult) && (params.stepSizeMult as number) >= 1
+      ? (params.stepSizeMult as number)
+      : DEFAULT_STEP_SIZING.stepSizeMult;
+  const maxStepUsd =
+    Number.isFinite(params?.maxStepUsd) && (params.maxStepUsd as number) > 0
+      ? (params.maxStepUsd as number)
+      : DEFAULT_STEP_SIZING.maxStepUsd;
+  const pct =
+    Number.isFinite(params?.maxTickerEquityPct) &&
+    (params.maxTickerEquityPct as number) > 0 &&
+    (params.maxTickerEquityPct as number) <= 100
+      ? (params.maxTickerEquityPct as number)
+      : DEFAULT_STEP_SIZING.maxTickerEquityPct;
+
   const step = stepSize || 0.0001;
-  const rounded = Math.ceil(unitSizeUsd / basePrice / step) * step;
-  return Math.max(minCompatibleSize, Math.round(rounded * 1e6) / 1e6);
+  let stepBaseQty: number;
+  if (!(basePrice > 0)) {
+    stepBaseQty = Math.ceil((mult * minCompatibleSize) / step) * step;
+  } else {
+    const target = Math.min(mult * minCompatibleSize, maxStepUsd / basePrice);
+    stepBaseQty = Math.ceil(target / step) * step;
+  }
+  const precision = step < 1 ? Math.min(6, Math.ceil(-Math.log10(step))) : 0;
+  const factor = Math.pow(10, precision);
+  stepBaseQty = Math.max(minCompatibleSize, Math.round(stepBaseQty * factor) / factor);
+
+  // Session multipliers (Phase 1): allow x inverse-vol x depth, each
+  // neutral 1.0 when unknown. A zero allow (funding mask) zeroes the step;
+  // the min-lot floor never fabricates size above zero.
+  const sessAllow = sessionFactor(params?.sessionAllow, 0, 1);
+  const sessInvVol = sessionFactor(params?.sessionInvVol, 0.5, 1.5);
+  const sessDepth = sessionFactor(params?.sessionDepth, 0.25, 1);
+  const sessMult = sessAllow * sessInvVol * sessDepth;
+  if (sessMult <= 0) {
+    stepBaseQty = 0;
+  } else if (sessMult !== 1) {
+    stepBaseQty = Math.max(
+      minCompatibleSize,
+      Math.floor((stepBaseQty * sessMult) / step) * step,
+    );
+  }
+
+  const stepUsd = basePrice > 0 ? stepBaseQty * basePrice : 0;
+  const equity = typeof totalEquityUsd === "number" ? totalEquityUsd : NaN;
+  const equityCap =
+    Number.isFinite(equity) && equity > 0 ? (equity * pct) / 100 : 0;
+  const maxSteps = equityCap > 0 && stepUsd > 0 ? Math.max(1, Math.floor(equityCap / stepUsd)) : 0;
+
+  return { minCompatBase: minCompatibleSize, stepBaseQty, stepUsd, maxSteps };
 }
 
 /**

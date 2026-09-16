@@ -2,7 +2,10 @@ pub mod spatial_price_arb;
 pub mod funding_rate_arb;
 pub mod stat_arb_pairs;
 pub mod prediction_market_arb;
+pub mod convergence_auto;
 pub mod engine;
+pub mod spatial_exit;
+pub mod pair_trim;
 
 pub use spatial_price_arb::*;
 pub use funding_rate_arb::*;

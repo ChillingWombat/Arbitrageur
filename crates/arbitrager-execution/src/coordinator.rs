@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::order::{OrderRequest, OrderResponse};
-use arbitrager_core::types::{Decimal, OrderStatus};
+use arbitrager_core::types::{Decimal, OrderStatus, Side};
 use arbitrager_risk::circuit_breaker::CircuitBreaker;
 use crate::emergency_unwind::EmergencyUnwindHandler;
 use crate::smart_routing::SmartOrderRouter;
@@ -27,6 +27,21 @@ pub enum ArbitrageExecutionResult {
         leg_b_fill: OrderResponse,
         unwind_resp: OrderResponse,
         error_a: String,
+    },
+    /// Both legs filled but only partially (or incompletely): the excess of
+    /// the larger fill was trimmed via the unwind path and the matched
+    /// portion remains open as a delta-neutral pair. Callers must attribute
+    /// the matched quantity (e.g. ledger cycle) — it is live exposure.
+    /// `realized_profit` is the closed trim-leg price PnL minus entry and
+    /// trim fees; the matched pair itself is unrealized and excluded. A trim
+    /// leg without fill prices contributes its fees only.
+    PartialPairKept {
+        leg_a_fill: OrderResponse,
+        leg_b_fill: OrderResponse,
+        matched_qty: Decimal,
+        unwind_a: Option<Box<OrderResponse>>,
+        unwind_b: Option<Box<OrderResponse>>,
+        realized_profit: Decimal,
     },
     /// Both legs failed with no residual exposure: clean rejects, zero-fill
     /// responses, or fills that were successfully unwound
@@ -78,6 +93,51 @@ fn is_complete_fill(
         && resp.remaining_qty == Decimal::ZERO
         && resp.avg_fill_price.map(|p| p > Decimal::ZERO).unwrap_or(false)
         && resp.fee >= Decimal::ZERO
+}
+
+/// A partial fill is trimmable only when it is attributable to the
+/// dispatched order, echoes the requested quantity, reports PartiallyFilled
+/// with the exact shortfall remaining, and carries a positive fill price with
+/// a nonnegative fee. Malformed fills (wrong echoed qty, missing price,
+/// negative fee) are never kept open — they fall through to the full-unwind
+/// path.
+fn is_trimmable_partial(
+    resp: &OrderResponse,
+    exchange: &Arc<dyn ExchangeAdapter>,
+    symbol: &str,
+    client_order_id: &str,
+    requested_qty: Decimal,
+) -> bool {
+    response_identity_matches(resp, exchange, symbol, client_order_id)
+        && resp.original_qty == requested_qty
+        && resp.status == OrderStatus::PartiallyFilled
+        && resp.filled_qty > Decimal::ZERO
+        && resp.filled_qty < requested_qty
+        && resp.remaining_qty == requested_qty - resp.filled_qty
+        && resp.avg_fill_price.map(|p| p > Decimal::ZERO).unwrap_or(false)
+        && resp.fee >= Decimal::ZERO
+}
+
+/// Realized price PnL of closing `closed_qty` of a leg opened at
+/// `fill_price` via an opposite-side trim filled at `trim_price`.
+/// Zero when there is nothing to close or either price is missing
+/// (fees still net through the caller — PnL is never invented).
+fn trim_leg_pnl(
+    side: Side,
+    fill_price: Option<Decimal>,
+    trim_price: Option<Decimal>,
+    closed_qty: Decimal,
+) -> Decimal {
+    let (Some(fill), Some(trim)) = (fill_price, trim_price) else {
+        return Decimal::ZERO;
+    };
+    if !(fill > Decimal::ZERO && trim > Decimal::ZERO && closed_qty > Decimal::ZERO) {
+        return Decimal::ZERO;
+    }
+    match side {
+        Side::Buy => (trim - fill) * closed_qty,
+        Side::Sell => (fill - trim) * closed_qty,
+    }
 }
 
 /// Concurrent execution coordinator for atomic multi-leg arbitrage.
@@ -190,6 +250,179 @@ impl AtomicArbitrageCoordinator {
                         fill_a.filled_qty > Decimal::ZERO && !identity_a;
                     let ambiguous_b =
                         fill_b.filled_qty > Decimal::ZERO && !identity_b;
+
+                    // Partial-fill trim: both legs returned Ok with
+                    // attributable nonzero fills, but at least one leg is
+                    // incomplete. Trim the larger fill down to
+                    // min(fill_a, fill_b) via the existing unwind path on the
+                    // excess only; the matched portion stays open as a
+                    // delta-neutral pair. If either residual unwind fails the
+                    // breaker trips with UnresolvedExposure (existing
+                    // semantics). Each leg must be complete or a sound
+                    // partial (exact shortfall, sane price/fee); zero-fill,
+                    // identity-mismatch, and malformed legs never reach this
+                    // branch — they fall through to the full-unwind path
+                    // below, unchanged.
+                    let sound_a = complete_a
+                        || is_trimmable_partial(
+                            &fill_a,
+                            exchange_a,
+                            &sym_a,
+                            &cid_a,
+                            requested_qty_a,
+                        );
+                    let sound_b = complete_b
+                        || is_trimmable_partial(
+                            &fill_b,
+                            exchange_b,
+                            &sym_b,
+                            &cid_b,
+                            requested_qty_b,
+                        );
+                    if !ambiguous_a
+                        && !ambiguous_b
+                        && fill_a.filled_qty > Decimal::ZERO
+                        && fill_b.filled_qty > Decimal::ZERO
+                        && sound_a
+                        && sound_b
+                    {
+                        let matched_qty = fill_a.filled_qty.min(fill_b.filled_qty);
+                        let excess_a = fill_a.filled_qty - matched_qty;
+                        let excess_b = fill_b.filled_qty - matched_qty;
+
+                        let (trim_a, trim_b) = tokio::join!(
+                            async {
+                                if excess_a > Decimal::ZERO {
+                                    Some(
+                                        EmergencyUnwindHandler::unwind_leg(
+                                            exchange_a,
+                                            &sym_a,
+                                            side_a,
+                                            excess_a,
+                                        )
+                                        .await,
+                                    )
+                                } else {
+                                    None
+                                }
+                            },
+                            async {
+                                if excess_b > Decimal::ZERO {
+                                    Some(
+                                        EmergencyUnwindHandler::unwind_leg(
+                                            exchange_b,
+                                            &sym_b,
+                                            side_b,
+                                            excess_b,
+                                        )
+                                        .await,
+                                    )
+                                } else {
+                                    None
+                                }
+                            },
+                        );
+
+                        let describe_trim = |fill: &OrderResponse,
+                                             requested_qty: Decimal,
+                                             excess: Decimal,
+                                             trim: &Option<anyhow::Result<OrderResponse>>| {
+                            let trim_outcome = match trim {
+                                Some(Ok(resp)) => {
+                                    format!(
+                                        "trimmed excess {} via order {}",
+                                        resp.filled_qty, resp.order_id
+                                    )
+                                }
+                                Some(Err(e)) => format!("unwind failed: {}", e),
+                                None => "no trim required (leg equals matched quantity)"
+                                    .to_string(),
+                            };
+                            format!(
+                                "status={:?} filled_qty={}/{} remaining_qty={} matched_qty={} excess={}; {}",
+                                fill.status,
+                                fill.filled_qty,
+                                requested_qty,
+                                fill.remaining_qty,
+                                matched_qty,
+                                excess,
+                                trim_outcome
+                            )
+                        };
+
+                        let trim_failed = matches!(trim_a, Some(Err(_)))
+                            || matches!(trim_b, Some(Err(_)));
+                        let error_a =
+                            describe_trim(&fill_a, requested_qty_a, excess_a, &trim_a);
+                        let error_b =
+                            describe_trim(&fill_b, requested_qty_b, excess_b, &trim_b);
+
+                        if trim_failed {
+                            self.circuit_breaker.trip(format!(
+                                "Partial-fill trim failed: Leg A [{}]; Leg B [{}]",
+                                error_a, error_b
+                            ));
+                            return ArbitrageExecutionResult::UnresolvedExposure {
+                                leg_a_fill: Some(fill_a),
+                                leg_b_fill: Some(fill_b),
+                                error_a,
+                                error_b,
+                            };
+                        }
+
+                        self.circuit_breaker.record_success();
+                        let trim_fee = trim_a
+                            .as_ref()
+                            .and_then(|r| r.as_ref().ok())
+                            .map(|resp| resp.fee)
+                            .unwrap_or(Decimal::ZERO)
+                            + trim_b
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .map(|resp| resp.fee)
+                                .unwrap_or(Decimal::ZERO);
+                        // Closed trim-leg price PnL: each trimmed excess was
+                        // opened at the leg fill price and closed at the trim
+                        // price. The matched pair stays open (unrealized).
+                        let trim_pnl = trim_leg_pnl(
+                            side_a,
+                            fill_a.avg_fill_price,
+                            trim_a
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .and_then(|resp| resp.avg_fill_price),
+                            trim_a
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .map(|resp| resp.filled_qty.min(excess_a))
+                                .unwrap_or(Decimal::ZERO),
+                        ) + trim_leg_pnl(
+                            side_b,
+                            fill_b.avg_fill_price,
+                            trim_b
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .and_then(|resp| resp.avg_fill_price),
+                            trim_b
+                                .as_ref()
+                                .and_then(|r| r.as_ref().ok())
+                                .map(|resp| resp.filled_qty.min(excess_b))
+                                .unwrap_or(Decimal::ZERO),
+                        );
+                        info!(
+                            "✂️ Partial fills trimmed to matched qty {} (A excess {}, B excess {}); pair kept open",
+                            matched_qty, excess_a, excess_b
+                        );
+                        return ArbitrageExecutionResult::PartialPairKept {
+                            realized_profit: trim_pnl
+                                - (fill_a.fee + fill_b.fee + trim_fee),
+                            leg_a_fill: fill_a,
+                            leg_b_fill: fill_b,
+                            matched_qty,
+                            unwind_a: trim_a.and_then(|r| r.ok().map(Box::new)),
+                            unwind_b: trim_b.and_then(|r| r.ok().map(Box::new)),
+                        };
+                    }
 
                     let (unwind_a, unwind_b) = tokio::join!(
                         async {
