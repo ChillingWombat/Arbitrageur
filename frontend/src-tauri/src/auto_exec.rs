@@ -373,6 +373,104 @@ impl OpportunityExecutor {
         Ok(())
     }
 
+    /// Adopt a manually executed position into the auto-exit watcher pool.
+    ///
+    /// When a trader executes an opportunity manually through the spread monitor,
+    /// this registers the position with its entry deviation, current baseline,
+    /// derived friction band, and max-hold deadline.
+    ///
+    /// If the bot is currently `Off`, it automatically transitions the bot to
+    /// `ReduceOnly` mode so exit watchers run every tick without opening unwanted
+    /// autonomous entries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn adopt_manual_position(
+        &self,
+        state: &AppEngineState,
+        symbol: &str,
+        buy_venue: &str,
+        sell_venue: &str,
+        size_usd: f64,
+        entry_dev_bps: Option<f64>,
+        baseline_bps: Option<f64>,
+        friction_band_bps: Option<f64>,
+        expected_converge_secs: Option<f64>,
+    ) -> Result<(), String> {
+        let now_ms = Utc::now().timestamp_millis();
+        let (cfg, mode) = Self::load_config(state);
+
+        let friction_band = friction_band_bps
+            .filter(|b| b.is_finite() && *b >= 0.0)
+            .unwrap_or(4.0);
+
+        let deadline_ms = arbitrager_strategy::convergence_auto::hold_deadline_ms(
+            now_ms,
+            expected_converge_secs,
+            &cfg,
+        )
+        .unwrap_or_else(|| now_ms.saturating_add(86_400_000));
+
+        let key = PairKey::new(symbol, buy_venue, sell_venue);
+        let pos = TrackedPosition {
+            entry_ts_ms: now_ms,
+            entry_dev_bps: entry_dev_bps.unwrap_or(0.0),
+            baseline_bps,
+            friction_band_bps: friction_band,
+            size_usd,
+            deadline_ms,
+            unwatched_since_ms: None,
+            last_seen_ms: now_ms,
+        };
+
+        state
+            .state_store
+            .upsert_bot_position(&pos.persist_row(&key))
+            .map_err(|e| format!("upsert bot position: {e}"))?;
+
+        self.open.lock().insert(key.clone(), pos.clone());
+
+        if mode == BotMode::Off {
+            let next_dto = RadarBotConfigDto {
+                enabled: false,
+                mode: "reduce_only".to_string(),
+                ..RadarBotConfigDto::from_policy(&cfg, BotMode::ReduceOnly)
+            };
+            let _ = Self::save_config(state, &next_dto);
+        }
+
+        self.audit(
+            state,
+            &key,
+            now_ms,
+            None,
+            "bot_enter",
+            &format!(
+                "manually executed position adopted into auto-exit watcher (targeting baseline {:?} bps)",
+                baseline_bps
+            ),
+            None,
+            entry_dev_bps,
+            None,
+            &serde_json::json!({
+                "sizeUsd": size_usd,
+                "frictionBandBps": friction_band,
+                "deadlineMs": deadline_ms,
+                "manual": true,
+            })
+            .to_string(),
+        );
+
+        Ok(())
+    }
+
+    /// Remove any tracked position matching the symbol and either venue order.
+    pub fn forget_position(&self, symbol: &str, venue_a: &str, venue_b: &str) {
+        let key_a = PairKey::new(symbol, venue_a, venue_b);
+        let key_b = PairKey::new(symbol, venue_b, venue_a);
+        let mut open = self.open.lock();
+        open.remove(&key_a);
+        open.remove(&key_b);
+    }
+
     /// Restart recovery: reload persisted positions, keep only those still
     /// backed by an open `radar` ledger signal, and rebuild cooldowns from
     /// recent `bot_exit` audits. Never fabricates watchers.
@@ -1595,4 +1693,82 @@ mod tests {
         assert_eq!(st.open_positions.len(), 1);
         assert!(st.last_decision.is_some());
     }
+
+    #[tokio::test]
+    async fn test_adopt_manual_position_transitions_to_reduce_only_and_exits_on_convergence() {
+        let (state, bot) = harness(vec![]);
+        // Explicitly set bot mode to Off
+        OpportunityExecutor::save_config(
+            &state,
+            &RadarBotConfigDto::from_policy(&AutoExecConfig::default(), BotMode::Off),
+        )
+        .expect("save off");
+        let (_, mode_before) = OpportunityExecutor::load_config(&state);
+        assert_eq!(mode_before, BotMode::Off);
+
+        // Adopt a manually executed position
+        bot.adopt_manual_position(
+            &state,
+            "BTC",
+            "hyperliquid",
+            "lighter",
+            500.0,
+            Some(35.0),
+            Some(20.0),
+            Some(4.0),
+            Some(60.0),
+        )
+        .expect("adopt manual position");
+
+        // Bot mode transitioned to ReduceOnly so exits run without opening entries
+        let (_, mode_after) = OpportunityExecutor::load_config(&state);
+        assert_eq!(mode_after, BotMode::ReduceOnly);
+        assert_eq!(bot.open_count(), 1);
+
+        // Verify persisted to DB
+        let persisted = state.state_store.list_bot_positions().expect("list bot positions");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].symbol, "BTC");
+        assert_eq!(persisted[0].size_usd, 500.0);
+
+        // Audit was recorded
+        let adopted_events = bot_events(&state, "bot_enter");
+        assert_eq!(adopted_events.len(), 1);
+        assert!(adopted_events[0]
+            .economics_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("\"manual\":true"));
+
+        // Inject a snapshot where spread has converged to the dynamic baseline (deviation 0.5 bps <= friction band 4.0 bps)
+        let engine = state.monitor.lock().clone().unwrap();
+        let mut row = qualified_row("BTC", "hyperliquid", "lighter");
+        row.deviation_bps = Some(0.5);
+        row.status = "neutral".to_string();
+        engine.inject_snapshot(MonitorSnapshotDto {
+            generated_ts_ms: Utc::now().timestamp_millis(),
+            running: true,
+            rows: vec![row],
+            watchlist: vec!["BTC".to_string()],
+            venues: vec![],
+            exempted: vec![],
+        });
+
+        // Run tick: should trigger exit on convergence
+        let dispatch = MockDispatch::ok();
+        bot.tick_once(&state, &dispatch).await;
+
+        assert_eq!(dispatch.exit_calls(), 1);
+        assert_eq!(bot.open_count(), 0);
+
+        // Exit audit is logged
+        let exit_events = bot_events(&state, "bot_exit");
+        assert_eq!(exit_events.len(), 1);
+        assert!(exit_events[0]
+            .economics_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("converged"));
+    }
 }
+

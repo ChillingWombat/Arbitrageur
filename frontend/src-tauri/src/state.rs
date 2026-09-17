@@ -1280,11 +1280,57 @@ impl AppEngineState {
         // No synthetic markets are ever seeded or fabricated.
     }
 
+    /// Synchronize credentials from the secure vault to live exchange adapters.
+    /// Clears credentials if vault is locked.
+    pub fn sync_vault_credentials_to_adapters(&self) {
+        let mut vault = self.vault.write();
+        if !vault.is_unlocked() {
+            self.live_aster.update_credentials(None, None);
+            self.live_hl.update_credentials(None, None);
+            return;
+        }
+
+        if let Ok(data) = vault.get_data() {
+            let mut aster_key = None;
+            let mut aster_secret = None;
+            let mut hl_wallet = None;
+            let mut hl_pk = None;
+
+            for cred in &data.credentials {
+                if !cred.enabled {
+                    continue;
+                }
+                match cred.venue.to_lowercase().as_str() {
+                    "aster" | "asterdex" => {
+                        if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                            aster_key = Some(cred.api_key.clone());
+                            aster_secret = Some(cred.api_secret.clone());
+                        }
+                    }
+                    "hyperliquid" | "hl" => {
+                        let wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                        let pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+                        if wallet.is_some() && pk.is_some() {
+                            hl_wallet = wallet;
+                            hl_pk = pk;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            self.live_aster.update_credentials(aster_key, aster_secret);
+            self.live_hl.update_credentials(hl_wallet, hl_pk);
+        } else {
+            self.live_aster.update_credentials(None, None);
+            self.live_hl.update_credentials(None, None);
+        }
+    }
+
     /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
     /// Lighter, Vanta (Orderly), Aster, Ondo Perps, GRVT, and edgeX are
-    /// exposed as read-only native market-data adapters, and only in paper
-    /// mode; no adapter is admitted while live mode is active. Public
-    /// read-only feeds require enablement, not secrets.
+    /// exposed as native market-data adapters. Public read-only feeds require
+    /// enablement, not secrets.
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -1297,9 +1343,6 @@ impl AppEngineState {
             &'static str,
             Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
         )> = Vec::new();
-        if *self.is_live_mode.read() {
-            return list;
-        }
         let s = self.settings.read();
         // A venue is on when its engine flag is set OR it owns an enabled
         // account — the account-zone switch is the same on/off as the flag.
@@ -1592,9 +1635,13 @@ mod tests {
         assert!(state.get_paper_exchange("edge_x").is_some());
 
         *state.is_live_mode.write() = true;
-        assert_eq!(state.get_venues().len(), 0);
-        assert!(state.get_adapter("hyperliquid").is_none());
-        assert!(state.get_adapter("lighter").is_none());
+        // In live mode, enabled venues remain admitted for market data streaming,
+        // while order execution is selectively gated by adapter capability & credentials.
+        assert!(state.get_venues().len() > 0);
+        assert!(state.get_adapter("hyperliquid").unwrap().supports_live_execution());
+        assert!(state.get_adapter("aster").unwrap().supports_live_execution());
+        assert!(!state.get_adapter("vanta").unwrap().supports_live_execution());
+        assert!(!state.get_adapter("hyperliquid").unwrap().has_live_credentials());
     }
 
     #[tokio::test]

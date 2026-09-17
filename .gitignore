@@ -39,3 +39,4 @@ logs/
 data/cache/
 data/captures/
 .playwright-mcp/
+.omo/

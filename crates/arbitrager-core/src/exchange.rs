@@ -77,4 +77,14 @@ pub trait ExchangeAdapter: Send + Sync {
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!("Leverage updates are not implemented for venue {}", self.name());
     }
+
+    /// Whether this adapter has implemented live order placement and cancellation.
+    fn supports_live_execution(&self) -> bool {
+        false
+    }
+
+    /// Whether authenticated live trading credentials are loaded in memory for this adapter.
+    fn has_live_credentials(&self) -> bool {
+        false
+    }
 }

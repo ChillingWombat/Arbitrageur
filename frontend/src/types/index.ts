@@ -21,6 +21,14 @@ export interface VenueStatusDto {
   fee_bps: number;
 }
 
+export interface VenueCapabilityDto {
+  venue: string;
+  name: string;
+  supportsLive: boolean;
+  hasCredentials: boolean;
+  liveReady: boolean;
+}
+
 export interface VenueVolumesDto {
   venue_id: string;
   /** 24h notional volume (USD) keyed by the venue's raw asset name. */

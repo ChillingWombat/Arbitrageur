@@ -21,7 +21,7 @@ import {
   retentionDaysToInput,
   retentionGbToInput,
 } from "../services/retention";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
@@ -335,6 +335,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [inlineVaultError, setInlineVaultError] = useState<string | null>(null);
   const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
+  // Venue execution capabilities & live trading risk gating
+  const [venueCapabilities, setVenueCapabilities] = useState<VenueCapabilityDto[]>([]);
+  const [showLiveRiskModal, setShowLiveRiskModal] = useState(false);
+  const [liveRiskAgreed, setLiveRiskAgreed] = useState(false);
+  const [liveRiskConfirmationInput, setLiveRiskConfirmationInput] = useState("");
+
   const handleInlineVaultSubmit = async () => {
     if (inlineUnlocking) return;
     setInlineVaultError(null);
@@ -492,6 +498,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       try {
         const s: EngineSettingsDto = await api.getEngineSettings();
         setConfiguredVenues(s.configured_venues || []);
+        api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
         setHsmUrl(s.hsm_url || "http://127.0.0.1:8787/sign");
         setHmacToken(s.hmac_token || "");
         setMinDepthRatio(s.min_depth_ratio ?? 3.0);
@@ -629,6 +636,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // A venue only counts as "API connected" when enabled and backed by a
   // working adapter (READ_ONLY). OFFLINE/UNSUPPORTED venues provide no data.
   const hasApiConnectivity = liveVenues.some((v) => v.status === "READ_ONLY");
+
+  useEffect(() => {
+    api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
+  }, [vaultStatus]);
+
+  const liveReadyVenues = venueCapabilities.filter((c) => c.liveReady);
+  const canSwitchToLive = (vaultStatus?.is_unlocked ?? false) && liveReadyVenues.length >= 2;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -2427,7 +2441,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts — currently disabled because authenticated order signing and submission are not implemented yet."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts on supported API venues (Aster & Hyperliquid). Live execution requires an unlocked credential vault and at least two live-ready venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -2436,7 +2450,44 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
                 </p>
 
-                <div className="flex items-center space-x-3 pt-1">
+                {/* Venue Execution Capability Indicators */}
+                {venueCapabilities.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    {venueCapabilities.map((cap) => (
+                      <span
+                        key={cap.venue}
+                        className={`px-2 py-0.5 rounded border font-mono text-[10px] flex items-center gap-1.5 ${
+                          cap.liveReady
+                            ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400"
+                            : cap.supportsLive
+                            ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400"
+                            : "bg-slate-100 dark:bg-slate-800/40 border-surface-border text-slate-400"
+                        }`}
+                        title={
+                          cap.liveReady
+                            ? `${cap.name}: Live execution ready (API keys active in unlocked vault)`
+                            : cap.supportsLive
+                            ? `${cap.name}: Live execution supported, but credentials missing or vault is locked`
+                            : `${cap.name}: Read-only market data venue (no live order placement API)`
+                        }
+                      >
+                        <span
+                          className={`w-1.5 h-1.5 rounded-full ${
+                            cap.liveReady
+                              ? "bg-emerald-500 animate-pulse"
+                              : cap.supportsLive
+                              ? "bg-amber-500"
+                              : "bg-slate-400"
+                          }`}
+                        />
+                        <span className="font-semibold">{cap.name}</span>:{" "}
+                        {cap.liveReady ? "LIVE READY" : cap.supportsLive ? "CREDS NEEDED" : "READ ONLY"}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center space-x-4 pt-1">
                   <label
                     className={`flex items-center space-x-2 ${hasApiConnectivity ? "cursor-pointer" : "cursor-not-allowed opacity-60"}`}
                     title={hasApiConnectivity ? undefined : "Requires at least one connected exchange API for market data"}
@@ -2453,11 +2504,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <span className="font-semibold text-slate-800">Paper Trading</span>
                   </label>
                   <label
-                    className="flex items-center space-x-2 cursor-not-allowed opacity-60"
+                    className={`flex items-center space-x-2 ${
+                      canSwitchToLive ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                    }`}
                     title={
-                      hasApiConnectivity
-                        ? "Authenticated order signing and submission is not implemented yet"
-                        : "Requires at least one connected exchange API for market data"
+                      !vaultStatus?.is_unlocked
+                        ? "Vault is locked. Unlock the vault to enable real trading."
+                        : liveReadyVenues.length < 2
+                        ? `Requires at least 2 live-ready venues (currently ${liveReadyVenues.length}: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Aster & Hyperliquid support live API orders.`
+                        : "Switch to Real Trading"
                     }
                   >
                     <input
@@ -2465,12 +2520,36 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       name="trading_mode"
                       value="real"
                       checked={tradingMode === "real"}
-                      disabled
-                      className="text-accent focus:ring-accent"
+                      disabled={!canSwitchToLive}
+                      onChange={() => {
+                        if (canSwitchToLive) {
+                          if (!liveRiskAgreed && tradingMode !== "real") {
+                            setShowLiveRiskModal(true);
+                          } else {
+                            setTradingMode("real");
+                          }
+                        }
+                      }}
+                      className="text-red-600 focus:ring-red-600"
                     />
-                    <span className="font-semibold text-slate-800">Real Trading</span>
+                    <span className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      Real Trading
+                      {tradingMode === "real" && (
+                        <span className="text-[10px] bg-red-600 text-white font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider animate-pulse">
+                          LIVE
+                        </span>
+                      )}
+                    </span>
                   </label>
                 </div>
+
+                {!canSwitchToLive && (
+                  <p className="text-[11px] text-amber-600 dark:text-amber-400 font-mono mt-0.5">
+                    {!vaultStatus?.is_unlocked
+                      ? "🔒 Real trading locked: Unlock the secure credential vault to enable live orders."
+                      : `⚠️ Real trading requires at least 2 live-ready venues with API keys enabled (${liveReadyVenues.length}/2 ready: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Aster & Hyperliquid support live order execution.`}
+                  </p>
+                )}
               </div>
 
               <div className="pt-3 border-t border-surface-border flex items-center justify-between gap-3">
@@ -2782,6 +2861,98 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       setShowVaultModal(false);
     }}
   />
+
+  {/* Live Trading Risk Confirmation Modal */}
+  {showLiveRiskModal && (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
+      <div className="bg-surface-raised border-2 border-red-500/50 rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-100 animate-in fade-in zoom-in-95 duration-150">
+        <div className="flex items-center space-x-3 text-red-400 mb-4 pb-3 border-b border-surface-border">
+          <div className="p-2 bg-red-500/10 rounded-lg border border-red-500/30">
+            <AlertTriangle className="w-6 h-6 text-red-500" />
+          </div>
+          <div>
+            <h3 className="text-lg font-bold text-slate-100">Institutional Risk Warning</h3>
+            <p className="text-xs text-red-400/90 font-mono">Live Automated Execution Activation</p>
+          </div>
+        </div>
+
+        <div className="space-y-3 text-xs text-slate-300 mb-6 leading-relaxed">
+          <div className="p-3 bg-red-950/30 border border-red-800/40 rounded-lg text-red-200 space-y-1.5 font-mono text-[11px]">
+            <p className="font-bold text-red-300">⚠️ CAPITAL AT RISK — TWO SIGMA EXECUTION DISCIPLINE</p>
+            <p>
+              You are enabling real-money automated order submission. Live orders will be placed directly to connected exchange order books.
+            </p>
+          </div>
+
+          <div className="space-y-2 text-slate-300">
+            <div className="flex items-start gap-2">
+              <span className="font-bold text-accent font-mono">1.</span>
+              <p>
+                <strong className="text-slate-100">Selective Live Execution:</strong> Only venue pairs where <span className="text-emerald-400 font-semibold">BOTH venues support live API execution</span> (currently Aster & Hyperliquid) will submit live orders. Routes involving read-only venues will fail closed to prevent naked unhedged legs.
+              </p>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="font-bold text-accent font-mono">2.</span>
+              <p>
+                <strong className="text-slate-100">Market Risk & Latency:</strong> Slippage, network jitter, and orderbook changes can result in price deviation or partial fills.
+              </p>
+            </div>
+            <div className="flex items-start gap-2">
+              <span className="font-bold text-accent font-mono">3.</span>
+              <p>
+                <strong className="text-slate-100">Kill Switch:</strong> Use the <span className="font-mono text-amber-400 font-semibold">PAUSE</span> button in the header at any time to immediately halt new order submissions.
+              </p>
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-surface-border">
+            <label className="text-[11px] font-mono text-slate-400 block mb-1.5">
+              To confirm activation, please type <span className="text-red-400 font-bold select-all">CONFIRM LIVE TRADING</span> below:
+            </label>
+            <input
+              type="text"
+              value={liveRiskConfirmationInput}
+              onChange={(e) => setLiveRiskConfirmationInput(e.target.value)}
+              placeholder="CONFIRM LIVE TRADING"
+              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-100 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-slate-600"
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end space-x-3 pt-3 border-t border-surface-border">
+          <button
+            type="button"
+            onClick={() => {
+              setShowLiveRiskModal(false);
+              setLiveRiskConfirmationInput("");
+            }}
+            className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            Cancel (Keep Paper)
+          </button>
+          <button
+            type="button"
+            disabled={liveRiskConfirmationInput !== "CONFIRM LIVE TRADING"}
+            onClick={() => {
+              if (liveRiskConfirmationInput === "CONFIRM LIVE TRADING") {
+                setLiveRiskAgreed(true);
+                setTradingMode("real");
+                setShowLiveRiskModal(false);
+                setLiveRiskConfirmationInput("");
+              }
+            }}
+            className={`px-4 py-2 text-xs font-bold rounded-lg uppercase tracking-wider transition-all ${
+              liveRiskConfirmationInput === "CONFIRM LIVE TRADING"
+                ? "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/30 cursor-pointer"
+                : "bg-red-950/40 text-red-500/40 border border-red-900/30 cursor-not-allowed"
+            }`}
+          >
+            Activate Live Trading
+          </button>
+        </div>
+      </div>
+    </div>
+  )}
 </div>
   );
 }, areEngineSettingsPropsEqual);

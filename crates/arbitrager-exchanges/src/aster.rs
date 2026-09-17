@@ -1,30 +1,27 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use reqwest::Client;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrager_core::position::AccountSnapshot;
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrager_core::types::{dec, Decimal, VenueId};
+use arbitrager_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
 
 /// Aster (asterdex.com, Binance-style USDT-margined futures) connector.
 ///
-/// Public read-only REST only — `GET {base}/fapi/v3/*`, no credentials.
-/// Verified live 2026-09-15: `/fapi/v3/ping` -> `{}`, `/fapi/v3/depth`,
-/// `/fapi/v3/exchangeInfo`, `/fapi/v3/premiumIndex`, `/fapi/v3/ticker/24hr`.
-/// WebSocket (`wss://fstream.asterdex.com`) is recorded for future work;
-/// this adapter is REST-only for v1 and leaves `subscribe_orderbook`
-/// at the fail-closed default.
+/// Supports public market data REST endpoints as well as authenticated
+/// HMAC-SHA256 order placement, cancellation, and account queries.
 #[allow(dead_code)]
 pub struct AsterAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    api_key: Option<String>,
-    api_secret: Option<String>,
+    api_key: RwLock<Option<String>>,
+    api_secret: RwLock<Option<String>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -246,10 +243,62 @@ impl AsterAdapter {
             venue_id: VenueId::new(venue_id),
             client: Client::builder().build().unwrap_or_default(),
             base_url: base,
-            api_key,
-            api_secret,
+            api_key: RwLock::new(api_key),
+            api_secret: RwLock::new(api_secret),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 100, 2000, 500, 10000),
         }
+    }
+
+    /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
+    pub fn update_credentials(&self, api_key: Option<String>, api_secret: Option<String>) {
+        *self.api_key.write() = api_key;
+        *self.api_secret.write() = api_secret;
+    }
+
+    /// Whether valid, non-empty API credentials are held in memory.
+    pub fn has_credentials(&self) -> bool {
+        let k = self.api_key.read();
+        let s = self.api_secret.read();
+        k.as_ref().is_some_and(|k| !k.trim().is_empty())
+            && s.as_ref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Sign request parameters using HMAC-SHA256 according to Binance/Aster standard.
+    pub fn sign_params(&self, params: &BTreeMap<&str, String>) -> anyhow::Result<(String, String)> {
+        let api_key = self
+            .api_key
+            .read()
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Aster API key not configured or empty"))?;
+        let api_secret = self
+            .api_secret
+            .read()
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Aster API secret not configured or empty"))?;
+
+        let mut query = String::new();
+        for (i, (k, v)) in params.iter().enumerate() {
+            if i > 0 {
+                query.push('&');
+            }
+            query.push_str(k);
+            query.push('=');
+            query.push_str(v);
+        }
+
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(api_secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Invalid HMAC key: {e}"))?;
+        mac.update(query.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        query.push_str("&signature=");
+        query.push_str(&signature);
+        Ok((api_key, query))
     }
 
     /// Map a UI/canonical symbol to the concatenated Aster venue spelling.
@@ -553,20 +602,276 @@ impl ExchangeAdapter for AsterAdapter {
         Ok(volumes)
     }
 
+    fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn has_live_credentials(&self) -> bool {
+        self.has_credentials()
+    }
+
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!("Live account fetch is not implemented for {}; refusing to fabricate an account snapshot", self.name())
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch live account on Aster: API credentials are not configured or vault is locked");
+        }
+        let mut params = BTreeMap::new();
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+
+        let (api_key, query_string) = self.sign_params(&params)?;
+        let url = format!("{}/fapi/v3/account?{}", self.base_url, query_string);
+
+        let resp = self.client.get(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Aster fetch_account failed (HTTP {status}): {text}");
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Aster account response: {e}; body: {text}"))?;
+
+        let wallet_balance = dec_from_json(v.get("totalWalletBalance")).unwrap_or_default();
+        let unrealized_pnl = dec_from_json(v.get("totalUnrealizedProfit")).unwrap_or_default();
+        let equity = dec_from_json(v.get("totalMarginBalance")).unwrap_or(wallet_balance + unrealized_pnl);
+        let free_margin = dec_from_json(v.get("availableBalance")).unwrap_or_default();
+        let maint_margin = dec_from_json(v.get("totalMaintMargin")).unwrap_or_default();
+        let initial_margin = dec_from_json(v.get("totalInitialMargin")).unwrap_or_default();
+
+        let margin_usage_pct = if equity > dec!(0) {
+            (initial_margin / equity) * dec!(100)
+        } else {
+            dec!(0)
+        };
+
+        let mut positions = Vec::new();
+        if let Some(pos_arr) = v.get("positions").and_then(|p| p.as_array()) {
+            for p in pos_arr {
+                let amt = dec_from_json(p.get("positionAmt")).unwrap_or_default();
+                if amt.is_zero() {
+                    continue;
+                }
+                let sym = p.get("symbol").and_then(|s| s.as_str()).unwrap_or_default();
+                let entry_px = dec_from_json(p.get("entryPrice")).unwrap_or_default();
+                let upnl = dec_from_json(p.get("unrealizedProfit")).unwrap_or_default();
+                let liq_px = dec_from_json(p.get("liquidationPrice")).filter(|p| *p > dec!(0));
+                let lev = p.get("leverage")
+                    .and_then(|l| match l {
+                        serde_json::Value::Number(n) => n.as_f64().and_then(Decimal::from_f64_retain),
+                        serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(dec!(1));
+
+                let side = if amt > dec!(0) { Side::Buy } else { Side::Sell };
+                let qty = amt.abs();
+                let notional = qty * entry_px;
+                let im = if lev > dec!(0) { notional / lev } else { notional };
+
+                positions.push(arbitrager_core::position::Position {
+                    venue: self.venue_id.clone(),
+                    symbol: sym.to_string(),
+                    side,
+                    quantity: qty,
+                    entry_price: entry_px,
+                    mark_price: entry_px,
+                    unrealized_pnl: upnl,
+                    realized_pnl: dec!(0),
+                    liquidation_price: liq_px,
+                    leverage: lev,
+                    initial_margin: im,
+                    maintenance_margin: im * dec!(0.5),
+                    updated_at: Utc::now(),
+                });
+            }
+        }
+
+        let balances = vec![arbitrager_core::position::Balance {
+            venue: self.venue_id.clone(),
+            currency: "USDT".to_string(),
+            total: wallet_balance,
+            free: free_margin,
+            locked: wallet_balance.saturating_sub(free_margin),
+        }];
+
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin,
+            maintenance_margin: maint_margin,
+            margin_usage_pct,
+            balances,
+            positions,
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot place live order on Aster: API credentials are not configured or vault is locked");
+        }
+        let venue_symbol = self.resolve_venue_symbol(&order.symbol).await?;
+        let mut params = BTreeMap::new();
+        params.insert("symbol", venue_symbol.clone());
+        let side_str = match order.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+        params.insert("side", side_str.to_string());
+
+        let (type_str, tif_str) = match order.order_type {
+            OrderType::Market => ("MARKET", None),
+            OrderType::PostOnly => ("LIMIT", Some("GTX")),
+            OrderType::Limit | OrderType::ImmediateOrCancel => {
+                let tif = match order.time_in_force {
+                    TimeInForce::ImmediateOrCancel => "IOC",
+                    TimeInForce::FillOrKill => "FOK",
+                    TimeInForce::GoodTilCancelled => "GTC",
+                    TimeInForce::PostOnly => "GTX",
+                };
+                ("LIMIT", Some(tif))
+            }
+        };
+        params.insert("type", type_str.to_string());
+        if let Some(tif) = tif_str {
+            params.insert("timeInForce", tif.to_string());
+        }
+        params.insert("quantity", order.quantity.to_string());
+        if let Some(p) = order.price {
+            params.insert("price", p.to_string());
+        }
+        if order.reduce_only {
+            params.insert("reduceOnly", "true".to_string());
+        }
+        if !order.client_order_id.is_empty() {
+            params.insert("newClientOrderId", order.client_order_id.clone());
+        }
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+
+        let (api_key, query_string) = self.sign_params(&params)?;
+        let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
+
+        let resp = self.client.post(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Aster place_order failed (HTTP {status}): {text}");
+        }
+
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Aster order response: {e}; body: {text}"))?;
+
+        let order_id = v.get("orderId")
+            .map(|id| id.to_string())
+            .unwrap_or_default();
+        let client_order_id = v.get("clientOrderId")
+            .and_then(|s| s.as_str())
+            .unwrap_or(&order.client_order_id)
+            .to_string();
+
+        let raw_status = v.get("status").and_then(|s| s.as_str()).unwrap_or("NEW");
+        let orig_qty = dec_from_json(v.get("origQty")).unwrap_or(order.quantity);
+        let executed_qty = dec_from_json(v.get("executedQty")).unwrap_or(dec!(0));
+        let remaining_qty = orig_qty.saturating_sub(executed_qty);
+        let avg_price = dec_from_json(v.get("avgPrice"))
+            .or_else(|| dec_from_json(v.get("price")))
+            .filter(|p| *p > dec!(0));
+
+        let order_status = match raw_status {
+            "FILLED" => OrderStatus::Filled,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "EXPIRED" if executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "EXPIRED" => OrderStatus::Cancelled,
+            "CANCELED" => OrderStatus::Cancelled,
+            "REJECTED" => OrderStatus::Rejected,
+            _ => OrderStatus::New,
+        };
+
+        // Aster taker fee: 3.5 BPS
+        let cum_quote = dec_from_json(v.get("cumQuote")).unwrap_or_default();
+        let fee = cum_quote * Decimal::new(35, 5);
+
+        Ok(OrderResponse {
+            order_id,
+            client_order_id,
+            venue: self.venue_id.clone(),
+            symbol: order.symbol,
+            status: order_status,
+            original_qty: orig_qty,
+            filled_qty: executed_qty,
+            remaining_qty,
+            avg_fill_price: avg_price,
+            fee,
+            fee_currency: "USDT".to_string(),
+            raw_response: Some(text),
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot cancel live order on Aster: API credentials are not configured or vault is locked");
+        }
+        let venue_symbol = self.resolve_venue_symbol(&req.symbol).await?;
+        let mut params = BTreeMap::new();
+        params.insert("symbol", venue_symbol);
+        if let Some(id) = req.order_id {
+            params.insert("orderId", id);
+        }
+        if let Some(cid) = req.client_order_id {
+            params.insert("origClientOrderId", cid);
+        }
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+
+        let (api_key, query_string) = self.sign_params(&params)?;
+        let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
+
+        let resp = self.client.delete(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Aster cancel_order failed: {text}");
+        }
+        Ok(())
     }
 
-    async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Leverage updates are not implemented for {}; refusing to pretend to apply it", self.name())
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot set leverage on Aster: API credentials are not configured or vault is locked");
+        }
+        let venue_symbol = self.resolve_venue_symbol(symbol).await?;
+        let mut params = BTreeMap::new();
+        params.insert("symbol", venue_symbol);
+        params.insert("leverage", leverage.to_string());
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+
+        let (api_key, query_string) = self.sign_params(&params)?;
+        let url = format!("{}/fapi/v3/leverage?{}", self.base_url, query_string);
+
+        let resp = self.client.post(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Aster set_leverage failed: {text}");
+        }
+        Ok(())
     }
 }
 
@@ -716,5 +1021,32 @@ mod tests {
                 .is_err()
         );
         assert!(adapter.set_leverage("BTC-USDT", 5).await.is_err());
+    }
+
+    #[test]
+    fn test_aster_signing_and_capabilities() {
+        let adapter = AsterAdapter::new(None, None, None);
+        assert!(adapter.supports_live_execution());
+        assert!(!adapter.has_live_credentials());
+
+        adapter.update_credentials(Some("test_key".to_string()), Some("test_secret".to_string()));
+        assert!(adapter.has_live_credentials());
+
+        let mut params = BTreeMap::new();
+        params.insert("symbol", "BTCUSDT".to_string());
+        params.insert("side", "BUY".to_string());
+        params.insert("timestamp", "1625412345678".to_string());
+
+        let (key, query) = adapter.sign_params(&params).expect("sign params");
+        assert_eq!(key, "test_key");
+        assert!(query.contains("symbol=BTCUSDT"));
+        assert!(query.contains("side=BUY"));
+        assert!(query.contains("timestamp=1625412345678"));
+        assert!(query.contains("&signature="));
+
+        // Clear credentials (e.g. on vault lock)
+        adapter.update_credentials(None, None);
+        assert!(!adapter.has_live_credentials());
+        assert!(adapter.sign_params(&params).is_err());
     }
 }

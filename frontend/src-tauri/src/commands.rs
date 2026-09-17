@@ -2891,8 +2891,12 @@ async fn execute_spatial_arbitrage_inner(
                 .into(),
         );
     }
-    if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+    let is_live = *state.is_live_mode.read();
+    if is_live {
+        if !state.vault.write().is_unlocked() {
+            return Err("Execution halted: Vault is locked. Live trading requires an unlocked credential vault.".into());
+        }
+        state.sync_vault_credentials_to_adapters();
     }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
 
@@ -2918,13 +2922,13 @@ async fn execute_spatial_arbitrage_inner(
 
     let buy_adapter = state.get_adapter(buy_venue).ok_or_else(|| {
         format!(
-            "Buy venue '{}' is not admitted for paper execution",
+            "Buy venue '{}' is not admitted for execution",
             buy_venue
         )
     })?;
     let sell_adapter = state.get_adapter(sell_venue).ok_or_else(|| {
         format!(
-            "Sell venue '{}' is not admitted for paper execution",
+            "Sell venue '{}' is not admitted for execution",
             sell_venue
         )
     })?;
@@ -2933,6 +2937,34 @@ async fn execute_spatial_arbitrage_inner(
     if crate::state::canonical_venue_id(buy_venue) == crate::state::canonical_venue_id(sell_venue) {
         return Err("Buy and sell venues must resolve to distinct canonical venues".into());
     }
+
+    if is_live {
+        if !buy_adapter.supports_live_execution() {
+            return Err(format!(
+                "Live execution halted: Buy venue '{}' is read-only and does not support live order execution",
+                buy_venue
+            ));
+        }
+        if !sell_adapter.supports_live_execution() {
+            return Err(format!(
+                "Live execution halted: Sell venue '{}' is read-only and does not support live order execution",
+                sell_venue
+            ));
+        }
+        if !buy_adapter.has_live_credentials() {
+            return Err(format!(
+                "Live execution halted: Buy venue '{}' has missing or unauthenticated live credentials",
+                buy_venue
+            ));
+        }
+        if !sell_adapter.has_live_credentials() {
+            return Err(format!(
+                "Live execution halted: Sell venue '{}' has missing or unauthenticated live credentials",
+                sell_venue
+            ));
+        }
+    }
+
     let buy_paper = state
         .get_paper_exchange(buy_vid.as_str())
         .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", buy_venue))?;
@@ -3132,16 +3164,33 @@ async fn execute_spatial_arbitrage_inner(
         })?;
 
     let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
-    let acc_buy = buy_paper.fetch_account().await.map_err(|e| e.to_string())?;
-    let acc_sell = sell_paper
-        .fetch_account()
-        .await
-        .map_err(|e| e.to_string())?;
+    let acc_buy = if is_live {
+        buy_adapter
+            .fetch_account()
+            .await
+            .map_err(|e| format!("Failed to fetch live account on {}: {}", buy_venue, e))?
+    } else {
+        buy_paper
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    let acc_sell = if is_live {
+        sell_adapter
+            .fetch_account()
+            .await
+            .map_err(|e| format!("Failed to fetch live account on {}: {}", sell_venue, e))?
+    } else {
+        sell_paper
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+    };
     for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
         match margin_monitor.evaluate_account(acc) {
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
                 return Err(format!(
-                    "Paper account {} margin status is critical/breached; execution refused",
+                    "Account {} margin status is critical/breached; execution refused",
                     vname
                 ));
             }
@@ -3178,7 +3227,7 @@ async fn execute_spatial_arbitrage_inner(
     }
     if acc_buy.get_position(symbol).is_some() || acc_sell.get_position(symbol).is_some() {
         return Err(format!(
-            "An open paper position already exists for {}; closing lifecycle is not implemented",
+            "An open position already exists for {}; closing lifecycle is not implemented",
             symbol
         ));
     }
@@ -3196,51 +3245,65 @@ async fn execute_spatial_arbitrage_inner(
         );
     }
 
-    buy_paper
-        .replace_orderbook(book_buy.clone())
-        .map_err(|e| e.to_string())?;
-    sell_paper
-        .replace_orderbook(book_sell.clone())
-        .map_err(|e| e.to_string())?;
-    // Harden the simulator's own margin paths with the same account cap, so
-    // a raw strategy target passed anywhere else still books at the cap.
-    // Venue-wide last-write-wins; a tighter cap only ever refuses, never
-    // over-leverages, so the failure direction stays fail-closed.
-    for paper in [&buy_paper, &sell_paper] {
-        if paper.max_leverage_cap() != account_cap {
-            paper
-                .set_max_leverage_cap(account_cap)
-                .map_err(|e| e.to_string())?;
+    if !is_live {
+        buy_paper
+            .replace_orderbook(book_buy.clone())
+            .map_err(|e| e.to_string())?;
+        sell_paper
+            .replace_orderbook(book_sell.clone())
+            .map_err(|e| e.to_string())?;
+        // Harden the simulator's own margin paths with the same account cap, so
+        // a raw strategy target passed anywhere else still books at the cap.
+        // Venue-wide last-write-wins; a tighter cap only ever refuses, never
+        // over-leverages, so the failure direction stays fail-closed.
+        for paper in [&buy_paper, &sell_paper] {
+            if paper.max_leverage_cap() != account_cap {
+                paper
+                    .set_max_leverage_cap(account_cap)
+                    .map_err(|e| e.to_string())?;
+            }
         }
+        buy_paper
+            .set_leverage(symbol, target_leverage)
+            .await
+            .map_err(|e| e.to_string())?;
+        sell_paper
+            .set_leverage(symbol, target_leverage)
+            .await
+            .map_err(|e| e.to_string())?;
+    } else {
+        let _ = buy_adapter.set_leverage(symbol, target_leverage).await;
+        let _ = sell_adapter.set_leverage(symbol, target_leverage).await;
     }
 
+    let (buy_exec, sell_exec): (
+        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+    ) = if is_live {
+        (buy_adapter.clone(), sell_adapter.clone())
+    } else {
+        (buy_paper.clone(), sell_paper.clone())
+    };
+
     let order_buy =
-        router.build_ioc_order(buy_paper.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
+        router.build_ioc_order(buy_exec.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
     let order_sell =
-        router.build_ioc_order(sell_paper.venue_id(), symbol, Side::Sell, sell_ref, qty_dec);
-
-    buy_paper
-        .set_leverage(symbol, target_leverage)
-        .await
-        .map_err(|e| e.to_string())?;
-    sell_paper
-        .set_leverage(symbol, target_leverage)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let buy_exec: Arc<dyn arbitrager_core::exchange::ExchangeAdapter> = buy_paper;
-    let sell_exec: Arc<dyn arbitrager_core::exchange::ExchangeAdapter> = sell_paper;
+        router.build_ioc_order(sell_exec.venue_id(), symbol, Side::Sell, sell_ref, qty_dec);
 
     let mut equity_before = dec!(0);
     let mut equity_before_by_venue = HashMap::new();
-    for (vid, paper) in state.paper_exchanges() {
-        let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-        equity_before += acc.equity;
-        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
-            if f.is_finite() {
-                equity_before_by_venue.insert(vid.to_string(), f);
+    if !is_live {
+        for (vid, paper) in state.paper_exchanges() {
+            let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+            equity_before += acc.equity;
+            if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+                if f.is_finite() {
+                    equity_before_by_venue.insert(vid.to_string(), f);
+                }
             }
         }
+    } else {
+        equity_before = acc_buy.equity + acc_sell.equity;
     }
 
     // Persist the selected candidate as in_flight BEFORE dispatch: if the
@@ -3291,28 +3354,44 @@ async fn execute_spatial_arbitrage_inner(
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
 
-    let mut equity_after = dec!(0);
-    for (_, paper) in state.paper_exchanges() {
-        equity_after += paper
-            .fetch_account()
-            .await
-            .map_err(|e| e.to_string())?
-            .equity;
-    }
-    // Own fills move the expected-equity baselines forward so the next
-    // attribution poll does not misread trade PnL as a manual flow.
-    refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
-    let attempt_pnl = equity_after - equity_before;
-    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
-    // Realized portfolio P&L is always derived from actual paper-account
-    // equity: fees, unwind slippage, and any residual loss are included;
-    // unrealized open-position exposure is not marked into it.
-    let total_f = {
-        let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - state.paper_baseline_equity();
-        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+    let (attempt_pnl_f, total_f) = if !is_live {
+        let mut equity_after = dec!(0);
+        for (_, paper) in state.paper_exchanges() {
+            equity_after += paper
+                .fetch_account()
+                .await
+                .map_err(|e| e.to_string())?
+                .equity;
+        }
+        // Own fills move the expected-equity baselines forward so the next
+        // attribution poll does not misread trade PnL as a manual flow.
+        refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
+        let attempt_pnl = equity_after - equity_before;
+        let pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+        // Realized portfolio P&L is always derived from actual paper-account
+        // equity: fees, unwind slippage, and any residual loss are included;
+        // unrealized open-position exposure is not marked into it.
+        let tot_f = {
+            let mut total_pnl = state.total_realized_profit.write();
+            *total_pnl = equity_after - state.paper_baseline_equity();
+            total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+        };
+        state.circuit_breaker.update_equity(equity_after);
+        (pnl_f, tot_f)
+    } else {
+        let pnl_f = match &res {
+            ArbitrageExecutionResult::Success { realized_profit, .. } => {
+                realized_profit.to_string().parse::<f64>().unwrap_or(0.0)
+            }
+            _ => 0.0,
+        };
+        let tot_f = {
+            let mut total_pnl = state.total_realized_profit.write();
+            *total_pnl += Decimal::from_str_exact(&pnl_f.to_string()).unwrap_or(dec!(0));
+            total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+        };
+        (pnl_f, tot_f)
     };
-    state.circuit_breaker.update_equity(equity_after);
 
     let cycle = {
         let mut step = state.sim_step_counter.write();
@@ -3467,7 +3546,8 @@ async fn execute_spatial_arbitrage_inner(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!(
-                    "{trim_note}Paper position opened; expected convergence capture ${:.2} is unrealized{baseline_note}",
+                    "{trim_note}{} position opened; expected convergence capture ${:.2} is unrealized{baseline_note}",
+                    if is_live { "Live real" } else { "Paper" },
                     expected_capture_f
                 ),
                 direction: direction
@@ -4342,6 +4422,52 @@ async fn flatten_leg_on_paper(
     Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
 }
 
+/// Place a reduce-only market order on a venue (paper or live) to close one
+/// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
+async fn flatten_leg(
+    args: FlattenLegArgs<'_>,
+    is_live: bool,
+) -> Result<Option<(Decimal, Decimal, Decimal, String)>, String> {
+    if !is_live {
+        return flatten_leg_on_paper(args).await;
+    }
+    let FlattenLegArgs {
+        state,
+        venue,
+        symbol,
+        side,
+        qty,
+        sig_id: _,
+        notes: _,
+        strategy_id: _,
+    } = args;
+    let adapter = state
+        .get_adapter(venue)
+        .ok_or_else(|| format!("Venue '{venue}' is not admitted for execution"))?;
+    if !adapter.supports_live_execution() || !adapter.has_live_credentials() {
+        return Err(format!(
+            "Venue '{venue}' does not support live execution or has unauthenticated credentials"
+        ));
+    }
+    if qty <= dec!(0) {
+        return Err("Invalid leg quantity".to_string());
+    }
+    let mut order =
+        arbitrager_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
+    order.reduce_only = true;
+
+    let resp = adapter.place_order(order).await.map_err(|e| e.to_string())?;
+    if resp.filled_qty <= dec!(0) {
+        return Ok(None);
+    }
+    let px = resp
+        .avg_fill_price
+        .filter(|p| *p > dec!(0))
+        .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
+    Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
+}
+
+
 /// Close the attributed virtual-ledger lot for a flattened signal family and
 /// report its realized PnL. The lot is matched on the signal's own ledger
 /// namespace (see `attribution::ledger_strategy_id`), so radar, futures and
@@ -4446,7 +4572,7 @@ fn close_flattened_spatial_lot(
 /// sized to that root family's attributed residual on each paper venue, and
 /// mark the original `closed` only once its attributed legs are neutralized.
 /// Bypasses pause/circuit-breaker because it is strictly risk-reducing;
-/// refused in live mode until authenticated venue exits exist.
+/// in live mode, dispatches reduce-only market orders to live authenticated adapters.
 pub async fn flatten_ticker_positions_impl(
     symbol: Option<&str>,
     strategy_id: &str,
@@ -4455,11 +4581,19 @@ pub async fn flatten_ticker_positions_impl(
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
-    if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+    let is_live = *state.is_live_mode.read();
+    if is_live {
+        let is_unlocked = state.vault.write().is_unlocked();
+        if !is_unlocked {
+            return Err("Cannot flatten in real trading mode while the secure credential vault is locked. Unlock the vault first.".into());
+        }
     }
     let _execution_guard = state.execution_lock.lock().await;
-    let flatten_equity_before = snapshot_paper_equity(state).await;
+    let flatten_equity_before = if !is_live {
+        snapshot_paper_equity(state).await
+    } else {
+        HashMap::new()
+    };
 
     let all_signals = state
         .state_store
@@ -4574,29 +4708,63 @@ pub async fn flatten_ticker_positions_impl(
                 continue;
             }
             if !accounts.contains_key(canonical) && !unreadable.contains(canonical) {
-                match papers
-                    .iter()
-                    .find(|(vid, _)| *vid == canonical)
-                    .map(|(_, p)| p.clone())
-                {
-                    Some(paper) => match paper.fetch_account().await {
-                        Ok(acc) => {
-                            accounts.insert(canonical, acc);
+                if is_live {
+                    match state.get_adapter(canonical) {
+                        Some(adapter) => {
+                            if !adapter.supports_live_execution() || !adapter.has_live_credentials() {
+                                unreadable.insert(canonical);
+                                out.notes.push(format!(
+                                    "{}: venue '{}' does not have authenticated live credentials",
+                                    sig.id, leg.venue
+                                ));
+                            } else {
+                                match adapter.fetch_account().await {
+                                    Ok(acc) => {
+                                        accounts.insert(canonical, acc);
+                                    }
+                                    Err(e) => {
+                                        unreadable.insert(canonical);
+                                        out.notes.push(format!(
+                                            "{}: cannot read {} live account: {e}",
+                                            sig.id, leg.venue
+                                        ));
+                                    }
+                                }
+                            }
                         }
-                        Err(e) => {
+                        None => {
                             unreadable.insert(canonical);
                             out.notes.push(format!(
-                                "{}: cannot read {} paper account: {e}",
+                                "{}: no live adapter exists for venue '{}'",
                                 sig.id, leg.venue
                             ));
                         }
-                    },
-                    None => {
-                        unreadable.insert(canonical);
-                        out.notes.push(format!(
-                            "{}: no paper account exists for venue '{}'",
-                            sig.id, leg.venue
-                        ));
+                    }
+                } else {
+                    match papers
+                        .iter()
+                        .find(|(vid, _)| *vid == canonical)
+                        .map(|(_, p)| p.clone())
+                    {
+                        Some(paper) => match paper.fetch_account().await {
+                            Ok(acc) => {
+                                accounts.insert(canonical, acc);
+                            }
+                            Err(e) => {
+                                unreadable.insert(canonical);
+                                out.notes.push(format!(
+                                    "{}: cannot read {} paper account: {e}",
+                                    sig.id, leg.venue
+                                ));
+                            }
+                        },
+                        None => {
+                            unreadable.insert(canonical);
+                            out.notes.push(format!(
+                                "{}: no paper account exists for venue '{}'",
+                                sig.id, leg.venue
+                            ));
+                        }
                     }
                 }
             }
@@ -4710,16 +4878,19 @@ pub async fn flatten_ticker_positions_impl(
 
         let mut leg_desc = Vec::new();
         for t in &targets {
-            match flatten_leg_on_paper(FlattenLegArgs {
-                state,
-                venue: &t.venue,
-                symbol: &sig.symbol,
-                side: t.order_side,
-                qty: t.qty,
-                strategy_id: &sig.strategy_id,
-                sig_id: &sig.id,
-                notes: &mut out.notes,
-            })
+            match flatten_leg(
+                FlattenLegArgs {
+                    state,
+                    venue: &t.venue,
+                    symbol: &sig.symbol,
+                    side: t.order_side,
+                    qty: t.qty,
+                    strategy_id: &sig.strategy_id,
+                    sig_id: &sig.id,
+                    notes: &mut out.notes,
+                },
+                is_live,
+            )
             .await {
                 Ok(Some((qty, px, fee, oid))) => {
                     state
@@ -4771,27 +4942,52 @@ pub async fn flatten_ticker_positions_impl(
             if residual <= dec!(0) {
                 continue;
             }
-            let Some((_, paper)) = papers.iter().find(|(vid, _)| *vid == exp.canonical) else {
-                fully_flat = false;
-                continue;
-            };
-            match paper.fetch_account().await {
-                Ok(acc) => match acc
-                    .positions
-                    .iter()
-                    .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
-                {
-                    None => {}
-                    Some(p) if p.side != exp.expected_pos_side => {
-                        fully_flat = false;
-                        out.notes.push(format!(
-                            "{}: {} position side {:?} contradicts {:?} leg; leaving open",
-                            sig.id, exp.canonical, p.side, exp.entry_side
-                        ));
-                    }
-                    Some(_) => fully_flat = false,
-                },
-                Err(_) => fully_flat = false,
+            if is_live {
+                let Some(adapter) = state.get_adapter(exp.canonical) else {
+                    fully_flat = false;
+                    continue;
+                };
+                match adapter.fetch_account().await {
+                    Ok(acc) => match acc
+                        .positions
+                        .iter()
+                        .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
+                    {
+                        None => {}
+                        Some(p) if p.side != exp.expected_pos_side => {
+                            fully_flat = false;
+                            out.notes.push(format!(
+                                "{}: {} position side {:?} contradicts {:?} leg; leaving open",
+                                sig.id, exp.canonical, p.side, exp.entry_side
+                            ));
+                        }
+                        Some(_) => fully_flat = false,
+                    },
+                    Err(_) => fully_flat = false,
+                }
+            } else {
+                let Some((_, paper)) = papers.iter().find(|(vid, _)| *vid == exp.canonical) else {
+                    fully_flat = false;
+                    continue;
+                };
+                match paper.fetch_account().await {
+                    Ok(acc) => match acc
+                        .positions
+                        .iter()
+                        .find(|p| p.symbol == sig.symbol && p.quantity > dec!(0))
+                    {
+                        None => {}
+                        Some(p) if p.side != exp.expected_pos_side => {
+                            fully_flat = false;
+                            out.notes.push(format!(
+                                "{}: {} position side {:?} contradicts {:?} leg; leaving open",
+                                sig.id, exp.canonical, p.side, exp.entry_side
+                            ));
+                        }
+                        Some(_) => fully_flat = false,
+                    },
+                    Err(_) => fully_flat = false,
+                }
             }
         }
 
@@ -4800,10 +4996,22 @@ pub async fn flatten_ticker_positions_impl(
         // fills cover it; single-leg residuals (e.g. triangle legs) realize
         // purely through their signal legs and keep the 0.0 log convention.
         let mut flatten_realized: Option<(f64, f64)> = None;
+        let (venue_a, venue_b) = (
+            sig.legs
+                .first()
+                .map(|l| l.venue.clone())
+                .unwrap_or_default(),
+            sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
+        );
         if fully_flat {
             close_family(&note)?;
             out.signals_closed += 1;
             flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now);
+            if let Some(bot) = state.radar_bot.lock().clone() {
+                bot.forget_position(&sig.symbol, &venue_a, &venue_b);
+                let _ = state.state_store.delete_bot_position(&sig.symbol, &venue_a, &venue_b);
+                let _ = state.state_store.delete_bot_position(&sig.symbol, &venue_b, &venue_a);
+            }
         } else {
             state
                 .state_store
@@ -4815,13 +5023,6 @@ pub async fn flatten_ticker_positions_impl(
                 .map_err(|e| e.to_string())?;
         }
 
-        let (venue_a, venue_b) = (
-            sig.legs
-                .first()
-                .map(|l| l.venue.clone())
-                .unwrap_or_default(),
-            sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
-        );
         state.execution_logs.write().push(ExecutionLogEntry {
             id: format!("exec-flatten-{}-{}", cycle, sig.id),
             timestamp: Utc::now().to_rfc3339(),
@@ -4866,23 +5067,56 @@ pub async fn flatten_ticker_positions_impl(
         })
         .count();
 
-    let mut equity_after = dec!(0);
-    for (_, paper) in state.paper_exchanges() {
-        equity_after += paper
-            .fetch_account()
-            .await
-            .map_err(|e| e.to_string())?
-            .equity;
+    if !is_live {
+        let mut equity_after = dec!(0);
+        for (_, paper) in state.paper_exchanges() {
+            equity_after += paper
+                .fetch_account()
+                .await
+                .map_err(|e| e.to_string())?
+                .equity;
+        }
+        {
+            let mut total_pnl = state.total_realized_profit.write();
+            *total_pnl = equity_after - state.paper_baseline_equity();
+        }
+        state.circuit_breaker.update_equity(equity_after);
+        refresh_equity_expectations_after_fills(state, &flatten_equity_before).await;
     }
-    {
-        let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - state.paper_baseline_equity();
-    }
-    state.circuit_breaker.update_equity(equity_after);
-    refresh_equity_expectations_after_fills(state, &flatten_equity_before).await;
     maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
     Ok(out)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VenueCapabilityDto {
+    pub venue: String,
+    pub name: String,
+    pub supports_live: bool,
+    pub has_credentials: bool,
+    pub live_ready: bool,
+}
+
+pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<VenueCapabilityDto> {
+    state.sync_vault_credentials_to_adapters();
+    let is_unlocked = state.vault.write().is_unlocked();
+    let venues = state.get_venues();
+    venues
+        .into_iter()
+        .map(|(vid, vname, adapter)| {
+            let supports_live = adapter.supports_live_execution();
+            let has_credentials = adapter.has_live_credentials();
+            let live_ready = is_unlocked && supports_live && has_credentials;
+            VenueCapabilityDto {
+                venue: vid.to_string(),
+                name: vname.to_string(),
+                supports_live,
+                has_credentials,
+                live_ready,
+            }
+        })
+        .collect()
 }
 
 pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLogEntry>, String> {
@@ -4890,11 +5124,42 @@ pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLo
 }
 
 pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool, String> {
-    *state.is_live_mode.write() = false;
     if enabled {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+        let is_unlocked = state.vault.write().is_unlocked();
+        if !is_unlocked {
+            *state.is_live_mode.write() = false;
+            return Err("Cannot enable real trading while the secure credential vault is locked. Unlock the vault first.".into());
+        }
+        state.sync_vault_credentials_to_adapters();
+        let mut ready_count = 0;
+        if state.live_aster.has_live_credentials() {
+            ready_count += 1;
+        }
+        if state.live_hl.has_live_credentials() {
+            ready_count += 1;
+        }
+        if ready_count < 2 {
+            *state.is_live_mode.write() = false;
+            return Err(format!(
+                "Real trading requires at least two venues with authenticated live credentials (currently {ready_count} ready: Aster={}, Hyperliquid={}). Please configure and enable API keys in Settings.",
+                state.live_aster.has_live_credentials(),
+                state.live_hl.has_live_credentials(),
+            ));
+        }
+        *state.is_live_mode.write() = true;
+        {
+            let mut s = state.settings.write();
+            s.trading_mode = "real".to_string();
+        }
+        Ok(true)
+    } else {
+        *state.is_live_mode.write() = false;
+        {
+            let mut s = state.settings.write();
+            s.trading_mode = "paper".to_string();
+        }
+        Ok(false)
     }
-    Ok(false)
 }
 
 pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bool, String> {
@@ -4914,8 +5179,35 @@ pub fn save_engine_settings_impl(
     mut settings: EngineSettingsDto,
     state: &AppEngineState,
 ) -> Result<String, String> {
-    if !settings.trading_mode.eq_ignore_ascii_case("paper") {
-        return Err("trading_mode must be 'paper'; live execution is unavailable".into());
+    let is_real = settings.trading_mode.eq_ignore_ascii_case("real");
+    let is_paper = settings.trading_mode.eq_ignore_ascii_case("paper");
+    if !is_real && !is_paper {
+        return Err("trading_mode must be 'paper' or 'real'".into());
+    }
+
+    if is_real {
+        let is_unlocked = state.vault.write().is_unlocked();
+        if !is_unlocked {
+            return Err("Cannot switch to 'real' trading mode while the secure credential vault is locked. Unlock the vault first.".into());
+        }
+        state.sync_vault_credentials_to_adapters();
+        let mut ready_count = 0;
+        if state.live_aster.has_live_credentials() {
+            ready_count += 1;
+        }
+        if state.live_hl.has_live_credentials() {
+            ready_count += 1;
+        }
+        if ready_count < 2 {
+            return Err(format!(
+                "Cannot switch to 'real' trading mode: At least two venues must have authenticated live credentials (currently {ready_count} ready: Aster={}, Hyperliquid={}). Please configure and enable API keys in Settings.",
+                state.live_aster.has_live_credentials(),
+                state.live_hl.has_live_credentials(),
+            ));
+        }
+        *state.is_live_mode.write() = true;
+    } else {
+        *state.is_live_mode.write() = false;
     }
     settings.spread_samples_max_days = match settings.spread_samples_max_days {
         None => None,
@@ -5770,6 +6062,13 @@ pub async fn get_execution_logs(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_impl(&state)
+}
+
+#[tauri::command]
+pub async fn get_venue_execution_capabilities(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<VenueCapabilityDto>, String> {
+    Ok(get_venue_execution_capabilities_impl(&state))
 }
 
 #[tauri::command]
@@ -7053,13 +7352,18 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
         vault.get_status()
     };
     ensure_credential_migration(state)?;
+    state.sync_vault_credentials_to_adapters();
     Ok(status)
 }
 
 pub fn lock_vault_impl(state: &AppEngineState) -> VaultStatus {
-    let mut vault = state.vault.write();
-    vault.lock();
-    vault.get_status()
+    let status = {
+        let mut vault = state.vault.write();
+        vault.lock();
+        vault.get_status()
+    };
+    state.sync_vault_credentials_to_adapters();
+    status
 }
 
 const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
@@ -7537,6 +7841,7 @@ pub fn upsert_account_impl(
             let _ = vault.update_profile_enabled(&[(profile.id.clone(), profile.enabled)]);
         }
     }
+    state.sync_vault_credentials_to_adapters();
 
     let dto = accounts_with_presence(state, vec![profile])?
         .into_iter()
@@ -7599,6 +7904,7 @@ pub fn delete_account_impl(account_id: &str, state: &AppEngineState) -> Result<b
             tracing::warn!("account {account_id} deleted but credential cleanup failed: {e}");
         }
     }
+    state.sync_vault_credentials_to_adapters();
     Ok(deleted)
 }
 
@@ -7618,13 +7924,17 @@ pub fn delete_account_credentials_impl(
     if !exists {
         return Err(format!("Unknown account '{account_id}'"));
     }
-    let mut vault = state.vault.write();
-    if !vault.is_unlocked() {
-        return Err("Vault is locked. Please unlock before removing credentials.".into());
-    }
-    vault
-        .delete_profile_credentials(account_id)
-        .map_err(|e| e.to_string())
+    let res = {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked. Please unlock before removing credentials.".into());
+        }
+        vault
+            .delete_profile_credentials(account_id)
+            .map_err(|e| e.to_string())
+    }?;
+    state.sync_vault_credentials_to_adapters();
+    Ok(res)
 }
 
 /// Returns the decrypted credentials bound to one account profile for the
@@ -8384,7 +8694,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     let qty = size_usd / ask;
     // Radar-dispatched fills persist under the "radar" strategy so the
     // Spread Radar page scopes positions separately from Single Spread.
-    execute_spatial_arbitrage_inner(
+    let res = execute_spatial_arbitrage_inner(
         &sym,
         buy_venue,
         sell_venue,
@@ -8399,7 +8709,28 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         "radar",
         state,
     )
-    .await
+    .await?;
+
+    // Adopt into auto-exit watcher pool targeting dynamic baseline
+    if let Some(bot) = state.radar_bot.lock().as_ref() {
+        let friction_band = row
+            .deviation_bps
+            .zip(row.net_capture_bps)
+            .and_then(|(d, n)| arbitrager_strategy::convergence_auto::friction_band_bps(Some(d), Some(n)));
+        let _ = bot.adopt_manual_position(
+            state,
+            &sym,
+            buy_venue,
+            sell_venue,
+            size_usd,
+            row.deviation_bps,
+            row.baseline_bps,
+            friction_band,
+            row.expected_converge_secs,
+        );
+    }
+
+    Ok(res)
 }
 
 // ---------------------------------------------------------------------------
@@ -11413,7 +11744,7 @@ mod tests {
         let state = AppEngineState::new();
         let res = set_live_mode_impl(true, &state);
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("Live execution is disabled"));
+        assert!(res.unwrap_err().contains("locked"));
         assert!(!*state.is_live_mode.read());
 
         let res_off = set_live_mode_impl(false, &state).expect("disable live mode");
@@ -11430,13 +11761,109 @@ mod tests {
         };
         let res = save_engine_settings_impl(settings, &state);
         assert!(res.is_err());
-        assert!(res.unwrap_err().contains("paper"));
+        assert!(res.unwrap_err().contains("locked"));
         assert_eq!(
             get_engine_settings_impl(&state)
                 .expect("settings")
                 .trading_mode,
             "paper"
         );
+    }
+
+    #[tokio::test]
+    async fn test_live_trading_unlock_and_execution_capabilities() {
+        let (state, _dir) = test_state_with_vault("live_test");
+        {
+            let mut s = state.settings.write();
+            s.aster_enabled = true;
+            s.hyperliquid_enabled = true;
+            s.vanta_enabled = true;
+        }
+
+        // 1. Vault locked -> live mode rejected
+        let res = set_live_mode_impl(true, &state);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("locked"));
+
+        // 2. Initialize and unlock vault
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
+        unlock_vault_impl("test-password-123", &state).expect("unlock vault");
+
+        // 3. Vault unlocked but credentials missing -> rejected
+        let res2 = set_live_mode_impl(true, &state);
+        assert!(res2.is_err());
+        assert!(res2.unwrap_err().contains("requires at least two venues"));
+
+        // 4. Populate credentials for Aster and Hyperliquid
+        {
+            let mut vault = state.vault.write();
+            let mut aster_c = crate::vault::ExchangeCredentials::default();
+            aster_c.venue = "aster".to_string();
+            aster_c.profile_id = Some("aster-1".to_string());
+            aster_c.api_key = "aster_api_key".to_string();
+            aster_c.api_secret = "aster_api_secret".to_string();
+            aster_c.enabled = true;
+            vault.upsert_profile_credentials("aster-1", aster_c).expect("save aster creds");
+
+            let mut hl_c = crate::vault::ExchangeCredentials::default();
+            hl_c.venue = "hyperliquid".to_string();
+            hl_c.profile_id = Some("hl-1".to_string());
+            hl_c.wallet_address = Some("0x1111111111111111111111111111111111111111".to_string());
+            hl_c.private_key = Some("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string());
+            hl_c.enabled = true;
+            vault.upsert_profile_credentials("hl-1", hl_c).expect("save hl creds");
+        }
+        state.sync_vault_credentials_to_adapters();
+
+        // 5. Capabilities report
+        let caps = get_venue_execution_capabilities_impl(&state);
+        let aster_cap = caps.iter().find(|c| c.venue == "aster").expect("aster cap");
+        assert!(aster_cap.supports_live);
+        assert!(aster_cap.has_credentials);
+        assert!(aster_cap.live_ready);
+
+        let hl_cap = caps.iter().find(|c| c.venue == "hyperliquid").expect("hl cap");
+        assert!(hl_cap.supports_live);
+        assert!(hl_cap.has_credentials);
+        assert!(hl_cap.live_ready);
+
+        let vanta_cap = caps.iter().find(|c| c.venue == "vanta").expect("vanta cap");
+        assert!(!vanta_cap.supports_live);
+        assert!(!vanta_cap.live_ready);
+
+        // 6. Live mode successfully enabled
+        let live_ok = set_live_mode_impl(true, &state).expect("enable live mode");
+        assert!(live_ok);
+        assert!(*state.is_live_mode.read());
+
+        // 7. Route involving read-only venue (Vanta) fails closed in live mode
+        let sim_err = execute_spatial_arbitrage_inner(
+            "BTC-USDC",
+            "aster",
+            "vanta",
+            100.0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "futures",
+            &state,
+        ).await;
+        assert!(sim_err.is_err());
+        assert!(sim_err.unwrap_err().contains("read-only"));
+
+        // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
+        let flat_res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
+        assert!(flat_res.is_ok());
+
+        // 9. When vault is locked, live flatten fails closed
+        let _ = lock_vault_impl(&state);
+        let flat_locked = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
+        assert!(flat_locked.is_err());
+        assert!(flat_locked.unwrap_err().contains("vault is locked"));
     }
 
     #[tokio::test]

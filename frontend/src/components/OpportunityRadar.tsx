@@ -87,7 +87,29 @@ const VENUE_LABEL: Record<string, string> = {
   hyperliquid: "HL",
   lighter: "LGT",
   robinhood: "RH",
+  vanta: "VNT",
+  aster: "AST",
+  ondoperps: "ONDO",
+  grvt: "GRVT",
+  edgex: "EDGX",
+  arcus: "ARC",
+  popdex: "POP",
+  kraken_spot: "KRK",
+  kraken_futures: "KFUT",
+  polymarket: "POLY",
+  kalshi: "KLSH",
+  binance: "BNB",
+  coinbase: "CB",
+  decibel: "DCB",
+  ibkr: "IBKR",
+  ig: "IG",
+  okx: "OKX",
+  variational: "VAR",
 };
+
+const LIVE_CAPABLE_VENUES = new Set(["aster", "hyperliquid"]);
+const isLiveCapableRoute = (v1: string, v2: string): boolean =>
+  LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
 
 /* ------------------------------------------------------------------ */
 /* Config modal (TickerConfigModal canon)                                */
@@ -654,10 +676,25 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             )}
           </td>
           <td className="px-2 py-1.5">
-            <span className="text-slate-700">
+            <span className="text-slate-700 font-mono">
               {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
               {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
             </span>
+            {isLiveCapableRoute(r.buyVenue, r.sellVenue) ? (
+              <span
+                className="ml-1.5 px-1 py-px rounded-xs border border-emerald-400 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono font-bold"
+                title="Both venues support live API execution (Aster ↔ Hyperliquid)"
+              >
+                LIVE
+              </span>
+            ) : (
+              <span
+                className="ml-1.5 px-1 py-px rounded-xs border border-surface-border bg-slate-100 dark:bg-slate-800 text-slate-400 text-[10px] font-mono"
+                title="Route involves a read-only venue — paper execution only"
+              >
+                PAPER
+              </span>
+            )}
           </td>
           <td className="px-2 py-1.5 text-right font-bold text-accent">
             {fmtBpsU(r.expectedProfitBps)}
@@ -912,6 +949,7 @@ const OpportunityRadarInner: React.FC = () => {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [executing, setExecuting] = useState<string | null>(null);
   const [execError, setExecError] = useState<string | null>(null);
+  const [execSuccess, setExecSuccess] = useState<string | null>(null);
   const [sizeUsd, setSizeUsd] = useState<Record<string, number>>({});
   // Autonomous convergence bot (paper-only, opt-in). Backend BotMode is the
   // single source of truth — no page-local lifecycle phase.
@@ -1045,8 +1083,14 @@ const OpportunityRadarInner: React.FC = () => {
       }
       setExecuting(k);
       setExecError(null);
+      setExecSuccess(null);
       try {
         await api.executeMonitorOpportunity(r.symbol, r.buyVenue, r.sellVenue, size);
+        setExecSuccess(
+          `${r.symbol} ${r.buyVenue}→${r.sellVenue}: Executed successfully — position adopted into auto-exit watcher (targeting dynamic baseline)`,
+        );
+        api.getRadarBotConfig().then(setBotCfg).catch(() => {});
+        api.getRadarBotStatus().then(setBotStatus).catch(() => {});
       } catch (e) {
         setExecError(`${r.symbol} ${r.buyVenue}→${r.sellVenue}: ${String(e)}`);
       } finally {
@@ -1134,10 +1178,18 @@ const OpportunityRadarInner: React.FC = () => {
         <div className="flex items-center space-x-3 shrink-0">
           {(execError || flattenError) && (
             <span
-              className="text-xs font-mono text-red-600 max-w-56 truncate"
+              className="text-xs font-mono text-red-600 max-w-72 truncate"
               title={execError ?? flattenError ?? ""}
             >
               {execError ?? flattenError}
+            </span>
+          )}
+          {execSuccess && !execError && !flattenError && (
+            <span
+              className="text-xs font-mono text-emerald-600 max-w-96 truncate"
+              title={execSuccess}
+            >
+              {execSuccess}
             </span>
           )}
           <button

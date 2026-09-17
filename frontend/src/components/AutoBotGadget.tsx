@@ -57,9 +57,19 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
               ? "bg-amber-50 text-amber-700 border-amber-200"
               : "bg-slate-100 text-slate-600 border-slate-300"
         }`}
-        title={armed ? "Entries + exits armed (paper-only)" : "Not arming entries"}
+        title={
+          armed
+            ? "Entries + exits armed (paper-only)"
+            : cfg?.mode === "reduce_only" && open.length > 0
+              ? "Auto-exit active: managing open positions until dynamic baseline convergence"
+              : "Not arming entries"
+        }
       >
-        {armed ? "ARMED" : describeBotMode(cfg?.mode)}
+        {armed
+          ? "ARMED"
+          : cfg?.mode === "reduce_only" && open.length > 0
+            ? "MANAGING EXITS"
+            : describeBotMode(cfg?.mode)}
       </span>
       <div className="flex items-center gap-1">
         {BOT_MODE_BTN.map((b) => (

@@ -145,6 +145,10 @@ interface OpportunityRowViewProps {
   onExecute: (opp: SpatialOpportunityDto) => void;
 }
 
+const LIVE_CAPABLE_VENUES = new Set(["aster", "hyperliquid"]);
+const isLiveRoute = (v1: string, v2: string): boolean =>
+  LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
+
 const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
   ({ opp, minBps, blocked, blockingIds, botPhase, loading, symbolLabel, onExecute }) => {
     const isExec = opp.is_executable;
@@ -155,12 +159,28 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
       : botPhase === "paused" || botPhase === "reduce_only" || botPhase === "stopping"
         ? `Entries blocked: bot is ${botPhase.replace("_", "-")}`
         : undefined;
+    const isLive = isLiveRoute(opp.buy_venue, opp.sell_venue);
     return (
       <tr className={`hover:bg-surface-raised transition ${isExec ? "bg-accent-dim/30" : ""}`}>
         <td className="py-2.5 px-3 font-medium text-slate-900 flex items-center space-x-1.5">
           <span className="text-slate-800 font-semibold">{opp.buy_venue}</span>
           <span className="text-slate-400 text-xs">➔</span>
           <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
+          {isLive ? (
+            <span
+              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-emerald-400 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono font-bold"
+              title="Both venues support live API execution (Aster ↔ Hyperliquid)"
+            >
+              LIVE
+            </span>
+          ) : (
+            <span
+              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-surface-border bg-slate-100 dark:bg-slate-800 text-slate-400 text-[10px] font-mono"
+              title="Route contains read-only venue(s) — paper execution only"
+            >
+              PAPER
+            </span>
+          )}
         </td>
         <td className="py-2.5 px-3 text-loss font-medium">{formatCurrencyPrice(opp.buy_price)}</td>
         <td className="py-2.5 px-3 text-profit font-medium">{formatCurrencyPrice(opp.sell_price)}</td>

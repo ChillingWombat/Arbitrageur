@@ -2,15 +2,142 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::Utc;
+use parking_lot::RwLock;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha3::{Digest, Keccak256};
 use arbitrager_core::exchange::ExchangeAdapter;
 use arbitrager_core::market::{MarketMetadata, Symbol};
 use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrager_core::position::{AccountSnapshot, Balance, Position};
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrager_core::types::{dec, Decimal, Side, VenueId};
+use arbitrager_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HlOrderWire {
+    pub a: u32,
+    pub b: bool,
+    pub p: String,
+    pub s: String,
+    pub r: bool,
+    pub t: HlOrderTypeWire,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HlOrderTypeWire {
+    pub limit: HlLimitWire,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HlLimitWire {
+    pub tif: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct HlCancelWire {
+    pub a: u32,
+    pub o: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum HlActionWire {
+    Order {
+        orders: Vec<HlOrderWire>,
+        grouping: String,
+    },
+    Cancel {
+        cancels: Vec<HlCancelWire>,
+    },
+}
+
+fn keccak256(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
+/// Computes the authentic EIP-712 signature for a Hyperliquid L1 action.
+pub fn sign_hyperliquid_l1_action<T: Serialize>(
+    action: &T,
+    nonce: u64,
+    vault_address: Option<&[u8; 20]>,
+    is_mainnet: bool,
+    private_key_hex: &str,
+) -> anyhow::Result<(String, String, u8)> {
+    let action_bytes = rmp_serde::to_vec_named(action)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize action with MessagePack: {e}"))?;
+    let mut hash_input = action_bytes;
+    hash_input.extend_from_slice(&nonce.to_be_bytes());
+    match vault_address {
+        Some(addr) => {
+            hash_input.push(1);
+            hash_input.extend_from_slice(addr);
+        }
+        None => {
+            hash_input.push(0);
+        }
+    }
+    let connection_id = keccak256(&hash_input);
+
+    // EIP-712 Domain Separator:
+    // EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)
+    let domain_typehash = keccak256(b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    let name_hash = keccak256(b"Exchange");
+    let version_hash = keccak256(b"1");
+    let mut chain_id_bytes = [0u8; 32];
+    chain_id_bytes[30] = 0x05;
+    chain_id_bytes[31] = 0x39; // 1337
+    let verifying_contract_bytes = [0u8; 32];
+
+    let mut domain_buf = Vec::with_capacity(32 * 5);
+    domain_buf.extend_from_slice(&domain_typehash);
+    domain_buf.extend_from_slice(&name_hash);
+    domain_buf.extend_from_slice(&version_hash);
+    domain_buf.extend_from_slice(&chain_id_bytes);
+    domain_buf.extend_from_slice(&verifying_contract_bytes);
+    let domain_separator = keccak256(&domain_buf);
+
+    // Agent Struct Hash:
+    // Agent(string source,bytes32 connectionId)
+    let agent_typehash = keccak256(b"Agent(string source,bytes32 connectionId)");
+    let source_hash = if is_mainnet { keccak256(b"a") } else { keccak256(b"b") };
+
+    let mut struct_buf = Vec::with_capacity(32 * 3);
+    struct_buf.extend_from_slice(&agent_typehash);
+    struct_buf.extend_from_slice(&source_hash);
+    struct_buf.extend_from_slice(&connection_id);
+    let struct_hash = keccak256(&struct_buf);
+
+    // EIP-712 Digest: \x19\x01 || domain_separator || struct_hash
+    let mut digest_buf = Vec::with_capacity(2 + 32 + 32);
+    digest_buf.extend_from_slice(b"\x19\x01");
+    digest_buf.extend_from_slice(&domain_separator);
+    digest_buf.extend_from_slice(&struct_hash);
+    let digest = keccak256(&digest_buf);
+
+    let key_clean = private_key_hex.trim().strip_prefix("0x").unwrap_or(private_key_hex.trim());
+    let key_bytes = hex::decode(key_clean)
+        .map_err(|e| anyhow::anyhow!("Invalid private key hex: {e}"))?;
+    if key_bytes.len() != 32 {
+        anyhow::bail!("Invalid private key length: expected 32 bytes, got {}", key_bytes.len());
+    }
+    let key_arr: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow::anyhow!("Failed to convert key bytes"))?;
+    let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_arr).into())
+        .map_err(|e| anyhow::anyhow!("Failed to instantiate secp256k1 signing key: {e}"))?;
+    let (sig, recid) = signing_key.sign_prehash_recoverable(&digest)
+        .map_err(|e| anyhow::anyhow!("ECDSA signing failed: {e}"))?;
+
+    let r_hex = format!("0x{}", hex::encode(sig.r().to_bytes()));
+    let s_hex = format!("0x{}", hex::encode(sig.s().to_bytes()));
+    let v = recid.to_byte() + 27;
+
+    Ok((r_hex, s_hex, v))
+}
 
 /// Hyperliquid L1 Perpetual and Spot exchange adapter.
 #[allow(dead_code)]
@@ -18,8 +145,8 @@ pub struct HyperliquidAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    wallet_address: Option<String>,
-    private_key: Option<String>,
+    wallet_address: RwLock<Option<String>>,
+    private_key: RwLock<Option<String>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -34,10 +161,24 @@ impl HyperliquidAdapter {
             venue_id: VenueId::new("hyperliquid"),
             client: Client::builder().build().unwrap_or_default(),
             base_url: base,
-            wallet_address,
-            private_key,
+            wallet_address: RwLock::new(wallet_address),
+            private_key: RwLock::new(private_key),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
         }
+    }
+
+    /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
+    pub fn update_credentials(&self, wallet_address: Option<String>, private_key: Option<String>) {
+        *self.wallet_address.write() = wallet_address;
+        *self.private_key.write() = private_key;
+    }
+
+    /// Whether valid, non-empty API credentials are held in memory.
+    pub fn has_credentials(&self) -> bool {
+        let w = self.wallet_address.read();
+        let p = self.private_key.read();
+        w.as_ref().is_some_and(|w| !w.trim().is_empty())
+            && p.as_ref().is_some_and(|p| !p.trim().is_empty())
     }
 
     async fn post_info(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -48,6 +189,35 @@ impl HyperliquidAdapter {
         }
         let json_val = resp.json::<serde_json::Value>().await?;
         Ok(json_val)
+    }
+
+    async fn post_exchange(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}/exchange", self.base_url);
+        let resp = self.client.post(&url).json(&body).send().await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Hyperliquid /exchange error HTTP {status}: {text}");
+        }
+        let json_val: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Hyperliquid exchange response: {e}; body: {text}"))?;
+        Ok(json_val)
+    }
+
+    /// Resolve coin name to integer asset index in Hyperliquid perpetual universe.
+    pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
+        let res = self.post_info(json!({"type": "meta"})).await?;
+        let universe = res.get("universe").and_then(|u| u.as_array()).ok_or_else(|| {
+            anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
+        })?;
+        for (idx, item) in universe.iter().enumerate() {
+            if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
+                if name.eq_ignore_ascii_case(coin) {
+                    return Ok(idx as u32);
+                }
+            }
+        }
+        anyhow::bail!("Asset '{coin}' not found in Hyperliquid perpetual universe");
     }
 }
 
@@ -248,14 +418,17 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        let user = self
-            .wallet_address
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!("Hyperliquid account fetch requires a wallet address")
-            })?;
+        let user = {
+            let guard = self.wallet_address.read();
+            guard
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)
+        }
+        .ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid account fetch requires a wallet address")
+        })?;
         let res = self
             .post_info(json!({"type": "clearinghouseState", "user": user}))
             .await?;
@@ -357,16 +530,228 @@ impl ExchangeAdapter for HyperliquidAdapter {
         })
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        let private_key = {
+            let guard = self.private_key.read();
+            guard
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(ToString::to_string)
+        }
+        .ok_or_else(|| anyhow::anyhow!("Hyperliquid live order placement requires a private key"))?;
+
+        let coin = perp_coin(&order.symbol)?;
+        let asset_index = self.resolve_asset_index(&coin).await?;
+
+        let price = match order.price {
+            Some(p) => p,
+            None => {
+                let ticker = self.fetch_ticker(&order.symbol).await?;
+                match order.side {
+                    Side::Buy => (ticker.ask * dec!(1.05)).round_dp(5),
+                    Side::Sell => (ticker.bid * dec!(0.95)).round_dp(5),
+                }
+            }
+        };
+
+        let tif = if order.post_only {
+            "Alo"
+        } else if order.time_in_force == TimeInForce::ImmediateOrCancel
+            || order.order_type == OrderType::ImmediateOrCancel
+        {
+            "Ioc"
+        } else {
+            "Gtc"
+        };
+
+        let wire_order = HlOrderWire {
+            a: asset_index,
+            b: order.side == Side::Buy,
+            p: price.to_string(),
+            s: order.quantity.to_string(),
+            r: order.reduce_only,
+            t: HlOrderTypeWire {
+                limit: HlLimitWire {
+                    tif: tif.to_string(),
+                },
+            },
+            c: None,
+        };
+
+        let action = HlActionWire::Order {
+            orders: vec![wire_order],
+            grouping: "na".to_string(),
+        };
+
+        let nonce = Utc::now().timestamp_millis() as u64;
+        let is_mainnet = !self.base_url.contains("testnet");
+        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, &private_key)?;
+
+        let body = json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": {
+                "r": r,
+                "s": s,
+                "v": v,
+            },
+            "vaultAddress": null,
+        });
+
+        let resp_json = self.post_exchange(body).await?;
+
+        if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
+            anyhow::bail!(
+                "Hyperliquid order error: {}",
+                resp_json.get("response").unwrap_or(&resp_json)
+            );
+        }
+
+        let data = resp_json.get("response").and_then(|r| r.get("data"));
+        let status_item = data
+            .and_then(|d| d.get("statuses"))
+            .and_then(|s| s.as_array())
+            .and_then(|a| a.first());
+
+        if let Some(status_obj) = status_item {
+            if let Some(err_msg) = status_obj.get("error").and_then(|e| e.as_str()) {
+                anyhow::bail!("Hyperliquid order rejected: {err_msg}");
+            }
+            if let Some(filled) = status_obj.get("filled") {
+                let oid = filled
+                    .get("oid")
+                    .and_then(|o| o.as_u64())
+                    .map(|o| o.to_string())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                let filled_sz = filled
+                    .get("totalSz")
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| Decimal::from_str(s).ok())
+                    .unwrap_or(order.quantity);
+                let avg_px = filled
+                    .get("avgPx")
+                    .and_then(|s| s.as_str())
+                    .and_then(|s| Decimal::from_str(s).ok())
+                    .or(Some(price));
+
+                return Ok(OrderResponse {
+                    order_id: oid,
+                    client_order_id: order.client_order_id.clone(),
+                    venue: self.venue_id.clone(),
+                    symbol: order.symbol.clone(),
+                    status: OrderStatus::Filled,
+                    original_qty: order.quantity,
+                    filled_qty: filled_sz,
+                    remaining_qty: (order.quantity - filled_sz).max(dec!(0)),
+                    avg_fill_price: avg_px,
+                    fee: dec!(0),
+                    fee_currency: "USDC".to_string(),
+                    raw_response: Some(resp_json.to_string()),
+                    timestamp: Utc::now(),
+                });
+            }
+            if let Some(resting) = status_obj.get("resting") {
+                let oid = resting
+                    .get("oid")
+                    .and_then(|o| o.as_u64())
+                    .map(|o| o.to_string())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                return Ok(OrderResponse {
+                    order_id: oid,
+                    client_order_id: order.client_order_id.clone(),
+                    venue: self.venue_id.clone(),
+                    symbol: order.symbol.clone(),
+                    status: OrderStatus::New,
+                    original_qty: order.quantity,
+                    filled_qty: dec!(0),
+                    remaining_qty: order.quantity,
+                    avg_fill_price: None,
+                    fee: dec!(0),
+                    fee_currency: "USDC".to_string(),
+                    raw_response: Some(resp_json.to_string()),
+                    timestamp: Utc::now(),
+                });
+            }
+        }
+
+        Ok(OrderResponse {
+            order_id: uuid::Uuid::new_v4().to_string(),
+            client_order_id: order.client_order_id.clone(),
+            venue: self.venue_id.clone(),
+            symbol: order.symbol.clone(),
+            status: OrderStatus::New,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(resp_json.to_string()),
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        let private_key = {
+            let guard = self.private_key.read();
+            guard
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .map(ToString::to_string)
+        }
+        .ok_or_else(|| anyhow::anyhow!("Hyperliquid live order cancellation requires a private key"))?;
+
+        let coin = perp_coin(&req.symbol)?;
+        let asset_index = self.resolve_asset_index(&coin).await?;
+        let oid_str = req.order_id.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid order cancellation requires an order_id")
+        })?;
+        let oid = oid_str.parse::<u64>().map_err(|e| {
+            anyhow::anyhow!("Invalid Hyperliquid order_id '{oid_str}': must be integer oid: {e}")
+        })?;
+
+        let action = HlActionWire::Cancel {
+            cancels: vec![HlCancelWire {
+                a: asset_index,
+                o: oid,
+            }],
+        };
+        let nonce = Utc::now().timestamp_millis() as u64;
+        let is_mainnet = !self.base_url.contains("testnet");
+        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, &private_key)?;
+
+        let body = json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": {
+                "r": r,
+                "s": s,
+                "v": v,
+            },
+            "vaultAddress": null,
+        });
+        let resp_json = self.post_exchange(body).await?;
+        if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
+            anyhow::bail!(
+                "Hyperliquid cancel error: {}",
+                resp_json.get("response").unwrap_or(&resp_json)
+            );
+        }
+        Ok(())
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+    }
+
+    fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn has_live_credentials(&self) -> bool {
+        self.has_credentials()
     }
 }
 
@@ -399,4 +784,59 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_k256_signing_api() {
+        use k256::ecdsa::SigningKey;
+        let key_bytes = [1u8; 32];
+        let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
+        let (sig, recid) = signing_key.sign_prehash_recoverable(&[0u8; 32]).unwrap();
+        let _r = sig.r();
+        let _s = sig.s();
+        let v = recid.to_byte() + 27;
+        assert!(v == 27 || v == 28);
+    }
+
+    #[test]
+    fn test_hyperliquid_l1_order_signing() {
+        let order = HlOrderWire {
+            a: 0,
+            b: true,
+            p: "3000.5".to_string(),
+            s: "0.1".to_string(),
+            r: false,
+            t: HlOrderTypeWire {
+                limit: HlLimitWire {
+                    tif: "Ioc".to_string(),
+                },
+            },
+            c: None,
+        };
+        let action = HlActionWire::Order {
+            orders: vec![order],
+            grouping: "na".to_string(),
+        };
+        let dummy_pk = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let (r, s, v) = sign_hyperliquid_l1_action(&action, 1234567890, None, true, dummy_pk).unwrap();
+        assert!(r.starts_with("0x") && r.len() == 66);
+        assert!(s.starts_with("0x") && s.len() == 66);
+        assert!(v == 27 || v == 28);
+    }
+
+    #[test]
+    fn test_hyperliquid_capabilities_and_credentials() {
+        let adapter = HyperliquidAdapter::new(None, None, None);
+        assert!(adapter.supports_live_execution());
+        assert!(!adapter.has_live_credentials());
+
+        adapter.update_credentials(
+            Some("0x1111111111111111111111111111111111111111".to_string()),
+            Some("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+        );
+        assert!(adapter.has_live_credentials());
+
+        adapter.update_credentials(None, None);
+        assert!(!adapter.has_live_credentials());
+    }
 }
+

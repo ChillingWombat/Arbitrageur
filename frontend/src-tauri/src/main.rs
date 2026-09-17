@@ -60,6 +60,20 @@ fn main() {
         tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
     }
 
+    // Spawn periodic convergence supervisor for Single Spread ("futures") strategy.
+    // Automatically monitors open manual/automated futures positions every 5s and
+    // unwinds them upon convergence into the friction band or on timeout/stop.
+    {
+        let bg_state = engine_state.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                let _ = commands::check_spatial_convergence_impl(None, "futures", &bg_state).await;
+            }
+        });
+    }
+
     // Spawn the WebSocket-first orderbook feed supervisors. REST polling
     // stays as the cold-start/stale fallback; dead WS lanes go stale.
     feed::spawn_all(engine_state.clone());
@@ -101,6 +115,7 @@ fn main() {
             commands::trigger_emergency_killswitch,
             commands::flatten_ticker_positions,
             commands::get_execution_logs,
+            commands::get_venue_execution_capabilities,
             commands::set_live_mode,
             commands::set_engine_paused,
             commands::get_engine_settings,

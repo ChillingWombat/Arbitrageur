@@ -1106,4 +1106,32 @@ mod tests {
         assert_eq!(BotMode::parse_mode("bogus"), None);
         assert_eq!(BotMode::Off.as_str(), "off");
     }
+
+    #[test]
+    fn exit_on_dynamic_baseline_shift_convergence() {
+        let cfg = exit_cfg();
+        // Entry: spread 35 bps, baseline 20 bps -> entry_dev = 15 bps. Friction band = 4 bps.
+        let entry_dev = 15.0;
+        let friction_band = 4.0;
+        let deadline = 100_000;
+
+        // Days later: baseline shifted permanently to 25 bps.
+        // Live spread is now 25.5 bps -> live_dev = 25.5 - 25.0 = 0.5 bps.
+        // Live dev is well within the friction band (0.5 <= 4.0).
+        let live_row = live("qualified", Some(0.5));
+        let e = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_row), 10_000, &cfg);
+        assert!(
+            matches!(e, ExitEval::Exit { trigger: ExitTrigger::Converged, .. }),
+            "expected converged, got {e:?}"
+        );
+
+        // Conversely, if spread never converges (e.g. stays at 32 bps on a 25 bps baseline -> live_dev = 7.0 bps),
+        // it holds until deadline expires, then exits on timeout:
+        let live_unconverged = live("qualified", Some(7.0));
+        let e_hold = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_unconverged), 50_000, &cfg);
+        assert_eq!(e_hold, ExitEval::Hold);
+
+        let e_timeout = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_unconverged), 100_000, &cfg);
+        assert!(matches!(e_timeout, ExitEval::Exit { trigger: ExitTrigger::TimedOut, .. }));
+    }
 }

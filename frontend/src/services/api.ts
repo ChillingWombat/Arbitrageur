@@ -52,6 +52,7 @@ import type {
   RadarBotConfigDto,
   RadarBotStatusDto,
   SessionProfileDto,
+  VenueCapabilityDto,
 } from "../types/index.ts";
 import { DEFAULT_PASSIVE_UNWIND } from "../types/index.ts";
 
@@ -112,6 +113,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "reset_circuit_breaker",
   "trigger_emergency_killswitch",
   "get_execution_logs",
+  "get_venue_execution_capabilities",
   "set_live_mode",
   "set_engine_paused",
   "get_engine_settings",
@@ -616,6 +618,10 @@ export const api = {
 
   async getExecutionLogs(): Promise<ExecutionLogEntry[]> {
     return invokeDesktop<ExecutionLogEntry[]>("get_execution_logs");
+  },
+
+  async getVenueExecutionCapabilities(): Promise<VenueCapabilityDto[]> {
+    return invokeDesktop<VenueCapabilityDto[]>("get_venue_execution_capabilities");
   },
 
   async setLiveMode(enabled: boolean): Promise<boolean> {

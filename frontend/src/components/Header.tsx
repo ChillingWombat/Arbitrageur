@@ -73,6 +73,27 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right: Metrics & Risk Actions */}
         <div className="border-l border-surface-border flex items-center space-x-2.5 px-4 shrink-0">
+          {/* Trading Mode Indicator Badge */}
+          <div
+            className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold flex items-center space-x-1.5 border transition-all ${
+              status?.is_live_mode
+                ? "bg-loss-dim text-loss border-loss/40 animate-pulse shadow-2xs"
+                : "bg-profit-dim text-profit border-profit/40"
+            }`}
+            title={
+              status?.is_live_mode
+                ? "LIVE REAL TRADING ACTIVE: Orders will be signed and executed with real funds on supported venues."
+                : "PAPER TRADING ACTIVE: Virtual execution simulation using live market data feeds."
+            }
+          >
+            <span
+              className={`w-2 h-2 rounded-full ${
+                status?.is_live_mode ? "bg-loss animate-ping" : "bg-profit"
+              }`}
+            />
+            <span>{status?.is_live_mode ? "LIVE TRADING" : "PAPER TRADING"}</span>
+          </div>
+
           {/* Reset CB if tripped */}
           {isTripped && (
             <button
