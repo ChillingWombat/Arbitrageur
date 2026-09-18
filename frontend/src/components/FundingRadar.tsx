@@ -1,8 +1,10 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
 import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
 import type { PerpTicker } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
+import { TickerTransactionHistory } from "./TickerTransactionHistory";
+import { TickerLogMonitor } from "./TickerLogMonitor";
 import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
@@ -101,6 +103,30 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               />
               <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
               <CarryDetailField label="APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
+              <CarryDetailField
+                label="Type"
+                value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
+                title="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding"
+              />
+              {opp.kind === "basis" && (
+                <CarryDetailField
+                  label="Basis divergence"
+                  value={opp.basis_bps != null ? `${opp.basis_bps >= 0 ? "+" : ""}${opp.basis_bps.toFixed(1)} bps` : "—"}
+                  title="Signed live divergence (perp - spot) / spot. Positive = contango."
+                />
+              )}
+              {opp.kind === "basis" && opp.spot_price != null && (
+                <CarryDetailField
+                  label="Spot ref"
+                  value={`$${opp.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                />
+              )}
+              {opp.kind === "basis" && opp.perp_price != null && (
+                <CarryDetailField
+                  label="Perp ref"
+                  value={`$${opp.perp_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                />
+              )}
               <CarryDetailField label="Trade size" value={`$${size.toLocaleString()}`} />
               <CarryDetailField
                 label="Executable size"
@@ -170,7 +196,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   tradeSize,
   minAprPct = 8.0,
   onExecuteCarry,
-  executionLogs: _executionLogs = [],
+  executionLogs = [],
   onOpenConfig,
   isPaused = false,
   hasApiConnectivity = false,
@@ -178,6 +204,17 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
   const [detailOppId, setDetailOppId] = useState<string | null>(null);
+  const [dockTab, setDockTab] = useState<"history" | "logs">("history");
+  const fundingLogs = useMemo(
+    () =>
+      executionLogs.filter(
+        (l) =>
+          l.strategy_id === "funding" ||
+          (l.trade_type ?? "").toLowerCase().includes("funding") ||
+          (l.trade_type ?? "").toLowerCase().includes("carry")
+      ),
+    [executionLogs]
+  );
 
   // Bot lifecycle is strategy-wide for Funding Rate carry, not locked to a single ticker
   const bot = useBotLifecycle({ strategyId: "funding" });
@@ -273,7 +310,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
       {/* Opportunity Scanner — fixed window, 5x3 compact cards, click for details */}
       <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card h-[640px] flex flex-col">
-        <div className="flex items-center justify-between gap-3 mb-3 shrink-0">
+        <div className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-surface-border shrink-0">
           <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
             Opportunity Scanner
           </h3>
@@ -299,6 +336,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-semibold bg-accent-dim text-accent border border-accent-line shrink-0">
                           #{idx + 1}
                         </span>
+                        {opp.kind === "basis" && (
+                          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-bold bg-profit-dim text-profit border border-profit/30 shrink-0" title="Same-exchange long-spot / short-perp cash-and-carry">
+                            BASIS
+                          </span>
+                        )}
                         <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-bold bg-slate-100 text-slate-800 border border-slate-200 truncate">
                           {opp.symbol}
                         </span>
@@ -321,6 +363,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         <span>8h:</span>
                         <span className="font-bold tabular-nums">+{opp.net_rate_8h_pct.toFixed(3)}%</span>
                       </div>
+                      {opp.kind === "basis" && opp.basis_bps != null && (
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-slate-500">Basis:</span>
+                          <span className="font-semibold text-slate-900 tabular-nums">{opp.basis_bps >= 0 ? "+" : ""}{opp.basis_bps.toFixed(1)} bps</span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-2 gap-1.5 font-sans text-[10px]">
@@ -359,6 +407,60 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
           </div>
         )}
+      </div>
+      {/* Bottom dock: Execution History vs Log Monitor */}
+      <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
+        <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
+          <div className="grid grid-cols-2 flex-1 divide-x divide-surface-border">
+            <button
+              type="button"
+              onClick={() => setDockTab("history")}
+              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
+                dockTab === "history"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <span>Execution History</span>
+              {fundingLogs.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+                {fundingLogs.length}
+              </span>
+              )}
+              {dockTab === "history" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDockTab("logs")}
+              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
+                dockTab === "logs"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <span>Log Monitor</span>
+              {dockTab === "logs" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+          </div>
+        </div>
+        <div className="p-3.5 max-h-96 overflow-y-auto">
+          {dockTab === "history" ? (
+            <TickerTransactionHistory symbol="" logs={fundingLogs} matchAllSymbols />
+          ) : (
+            <TickerLogMonitor
+              symbol=""
+              namespace="funding-carry"
+              strategyName="Funding Carry"
+              executionLogs={fundingLogs}
+              matchAllSymbols
+              isPaused={isPaused}
+            />
+          )}
+        </div>
       </div>
       {(() => {
         const detailOpp =

@@ -11,6 +11,8 @@ import { EmptyState } from "./EmptyState";
 interface TickerTransactionHistoryProps {
   symbol: string;
   logs: ExecutionLogEntry[];
+  /** Skip symbol matching (caller pre-filtered, e.g. multi-ticker strategies). */
+  matchAllSymbols?: boolean;
   config?: TickerStrategyConfigDto;
   onRefresh?: () => void;
 }
@@ -19,6 +21,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
   symbol,
   logs,
   config,
+  matchAllSymbols = false,
 }) => {
   const [filterStatus, setFilterStatus] = useState<"ALL" | "FILLED" | "FAILED">("ALL");
   const [filterDirection, setFilterDirection] = useState<string>("ALL");
@@ -28,12 +31,14 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
   const tickerLogs = useMemo(() => {
     return logs.filter((log) => {
       // Direct match on symbol (e.g. "BTC-USDC") or pair format (e.g. "BTC-USDC/ETH-USDC")
-      const matchesSymbol =
-        log.symbol === symbol ||
-        log.symbol.startsWith(`${symbol}/`) ||
-        log.symbol.endsWith(`/${symbol}`);
+      if (!matchAllSymbols) {
+        const matchesSymbol =
+          log.symbol === symbol ||
+          log.symbol.startsWith(`${symbol}/`) ||
+          log.symbol.endsWith(`/${symbol}`);
 
-      if (!matchesSymbol) return false;
+        if (!matchesSymbol) return false;
+      }
 
       if (filterStatus === "FILLED" && !log.success) return false;
       if (filterStatus === "FAILED" && log.success) return false;
@@ -55,7 +60,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
       return true;
     });
-  }, [logs, symbol, filterStatus, filterDirection, searchQuery]);
+  }, [logs, symbol, matchAllSymbols, filterStatus, filterDirection, searchQuery]);
 
   return (
     <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card transition">

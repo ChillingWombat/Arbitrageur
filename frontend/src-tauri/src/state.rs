@@ -197,6 +197,16 @@ pub struct StrategyParamsDto {
     // this (bps). None disables rotation.
     #[serde(default)]
     pub funding_rotation_threshold_bps: Option<f64>,
+    // Same-exchange spot-vs-perp basis (cash-and-carry) switch. When true the
+    // funding scanner also emits long-spot / short-perp basis opps per venue
+    // with a live funding print and both books available. `serde(default)`
+    // keeps old persisted rows loadable (missing key => enabled).
+    #[serde(default = "default_funding_enable_basis")]
+    pub funding_enable_basis: bool,
+    // Minimum signed basis `(perp - spot) / spot * 10000` in bps for basis
+    // opps. None disables the floor (funding APR still gates downstream).
+    #[serde(default)]
+    pub funding_min_basis_bps: Option<f64>,
     // Universal trim block: every bot configurator surfaces the same
     // threshold with the same trim-both/close-both semantics via the shared
     // helper. Prediction is defined-but-disabled (no execution path).
@@ -258,6 +268,8 @@ impl StrategyParamsDto {
             funding_liq_trim_pct: None,
             funding_auto_rebalance: false,
             funding_rotation_threshold_bps: None,
+            funding_enable_basis: true,
+            funding_min_basis_bps: None,
             futures_liq_trim_pct: None,
             spot_liq_trim_pct: None,
             prediction_liq_trim_pct: None,
@@ -298,6 +310,9 @@ fn default_hmac_token() -> String {
 }
 fn default_max_slippage() -> f64 {
     15.0
+}
+fn default_funding_enable_basis() -> bool {
+    true
 }
 fn default_funding_max_entry_spread() -> f64 {
     50.0

@@ -30,6 +30,10 @@ interface TickerLogMonitorProps {
   orderbooks?: VenueOrderBookDto[];
   autoBotEnabled?: boolean;
   isPaused?: boolean;
+  /** Skip symbol matching (caller pre-filtered, e.g. multi-ticker strategies). */
+  matchAllSymbols?: boolean;
+  /** Storage/display namespace override (defaults to symbol). */
+  namespace?: string;
 }
 
 const getLevelBadgeClass = (level: LogItem["level"]) => {
@@ -127,6 +131,8 @@ function TickerLogMonitorInner({
   orderbooks = [],
   autoBotEnabled = false,
   isPaused = false,
+  matchAllSymbols = false,
+  namespace,
 }: TickerLogMonitorProps) {
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [logDepth, setLogDepth] = useState<string>("100");
@@ -134,7 +140,7 @@ function TickerLogMonitorInner({
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [runtimeLogs, setRuntimeLogs] = useState<LogItem[]>([]);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
-  const storageKey = `ticker-log-monitor:${symbol}`;
+  const storageKey = `ticker-log-monitor:${namespace ?? symbol}`;
   // Heartbeat entries buffer here and flush to state at most once per
   // second — the 3s orderbook poll must not setState per tick.
   const pendingRef = useRef<LogItem[]>([]);
@@ -169,6 +175,7 @@ function TickerLogMonitorInner({
 
     return executionLogs
       .filter((log) => {
+        if (matchAllSymbols) return true;
         if (!log.symbol) return false;
         const logKey = log.symbol.toUpperCase();
         const logBase = logKey.split(/[-_/]/)[0];
@@ -195,7 +202,7 @@ function TickerLogMonitorInner({
           status,
         };
       });
-  }, [executionLogs, symbol]);
+  }, [executionLogs, symbol, matchAllSymbols]);
 
   // Generate live strategy telemetry heartbeat logs on ticker / orderbook updates
   useEffect(() => {
@@ -469,7 +476,7 @@ function TickerLogMonitorInner({
             icon={Activity}
             pulse
             title="No Telemetry Logs"
-            hint={`No logs recorded for ${symbol || "this ticker"} yet.`}
+            hint={`No logs recorded for ${namespace ?? symbol ?? "this ticker"} yet.`}
           />
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
@@ -507,7 +514,7 @@ function TickerLogMonitorInner({
       <div className="flex items-center justify-between text-xs text-slate-500 px-1 pt-0.5">
         <span>
           Showing <strong className="text-slate-800">{filteredLogs.length}</strong> of{" "}
-          <strong className="text-slate-800">{allLogs.length}</strong> log events for {symbol} ({strategyName})
+          <strong className="text-slate-800">{allLogs.length}</strong> log events for {namespace ?? symbol} ({strategyName})
         </span>
 
         <div className="flex items-center space-x-2">

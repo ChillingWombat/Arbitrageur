@@ -110,45 +110,73 @@ pub fn evaluate_funding_carry(
     })
 }
 
-/// Evaluates Spot-Perp Cash and Carry:
-/// Buy spot on `spot_venue`, short perpetual on `perp_venue`.
-/// Spot has 0 funding, Perpetual short earns positive funding `perp_rate`.
-pub fn evaluate_spot_perp_carry(
+/// Same-exchange spot-vs-perp/futures (cash-and-carry) basis breakdown.
+///
+/// Long spot on the venue, short the venue's perp for the same base asset.
+/// PnL drivers, all captured explicitly:
+/// - `basis_bps`: live divergence `(perp - spot) / spot` in bps. Positive =
+///   perp in contango (normal); negative = backwardation. Convergence of this
+///   spread at exit is a PnL term on top of funding accrual.
+/// - funding accrual: short perp earns `perp_funding` per hour; spot pays none.
+/// - friction: round-trip taker fees for BOTH legs plus the measured entry
+///   cross (spot-ask lift vs perp-bid hit VWAP) from `funding_entry_capacity`.
+///   Exit cross is not yet measured — the scanner reports the entry cross and
+///   the configurator's max-entry-spread gate bounds it.
+///
+/// Reverse (long perp / short spot) needs a borrow desk and is NOT modelled:
+/// this evaluator only produces the long-spot / short-perp direction and
+/// returns `None` when the perp funding rate is non-positive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpotPerpBasisBreakdown {
+    /// Underlying carry opportunity (long leg = spot, short leg = perp venue).
+    pub carry: FundingCarryOpportunity,
+    /// Live spot reference price used for the basis print.
+    pub spot_price: Decimal,
+    /// Live perp reference price used for the basis print.
+    pub perp_price: Decimal,
+    /// Signed divergence `(perp - spot) / spot * 10000` in bps.
+    pub basis_bps: Decimal,
+}
+
+/// Evaluates a same-exchange spot-perp cash-and-carry (basis) trade.
+///
+/// Returns `None` when prices are non-positive, when the perp funding rate is
+/// non-positive (no carry to harvest, and the reverse direction needs borrow),
+/// or when the decimal math overflows. Callers apply the strategy's own gates
+/// (min APR, min basis bps, max entry spread) on the returned breakdown.
+pub fn evaluate_spot_perp_basis(
     spot_price: Decimal,
     perp_price: Decimal,
     perp_funding: &FundingRate,
     round_trip_fee_bps: Decimal,
     trade_size_usd: Decimal,
-) -> Option<FundingCarryOpportunity> {
-    let basis = perp_price - spot_price;
-    let basis_bps = (basis / spot_price) * BPS_DIVISOR;
-
-    // Hourly rate on perp short
-    let hourly_funding = perp_funding.rate / Decimal::from(perp_funding.interval_hours.max(1));
-    let net_hourly = hourly_funding;
-
-    if net_hourly <= dec!(0) && basis_bps <= dec!(0) {
+) -> Option<SpotPerpBasisBreakdown> {
+    if spot_price <= dec!(0) || perp_price <= dec!(0) {
         return None;
     }
+    // Hourly rate earned by the short-perp leg.
+    let hourly_funding = perp_funding.rate / Decimal::from(perp_funding.interval_hours.max(1));
+    if hourly_funding <= dec!(0) {
+        return None;
+    }
+    let basis_bps = ((perp_price - spot_price) / spot_price) * BPS_DIVISOR;
 
-    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
-    let net_apr = net_hourly
+    let net_rate_8h = hourly_funding.checked_mul(dec!(8)).unwrap_or(dec!(999999));
+    let net_apr = hourly_funding
         .checked_mul(dec!(8760))
         .unwrap_or(dec!(999999));
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
-    let break_even_hours = if net_hourly > dec!(0) {
-        fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999))
-    } else {
-        dec!(999999)
-    };
+    let break_even_hours = fee_ratio
+        .checked_div(hourly_funding)
+        .unwrap_or(dec!(999999));
 
     let daily_income_usd = trade_size_usd
-        .checked_mul(net_hourly)
+        .checked_mul(hourly_funding)
         .and_then(|d| d.checked_mul(dec!(24)))
         .unwrap_or(dec!(999999));
 
-    Some(FundingCarryOpportunity {
+    let carry = FundingCarryOpportunity {
         long_venue: "SPOT".to_string(),
         short_venue: perp_funding.venue.to_string(),
         symbol: perp_funding.symbol.clone(),
@@ -159,7 +187,37 @@ pub fn evaluate_spot_perp_carry(
         break_even_hours,
         recommended_size_usd: trade_size_usd,
         daily_income_usd,
+    };
+    Some(SpotPerpBasisBreakdown {
+        carry,
+        spot_price,
+        perp_price,
+        basis_bps,
     })
+}
+
+/// Evaluates Spot-Perp Cash and Carry:
+/// Buy spot on `spot_venue`, short perpetual on `perp_venue`.
+/// Spot has 0 funding, Perpetual short earns positive funding `perp_rate`.
+///
+/// Thin wrapper over [`evaluate_spot_perp_basis`] kept for API compatibility;
+/// prefer the basis breakdown variant which also reports the live spot/perp
+/// divergence.
+pub fn evaluate_spot_perp_carry(
+    spot_price: Decimal,
+    perp_price: Decimal,
+    perp_funding: &FundingRate,
+    round_trip_fee_bps: Decimal,
+    trade_size_usd: Decimal,
+) -> Option<FundingCarryOpportunity> {
+    evaluate_spot_perp_basis(
+        spot_price,
+        perp_price,
+        perp_funding,
+        round_trip_fee_bps,
+        trade_size_usd,
+    )
+    .map(|b| b.carry)
 }
 
 /// One rung of the funding entry-capacity walk.
@@ -290,6 +348,74 @@ pub fn funding_entry_capacity(
         tiers,
         optimal_size_usd: optimal.map(|(s, _)| s),
         entry_spread_bps: optimal.map(|(_, e)| e),
+    }
+}
+
+#[cfg(test)]
+mod spot_perp_basis_tests {
+    use super::*;
+    use arbitrageur_core::types::VenueId;
+    use chrono::Utc;
+
+    fn perp_funding(venue: &str, symbol: &str, rate: &str, interval_hours: u32) -> FundingRate {
+        FundingRate {
+            venue: VenueId::new(venue),
+            symbol: symbol.to_string(),
+            rate: Decimal::from_str_exact(rate).unwrap(),
+            predicted_rate: None,
+            interval_hours,
+            next_funding_time: Utc::now(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn positive_funding_reports_signed_basis() {
+        let fr = perp_funding("lighter", "BTC-USDC", "0.0001", 8);
+        let b = evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
+            .expect("basis");
+        // (100.5-100)/100*10000 = +50 bps contango.
+        assert!((b.basis_bps - dec!(50)).abs() < dec!(0.001));
+        assert_eq!(b.spot_price, dec!(100.0));
+        assert_eq!(b.perp_price, dec!(100.5));
+        assert_eq!(b.carry.long_venue, "SPOT");
+        assert!(b.carry.net_apr > dec!(0));
+        assert!(b.carry.break_even_hours > dec!(0));
+    }
+
+    #[test]
+    fn backwardation_still_reports_negative_basis() {
+        let fr = perp_funding("lighter", "BTC-USDC", "0.0002", 8);
+        let b = evaluate_spot_perp_basis(dec!(100.0), dec!(99.5), &fr, dec!(3.5), dec!(2000.0))
+            .expect("basis");
+        assert!(b.basis_bps < dec!(0));
+    }
+
+    #[test]
+    fn non_positive_funding_is_none_no_borrow_desk() {
+        let fr = perp_funding("lighter", "BTC-USDC", "0.0", 8);
+        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0)).is_none());
+        let neg = perp_funding("lighter", "BTC-USDC", "-0.0001", 8);
+        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &neg, dec!(3.5), dec!(2000.0)).is_none());
+    }
+
+    #[test]
+    fn non_positive_prices_are_none() {
+        let fr = perp_funding("lighter", "BTC-USDC", "0.0001", 8);
+        assert!(evaluate_spot_perp_basis(dec!(0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0)).is_none());
+        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(0), &fr, dec!(3.5), dec!(2000.0)).is_none());
+    }
+
+    #[test]
+    fn legacy_wrapper_delegates() {
+        let fr = perp_funding("lighter", "BTC-USDC", "0.0001", 8);
+        let via_legacy =
+            evaluate_spot_perp_carry(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
+                .expect("legacy");
+        let via_new =
+            evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
+                .expect("new");
+        assert_eq!(via_legacy, via_new.carry);
     }
 }
 

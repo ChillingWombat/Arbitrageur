@@ -17,7 +17,7 @@ use arbitrageur_math::autotune::{
     TuneHistory, TuneParams, recommend,
 };
 use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
-use arbitrageur_math::funding_carry::{evaluate_funding_carry, funding_entry_capacity};
+use arbitrageur_math::funding_carry::{evaluate_funding_carry, evaluate_spot_perp_basis, funding_entry_capacity};
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
 use arbitrageur_math::pair_monitor::build_pair_series;
@@ -148,6 +148,25 @@ pub struct FundingOpportunityDto {
     /// Measured entry cross (long-ask vs short-bid VWAP) in bps, as a
     /// positive cost. -1.0 when unmeasured (no book data).
     pub entry_spread_bps: f64,
+    /// Opportunity kind: "carry" (cross-exchange perp/perp funding) or
+    /// "basis" (same-exchange long-spot / short-perp cash-and-carry).
+    /// Defaults to "carry" so stale backends/clients keep working.
+    #[serde(default = "default_funding_opp_kind")]
+    pub kind: String,
+    /// Signed live divergence `(perp - spot) / spot * 10000` in bps.
+    /// `None` for cross-exchange carry (no single spot/perp pair).
+    #[serde(default)]
+    pub basis_bps: Option<f64>,
+    /// Spot reference price for basis opps. `None` for carry.
+    #[serde(default)]
+    pub spot_price: Option<f64>,
+    /// Perp reference price for basis opps. `None` for carry.
+    #[serde(default)]
+    pub perp_price: Option<f64>,
+}
+
+fn default_funding_opp_kind() -> String {
+    "carry".to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2461,7 +2480,7 @@ async fn scan_funding_opportunities_for_symbol(
 ) -> Vec<FundingOpportunityDto> {
     state.ensure_market(symbol);
     let venues = state.get_venues();
-    if venues.len() < 2 {
+    if venues.is_empty() {
         return Vec::new();
     }
 
@@ -2483,10 +2502,8 @@ async fn scan_funding_opportunities_for_symbol(
         }
     }
 
-    if rates.len() < 2 {
-        return Vec::new();
-    }
-
+    // Cross-exchange carry needs >= 2 funding prints; same-exchange basis
+    // needs only one venue with funding + both books, so no early return here.
     let mut opps = Vec::new();
     let fee_total = dec!(3.5); // 3.5 bps round trip
 
@@ -2581,7 +2598,223 @@ async fn scan_funding_opportunities_for_symbol(
                     trade_size_usd,
                     optimal_size_usd: depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
                     entry_spread_bps: depth.map(|(_, e)| e).unwrap_or(-1.0),
+                    kind: "carry".to_string(),
+                    basis_bps: None,
+                    spot_price: None,
+                    perp_price: None,
                 });
+            }
+        }
+    }
+
+    // Same-exchange spot-vs-perp/futures cash-and-carry (basis) scan.
+    // Long spot + short perp on the SAME venue harvests the perp funding rate
+    // while the spot/perp divergence (basis) converges at exit. Only venues
+    // with a live funding print participate; venues without spot books
+    // (Hyperliquid/Vanta explicitly refuse spot) fail closed — no fabricated
+    // basis opps. Reverse (long perp / short spot) needs borrow and is out of
+    // scope. Gated by the funding strategy's basis switch + min-basis floor;
+    // the existing min-APR filter applies downstream in the UI/bot.
+    {
+        let (basis_enabled, min_basis_bps) = state
+            .strategy_params
+            .read()
+            .get("funding")
+            .map(|params| (params.funding_enable_basis, params.funding_min_basis_bps))
+            .unwrap_or((true, None));
+        if basis_enabled {
+            let fee_total = dec!(3.5); // same round-trip assumption as carry
+            let size_f = size_dec.to_string().parse::<f64>().unwrap_or(0.0);
+            if size_f.is_finite() && size_f > 0.0 {
+                let base = symbol
+                    .split(['-', '/', '_'])
+                    .next()
+                    .unwrap_or(symbol)
+                    .trim()
+                    .to_uppercase();
+                let spot_candidates: Vec<String> = if base.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![format!("{base}-SPOT"), format!("{symbol}-SPOT")]
+                };
+                for (vid, _vname, funding_rate) in &rates {
+                    let venue_id = VenueId::from(*vid);
+                    // Perp leg book under the canonical perp symbol.
+                    let perp_book = state.market_data_hub.get_valid_orderbook(
+                        &venue_id,
+                        symbol,
+                        Some(std::time::Duration::from_secs(120)),
+                    );
+                    // Spot leg: first candidate with a live book wins.
+                    let mut spot_book = None;
+                    let mut spot_key_used: Option<String> = None;
+                    for candidate in &spot_candidates {
+                        if let Some(book) = state.market_data_hub.get_valid_orderbook(
+                            &venue_id,
+                            candidate,
+                            Some(std::time::Duration::from_secs(120)),
+                        ) {
+                            spot_book = Some(book);
+                            spot_key_used = Some(candidate.clone());
+                            break;
+                        }
+                    }
+                    // Cold-start: optionally pull books over the network so a
+                    // fresh app can still surface basis without WS history.
+                    if allow_network_fetch {
+                        if let Some(adapter) = state
+                            .get_venues()
+                            .into_iter()
+                            .find(|(id, _, _)| id == vid)
+                            .map(|(_, _, adapter)| adapter)
+                        {
+                            if perp_book.is_none() {
+                                if let Ok(book) = adapter.fetch_orderbook(symbol).await {
+                                    state.market_data_hub.update_orderbook(book.clone());
+                                }
+                            }
+                            if spot_book.is_none() {
+                                for candidate in &spot_candidates {
+                                    if let Ok(book) = adapter.fetch_orderbook(candidate).await {
+                                        state.market_data_hub.update_orderbook(book.clone());
+                                        spot_key_used = Some(candidate.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    let (Some(perp), Some(spot)) = (
+                        state.market_data_hub.get_valid_orderbook(
+                            &venue_id,
+                            symbol,
+                            Some(std::time::Duration::from_secs(120)),
+                        ),
+                        spot_key_used.as_ref().and_then(|key| {
+                            state.market_data_hub.get_valid_orderbook(
+                                &venue_id,
+                                key,
+                                Some(std::time::Duration::from_secs(120)),
+                            )
+                        }),
+                    ) else {
+                        continue;
+                    };
+                    let _ = (perp_book, spot_book);
+                    let (Some(spot_mid), Some(perp_mid)) = (spot.mid_price(), perp.mid_price())
+                    else {
+                        continue;
+                    };
+                    let Some(eval) = evaluate_spot_perp_basis(
+                        spot_mid,
+                        perp_mid,
+                        funding_rate,
+                        fee_total,
+                        size_dec,
+                    ) else {
+                        continue;
+                    };
+                    let basis_f = eval
+                        .basis_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(f64::NAN);
+                    if !basis_f.is_finite() {
+                        continue;
+                    }
+                    if let Some(floor) = min_basis_bps {
+                        if basis_f < floor {
+                            continue;
+                        }
+                    }
+                    // Friction: walk spot asks (long leg lift) against perp
+                    // bids (short leg hit) — same depth discipline as carry.
+                    let to_pair = |levels: &[arbitrageur_core::quote::BookLevel]| {
+                        levels
+                            .iter()
+                            .filter_map(|l| {
+                                let px = l.price.to_string().parse::<f64>().ok()?;
+                                let q = l.size.to_string().parse::<f64>().ok()?;
+                                (px.is_finite() && q.is_finite()).then_some((px, q))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let rep = funding_entry_capacity(
+                        &to_pair(&spot.asks),
+                        &to_pair(&perp.bids),
+                        &[size_f * 0.5, size_f, size_f * 2.0],
+                    );
+                    let depth = rep.optimal_size_usd.and_then(|optimal| {
+                        rep.entry_spread_bps
+                            .map(|e| (-e).max(0.0))
+                            .map(|cost| (optimal, cost))
+                    });
+                    let venue_label = funding_rate.venue.to_string();
+                    let spot_mid_f =
+                        spot_mid.to_string().parse::<f64>().unwrap_or(0.0);
+                    let perp_mid_f =
+                        perp_mid.to_string().parse::<f64>().unwrap_or(0.0);
+                    opps.push(FundingOpportunityDto {
+                        id: format!("{symbol}-{venue_label}-BASIS"),
+                        symbol: symbol.to_string(),
+                        long_venue: format!("{venue_label} SPOT"),
+                        short_venue: format!("{venue_label} PERP"),
+                        net_rate_8h_pct: eval
+                            .carry
+                            .net_rate_8h
+                            .to_string()
+                            .parse::<f64>()
+                            .map(|v| v * 100.0)
+                            .unwrap_or(0.0),
+                        net_apr_pct: eval
+                            .carry
+                            .net_apr
+                            .to_string()
+                            .parse::<f64>()
+                            .map(|v| v * 100.0)
+                            .unwrap_or(0.0),
+                        net_apy_pct: eval
+                            .carry
+                            .net_apy
+                            .to_string()
+                            .parse::<f64>()
+                            .map(|v| v * 100.0)
+                            .unwrap_or(0.0),
+                        round_trip_fee_bps: eval
+                            .carry
+                            .round_trip_fee_bps
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0),
+                        break_even_hours: eval
+                            .carry
+                            .break_even_hours
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0),
+                        estimated_daily_income_usd: eval
+                            .carry
+                            .daily_income_usd
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0),
+                        trade_size_usd,
+                        optimal_size_usd: depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
+                        entry_spread_bps: depth.map(|(_, e)| e).unwrap_or(-1.0),
+                        kind: "basis".to_string(),
+                        basis_bps: Some(basis_f),
+                        spot_price: if spot_mid_f > 0.0 {
+                            Some(spot_mid_f)
+                        } else {
+                            None
+                        },
+                        perp_price: if perp_mid_f > 0.0 {
+                            Some(perp_mid_f)
+                        } else {
+                            None
+                        },
+                    });
+                }
             }
         }
     }
@@ -6548,6 +6781,11 @@ pub fn save_strategy_params_impl(
             );
         }
     }
+    if let Some(floor) = params.funding_min_basis_bps {
+        if !floor.is_finite() {
+            return Err("funding_min_basis_bps must be finite when set".into());
+        }
+    }
     for (label, cfg) in [
         ("futures_passive_unwind", &params.futures_passive_unwind),
         ("funding_passive_unwind", &params.funding_passive_unwind),
@@ -9980,6 +10218,58 @@ mod tests {
             .await
             .expect("empty symbol scan");
         assert!(all_opps.is_empty() || !all_opps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_funding_scan_emits_same_exchange_basis() {
+        let state = setup_test_state_with_venues();
+        // Single venue with funding: no cross-exchange carry possible, but a
+        // same-exchange spot/perp basis opp must surface.
+        seed_test_funding(&state, "lighter", "BTC-USDC");
+        // Perp leg book under the canonical symbol ...
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
+        // ... and the spot leg under the `-SPOT` market-type suffix.
+        seed_test_book(&state, "lighter", "BTC-SPOT", dec!(60000.0), dec!(60005.0));
+
+        let opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
+            .await
+            .expect("basis scan");
+        let basis: Vec<_> = opps.iter().filter(|o| o.kind == "basis").collect();
+        assert_eq!(basis.len(), 1, "expected one basis opp, got {opps:?}");
+        let b = basis[0];
+        assert_eq!(b.symbol, "BTC-USDC");
+        assert!(b.long_venue.contains("SPOT"), "long leg must be spot, got {}", b.long_venue);
+        assert!(b.short_venue.contains("PERP"), "short leg must be perp, got {}", b.short_venue);
+        // (60122.5-60002.5)/60002.5*10000 ~= +20 bps contango.
+        let reported = b.basis_bps.expect("basis_bps");
+        assert!((reported - 20.0).abs() < 1.0, "unexpected basis {reported}");
+        assert!(b.spot_price.expect("spot") > 0.0);
+        assert!(b.perp_price.expect("perp") > 0.0);
+        assert!(b.net_apr_pct > 0.0);
+        // Depth: 10-unit books at ~$60k hold the $25k tier twice over.
+        assert!(b.optimal_size_usd > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_funding_scan_basis_disabled_by_switch() {
+        let state = setup_test_state_with_venues();
+        seed_test_funding(&state, "lighter", "BTC-USDC");
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
+        seed_test_book(&state, "lighter", "BTC-SPOT", dec!(60000.0), dec!(60005.0));
+        // Flip the basis switch off via the persisted strategy params.
+        {
+            let mut map = state.strategy_params.write();
+            let mut params = StrategyParamsDto::defaults_for("funding");
+            params.funding_enable_basis = false;
+            map.insert("funding".to_string(), params);
+        }
+        let opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
+            .await
+            .expect("scan");
+        assert!(
+            opps.iter().all(|o| o.kind != "basis"),
+            "basis switch OFF must suppress basis opps, got {opps:?}"
+        );
     }
 
     #[tokio::test]

@@ -30,6 +30,12 @@ export function validateStrategyParams(p: StrategyParamsDto): string[] {
   if (p.fundingRotationThresholdBps !== null && p.fundingRotationThresholdBps !== undefined) {
     positive(p.fundingRotationThresholdBps, "fundingRotationThresholdBps");
   }
+  {
+    const v: unknown = (p as unknown as Record<string, unknown>).fundingMinBasisBps;
+    if (v !== null && v !== undefined && (typeof v !== "number" || !Number.isFinite(v))) {
+      errors.push("fundingMinBasisBps must be finite when set");
+    }
+  }
   if (p.triangleTradeSizeUsd !== undefined) {
     positive(p.triangleTradeSizeUsd, "triangleTradeSizeUsd");
   }

@@ -271,6 +271,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const [fundingAutoExitSpreadPct, setFundingAutoExitSpreadPct] = useState<string>("");
   const [fundingRotationThresholdBps, setFundingRotationThresholdBps] = useState<string>("");
   const [fundingAutoRebalance, setFundingAutoRebalance] = useState<boolean>(false);
+  const [fundingEnableBasis, setFundingEnableBasis] = useState<boolean>(true);
+  const [fundingMinBasisBps, setFundingMinBasisBps] = useState<string>("");
 
   // Form State for Spot Strategy
   const [spotTradeSizeUsd, setSpotTradeSizeUsd] = useState<number>(1000);
@@ -363,6 +365,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         setFundingAutoExitSpreadPct(p.fundingAutoExitSpreadPct != null ? String(p.fundingAutoExitSpreadPct) : "");
         setFundingRotationThresholdBps(p.fundingRotationThresholdBps != null ? String(p.fundingRotationThresholdBps) : "");
         setFundingAutoRebalance(p.fundingAutoRebalance === true);
+        setFundingEnableBasis((p.fundingEnableBasis ?? true) !== false);
+        setFundingMinBasisBps(p.fundingMinBasisBps != null ? String(p.fundingMinBasisBps) : "");
         setFundingLiqTrimPct(p.fundingLiqTrimPct != null ? String(p.fundingLiqTrimPct) : "");
         setFuturesMaxSlippageBps(Number(p.futuresMaxSlippageBps ?? 15.0));
         setFuturesLiqTrimPct(p.futuresLiqTrimPct != null ? String(p.futuresLiqTrimPct) : "");
@@ -1079,6 +1083,33 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         />
       </SettingRow>
 
+      <SettingRow
+        label="Basis Trades"
+        description="Include same-exchange long-spot / short-perp cash-and-carry in the scanner"
+        tooltip="When ON, venues with a live funding print and both spot + perp books emit basis opportunities alongside cross-exchange carry. Reverse (long perp / short spot) needs borrow and is never emitted."
+      >
+        <SwitchToggle
+          size="sm"
+          label={fundingEnableBasis ? "ON" : "OFF"}
+          checked={fundingEnableBasis}
+          onChange={setFundingEnableBasis}
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Min Basis"
+        description="Skip basis opps below this signed spot/perp divergence · empty = off"
+        tooltip="Floor on (perp - spot) / spot in bps. Positive = contango only; empty disables the floor (funding APR still gates)."
+      >
+        <NumberInput
+          value={fundingMinBasisBps}
+          onChange={setFundingMinBasisBps}
+          unit="bps"
+          step="1"
+          placeholder="OFF"
+        />
+      </SettingRow>
+
     </div>
   );
 
@@ -1364,6 +1395,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       fundingLiqTrimPct: parseOptThreshold(fundingLiqTrimPct),
       fundingAutoRebalance,
       fundingRotationThresholdBps: parseOptThreshold(fundingRotationThresholdBps),
+      fundingEnableBasis,
+      fundingMinBasisBps: fundingMinBasisBps.trim() === "" ? null : Number(fundingMinBasisBps),
       futuresLiqTrimPct: parseOptThreshold(futuresLiqTrimPct),
       spotLiqTrimPct: parseOptThreshold(spotLiqTrimPct),
       predictionLiqTrimPct: currentRecord?.predictionLiqTrimPct ?? null,

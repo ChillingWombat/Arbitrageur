@@ -211,6 +211,10 @@ export interface StrategyParamsDto {
   fundingLiqTrimPct: number | null;
   fundingAutoRebalance: boolean;
   fundingRotationThresholdBps: number | null;
+  // Same-exchange spot-vs-perp basis (cash-and-carry) switch + signed
+  // min-basis floor in bps (null = no floor; APR still gates downstream).
+  fundingEnableBasis: boolean;
+  fundingMinBasisBps: number | null;
   // Universal trim block: every bot configurator surfaces the same
   // threshold (percent, null = off) with identical trim-both/close-both
   // semantics. Prediction is defined-but-disabled.
@@ -381,6 +385,14 @@ export interface FundingOpportunityDto {
   optimal_size_usd?: number;
   /** Measured entry cross as a positive cost in bps; negative = unmeasured. */
   entry_spread_bps?: number;
+  /** Opportunity kind: "carry" (cross-exchange perp/perp) or "basis" (same-exchange spot/perp). Absent = carry (stale backends). */
+  kind?: string;
+  /** Signed live divergence (perp - spot) / spot * 10000 in bps. Only for basis opps. */
+  basis_bps?: number;
+  /** Spot reference price. Only for basis opps. */
+  spot_price?: number;
+  /** Perp reference price. Only for basis opps. */
+  perp_price?: number;
 }
 
 export interface PredictionOpportunityDto {
