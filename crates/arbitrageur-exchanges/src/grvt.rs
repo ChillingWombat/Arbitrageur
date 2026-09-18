@@ -188,7 +188,7 @@ impl GrvtAdapter {
         let base = base_url.unwrap_or_else(|| "https://market-data.grvt.io".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             rate_limiter: AccountRequestCoordinator::new(venue_id, 150, 2000, 500, 10000),
         }

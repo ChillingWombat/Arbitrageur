@@ -14,7 +14,7 @@ import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { TriangularArbitrage } from "./components/TriangularArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
-import { api } from "./services/api";
+import { api, withTimeoutFallback } from "./services/api";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
@@ -353,27 +353,39 @@ export const App: React.FC = () => {
       const qty = customQty ?? (ticker ? sizing.stepBaseQty : 0.5);
       const minBps = customMinBps ?? (futuresParams?.targetProfitBps ?? 1.0);
 
+      // Every leg races a timeout into its empty fallback, so one stalled
+      // venue can never stick the whole refresh (or a configurator save).
       const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions, balances] = await Promise.all([
-        api.getSystemStatus(),
-        api.getEngineSettings(),
-        selectedSymbol ? api.fetchOrderbooks(selectedSymbol) : Promise.resolve([]),
-        selectedSymbol ? api.scanSpatialOpportunities(selectedSymbol, minBps, qty) : Promise.resolve([]),
-        api
-          .scanFundingOpportunities(
+        withTimeoutFallback(api.getSystemStatus(), null),
+        withTimeoutFallback(api.getEngineSettings(), null),
+        withTimeoutFallback(
+          selectedSymbol ? api.fetchOrderbooks(selectedSymbol) : Promise.resolve([]),
+          []
+        ),
+        withTimeoutFallback(
+          selectedSymbol ? api.scanSpatialOpportunities(selectedSymbol, minBps, qty) : Promise.resolve([]),
+          []
+        ),
+        withTimeoutFallback(
+          api.scanFundingOpportunities(
             availableTickers.length > 0 ? availableTickers.map((t) => t.symbol) : undefined,
             fundingTradeSize
-          )
-          .catch(() => []),
-        api.scanPredictionOpportunities(""),
-        api.getRiskOverview(),
-        api.getExecutionLogs(),
-        api.getAllTickerStrategyConfigs(),
-        api.getAllStrategyParams().catch(() => [] as StrategyParamsDto[]),
-        api.scanSpotOpportunities(),
-        api.scanTriangleOpportunities(),
-        selectedSymbol ? api.getTickerPositionState(selectedSymbol) : Promise.resolve(null),
-        api.getOpenPositions().catch(() => []),
-        api.getVenueBalances().catch(() => []),
+          ),
+          []
+        ),
+        withTimeoutFallback(api.scanPredictionOpportunities(""), []),
+        withTimeoutFallback(api.getRiskOverview(), null),
+        withTimeoutFallback(api.getExecutionLogs(), []),
+        withTimeoutFallback(api.getAllTickerStrategyConfigs(), []),
+        withTimeoutFallback(api.getAllStrategyParams(), [] as StrategyParamsDto[]),
+        withTimeoutFallback(api.scanSpotOpportunities(), []),
+        withTimeoutFallback(api.scanTriangleOpportunities(), []),
+        withTimeoutFallback(
+          selectedSymbol ? api.getTickerPositionState(selectedSymbol) : Promise.resolve(null),
+          null
+        ),
+        withTimeoutFallback(api.getOpenPositions(), []),
+        withTimeoutFallback(api.getVenueBalances(), []),
       ]);
 
       setSystemStatus(status);

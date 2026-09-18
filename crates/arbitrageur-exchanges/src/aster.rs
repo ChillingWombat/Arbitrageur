@@ -241,7 +241,7 @@ impl AsterAdapter {
         let base = base_url.unwrap_or_else(|| "https://fapi.asterdex.com".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             api_key: RwLock::new(api_key),
             api_secret: RwLock::new(api_secret),

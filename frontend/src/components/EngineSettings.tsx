@@ -755,9 +755,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     isVenueConfigured("kalshi"),
   ].filter(Boolean).length;
 
-  const activeVenuesCount = (
-    ["hyperliquid", "lighter", "vanta", "arcus", "popdex", "robinhood", "kraken", "polymarket", "kalshi"] as ExchangeId[]
-  ).filter((id) => isExchangeEnabled(id)).length;
 
   const isVaultLocked = !api.isTauri || !vaultStatus?.is_unlocked;
   const isVaultInitializing = vaultStatus?.is_initialized === false;
@@ -803,11 +800,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               }`}
             />
             <span>Exchanges</span>
-            {activeVenuesCount > 0 && (
-            <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
-              {activeVenuesCount}
-            </span>
-            )}
             {activeTab === "exchanges" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
@@ -1220,11 +1212,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     />
                     <span className="font-semibold text-slate-800 flex items-center gap-1.5">
                       Live Trading
-                      {tradingMode === "real" && (
-                        <span className="text-[10px] bg-loss text-white font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider animate-pulse">
-                          LIVE
-                        </span>
-                      )}
                     </span>
                   </label>
                 </div>
@@ -1232,16 +1219,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
               </div>
 
-              <div className="pt-3 border-t border-surface-border flex items-center justify-between gap-3">
-                <div className="flex-1 min-w-0">
+              <div className="pt-3 border-t border-surface-border space-y-1.5">
+                <div className="flex items-center gap-3">
                   <label className="text-slate-600 block font-mono text-xs">
                     Paper Starting Balance (USD)
                   </label>
-                  <p className="text-xs text-slate-400 leading-snug mt-0.5">
-                    Virtual equity per paper account. Saving resets paper accounts and clears open positions.
-                  </p>
-                </div>
-                <input
+                  <input
                   type="number"
                   min="1"
                   step="any"
@@ -1249,7 +1232,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   value={paperStartingBalance}
                   onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
                   className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
+                  />
+                </div>
+                <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
+                  Virtual equity per paper account. Saving resets paper accounts and clears open positions.
+                </p>
               </div>
             </div>
 

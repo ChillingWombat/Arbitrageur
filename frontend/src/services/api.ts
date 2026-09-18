@@ -81,6 +81,21 @@ export async function invokeDesktop<T>(
   return core.invoke<T>(command, args);
 }
 
+/** Race an IPC call against a timeout, resolving the fallback instead of
+ *  hanging or throwing — keeps refresh fan-outs settling when a venue stalls.
+ *  Backend REST clients carry their own 15s timeouts; this bounds the rest. */
+export function withTimeoutFallback<T>(promise: Promise<T>, fallback: T, ms = 30000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`request timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout])
+    .catch(() => fallback)
+    .finally(() => {
+      if (timer !== undefined) clearTimeout(timer);
+    });
+}
+
 // Commands registered in the desktop invoke handler (src-tauri/src/main.rs).
 // Triangle scan/execute and the spatial convergence check are native
 // paper-only commands; in the browser they fail closed with the

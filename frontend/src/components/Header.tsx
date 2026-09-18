@@ -117,7 +117,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="btn-danger px-2 py-2 text-xs font-sans font-bold flex items-center space-x-1.5 shadow-xs"
+            className="btn-danger px-2 py-2 text-xs font-sans font-bold flex items-center space-x-1 shadow-xs"
             title="Emergency Killswitch: Stop All Trading"
           >
             <OctagonX className="w-3.5 h-3.5" />

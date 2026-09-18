@@ -29,7 +29,7 @@ impl PopDexAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.popdex.trade".to_string());
         Self {
             venue_id: VenueId::new("popdex"),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             api_key,
             api_secret,

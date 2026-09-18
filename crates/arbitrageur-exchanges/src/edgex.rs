@@ -253,7 +253,7 @@ impl EdgeXAdapter {
             base_url.unwrap_or_else(|| "https://edgex-prod-v2.edgex.exchange".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 5000, 1000, 30000),
         }

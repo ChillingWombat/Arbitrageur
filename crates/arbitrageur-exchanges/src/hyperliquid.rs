@@ -159,7 +159,7 @@ impl HyperliquidAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.hyperliquid.xyz".to_string());
         Self {
             venue_id: VenueId::new("hyperliquid"),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             wallet_address: RwLock::new(wallet_address),
             private_key: RwLock::new(private_key),

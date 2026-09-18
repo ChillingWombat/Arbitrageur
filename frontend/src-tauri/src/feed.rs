@@ -243,7 +243,7 @@ async fn run_lighter_protocol(
             reqwest::header::ACCEPT,
             "application/json, text/plain, */*".parse().unwrap(),
         );
-        reqwest::Client::builder()
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(15))
             .default_headers(headers)
             .timeout(Duration::from_secs(5))
             .build()

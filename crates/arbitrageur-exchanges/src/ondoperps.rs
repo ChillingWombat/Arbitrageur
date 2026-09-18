@@ -191,7 +191,7 @@ impl OndoPerpsAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.ondoperps.xyz".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             // Venue guidance is ~1 req/s; 1100ms keeps public polling inside it.
             rate_limiter: AccountRequestCoordinator::new(venue_id, 1100, 10000, 1000, 30000),

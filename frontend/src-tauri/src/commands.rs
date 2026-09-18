@@ -725,7 +725,7 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
 async fn probe_http(spec: PublicProbe) -> Result<(), String> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     let client = CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(15))
             .timeout(std::time::Duration::from_secs(8))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())

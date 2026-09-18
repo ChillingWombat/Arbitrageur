@@ -21,7 +21,7 @@ impl PolymarketAdapter {
     pub fn new(base_url: Option<String>, api_key: Option<String>) -> Self {
         Self {
             venue_id: VenueId::new("polymarket"),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base_url.unwrap_or_else(|| "https://clob.polymarket.com".to_string()),
             api_key,
         }
@@ -113,7 +113,7 @@ impl KalshiAdapter {
     pub fn new(base_url: Option<String>, api_key: Option<String>) -> Self {
         Self {
             venue_id: VenueId::new("kalshi"),
-            client: Client::builder().build().unwrap_or_default(),
+            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base_url.unwrap_or_else(|| "https://trading-api.kalshi.com".to_string()),
             api_key,
         }

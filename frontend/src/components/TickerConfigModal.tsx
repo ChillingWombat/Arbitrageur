@@ -139,17 +139,17 @@ interface SettingRowProps {
 }
 
 const SettingRow: React.FC<SettingRowProps> = ({ label, description, tooltip, children }) => (
-  <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-2xs flex items-center justify-between gap-4 transition hover:border-slate-300">
-    <div className="min-w-0 flex-1">
-      <div className="flex items-center gap-1.5">
+  <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-2xs space-y-2 transition hover:border-slate-300">
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1.5 min-w-0">
         <span className="text-xs font-semibold font-sans text-slate-800">{label}</span>
         {tooltip && <InfoTooltip text={tooltip} />}
       </div>
-      {description && (
-        <p className="text-[11px] font-sans text-slate-400 font-normal mt-0.5 leading-normal">{description}</p>
-      )}
+      <div className="shrink-0 flex items-center gap-2">{children}</div>
     </div>
-    <div className="shrink-0 flex items-center gap-2">{children}</div>
+    {description && (
+      <p className="text-[11px] font-sans text-slate-400 font-normal leading-normal border-t border-surface-border/60 pt-2">{description}</p>
+    )}
   </div>
 );
 
@@ -916,7 +916,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-2 shadow-2xs transition hover:border-slate-300">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold font-sans text-slate-800">Execution Mode</span>
-          <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Double-Way) or maintain inventory until manual rebalancing (Single-Way)." />
+          <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Divergence & Convergence) or maintain inventory until manual rebalancing (Single-Way)." />
         </div>
         <div className="grid grid-cols-2 gap-2 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
           <button
@@ -939,9 +939,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 ? "bg-accent text-white shadow-2xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
-            title="Double-Way: Enter on divergence and automatically unwind when spread converges to 0"
+            title="Divergence & Convergence: Enter on divergence and automatically unwind when spread converges to 0"
           >
-            Double-Way (Expand & Converge)
+            Divergence & Convergence
           </button>
         </div>
       </div>
