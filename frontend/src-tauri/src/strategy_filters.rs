@@ -110,28 +110,36 @@ pub fn ticker_passes_strategy_filters(
         let floor = filters.min_volume_usd.unwrap_or(f64::MAX);
         let mut min_seen: Option<f64> = None;
         for venue in in_scope_venues {
-            match volumes_by_venue
+            if let Some(v) = volumes_by_venue
                 .get(venue)
                 .and_then(|m| venue_asset_volume_usd(m, base))
             {
-                Some(v) => min_seen = Some(min_seen.map_or(v, |m: f64| m.min(v))),
-                None => {
-                    return (
-                        false,
-                        Some(format!(
-                            "{base} blocked by auto volume filter: venue {venue} reports no 24h volume"
-                        )),
-                    )
+                min_seen = Some(min_seen.map_or(v, |m: f64| m.min(v)));
+            }
+        }
+        // If none of the in-scope venues reported volume, check across all venue volume maps
+        if min_seen.is_none() {
+            for vols in volumes_by_venue.values() {
+                if let Some(v) = venue_asset_volume_usd(vols, base) {
+                    min_seen = Some(min_seen.map_or(v, |m: f64| m.min(v)));
                 }
             }
         }
         match min_seen {
             Some(m) if m >= floor => {}
-            _ => {
+            Some(m) => {
                 return (
                     false,
                     Some(format!(
-                        "{base} blocked by auto volume filter: min venue volume below floor"
+                        "{base} blocked by auto volume filter: min venue volume ({m:.0} USD) below floor ({floor:.0} USD)"
+                    )),
+                )
+            }
+            None => {
+                return (
+                    false,
+                    Some(format!(
+                        "{base} blocked by auto volume filter: no venue reports 24h volume"
                     )),
                 )
             }
@@ -141,25 +149,31 @@ pub fn ticker_passes_strategy_filters(
         let floor = filters.min_price_usd.unwrap_or(f64::MAX);
         let mut min_seen: Option<f64> = None;
         for venue in in_scope_venues {
-            match mids_by_venue.get(venue).copied().filter(|p| p.is_finite() && *p > 0.0) {
-                Some(p) => min_seen = Some(min_seen.map_or(p, |m: f64| m.min(p))),
-                None => {
-                    return (
-                        false,
-                        Some(format!(
-                            "{base} blocked by auto price filter: venue {venue} reports no mid price"
-                        )),
-                    )
-                }
+            if let Some(p) = mids_by_venue.get(venue).copied().filter(|p| p.is_finite() && *p > 0.0) {
+                min_seen = Some(min_seen.map_or(p, |m: f64| m.min(p)));
+            }
+        }
+        // If in-scope venues had no specific mid price, check any available price passed in mids_by_venue
+        if min_seen.is_none() {
+            for p in mids_by_venue.values().copied().filter(|p| p.is_finite() && *p > 0.0) {
+                min_seen = Some(min_seen.map_or(p, |m: f64| m.min(p)));
             }
         }
         match min_seen {
             Some(m) if m >= floor => {}
-            _ => {
+            Some(m) => {
                 return (
                     false,
                     Some(format!(
-                        "{base} blocked by auto price filter: min venue mid below floor"
+                        "{base} blocked by auto price filter: mid price ({m}) below floor ({floor})"
+                    )),
+                )
+            }
+            None => {
+                return (
+                    false,
+                    Some(format!(
+                        "{base} blocked by auto price filter: no mid price available"
                     )),
                 )
             }
@@ -238,21 +252,44 @@ mod tests {
     }
 
     #[test]
-    fn missing_venue_volume_excludes_ticker_fail_closed() {
+    fn unreporting_venue_does_not_block_liquid_ticker() {
         let scope = ["hyperliquid".to_string(), "vanta".to_string()];
         let volumes = by_venue(&[("hyperliquid", vols(&[("BTC", 1_000_000.0)]))]);
         let filters = StrategyAutoFilters {
-            min_volume_usd: Some(1.0),
+            min_volume_usd: Some(500_000.0),
             min_price_usd: None,
         };
         let (ok, reason) =
             ticker_passes_strategy_filters("BTC", &scope, &volumes, &mids(&[]), filters);
-        assert!(!ok);
-        assert!(reason.unwrap_or_default().contains("vanta"));
+        assert!(ok, "reporting venue volume >= floor must pass: {reason:?}");
+
+        // But if reported volume is below floor, it must block
+        let filters = StrategyAutoFilters {
+            min_volume_usd: Some(2_000_000.0),
+            min_price_usd: None,
+        };
+        let (ok, reason) =
+            ticker_passes_strategy_filters("BTC", &scope, &volumes, &mids(&[]), filters);
+        assert!(!ok, "reported volume < floor must block");
+        assert!(reason.unwrap_or_default().contains("below floor"));
     }
 
     #[test]
-    fn price_filter_uses_min_mid_and_missing_excludes() {
+    fn completely_unreported_volume_blocks() {
+        let scope = ["hyperliquid".to_string(), "vanta".to_string()];
+        let volumes = by_venue(&[]);
+        let filters = StrategyAutoFilters {
+            min_volume_usd: Some(100.0),
+            min_price_usd: None,
+        };
+        let (ok, reason) =
+            ticker_passes_strategy_filters("UNKNOWN", &scope, &volumes, &mids(&[]), filters);
+        assert!(!ok);
+        assert!(reason.unwrap_or_default().contains("no venue reports"));
+    }
+
+    #[test]
+    fn price_filter_evaluates_available_prices() {
         let scope = ["hyperliquid".to_string(), "lighter".to_string()];
         let filters = StrategyAutoFilters {
             min_volume_usd: None,
@@ -266,6 +303,7 @@ mod tests {
             filters,
         );
         assert!(!ok, "min mid below floor must block");
+
         let (ok, _) = ticker_passes_strategy_filters(
             "BTC",
             &scope,
@@ -273,7 +311,16 @@ mod tests {
             &mids(&[("hyperliquid", 500.0)]),
             filters,
         );
-        assert!(!ok, "missing mid must block fail-closed");
+        assert!(ok, "single available price >= floor must pass");
+
+        let (ok, _) = ticker_passes_strategy_filters(
+            "BTC",
+            &scope,
+            &by_venue(&[]),
+            &mids(&[]),
+            filters,
+        );
+        assert!(!ok, "missing all mids must block");
     }
 
     #[test]

@@ -238,10 +238,10 @@ impl GrvtAdapter {
         body: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
         let cache_key = format!("{path}|{body}");
-        if let Ok(Some(cached_str)) = self
+        if let Some(cached_str) = self
             .rate_limiter
             .acquire_or_cache_path(&cache_key, true)
-            .await
+            .await?
         {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
                 return Ok(val);

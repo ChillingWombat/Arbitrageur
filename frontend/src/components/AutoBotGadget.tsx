@@ -1,5 +1,5 @@
 import React from "react";
-import { OctagonX } from "lucide-react";
+import { Play, Pause, OctagonX } from "lucide-react";
 import type { RadarBotConfigDto, RadarBotStatusDto } from "../types";
 import {
   botArmed,
@@ -9,27 +9,11 @@ import {
   describeBotMode,
 } from "../services/radarBot";
 
-/**
- * The single radar bot control. Backend BotMode (off/auto/paused/reduce-only)
- * is the source of truth — this gadget writes it and reflects it, with no
- * page-local phase. The emergency Flatten entry point was merged in from the
- * removed BotLifecycleControls Stop button; the lifecycle Start/Pause/Reduce
- * buttons were dropped because they drove an in-memory phase that fought the
- * backend mode.
- */
-const BOT_MODE_BTN: { mode: RadarBotConfigDto["mode"]; label: string; title: string }[] = [
-  { mode: "auto", label: "Auto", title: "Arm entries + exits (paper-only)" },
-  { mode: "paused", label: "Pause", title: "Freeze entries; exit watchers stay live" },
-  { mode: "reduce_only", label: "Reduce", title: "Exits only; wind the book down" },
-  { mode: "off", label: "Off", title: "Fully inert" },
-];
-
 export interface AutoBotGadgetProps {
   cfg: RadarBotConfigDto | null;
   status: RadarBotStatusDto | null;
   flattening: boolean;
   onMode: (mode: RadarBotConfigDto["mode"]) => void;
-  onConfigure: () => void;
   onFlatten: () => void;
 }
 
@@ -38,7 +22,6 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
   status,
   flattening,
   onMode,
-  onConfigure,
   onFlatten,
 }) => {
   const armed = botArmed(cfg);
@@ -46,16 +29,22 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
   const controlsOff = botControlsDisabled(cfg);
   const open = status?.openPositions ?? [];
   const flattenArmed = !flattening && botFlattenAvailable(open.length, cfg?.mode);
+
+  const handleStop = () => {
+    onMode("off");
+    onFlatten();
+  };
+
   return (
-    <div className="px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 bg-surface rounded-lg border border-surface-border shadow-2xs shrink-0 font-mono text-xs">
-      <span className="text-[13px] font-bold tracking-wider text-slate-900">Auto-Bot</span>
+    <div className="px-4 py-2.5 flex flex-wrap items-center gap-x-4 gap-y-2 bg-surface rounded-xl border border-surface-border shadow-card shrink-0 text-xs">
+      <span className="text-xs font-bold font-sans tracking-wider text-slate-900 uppercase">Auto-Bot</span>
       <span
-        className={`px-1.5 py-0.5 rounded-sm border font-bold ${
+        className={`px-2.5 py-0.5 rounded-full border text-[11px] font-sans font-bold shadow-xs transition-all ${
           tone === "armed"
-            ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+            ? "bg-profit-dim text-profit border-profit-border"
             : tone === "draining"
-              ? "bg-amber-50 text-amber-700 border-amber-200"
-              : "bg-slate-100 text-slate-600 border-slate-300"
+              ? "bg-warn-dim text-warn border-warn-border"
+              : "bg-surface-raised text-slate-600 border-surface-border"
         }`}
         title={
           armed
@@ -71,65 +60,73 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
             ? "MANAGING EXITS"
             : describeBotMode(cfg?.mode)}
       </span>
-      <div className="flex items-center gap-1">
-        {BOT_MODE_BTN.map((b) => (
-          <button
-            key={b.mode}
-            type="button"
-            title={b.title}
-            disabled={controlsOff}
-            onClick={() => onMode(b.mode)}
-            className={`px-2 py-1 rounded-md border text-xs font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
-              cfg?.mode === b.mode && (b.mode !== "auto" || cfg?.enabled)
-                ? "bg-accent/10 text-accent border-accent-line"
-                : "text-slate-600 border-surface-border hover:bg-slate-100"
-            }`}
-          >
-            {b.label}
-          </button>
-        ))}
+
+      {/* Unified Bot Lifecycle Controls: Start / Pause / Stop */}
+      <div className="flex items-center gap-1 p-0.5 bg-surface-raised border border-surface-border rounded-lg">
+        <button
+          type="button"
+          title="Start the bot — monitor, enter, and automatically rebalance on convergence"
+          disabled={controlsOff || armed}
+          onClick={() => onMode("auto")}
+          className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+            armed
+              ? "bg-profit text-white shadow-xs font-bold"
+              : "text-profit hover:bg-profit-dim border border-transparent hover:border-profit-border"
+          }`}
+        >
+          <Play className="w-3 h-3" />
+          <span>Start</span>
+        </button>
+
+        <button
+          type="button"
+          title="Pause new entries; open positions remain managed until target convergence"
+          disabled={controlsOff || cfg?.mode === "paused"}
+          onClick={() => onMode("paused")}
+          className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+            cfg?.mode === "paused"
+              ? "bg-accent text-white shadow-xs font-bold"
+              : "text-slate-700 hover:bg-slate-200/50"
+          }`}
+        >
+          <Pause className="w-3 h-3" />
+          <span>Pause</span>
+        </button>
+
+        <button
+          type="button"
+          title="Emergency exit — stop bot and immediately flatten this strategy's positions to delta-neutral"
+          disabled={!flattenArmed}
+          onClick={handleStop}
+          className="flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed text-loss hover:bg-loss-dim border border-transparent hover:border-loss-border bg-loss-dim/40 shadow-xs active:scale-[0.98]"
+        >
+          <OctagonX className="w-3 h-3" />
+          <span>{flattening ? "Stopping…" : "Stop"}</span>
+        </button>
       </div>
-      <button
-        type="button"
-        title="Emergency exit — flatten this strategy's positions to delta-neutral"
-        disabled={!flattenArmed}
-        onClick={onFlatten}
-        className="flex items-center space-x-1 px-2 py-1 rounded-md border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed text-red-700 hover:bg-red-50 border-red-300"
-      >
-        <OctagonX className="w-3 h-3" />
-        <span>{flattening ? "Flattening…" : "Flatten"}</span>
-      </button>
-      <span className="text-slate-500" title="Open convergence positions managed by the bot">
-        Open <b className="text-slate-900">{open.length}</b>
+      <span className="text-slate-500 font-sans" title="Open convergence positions managed by the bot">
+        Open <b className="font-mono tabular-nums text-slate-900">{open.length}</b>
       </span>
-      <span className="text-slate-500" title="Bot decisions today (durable audit)">
-        in <b className="text-slate-900">{status?.entersToday ?? "—"}</b>
-        {" / "}out <b className="text-slate-900">{status?.exitsToday ?? "—"}</b>
-        {" / "}skip <b className="text-slate-900">{status?.skipsToday ?? "—"}</b>
+      <span className="text-slate-500 font-sans" title="Bot decisions today (durable audit)">
+        in <b className="font-mono tabular-nums text-slate-900">{status?.entersToday ?? "—"}</b>
+        {" / "}out <b className="font-mono tabular-nums text-slate-900">{status?.exitsToday ?? "—"}</b>
+        {" / "}skip <b className="font-mono tabular-nums text-slate-900">{status?.skipsToday ?? "—"}</b>
       </span>
       {open.length > 0 && (
-        <span className="text-slate-500 truncate max-w-80" title={open.map((p) => `${p.symbol} ${p.buyVenue}→${p.sellVenue}`).join(", ")}>
+        <span className="text-slate-500 font-mono text-[11px] truncate max-w-80" title={open.map((p) => `${p.symbol} ${p.buyVenue}→${p.sellVenue}`).join(", ")}>
           {open.map((p) => p.symbol).join(", ")}
         </span>
       )}
       {status?.lastDecision && (
-        <span className="text-slate-500 truncate max-w-96" title={`${status.lastDecision.pair}: ${status.lastDecision.reason}`}>
+        <span className="text-slate-500 font-sans text-xs truncate max-w-96" title={`${status.lastDecision.pair}: ${status.lastDecision.reason}`}>
           last: <b className="text-slate-700">{status.lastDecision.decision}</b> {status.lastDecision.reason}
         </span>
       )}
       {status?.lastError && (
-        <span className="text-red-600 truncate max-w-72" title={status.lastError}>
+        <span className="text-loss font-sans text-xs truncate max-w-72" title={status.lastError}>
           {status.lastError}
         </span>
       )}
-      <button
-        type="button"
-        onClick={onConfigure}
-        className="ml-auto px-2.5 py-1 rounded-md border border-surface-border text-slate-600 hover:bg-slate-100 text-xs font-bold transition cursor-pointer"
-        title="Configure auto-bot knobs"
-      >
-        Configure auto-bot
-      </button>
     </div>
   );
 };

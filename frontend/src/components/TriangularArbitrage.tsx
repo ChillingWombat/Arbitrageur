@@ -12,6 +12,7 @@ import type {
   TriangleOpportunityDto,
   TriangleExecutionParams,
   ExecutionLogEntry,
+  StrategyParamsDto,
 } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
@@ -22,13 +23,35 @@ interface TriangularArbitrageProps {
   onRefreshAll: () => Promise<void>;
   isPaused?: boolean;
   hasApiConnectivity?: boolean;
+  onOpenConfig?: (symbol: string, strategy?: string) => void;
+  params?: StrategyParamsDto;
 }
+
+const formatBps = (bps: number | undefined): string => {
+  if (bps === undefined || isNaN(bps)) return "0.0";
+  return bps.toFixed(1);
+};
+
+const formatPrice = (price: number, symbol: string): string => {
+  const parts = symbol.split(/[-_/]/);
+  const quote = parts[1]?.toUpperCase() || "USDC";
+  const formatted = price.toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: price < 1 ? 6 : 2,
+  });
+  if (quote === "USDC" || quote === "USD" || quote === "USDT") {
+    return `$${formatted}`;
+  }
+  return `${formatted} ${quote}`;
+};
 
 export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   executionLogs: _executionLogs,
   onRefreshAll,
   isPaused = false,
   hasApiConnectivity = false,
+  onOpenConfig,
+  params,
 }) => {
   const [opportunities, setOpportunities] = useState<TriangleOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
@@ -38,8 +61,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   // stop never leaves residual exposure; reduce-only drains instantly.
   const bot = useBotLifecycle({ strategyId: "triangle" });
   const lastAutoTriExecRef = useRef<number>(0);
-  const [tradeSizeUsd, setTradeSizeUsd] = useState(10000);
-  const [minProfitBps, setMinProfitBps] = useState(2.0);
+  const tradeSizeUsd = params?.triangleTradeSizeUsd ?? 10000;
+  const minProfitBps = params?.triangleMinProfitBps ?? 2.0;
+  const maxSlippageBps = params?.triangleMaxSlippageBps ?? 5.0;
   const [botStatus, setBotStatus] = useState<"idle" | "verifying" | "dispatching" | "filled" | "error">("idle");
   const [botMessage, setBotMessage] = useState<string>("");
 
@@ -146,37 +170,56 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   return (
     <div className="w-full p-4 space-y-4 overflow-y-auto h-full select-none pb-24 font-mono">
       {/* 1. Strategy Ribbon — read-only params left, configurator + toggle right */}
-      <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs">
+      <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            className="ribbon-pill"
             title="Notional per 3-leg cycle — edit in Cycle Guardrails"
           >
             <span className="text-slate-400">Trade Size</span>
-            <span className="font-bold text-slate-900">{tradeSizeUsd.toLocaleString()}</span>
+            <span className="font-bold text-slate-900 tabular-nums">{tradeSizeUsd.toLocaleString()}</span>
             <span className="text-slate-400">USD</span>
           </div>
 
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+            className="ribbon-pill"
             title="Net profit hurdle required to fire — edit in Cycle Guardrails"
           >
             <span className="text-slate-400">Min Profit</span>
-            <span className="font-bold text-slate-900">{minProfitBps}</span>
+            <span className="font-bold text-slate-900 tabular-nums">{minProfitBps}</span>
+            <span className="text-slate-400">BPS</span>
+          </div>
+
+          <div
+            className="ribbon-pill"
+            title="Execution slippage tolerance — edit via Configure Strategy"
+          >
+            <span className="text-slate-400">Max Slippage</span>
+            <span className="font-bold text-slate-900 tabular-nums">{maxSlippageBps}</span>
             <span className="text-slate-400">BPS</span>
           </div>
 
           {isPaused && (
-            <span className="px-2 py-0.5 rounded-sm text-xs font-bold bg-warn-dim text-warn border border-warn-border">
+            <span className="badge-status-warn">
               Engine Paused
             </span>
           )}
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => onOpenConfig?.("BTC-USDC", "triangle")}
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            title="Configure Triangle strategy parameters (applies to all 3-leg cycles)"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configure Strategy</span>
+          </button>
+
           <BotLifecycleControls
             phase={bot.phase}
             hasOpenPositions={bot.hasOpenPositions}
@@ -187,7 +230,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}
@@ -197,7 +240,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       {/* 2. Top Interactive Visualizer & Parameters Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Left 2 Cols: 3-Leg Cycle Graph Visualizer */}
-        <div className="lg:col-span-2 bg-surface p-3.5 rounded-lg border border-surface-border shadow-2xs space-y-3">
+        <div className="lg:col-span-2 bg-surface p-4 rounded-xl border border-surface-border shadow-card space-y-3">
           <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
               <Triangle className="w-4 h-4 text-accent" />
@@ -223,11 +266,11 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg1.symbol}</div>
                   <div className="flex justify-between text-xs text-slate-500">
                     <span>Price:</span>
-                    <span className="font-bold text-slate-700">${activeOpp.leg1.price.toLocaleString()}</span>
+                    <span className="font-bold text-slate-700 tabular-nums">{formatPrice(activeOpp.leg1.price, activeOpp.leg1.symbol)}</span>
                   </div>
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
-                    <span>{activeOpp.leg1.fee_bps} BPS</span>
+                    <span className="tabular-nums">{formatBps(activeOpp.leg1.fee_bps)} BPS</span>
                   </div>
                 </div>
 
@@ -240,28 +283,28 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg2.symbol}</div>
                   <div className="flex justify-between text-xs text-slate-500">
                     <span>Price:</span>
-                    <span className="font-bold text-slate-700">${activeOpp.leg2.price.toLocaleString()}</span>
+                    <span className="font-bold text-slate-700 tabular-nums">{formatPrice(activeOpp.leg2.price, activeOpp.leg2.symbol)}</span>
                   </div>
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
-                    <span>{activeOpp.leg2.fee_bps} BPS</span>
+                    <span className="tabular-nums">{formatBps(activeOpp.leg2.fee_bps)} BPS</span>
                   </div>
                 </div>
 
                 {/* Leg 3 */}
                 <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-sm font-bold">Leg 3</span>
+                    <span className="px-2 py-0.5 bg-profit-dim text-profit border border-profit-border rounded-md font-bold">Leg 3</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg3.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg3.symbol}</div>
                   <div className="flex justify-between text-xs text-slate-500">
                     <span>Price:</span>
-                    <span className="font-bold text-slate-700">${activeOpp.leg3.price.toLocaleString()}</span>
+                    <span className="font-bold text-slate-700 tabular-nums">{formatPrice(activeOpp.leg3.price, activeOpp.leg3.symbol)}</span>
                   </div>
                   <div className="flex justify-between text-xs text-slate-400">
                     <span>Fee:</span>
-                    <span>{activeOpp.leg3.fee_bps} BPS</span>
+                    <span className="tabular-nums">{formatBps(activeOpp.leg3.fee_bps)} BPS</span>
                   </div>
                 </div>
               </div>
@@ -273,10 +316,10 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                   <span className="font-bold text-accent">{activeOpp.path}</span>
                 </div>
                 <div className="flex items-center space-x-4">
-                  <span>Gross: <strong className="text-slate-800">+{activeOpp.gross_spread_bps} BPS</strong></span>
-                  <span>Fees: <strong className="text-slate-500">-{activeOpp.total_fee_bps} BPS</strong></span>
-                  <span>Net: <strong className={activeOpp.net_spread_bps >= 0 ? "text-profit" : "text-loss"}>
-                    {activeOpp.net_spread_bps >= 0 ? `+${activeOpp.net_spread_bps}` : activeOpp.net_spread_bps} BPS
+                  <span>Gross: <strong className="text-slate-800 tabular-nums">+{formatBps(activeOpp.gross_spread_bps)} BPS</strong></span>
+                  <span>Fees: <strong className="text-slate-500 tabular-nums">-{formatBps(activeOpp.total_fee_bps)} BPS</strong></span>
+                  <span>Net: <strong className={`tabular-nums ${activeOpp.net_spread_bps >= 0 ? "text-profit" : "text-loss"}`}>
+                    {activeOpp.net_spread_bps >= 0 ? `+${formatBps(activeOpp.net_spread_bps)}` : formatBps(activeOpp.net_spread_bps)} BPS
                   </strong></span>
                 </div>
               </div>
@@ -290,40 +333,37 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
         </div>
 
         {/* Right 1 Col: Execution Bot Settings & 1-Click Action */}
-        <div className="bg-surface p-3.5 rounded-lg border border-surface-border shadow-2xs space-y-3">
+        <div className="bg-surface p-4 rounded-xl border border-surface-border shadow-card space-y-3">
           <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
               <SlidersHorizontal className="w-4 h-4 text-accent" />
               <span>Cycle Guardrails</span>
             </h2>
+            {onOpenConfig && (
+              <button
+                type="button"
+                onClick={() => onOpenConfig("triangle")}
+                className="text-xs text-accent hover:underline font-mono cursor-pointer"
+              >
+                Configure
+              </button>
+            )}
           </div>
 
-          <div className="space-y-3.5 text-xs">
-            <div className="flex items-center justify-between gap-3">
-              <label className="block text-slate-500 flex-1">Trade Size (USD):</label>
-              <div className="relative w-28 shrink-0">
-                <span className="absolute left-3 top-2 text-slate-400">$</span>
-                <input
-                  type="number"
-                  value={tradeSizeUsd}
-                  onChange={(e) => setTradeSizeUsd(Number(e.target.value) || 1000)}
-                  step={1000}
-                  min={1000}
-                  className="w-full pl-7 pr-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
+          <div className="space-y-3 text-xs font-sans">
+            <div className="flex items-center justify-between gap-3 py-1">
+              <span className="text-slate-500">Trade Size:</span>
+              <span className="font-mono font-bold text-slate-900 tabular-nums">${tradeSizeUsd.toLocaleString()}</span>
             </div>
 
-            <div className="flex items-center justify-between gap-3">
-              <label className="block text-slate-500 flex-1">Min Profit Hurdle (BPS):</label>
-              <input
-                type="number"
-                value={minProfitBps}
-                onChange={(e) => setMinProfitBps(Number(e.target.value) || 0.5)}
-                step={0.5}
-                min={0}
-                className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-bold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
-              />
+            <div className="flex items-center justify-between gap-3 py-1">
+              <span className="text-slate-500">Min Profit Hurdle:</span>
+              <span className="font-mono font-bold text-slate-900 tabular-nums">{minProfitBps.toFixed(1)} bps</span>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 py-1">
+              <span className="text-slate-500">Max Leg Slippage:</span>
+              <span className="font-mono font-bold text-slate-900 tabular-nums">{maxSlippageBps.toFixed(1)} bps</span>
             </div>
 
             {/* Deploy 1-Click Button */}
@@ -331,7 +371,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               <button
                 onClick={handleDeployCycle}
                 disabled={!activeOpp || isPaused || botStatus === "verifying" || botStatus === "dispatching"}
-                className="w-full py-2.5 px-4 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-md text-xs font-bold transition shadow-2xs flex items-center justify-center space-x-2 cursor-pointer"
+                className="btn-primary w-full !py-2.5 !px-4 text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
               >
                 <Zap className="w-4 h-4 fill-current" />
                 <span>
@@ -426,16 +466,16 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                         <span>{opp.path}</span>
                       </td>
                       <td className="py-3 px-3 text-slate-600">{opp.venue}</td>
-                      <td className="py-3 px-3 font-medium text-slate-700">+{opp.gross_spread_bps} BPS</td>
-                      <td className="py-3 px-3 text-slate-500">-{opp.total_fee_bps} BPS</td>
+                      <td className="py-3 px-3 font-medium text-slate-700 tabular-nums">+{formatBps(opp.gross_spread_bps)} BPS</td>
+                      <td className="py-3 px-3 text-slate-500 tabular-nums">-{formatBps(opp.total_fee_bps)} BPS</td>
                       <td className="py-3 px-3 font-bold">
-                        <span className={opp.net_spread_bps >= 0 ? "text-profit" : "text-loss"}>
-                          {opp.net_spread_bps >= 0 ? `+${opp.net_spread_bps}` : opp.net_spread_bps} BPS
+                        <span className={`tabular-nums ${opp.net_spread_bps >= 0 ? "text-profit" : "text-loss"}`}>
+                          {opp.net_spread_bps >= 0 ? `+${formatBps(opp.net_spread_bps)}` : formatBps(opp.net_spread_bps)} BPS
                         </span>
                       </td>
                       <td className="py-3 px-3 font-bold">
-                        <span className={opp.net_profit_usd >= 0 ? "text-profit" : "text-loss"}>
-                          {opp.net_profit_usd >= 0 ? `+$${opp.net_profit_usd.toFixed(2)}` : `-$${Math.abs(opp.net_profit_usd).toFixed(2)}`}
+                        <span className={`tabular-nums ${opp.net_profit_usd >= 0 ? "text-profit" : "text-loss"}`}>
+                          {opp.net_profit_usd >= 0 ? `+$${opp.net_profit_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `-$${Math.abs(opp.net_profit_usd).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                         </span>
                       </td>
                       <td className="py-3 px-3">

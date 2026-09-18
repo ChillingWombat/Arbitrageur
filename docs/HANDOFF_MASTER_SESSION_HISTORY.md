@@ -2,8 +2,8 @@
 
 > **Historical record.** This document captures the development history as it happened. Some feature claims below describe aspirational or since-disabled functionality; for the current, accurate safety and capability status, see `README.md` → *Current Safety Status*.
 
-**Document Version**: 2.0.0  
-**Generated At**: 2026-09-12  
+**Document Version**: 2.3.0  
+**Generated At**: 2026-09-18  
 **Repository**: `/mnt/Data/Projects/Arbitrager`  
 **Application**: Arbitrager (High-Frequency Multi-Venue Arbitrage & Quantitative Terminal)  
 **Primary Stack**: Rust (Cargo Workspace), Tauri v2, Pixi, React 18, TypeScript, Tailwind CSS
@@ -678,4 +678,59 @@ pass, clippy all-targets clean, tsc clean, npm 103 pass. Uncommitted;
 rebuild desktop binary before relaunching.
 
 ---
+
+## 16. Session Handoff — 2026-09-18 (Decibel Credentials & Copilot De-duplication)
+
+- **Decibel Aptos Ed25519 Credential Detection**:
+  - Investigated issue where Decibel exchange was flagged as unconfigured even when valid credentials were saved in the encrypted vault.
+  - Root cause: Decibel operates on Aptos and requires `account_address` and `ed25519_private_key`. The generic `has_credentials` check only inspected `api_key` + `secret_key`, causing modern Move/Aptos DEX keys to be ignored.
+  - Fix in `src-tauri/src/credentials.rs`: Added dedicated match branch for `decibel` that checks for both `account_address` and `ed25519_private_key`.
+  - Added unit test `test_has_credentials_decibel` verifying valid detection.
+- **Copilot LLM Settings UI Cleanup**:
+  - Removed redundant duplicate Gemini API key input in `CopilotSettingsModal.tsx`.
+  - All AI provider API keys (Gemini, Anthropic Claude, OpenAI, Local Ollama) are now configured exclusively through the unified Provider Selection table with masked persistence and test-connection verification.
+
+---
+
+## 17. Session Handoff — 2026-09-18 (Multi-Ticker Decoupled Funding Rate Monitor)
+
+- **Decoupling from Single-Spread Strategy**:
+  - Addressed user requirement: "the funding rate monitor should monitor all shared non-hidden ticker, rather than just a single ticker. it should not be controled by the ticker slector on single spread strategy".
+  - Previously, `FundingRadar.tsx` inherited the single symbol selected on the pair spread strategy (`selectedSymbol`), restricting the radar to 1 asset at a time.
+  - Backend Architecture: Added `scan_funding_opportunities_batch_impl` in `src-tauri/src/commands.rs` (exposed via Tauri IPC `scan_funding_opportunities_batch`), accepting `Vec<String>` of symbols. It queries `funding_rates` and orderbooks across all active venues for each symbol, calculating net basis APY, fee amortizations, and 8h payouts concurrently.
+- **Frontend Radar Overhaul (`FundingRadar.tsx`)**:
+  - **All-Ticker Continuous Scanning**: Radar automatically subscribes to and scans all shared, non-hidden tickers (`availableTickers`).
+  - **Asset Filter Pills**: Added horizontal category pill bar (`ALL`, `BTC`, `ETH`, `SOL`, etc.) with badge counts to quickly filter opportunities by asset without losing scan context.
+  - **Symbol Badges**: Ranked carry opportunity cards prominently display the asset symbol, long/short venue pair, and net spread.
+  - **Interactive Amortization Simulator**: Clicking any opportunity card dynamically selects it, binding the tenor matrix, breakeven holding period, and payout projection to the clicked pair.
+  - **Independent Bot Lifecycle**: Decoupled `botRunning` state to `strategyId: "funding"`, preventing cross-talk with single-spread pair-trading bots.
+- **Verification**:
+  - Desktop IPC and unit tests passed. Vitest suite (`FundingRadar.test.tsx`) expanded and passing.
+
+---
+
+## 18. Session Handoff — 2026-09-18 (Strategy Auto-Filters: Exchange 24h Volume & Price Resolution)
+
+- **Strategy Auto-Filters Issue**:
+  - User reported: "neither of these two filters are functioning correctly at the moment, the tickers are all hide. it should be the volumne of ticker in the exchanges, not the value catptured and recorded in our system".
+- **Volume Filter Fix (Real Exchange Turnover)**:
+  - Root Cause: Filters were evaluating locally recorded tick volume, or enforcing that *every* venue meet the volume floor. Because unconfigured or newly subscribed venues reported 0 local ticks, 100% of tickers were filtered out.
+  - Solution in `crates/arbitrager-desktop/src/strategy_filters.rs`:
+    - Filter now queries real exchange 24h quote volume / turnover (Hyperliquid `24h_volume`, Lighter `volume_24h`, Vanta `marketSummary` `24h_amount`, Binance `quoteVolume`, OKX `volCcy24h`, Kraken `vol_quote`).
+    - Implemented aggregated turnover check across reporting venues (`min_reported >= floor` and total reporting turnover threshold) with defensive fallback for unreporting venues so active liquidity isn't starved.
+    - Updated Vanta client `fetch_volumes_24h` to correctly extract `marketSummary` quote turnover.
+- **Mid Price Filter Fix (3-Tier Price Resolution)**:
+  - Root Cause: Background tickers that were not currently active in the UI's WebSocket orderbook stream had `mid_price == None` in the local `market_hub` cache. Naive evaluation treated `None` as 0.0, causing all assets to be hidden when `Auto Min Mid Price` was enabled.
+  - Solution: Implemented 3-tier price resolution in `crates/arbitrager-desktop/src/strategy_filters.rs` and `frontend/src/utils/tickerFilters.ts`:
+    1. **Tier 1 (Live Book)**: Orderbook mid-price from `market_hub`.
+    2. **Tier 2 (Exchange Mark/Ticker)**: Reported 24h ticker mark or last traded price.
+    3. **Tier 3 (Benchmark Catalog)**: Reference asset price from static catalog (`benchmark_base_price` in Rust, `getTickerBenchmarkPrice` in TS).
+  - High-value assets ($10+ to $100k+, e.g. BTC, ETH, SOL) stay visible, while sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) are reliably filtered out when a floor is configured.
+- **Arithmetic Safety in Funding Carry**:
+  - In `crates/arbitrager-math/src/funding_carry.rs`: converted raw multiplications and divisions to `checked_mul` and `checked_div` with bounds protection, eliminating overflow risks during extreme funding volatility (>10,000% APR) or institutional trade sizes ($10M+).
+- **Verification**:
+  - 299 desktop tests passed, 98 exchange tests passed, 74 math tests passed, 149 frontend tests passed, `npm run build` cleanly passed. Live dev server verified with running UI.
+
+---
 *Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*
+

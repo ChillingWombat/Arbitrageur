@@ -9,10 +9,10 @@ interface SessionBadgeProps {
 }
 
 const ALLOW_STYLE = (allow: number | null | undefined): string => {
-  if (allow == null || !Number.isFinite(allow)) return "bg-slate-100 text-slate-500 border-slate-300";
-  if (allow <= 0) return "bg-rose-50 text-rose-700 border-rose-300";
-  if (allow < 1) return "bg-amber-50 text-amber-700 border-amber-300";
-  return "bg-emerald-50 text-emerald-700 border-emerald-300";
+  if (allow == null || !Number.isFinite(allow)) return "bg-surface-raised text-slate-500 border-surface-border";
+  if (allow <= 0) return "bg-loss-dim text-loss border-loss-border";
+  if (allow < 1) return "bg-warn-dim text-warn border-warn-border";
+  return "bg-profit-dim text-profit border-profit-border";
 };
 
 export const SessionBadge: React.FC<SessionBadgeProps> = ({
@@ -30,7 +30,7 @@ export const SessionBadge: React.FC<SessionBadgeProps> = ({
         (sizeMult != null && Number.isFinite(sizeMult) ? ` · size x${sizeMult.toFixed(2)}` : "");
   return (
     <span
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sm border text-xs ${ALLOW_STYLE(allow)}`}
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-xs font-mono font-semibold tabular-nums ${ALLOW_STYLE(allow)}`}
       title={title}
     >
       {label}

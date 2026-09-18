@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { scopeAndSortPositions } from "./positionsQuant.ts";
+import {
+  scopeAndSortPositions,
+  getReduceOnlyPositions,
+  isPositionReduceOnly,
+  setPositionReduceOnly,
+} from "./positionsQuant.ts";
 import type { OpenPositionDto } from "../types/index.ts";
 
 const pos = (
@@ -74,3 +79,51 @@ test("size sort descends on entry notional with nulls last", () => {
     [200, 100, 50],
   );
 });
+
+test("reduce-only state management persists symbols and handles window environment", () => {
+  // Mock window and localStorage
+  const storage = new Map<string, string>();
+  const mockLocalStorage = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, val: string) => {
+      storage.set(key, val);
+    },
+    removeItem: (key: string) => {
+      storage.delete(key);
+    },
+    clear: () => {
+      storage.clear();
+    },
+  };
+
+  const origWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    localStorage: mockLocalStorage,
+    dispatchEvent: () => true,
+  };
+
+  try {
+    assert.equal(isPositionReduceOnly("BTC-USDC"), false);
+    assert.deepEqual(getReduceOnlyPositions(), []);
+
+    setPositionReduceOnly("BTC-USDC", true);
+    assert.equal(isPositionReduceOnly("BTC-USDC"), true);
+    assert.equal(isPositionReduceOnly("btc-usdc"), true);
+    assert.deepEqual(getReduceOnlyPositions(), ["BTC-USDC"]);
+
+    setPositionReduceOnly("ETH-USDC", true);
+    assert.equal(isPositionReduceOnly("ETH-USDC"), true);
+    assert.equal(getReduceOnlyPositions().length, 2);
+
+    setPositionReduceOnly("BTC-USDC", false);
+    assert.equal(isPositionReduceOnly("BTC-USDC"), false);
+    assert.equal(isPositionReduceOnly("ETH-USDC"), true);
+  } finally {
+    if (origWindow === undefined) {
+      delete (globalThis as any).window;
+    } else {
+      (globalThis as any).window = origWindow;
+    }
+  }
+});
+

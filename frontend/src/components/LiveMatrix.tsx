@@ -35,6 +35,7 @@ import {
   parseDuration,
 } from "../services/matrixQuant";
 import { deriveStepSizing } from "../services/contractSpecs";
+import { isPositionReduceOnly } from "../services/positionsQuant";
 import { formatWinPct as fmtPct } from "../services/winPct";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
@@ -145,7 +146,17 @@ interface OpportunityRowViewProps {
   onExecute: (opp: SpatialOpportunityDto) => void;
 }
 
-const LIVE_CAPABLE_VENUES = new Set(["aster", "hyperliquid"]);
+const LIVE_CAPABLE_VENUES = new Set([
+  "aster",
+  "hyperliquid",
+  "lighter",
+  "robinhood",
+  "vanta",
+  "binance",
+  "okx",
+  "coinbase",
+  "kraken",
+]);
 const isLiveRoute = (v1: string, v2: string): boolean =>
   LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
 
@@ -168,31 +179,31 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
           <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
           {isLive ? (
             <span
-              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-emerald-400 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono font-bold"
-              title="Both venues support live API execution (Aster ↔ Hyperliquid)"
+              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
+              title="Both venues support live API execution"
             >
               LIVE
             </span>
           ) : (
             <span
-              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-surface-border bg-slate-100 dark:bg-slate-800 text-slate-400 text-[10px] font-mono"
+              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
               title="Route contains read-only venue(s) — paper execution only"
             >
               PAPER
             </span>
           )}
         </td>
-        <td className="py-2.5 px-3 text-loss font-medium">{formatCurrencyPrice(opp.buy_price)}</td>
-        <td className="py-2.5 px-3 text-profit font-medium">{formatCurrencyPrice(opp.sell_price)}</td>
-        <td className="py-2.5 px-3 text-slate-700">{opp.gross_spread_bps.toFixed(1)} BPS</td>
-        <td className="py-2.5 px-3 text-slate-500">{opp.fee_bps.toFixed(1)} BPS</td>
-        <td className="py-2.5 px-3">
+        <td className="py-2.5 px-3 text-loss font-medium font-mono tabular-nums">{formatCurrencyPrice(opp.buy_price)}</td>
+        <td className="py-2.5 px-3 text-profit font-medium font-mono tabular-nums">{formatCurrencyPrice(opp.sell_price)}</td>
+        <td className="py-2.5 px-3 text-slate-700 font-mono tabular-nums">{opp.gross_spread_bps.toFixed(1)} BPS</td>
+        <td className="py-2.5 px-3 text-slate-500 font-mono tabular-nums">{opp.fee_bps.toFixed(1)} BPS</td>
+        <td className="py-2.5 px-3 font-mono tabular-nums">
           <span className={`font-bold ${opp.net_spread_bps >= minBps ? "text-profit" : "text-slate-500"}`}>
             {opp.net_spread_bps.toFixed(2)} BPS
           </span>
         </td>
-        <td className="py-2.5 px-3 text-slate-700">{fmtPct(opp.win_probability)}</td>
-        <td className={`py-2.5 px-3 font-bold ${opp.estimated_profit_usd >= 0 ? "text-profit" : "text-loss"}`}>
+        <td className="py-2.5 px-3 text-slate-700 font-mono tabular-nums">{fmtPct(opp.win_probability)}</td>
+        <td className={`py-2.5 px-3 font-bold font-mono tabular-nums ${opp.estimated_profit_usd >= 0 ? "text-profit" : "text-loss"}`}>
           {formatCurrencyPnl(opp.estimated_profit_usd)}
         </td>
         <td className="py-2.5 px-3 text-right">
@@ -200,9 +211,9 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
             onClick={() => onExecute(opp)}
             disabled={disabled}
             title={title}
-            className={`px-3 py-1.5 rounded-sm text-xs font-mono font-medium transition shadow-2xs ${
+            className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium transition shadow-2xs ${
               isExec && !blocked && entriesOpen
-                ? "bg-accent hover:bg-accent-hover text-white"
+                ? "bg-accent hover:bg-accent-hover text-white cursor-pointer"
                 : "bg-surface-raised text-slate-400 cursor-not-allowed border border-surface-border"
             }`}
           >
@@ -612,7 +623,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
     for (const row of venueMatrix.grid) {
       for (const cell of row) {
         if (cell.isDiagonal) continue;
-        if (bot.entriesAllowed && cell.isExecutable && cell.netSpreadBps > highestNet) {
+        if (bot.entriesAllowed && !isPositionReduceOnly(sym) && cell.isExecutable && cell.netSpreadBps > highestNet) {
           if (currentStrategyConfig.currentAccumulatedUnits < currentStrategyConfig.maxAccumulatedUnits) {
             highestNet = cell.netSpreadBps;
             bestCell = cell;
@@ -682,7 +693,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
     <div className="p-4 h-full flex flex-col space-y-4 overflow-hidden text-slate-900 font-sans">
       {/* 1. Strategy Ribbon — parameters left, configurator + lifecycle right
              (same layout as the other strategy pages) */}
-      <div className="shrink-0 px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs select-none">
+      <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
@@ -692,10 +703,10 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               signal's own legs reconcile. */}
           {hasActiveTicker && positionState?.blocked && (
             <div
-              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-md border bg-amber-50 text-amber-800 border-amber-300"
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border bg-warn-dim text-warn border-warn-border"
               title={`Signal ${positionState.blockingSignalIds.join(", ")} is in-flight or imbalanced — new orders on ${symbol} are refused until its legs confirm delta-neutral. Net filled position: ${positionState.netPositionQty}`}
             >
-              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+              <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" />
               <span className="font-bold text-xs tracking-wide">
                 Reconciling{positionState.netPositionQty !== 0 ? ` (${positionState.netPositionQty > 0 ? "+" : ""}${positionState.netPositionQty.toFixed(4)} net)` : ""}
               </span>
@@ -707,7 +718,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           {hasActiveTicker && (
             <>
               <div
-                className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+                className="ribbon-pill"
                 title="Target profit locked in per round-trip after fees and friction — edit via Configure Strategy"
               >
                 <span className="text-slate-400">Target</span>
@@ -716,7 +727,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               </div>
 
               <div
-                className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
+                className="ribbon-pill"
                 title={`${windowTitle} · percentile trigger P${currentStrategyConfig.windowPercentile}%`}
               >
                 <span className="text-slate-400">Window</span>
@@ -734,7 +745,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           <button
             type="button"
             onClick={handleOpenConfig}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
             title="Configure Single Spread strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -751,7 +762,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
             onStop={() => void bot.stop()}
           />
           {bot.lastError && (
-            <span className="text-xs font-mono text-red-600 max-w-56 truncate" title={bot.lastError}>
+            <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
             </span>
           )}

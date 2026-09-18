@@ -30,6 +30,15 @@ export function validateStrategyParams(p: StrategyParamsDto): string[] {
   if (p.fundingRotationThresholdBps !== null && p.fundingRotationThresholdBps !== undefined) {
     positive(p.fundingRotationThresholdBps, "fundingRotationThresholdBps");
   }
+  if (p.triangleTradeSizeUsd !== undefined) {
+    positive(p.triangleTradeSizeUsd, "triangleTradeSizeUsd");
+  }
+  if (p.triangleMinProfitBps !== undefined) {
+    positive(p.triangleMinProfitBps, "triangleMinProfitBps");
+  }
+  if (p.triangleMaxSlippageBps !== undefined) {
+    positive(p.triangleMaxSlippageBps, "triangleMaxSlippageBps");
+  }
   validatePassiveUnwind(p.futuresPassiveUnwind, "futuresPassiveUnwind", errors);
   validatePassiveUnwind(p.fundingPassiveUnwind, "fundingPassiveUnwind", errors);
   validatePassiveUnwind(p.spotPassiveUnwind, "spotPassiveUnwind", errors);

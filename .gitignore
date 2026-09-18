@@ -40,3 +40,7 @@ data/cache/
 data/captures/
 .playwright-mcp/
 .omo/
+
+# Local desktop launcher shortcuts
+Arbitrager
+*.desktop

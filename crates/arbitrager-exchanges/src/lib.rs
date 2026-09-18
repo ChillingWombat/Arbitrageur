@@ -10,6 +10,12 @@ pub mod aster;
 pub mod edgex;
 pub mod grvt;
 pub mod ondoperps;
+pub mod binance;
+pub mod okx;
+pub mod coinbase;
+pub mod kraken;
+pub mod decibel;
+pub mod variational;
 pub mod prediction;
 pub mod simulated;
 
@@ -25,6 +31,12 @@ pub use aster::*;
 pub use edgex::*;
 pub use grvt::*;
 pub use ondoperps::*;
+pub use binance::*;
+pub use okx::*;
+pub use coinbase::*;
+pub use kraken::*;
+pub use decibel::*;
+pub use variational::*;
 pub use prediction::*;
 pub use simulated::*;
 
@@ -450,5 +462,43 @@ mod tests {
         assert_eq!(edgex.venue_id(), VenueId::new("edgex"));
         assert!(edgex.fetch_account().await.is_err());
         assert!(edgex.set_leverage("BTC", 5).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_new_universal_adapters() {
+        let binance = BinanceAdapter::new(None, None, None);
+        assert_eq!(binance.name(), "Binance");
+        assert_eq!(binance.venue_id(), VenueId::new("binance"));
+        assert!(binance.fetch_account().await.is_err());
+
+        let okx = OkxAdapter::new(None, None, None, None);
+        assert_eq!(okx.name(), "OKX");
+        assert_eq!(okx.venue_id(), VenueId::new("okx"));
+        assert!(okx.fetch_account().await.is_err());
+
+        let coinbase = CoinbaseAdapter::new(None, None, None, None);
+        assert_eq!(coinbase.name(), "Coinbase");
+        assert_eq!(coinbase.venue_id(), VenueId::new("coinbase"));
+        assert!(coinbase.fetch_account().await.is_err());
+
+        let kraken = KrakenAdapter::new(None, None, None, None);
+        assert_eq!(kraken.name(), "Kraken");
+        assert_eq!(kraken.venue_id(), VenueId::new("kraken"));
+        assert!(kraken.fetch_account().await.is_err());
+
+        let decibel = DecibelAdapter::new(None, None, None);
+        assert_eq!(decibel.name(), "Decibel");
+        assert_eq!(decibel.venue_id(), VenueId::new("decibel"));
+        assert!(decibel.fetch_account().await.is_err());
+
+        let variational = VariationalAdapter::new(None, None, None);
+        assert_eq!(variational.name(), "Variational");
+        assert_eq!(variational.venue_id(), VenueId::new("variational"));
+        assert!(variational.fetch_account().await.is_err());
+
+        let robinhood = RobinhoodAdapter::new(None, None, None, None);
+        assert_eq!(robinhood.name(), "Robinhood");
+        assert_eq!(robinhood.venue_id(), VenueId::new("robinhood"));
+        assert!(robinhood.fetch_account().await.is_err());
     }
 }

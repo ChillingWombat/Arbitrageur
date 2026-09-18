@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Key,
   Lock,
+  Unlock,
   Sliders,
   ExternalLink,
   Globe,
@@ -12,7 +13,7 @@ import {
   RefreshCw,
   Info,
   Trash2,
-  ArrowLeftRight,
+  ShieldAlert,
 } from "lucide-react";
 import { api } from "../services/api";
 import {
@@ -26,117 +27,10 @@ import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitragerLogo } from "./ArbitragerLogo";
 import { ToggleSwitch } from "./ToggleSwitch";
-import { VenueAccountsSection, StrategyRoutingPanel, AddAccountSlot, VenueDefaultControl, VenueAccountToggle, AccountCredentialsDelete, AccountLabelControl } from "./ExchangeAccounts";
+import { VenueAccountsSection } from "./ExchangeAccounts";
 
-/** Venue margin/metrics block rendered inside the venue's account zone. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
-const VenueBalancePanel: React.FC<{
-  bal: VenueBalanceInfo | null;
-  lane?: VenueLaneStatusDto | null;
-}> = ({ bal, lane }) => (
-  <div className="space-y-3">
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
-      {/* Metric 1: Equity */}
-      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-        <div className="flex items-center justify-between text-slate-400">
-          <span className="text-xs font-bold tracking-wider">Total Equity</span>
-          <span className="text-xs">USD</span>
-        </div>
-        <div className="text-xl font-bold text-slate-900 tracking-tight">
-          {bal
-            ? `$${bal.equity_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : "N/A"}
-        </div>
-      </div>
 
-      {/* Metric 2: Available Margin */}
-      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-        <div className="flex items-center justify-between text-slate-400">
-          <span className="text-xs font-bold tracking-wider">Available Margin</span>
-          <span className="text-xs">USD</span>
-        </div>
-        <div className={`text-xl font-bold tracking-tight ${bal ? "text-emerald-700" : "text-slate-900"}`}>
-          {bal
-            ? `$${bal.available_margin_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-            : "N/A"}
-        </div>
-      </div>
-
-      {/* Metric 3: Margin Rate */}
-      <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-        <div className="flex items-center justify-between text-slate-400">
-          <span className="text-xs font-bold tracking-wider">Margin Rate</span>
-          <span className="text-xs">Utilization</span>
-        </div>
-        <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight">
-          {bal?.margin_rate_pct != null ? (
-            <>
-              <span>{bal.margin_rate_pct.toFixed(1)}%</span>
-              <span className="text-xs font-normal text-slate-400">utilized</span>
-            </>
-          ) : (
-            <span>N/A</span>
-          )}
-        </div>
-        <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1.5">
-          <div
-            className={`h-full rounded-full transition-all duration-300 ${
-              (bal?.margin_rate_pct ?? 0) > 80
-                ? "bg-red-500"
-                : (bal?.margin_rate_pct ?? 0) > 50
-                ? "bg-amber-500"
-                : "bg-accent"
-            }`}
-            style={{ width: `${Math.min(100, bal?.margin_rate_pct ?? 0)}%` }}
-          />
-        </div>
-      </div>
-    </div>
-
-    <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5 flex-wrap gap-y-1">
-      {lane ? (
-        <>
-          <span
-            className={`px-1.5 py-0.5 rounded-sm border font-bold tracking-wider ${
-              lane.backingOff
-                ? "bg-rose-50 border-rose-200 text-rose-600"
-                : "bg-slate-100 border-slate-200 text-slate-600"
-            }`}
-            title="Read requests used in the last minute vs the venue's per-minute budget"
-          >
-            {lane.usedLastMin}/{lane.readBudgetPerMin.toFixed(0)}/min{lane.backingOff ? " backoff" : ""}
-          </span>
-          <span>
-            Rate budget · tier {lane.accountTier} · refresh {lane.refreshIntervalSecs.toFixed(0)}s · {lane.symbols} symbols
-          </span>
-        </>
-      ) : (
-        <span>No monitor lane — venue is not streaming market data.</span>
-      )}
-    </div>
-
-    <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
-      {bal ? (
-        <>
-          <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider">
-            Paper
-          </span>
-          <span>Simulated account balance — virtual funds from the paper-trading engine, not your real exchange balance.</span>
-        </>
-      ) : (
-        <span>No paper account — paper execution is provisioned only for venues with a real market-data adapter (Hyperliquid, Lighter, Robinhood Lighter, Vanta).</span>
-      )}
-    </div>
-
-    {bal?.recommended_action && (
-      <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-lg text-xs font-mono text-amber-900 flex items-start space-x-2">
-        <AlertTriangle className="w-3.5 h-3.5 text-amber-700 shrink-0 mt-0.5" />
-        <span>{bal.recommended_action}</span>
-      </div>
-    )}
-  </div>
-);
-
-export type SettingsTab = "execution" | "exchanges" | "strategies" | "network" | "about";
+export type SettingsTab = "execution" | "exchanges" | "network" | "about";
 export type ExchangeId =
   | "arcus"
   | "aster"
@@ -329,10 +223,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Vault state
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
-  const [inlinePassword, setInlinePassword] = useState("");
-  const [inlineConfirmPassword, setInlineConfirmPassword] = useState("");
-  const [inlineUnlocking, setInlineUnlocking] = useState(false);
-  const [inlineVaultError, setInlineVaultError] = useState<string | null>(null);
   const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
   // Venue execution capabilities & live trading risk gating
@@ -340,50 +230,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [showLiveRiskModal, setShowLiveRiskModal] = useState(false);
   const [liveRiskAgreed, setLiveRiskAgreed] = useState(false);
   const [liveRiskConfirmationInput, setLiveRiskConfirmationInput] = useState("");
-
-  const handleInlineVaultSubmit = async () => {
-    if (inlineUnlocking) return;
-    setInlineVaultError(null);
-
-    if (!vaultStatus) {
-      setInlineVaultError("Vault status is still loading. Please try again.");
-      return;
-    }
-    if (!inlinePassword) return;
-
-    const isInitializing = !vaultStatus.is_initialized;
-    if (isInitializing && Array.from(inlinePassword).length < 12) {
-      setInlineVaultError("Password must be at least 12 characters long.");
-      return;
-    }
-    if (isInitializing && inlinePassword !== inlineConfirmPassword) {
-      setInlineVaultError("Passwords do not match. Please re-enter.");
-      return;
-    }
-
-    setInlineUnlocking(true);
-    try {
-      const updatedStatus = isInitializing
-        ? await api.initializeVault(inlinePassword)
-        : await api.unlockVault(inlinePassword);
-      setVaultStatus(updatedStatus);
-      setInlinePassword("");
-      setInlineConfirmPassword("");
-      const sanitized = await api.getEngineSettings();
-      setConfiguredVenues(sanitized.configured_venues || []);
-    } catch (err) {
-      setInlineVaultError(err instanceof Error ? err.message : "Vault operation failed");
-    } finally {
-      setInlineUnlocking(false);
-    }
-  };
-
-  const handleInlineVaultKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key !== "Enter") return;
-    e.preventDefault();
-    e.stopPropagation();
-    void handleInlineVaultSubmit();
-  };
+  const [liveRiskAck, setLiveRiskAck] = useState(false);
 
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
@@ -425,6 +272,31 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "vanta": return vantaEnabled;
       case "variational": return variationalEnabled;
       default: return false;
+    }
+  };
+
+  const setVenueFlagEnabled = (id: ExchangeId, enabled: boolean) => {
+    switch (id) {
+      case "arcus": setArcusEnabled(enabled); break;
+      case "aster": setAsterEnabled(enabled); break;
+      case "binance": setBinanceEnabled(enabled); break;
+      case "coinbase": setCoinbaseEnabled(enabled); break;
+      case "decibel": setDecibelEnabled(enabled); break;
+      case "edgex": setEdgexEnabled(enabled); break;
+      case "grvt": setGrvtEnabled(enabled); break;
+      case "hyperliquid": setHlEnabled(enabled); break;
+      case "ibkr": setIbkrEnabled(enabled); break;
+      case "ig": setIgEnabled(enabled); break;
+      case "kalshi": setKalshiEnabled(enabled); break;
+      case "kraken": setKrakenEnabled(enabled); break;
+      case "lighter": setLighterEnabled(enabled); break;
+      case "okx": setOkxEnabled(enabled); break;
+      case "ondoperps": setOndoperpsEnabled(enabled); break;
+      case "polymarket": setPolymarketEnabled(enabled); break;
+      case "popdex": setPopdexEnabled(enabled); break;
+      case "robinhood": setRobinhoodEnabled(enabled); break;
+      case "vanta": setVantaEnabled(enabled); break;
+      case "variational": setVariationalEnabled(enabled); break;
     }
   };
 
@@ -473,7 +345,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const streamingCount = liveVenues.filter((v) => v.status === "READ_ONLY").length;
 
   const latencyClass = (ms: number): string =>
-    ms < 100 ? "text-emerald-600" : ms < 300 ? "text-amber-500" : "text-red-500";
+    ms < 100 ? "text-profit font-semibold" : ms < 300 ? "text-warn font-semibold" : "text-loss font-semibold";
 
   const loadVaultStatus = async () => {
     try {
@@ -731,12 +603,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
       await api.saveEngineSettings(payload);
 
-      // Live execution is disabled until authenticated adapters exist; always report paper mode
-      await api.setLiveMode(false);
+      // Ensure live mode state reflects selected mode
+      await api.setLiveMode(tradingMode === "real");
 
       const sanitized = await api.getEngineSettings();
       setConfiguredVenues(sanitized.configured_venues || []);
       clearCredentialInputs();
+
+      // Refresh balances for the newly active trading mode
+      await loadVenueBalances();
 
       onSettingsSaved?.(sanitized);
 
@@ -779,8 +654,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     setPolymarketPassphrase("");
     setKalshiApiKeyId("");
     setKalshiPrivateKey("");
-    setInlinePassword("");
-    setInlineConfirmPassword("");
   };
 
   const handleLockVault = async () => {
@@ -789,6 +662,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       setVaultStatus(s);
       setConfiguredVenues([]);
       clearCredentialInputs();
+      setShowVaultModal(true);
     } catch (err) {
       console.error("Lock error:", err);
     }
@@ -879,7 +753,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
   const isVaultLocked = !api.isTauri || !vaultStatus?.is_unlocked;
   const isVaultInitializing = vaultStatus?.is_initialized === false;
-  const isVaultStatusLoading = api.isTauri && vaultStatus === null;
 
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
@@ -936,25 +809,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             )}
           </button>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab("strategies")}
-            className={`relative h-10 flex items-center space-x-2 px-4 sm:px-5 text-[11px] font-mono transition select-none group cursor-pointer ${
-              activeTab === "strategies"
-                ? "text-accent font-bold bg-surface"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-            }`}
-          >
-            <ArrowLeftRight
-              className={`w-3 h-3 transition shrink-0 ${
-                activeTab === "strategies" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
-              }`}
-            />
-            <span>Strategies</span>
-            {activeTab === "strategies" && (
-              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-            )}
-          </button>
 
           <button
             type="button"
@@ -997,20 +851,27 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           </button>
         </div>
 
-        {/* Right Header: Lock Vault action when unlocked on Exchanges Tab */}
+        {/* Right Header: Unlock / Lock Vault action on Exchanges Tab */}
         <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
-          {activeTab === "exchanges" && !isVaultLocked && (
-            <>
-              <button
-                type="button"
-                onClick={handleLockVault}
-                className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
-                title="Lock sensitive exchange credentials now"
-              >
-                <Lock className="w-3.5 h-3.5 text-slate-500" />
-                <span>Lock Vault</span>
-              </button>
-            </>
+          {activeTab === "exchanges" && api.isTauri && (
+            <button
+              type="button"
+              onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
+              className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+              title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
+            >
+              {isVaultLocked ? (
+                <>
+                  <Unlock className="w-3.5 h-3.5 text-warn" />
+                  <span className="font-semibold text-slate-700">Unlock Vault</span>
+                </>
+              ) : (
+                <>
+                  <Lock className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Lock Vault</span>
+                </>
+              )}
+            </button>
           )}
           {activeTab === "network" &&
             !isVaultLocked &&
@@ -1018,10 +879,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
-                className="px-2.5 py-1 rounded-md border border-red-200 bg-surface hover:bg-red-50 text-red-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-md border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Permanently remove the stored HSM token from the vault"
               >
-                <Trash2 className="w-3.5 h-3.5 text-red-500" />
+                <Trash2 className="w-3.5 h-3.5 text-loss" />
                 <span>Remove HSM Token</span>
               </button>
             )}
@@ -1038,7 +899,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <span>
                   {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
                   {activeTab === "exchanges" && "Exchange Accounts, API Credentials & Margins"}
-                  {activeTab === "strategies" && "Strategy Account Routing"}
                   {activeTab === "network" && "Network Ports & HSM Signer Configuration"}
                   {activeTab === "about" && "About Arbitrager & Release Information"}
                 </span>
@@ -1048,8 +908,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       ? "Calibrate the minimum depth ratio and paper/live trading modes. Slippage tolerances live in each strategy's configurator."
                       : activeTab === "exchanges"
                       ? "Manage per-exchange accounts: credentials in the encrypted vault, enable switches, and default selection."
-                      : activeTab === "strategies"
-                      ? "Bind which account on one exchange trades against which account on another for each strategy. Applies to all tickers using the strategy."
                       : activeTab === "network"
                       ? "Manage local daemon RPC/WS ports and remote Hardware Security Module tokens."
                       : "Version status, open-source repository, sponsorship, and compliance notices."
@@ -1153,7 +1011,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                               isSelected
                                 ? "text-blue-100"
                                 : noAdapter
-                                ? "text-amber-500"
+                                ? "text-warn"
                                 : statusLabel === "Off" || statusLabel === "No response"
                                 ? "text-slate-400"
                                 : latency != null
@@ -1180,13 +1038,19 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                             className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}
                             title={
                               bal
-                                ? "Simulated paper equity, not live exchange equity"
-                                : "No paper execution account for this venue"
+                                ? bal.is_live
+                                  ? "Real exchange equity"
+                                  : "Simulated paper equity, not live exchange equity"
+                                : "No account balance for this venue"
                             }
                           >
                             {bal
-                              ? `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                              : "No paper"}
+                              ? bal.is_live
+                                ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                                : `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                              : isEnabled
+                              ? "No balance"
+                              : "Off"}
                           </span>
                         </div>
                       </button>
@@ -1196,7 +1060,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
                 {/* Left Panel Summary */}
                 <div className="p-3 border-t border-surface-border bg-slate-100/60 text-xs font-mono text-slate-500 flex items-center justify-between shrink-0">
-                  <span>Streaming: <strong className="text-emerald-600 font-bold">{streamingCount}</strong></span>
+                  <span>Streaming: <strong className="text-profit font-bold">{streamingCount}</strong></span>
                   <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
                   <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
                 </div>
@@ -1205,1229 +1069,125 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               {/* Right Content Pane: Single Selected Exchange */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4 min-w-0">
                 {errorMsg && (
-                  <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
+                  <div className="p-4 bg-loss-dim border border-loss-border text-loss rounded-xl text-xs font-mono flex items-center space-x-2">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{errorMsg}</span>
                   </div>
                 )}
 
                 {saved && (
-                  <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                  <div className="p-4 bg-profit-dim border border-profit-border text-profit rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
                     <CheckCircle2 className="w-4 h-4 shrink-0" />
                     <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
                   </div>
                 )}
 
-
-            {/* Exchange: Arcus DEX */}
-            {selectedExchange === "arcus" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Arcus #1
-                    </h3>
-                    <AccountLabelControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="arcus"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="arcus" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="arcus"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={arcusEnabled}
-                      onFallbackChange={setArcusEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("arcus")}
-                  lane={getVenueLane("arcus")}
-                />                  <VenueAccountsSection
-                    venue="arcus"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-              </div>
-
-              <AddAccountSlot
-                venue="arcus"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange 1: Hyperliquid */}
-            {selectedExchange === "hyperliquid" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Hyperliquid #1
-                    </h3>
-                    <AccountLabelControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="hyperliquid"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="hyperliquid" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="hyperliquid"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={hlEnabled}
-                      onFallbackChange={setHlEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("hyperliquid")}
-                  lane={getVenueLane("hyperliquid")}
-                />
-
-                <div className="space-y-3">
-                  <VenueAccountsSection
-                    venue="hyperliquid"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-                </div>
-              </div>
-
-              <AddAccountSlot
-                venue="hyperliquid"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange 7: Kalshi */}
-            {selectedExchange === "kalshi" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Kalshi #1
-                    </h3>
-                    <AccountLabelControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="kalshi"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="kalshi" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="kalshi"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={kalshiEnabled}
-                      onFallbackChange={setKalshiEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("kalshi")}
-                  lane={getVenueLane("kalshi")}
-                />                  <VenueAccountsSection
-                    venue="kalshi"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-              </div>
-
-              <AddAccountSlot
-                venue="kalshi"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-            {/* Exchange 5: Kraken (Spot & Futures Multi-Market) */}
-            {selectedExchange === "kraken" && (
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Kraken #1
-                    </h3>
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <ToggleSwitch
-                      checked={krakenEnabled}
-                      onChange={setKrakenEnabled}
-                      label={krakenEnabled ? "Active" : undefined}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("kraken")}
-                  lane={getVenueLane("kraken")}
-                />
-
-                <div className="space-y-4">
-                  <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs font-mono text-slate-600">
-                    💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Toggle each option independently to enter its respective credentials.
-                  </div>
-
-                  {/* Option A: Kraken Spot Market */}
-                  <div className="p-4 bg-surface-raised border border-surface-border rounded-lg space-y-3">
-                    <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
-                        <span className="text-xs font-mono px-1.5 py-0.2 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
-                        <AccountLabelControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
+                {/* Non-blocking Vault Locked Banner */}
+                {isVaultLocked && api.isTauri && (
+                  <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between shadow-2xs">
+                    <div className="flex items-center space-x-3">
+                      <div className="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-600 shrink-0">
+                        <Lock className="w-4 h-4" />
                       </div>
-                      <AccountCredentialsDelete
-                        venue="kraken_spot"
-                        refreshKey={accountsEpoch}
-                        locked={isVaultLocked}
-                        onChanged={handleAccountsChanged}
-                      />
-                      <VenueDefaultControl venue="kraken_spot" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                      <VenueAccountToggle
-                        venue="kraken_spot"
-                        refreshKey={accountsEpoch}
-                        locked={isVaultLocked}
-                        fallbackEnabled={krakenSpotEnabled}
-                        onFallbackChange={setKrakenSpotEnabled}
-                        onChanged={() => setAccountsEpoch((e) => e + 1)}
-                      />
-                    </div>
-
-                    <div className="space-y-3 pt-1">
-                      <VenueAccountsSection
-                        venue="kraken_spot"
-                        locked={isVaultLocked}
-                        refreshKey={accountsEpoch}
-                        compact
-                        onChanged={() => setAccountsEpoch((e) => e + 1)}
-                      />
-                    </div>
-                  </div>
-
-                  <AddAccountSlot
-                    venue="kraken_spot"
-                    locked={isVaultLocked}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-
-                  {/* Option B: Kraken Futures Market */}
-                  <div className="p-4 bg-surface-raised border border-surface-border rounded-lg space-y-3">
-                    <div className="flex items-center justify-between border-b border-surface-border/60 pb-2">
-                      <div className="flex items-center space-x-2">
-                        <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
-                        <span className="text-xs font-mono px-1.5 py-0.2 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
-                        <AccountLabelControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                      </div>
-                      <AccountCredentialsDelete
-                        venue="kraken_futures"
-                        refreshKey={accountsEpoch}
-                        locked={isVaultLocked}
-                        onChanged={handleAccountsChanged}
-                      />
-                      <VenueDefaultControl venue="kraken_futures" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                      <VenueAccountToggle
-                        venue="kraken_futures"
-                        refreshKey={accountsEpoch}
-                        locked={isVaultLocked}
-                        fallbackEnabled={krakenFuturesEnabled}
-                        onFallbackChange={setKrakenFuturesEnabled}
-                        onChanged={() => setAccountsEpoch((e) => e + 1)}
-                      />
-                    </div>
-
-                    <div className="space-y-3 pt-1">
-                      <VenueAccountsSection
-                        venue="kraken_futures"
-                        locked={isVaultLocked}
-                        refreshKey={accountsEpoch}
-                        compact
-                        onChanged={() => setAccountsEpoch((e) => e + 1)}
-                      />
-                    </div>
-                  </div>
-
-                  <AddAccountSlot
-                    venue="kraken_futures"
-                    locked={isVaultLocked}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-                </div>
-              </div>
-            )}
-
-
-
-            {/* Exchange 2: Lighter */}
-            {selectedExchange === "lighter" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Lighter #1
-                    </h3>
-                    <AccountLabelControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="lighter"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="lighter" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="lighter"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={lighterEnabled}
-                      onFallbackChange={setLighterEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("lighter")}
-                  lane={getVenueLane("lighter")}
-                />
-
-                <div className="space-y-3">
-                  <VenueAccountsSection
-                    venue="lighter"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-
-                </div>
-              </div>
-
-              <AddAccountSlot
-                venue="lighter"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange 6: Polymarket */}
-            {selectedExchange === "polymarket" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Polymarket #1
-                    </h3>
-                    <AccountLabelControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="polymarket"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="polymarket" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="polymarket"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={polymarketEnabled}
-                      onFallbackChange={setPolymarketEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("polymarket")}
-                  lane={getVenueLane("polymarket")}
-                />                  <VenueAccountsSection
-                    venue="polymarket"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-              </div>
-
-              <AddAccountSlot
-                venue="polymarket"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange: PopDEX */}
-            {selectedExchange === "popdex" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      PopDEX #1
-                    </h3>
-                    <AccountLabelControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="popdex"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="popdex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="popdex"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={popdexEnabled}
-                      onFallbackChange={setPopdexEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("popdex")}
-                  lane={getVenueLane("popdex")}
-                />                  <VenueAccountsSection
-                    venue="popdex"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-              </div>
-
-              <AddAccountSlot
-                venue="popdex"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange 4: Robinhood EVM */}
-            {selectedExchange === "robinhood" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Robinhood Lighter #1
-                    </h3>
-                    <AccountLabelControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="robinhood"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="robinhood" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="robinhood"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={robinhoodEnabled}
-                      onFallbackChange={setRobinhoodEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("robinhood")}
-                  lane={getVenueLane("robinhood")}
-                />                  <VenueAccountsSection
-                    venue="robinhood"
-                    locked={isVaultLocked}
-                    refreshKey={accountsEpoch}
-                    onChanged={() => setAccountsEpoch((e) => e + 1)}
-                  />
-              </div>
-
-              <AddAccountSlot
-                venue="robinhood"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-
-            {/* Exchange 3: Vanta */}
-            {selectedExchange === "vanta" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Vanta #1
-                    </h3>
-                    <AccountLabelControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="vanta"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="vanta" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="vanta"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={vantaEnabled}
-                      onFallbackChange={setVantaEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("vanta")}
-                  lane={getVenueLane("vanta")}
-                />
-
-                <VenueAccountsSection
-                  venue="vanta"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="vanta"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Aster */}
-            {selectedExchange === "aster" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Aster #1
-                    </h3>
-                    <AccountLabelControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="aster"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="aster" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="aster"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={asterEnabled}
-                      onFallbackChange={setAsterEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("aster")}
-                  lane={getVenueLane("aster")}
-                />
-
-                <VenueAccountsSection
-                  venue="aster"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="aster"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Binance */}
-            {selectedExchange === "binance" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Binance #1
-                    </h3>
-                    <AccountLabelControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="binance"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="binance" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="binance"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={binanceEnabled}
-                      onFallbackChange={setBinanceEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("binance")}
-                  lane={getVenueLane("binance")}
-                />
-
-                <VenueAccountsSection
-                  venue="binance"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="binance"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Coinbase */}
-            {selectedExchange === "coinbase" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Coinbase #1
-                    </h3>
-                    <AccountLabelControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="coinbase"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="coinbase" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="coinbase"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={coinbaseEnabled}
-                      onFallbackChange={setCoinbaseEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("coinbase")}
-                  lane={getVenueLane("coinbase")}
-                />
-
-                <VenueAccountsSection
-                  venue="coinbase"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="coinbase"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Decibel */}
-            {selectedExchange === "decibel" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Decibel #1
-                    </h3>
-                    <AccountLabelControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="decibel"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="decibel" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="decibel"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={decibelEnabled}
-                      onFallbackChange={setDecibelEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("decibel")}
-                  lane={getVenueLane("decibel")}
-                />
-
-                <VenueAccountsSection
-                  venue="decibel"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="decibel"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Interactive Brokers */}
-            {/* Exchange: edgeX */}
-            {selectedExchange === "edgex" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      edgeX #1
-                    </h3>
-                    <AccountLabelControl venue="edgex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="edgex"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="edgex" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="edgex"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={edgexEnabled}
-                      onFallbackChange={setEdgexEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("edgex")}
-                  lane={getVenueLane("edgex")}
-                />
-
-                <VenueAccountsSection
-                  venue="edgex"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="edgex"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: GRVT */}
-            {selectedExchange === "grvt" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      GRVT #1
-                    </h3>
-                    <AccountLabelControl venue="grvt" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="grvt"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="grvt" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="grvt"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={grvtEnabled}
-                      onFallbackChange={setGrvtEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("grvt")}
-                  lane={getVenueLane("grvt")}
-                />
-
-                <VenueAccountsSection
-                  venue="grvt"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="grvt"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {selectedExchange === "ibkr" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Interactive Brokers #1
-                    </h3>
-                    <AccountLabelControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="ibkr"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="ibkr" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="ibkr"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={ibkrEnabled}
-                      onFallbackChange={setIbkrEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("ibkr")}
-                  lane={getVenueLane("ibkr")}
-                />
-
-                <VenueAccountsSection
-                  venue="ibkr"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="ibkr"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: IG Trading */}
-            {selectedExchange === "ig" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      IG Trading #1
-                    </h3>
-                    <AccountLabelControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="ig"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="ig" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="ig"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={igEnabled}
-                      onFallbackChange={setIgEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("ig")}
-                  lane={getVenueLane("ig")}
-                />
-
-                <VenueAccountsSection
-                  venue="ig"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="ig"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: OKX */}
-            {selectedExchange === "okx" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      OKX #1
-                    </h3>
-                    <AccountLabelControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="okx"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="okx" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="okx"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={okxEnabled}
-                      onFallbackChange={setOkxEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("okx")}
-                  lane={getVenueLane("okx")}
-                />
-
-                <VenueAccountsSection
-                  venue="okx"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="okx"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {/* Exchange: Variational */}
-            {/* Exchange: Ondo Perps */}
-            {selectedExchange === "ondoperps" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Ondo Perps #1
-                    </h3>
-                    <AccountLabelControl venue="ondoperps" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="ondoperps"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="ondoperps" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="ondoperps"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={ondoperpsEnabled}
-                      onFallbackChange={setOndoperpsEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("ondoperps")}
-                  lane={getVenueLane("ondoperps")}
-                />
-
-                <VenueAccountsSection
-                  venue="ondoperps"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="ondoperps"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-            {selectedExchange === "variational" && (
-              <div className="space-y-4">
-              <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-                <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-                  <div className="flex items-center space-x-2">
-                    <h3 className="text-[13px] font-mono font-bold text-slate-900">
-                      Variational #1
-                    </h3>
-                    <AccountLabelControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                  </div>
-                  <div className="flex items-center space-x-3">
-                    <AccountCredentialsDelete
-                      venue="variational"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      onChanged={handleAccountsChanged}
-                    />
-                    <VenueDefaultControl venue="variational" refreshKey={accountsEpoch} onChanged={() => setAccountsEpoch((e) => e + 1)} />
-                    <VenueAccountToggle
-                      venue="variational"
-                      refreshKey={accountsEpoch}
-                      locked={isVaultLocked}
-                      fallbackEnabled={variationalEnabled}
-                      onFallbackChange={setVariationalEnabled}
-                      onChanged={() => setAccountsEpoch((e) => e + 1)}
-                    />
-                  </div>
-                </div>
-
-                <VenueBalancePanel
-                  bal={getVenueBalance("variational")}
-                  lane={getVenueLane("variational")}
-                />
-
-                <VenueAccountsSection
-                  venue="variational"
-                  locked={isVaultLocked}
-                  refreshKey={accountsEpoch}
-                  onChanged={() => setAccountsEpoch((e) => e + 1)}
-                />
-              </div>
-
-              <AddAccountSlot
-                venue="variational"
-                locked={isVaultLocked}
-                onChanged={() => setAccountsEpoch((e) => e + 1)}
-              />
-              </div>
-            )}
-
-
-              </div>
-
-              {/* Locked Vault Overlay: Completely Greys Out the Exchange Configuration */}
-              {isVaultLocked && (
-                <div className="absolute inset-0 z-40 bg-slate-100 flex items-center justify-center p-4 animate-in fade-in duration-150">
-                  <div className="bg-white rounded-xl p-6 shadow-2xl w-80 text-center space-y-4 border border-slate-200 animate-in zoom-in-95 duration-150">
-                    <div className="w-12 h-12 rounded-lg bg-blue-50 border border-blue-100 flex items-center justify-center mx-auto text-accent shadow-2xs">
-                      {api.isTauri && isVaultInitializing ? (
-                        <Key className="w-5 h-5 text-accent" />
-                      ) : (
-                        <Lock className="w-5 h-5 text-accent" />
-                      )}
-                    </div>
-                    {api.isTauri ? (
-                      <>
-                        <div>
-                          <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-                            {isVaultStatusLoading
-                              ? "Checking Secure Vault"
-                              : isVaultInitializing
-                              ? "Create Password"
-                              : "Vault Locked"}
-                          </h4>
-                          <p className="text-xs text-slate-500 font-sans mt-1">
-                            {isVaultStatusLoading
-                              ? "Loading local vault status..."
-                              : isVaultInitializing
-                              ? "Create a password to encrypt credentials"
-                              : "Enter your password to unlock credentials"}
-                          </p>
-                        </div>
-
-                        {inlineVaultError && (
-                          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600">
-                            {inlineVaultError}
-                          </div>
-                        )}
-
-                        {!isVaultStatusLoading && (
-                          <div className="space-y-3">
-                            <input
-                              type="password"
-                              value={inlinePassword}
-                              onChange={(e) => setInlinePassword(e.target.value)}
-                              onKeyDown={handleInlineVaultKeyDown}
-                              placeholder={isVaultInitializing ? "Create password..." : "Enter password..."}
-                              autoComplete={isVaultInitializing ? "new-password" : "current-password"}
-                              autoFocus
-                              className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-accent"
-                            />
-                            {isVaultInitializing && (
-                              <>
-                                <input
-                                  type="password"
-                                  value={inlineConfirmPassword}
-                                  onChange={(e) => setInlineConfirmPassword(e.target.value)}
-                                  onKeyDown={handleInlineVaultKeyDown}
-                                  placeholder="Confirm password..."
-                                  autoComplete="new-password"
-                                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-md text-xs font-mono text-center focus:outline-none focus:ring-1 focus:ring-accent"
-                                />
-                                <p className="text-xs text-slate-500 font-sans leading-relaxed">
-                                  Use at least 12 characters. Letters, numbers, and symbols are accepted. Longer passwords are safer, and this password cannot be recovered.
-                                </p>
-                              </>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => void handleInlineVaultSubmit()}
-                              disabled={inlineUnlocking || !vaultStatus || !inlinePassword || (isVaultInitializing && !inlineConfirmPassword)}
-                              className="w-full py-2 bg-accent hover:bg-blue-600 text-white font-semibold text-xs font-mono rounded-md transition shadow-2xs disabled:opacity-50 cursor-pointer"
-                            >
-                              {inlineUnlocking
-                                ? isVaultInitializing ? "Creating Vault..." : "Unlocking..."
-                                : isVaultInitializing ? "Create & Unlock Vault" : "Unlock Vault"}
-                            </button>
-                          </div>
-                        )}
-                      </>
-                    ) : (
                       <div>
-                        <h4 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">Desktop Application Required</h4>
-                        <p className="text-xs text-slate-500 font-sans mt-1">
-                          Secure credential storage is available only in the desktop application.
+                        <h4 className="text-xs font-bold font-mono text-slate-900">
+                          {isVaultInitializing ? "Master Password Not Created" : "Secure Vault is Locked"}
+                        </h4>
+                        <p className="text-[11px] text-slate-600 font-sans mt-0.5">
+                          {isVaultInitializing
+                            ? "Create a master password to encrypt and manage exchange API keys."
+                            : "Unlock your vault with your master password to view, add, or edit live API credentials."}
                         </p>
                       </div>
-                    )}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowVaultModal(true)}
+                      className="btn-accent px-3 py-1.5 text-xs font-mono font-bold flex items-center space-x-1.5 shrink-0 ml-3 cursor-pointer"
+                    >
+                      <Unlock className="w-3.5 h-3.5" />
+                      <span>{isVaultInitializing ? "Create Password" : "Unlock Vault"}</span>
+                    </button>
                   </div>
+                )}
+
+            {/* Exchange: Kraken (Spot & Futures Multi-Market) */}
+            {selectedExchange === "kraken" && (
+              <div className="space-y-4">
+                <div className="p-2.5 bg-blue-50/70 border border-blue-200 rounded-lg text-xs font-mono text-slate-600">
+                  💡 Kraken maintains separate API infrastructure for Spot and Futures markets. Configure accounts independently for each market.
                 </div>
-              )}
+
+                {/* Kraken Spot */}
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
+                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
+                  </div>
+                  <VenueAccountsSection
+                    venue="kraken_spot"
+                    locked={isVaultLocked}
+                    bal={getVenueBalance("kraken")}
+                    lane={getVenueLane("kraken")}
+                    fallbackEnabled={krakenSpotEnabled}
+                    onFallbackChange={setKrakenSpotEnabled}
+                    refreshKey={accountsEpoch}
+                    onChanged={handleAccountsChanged}
+                  />
+                </div>
+
+                {/* Kraken Futures */}
+                <div className="space-y-2">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
+                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
+                  </div>
+                  <VenueAccountsSection
+                    venue="kraken_futures"
+                    locked={isVaultLocked}
+                    bal={getVenueBalance("kraken")}
+                    lane={getVenueLane("kraken")}
+                    fallbackEnabled={krakenFuturesEnabled}
+                    onFallbackChange={setKrakenFuturesEnabled}
+                    refreshKey={accountsEpoch}
+                    onChanged={handleAccountsChanged}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Standard Exchanges */}
+            {selectedExchange !== "kraken" && (
+              <VenueAccountsSection
+                venue={selectedExchange}
+                locked={isVaultLocked}
+                bal={getVenueBalance(selectedExchange)}
+                lane={getVenueLane(selectedExchange)}
+                fallbackEnabled={venueFlagEnabled(selectedExchange)}
+                onFallbackChange={(en) => setVenueFlagEnabled(selectedExchange, en)}
+                refreshKey={accountsEpoch}
+                onChanged={handleAccountsChanged}
+              />
+            )}
+
+
+              </div>
             </div>
           ) : (
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               {errorMsg && (
-                <div className="p-4 bg-red-50 border border-red-200 text-red-700 rounded-lg text-xs font-mono flex items-center space-x-2">
+                <div className="p-4 bg-loss-dim border border-loss-border text-loss rounded-xl text-xs font-mono flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{errorMsg}</span>
                 </div>
               )}
 
               {saved && (
-                <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-700 rounded-lg text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
+                <div className="p-4 bg-profit-dim border border-profit-border text-profit rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
                   <CheckCircle2 className="w-4 h-4 shrink-0" />
                   <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
                 </div>
               )}
-        {/* =================================================================== */}
-        {/* SECTION 2B: STRATEGY ACCOUNT ROUTING                               */}
-        {/* =================================================================== */}
-        {activeTab === "strategies" && (
-          <div className="max-w-4xl mx-auto w-full">
-            <StrategyRoutingPanel />
-          </div>
-        )}
 
         {/* =================================================================== */}
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
@@ -2441,7 +1201,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts on supported API venues (Aster & Hyperliquid). Live execution requires an unlocked credential vault and at least two live-ready venues."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts on supported API venues. Live execution requires an unlocked credential vault and at least two live-ready venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -2449,43 +1209,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     ? "Both modes require exchange API connectivity for market data."
                     : "Unavailable — no exchange API is connected. Enable a venue with working connectivity in the Exchanges tab first."}
                 </p>
-
-                {/* Venue Execution Capability Indicators */}
-                {venueCapabilities.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    {venueCapabilities.map((cap) => (
-                      <span
-                        key={cap.venue}
-                        className={`px-2 py-0.5 rounded border font-mono text-[10px] flex items-center gap-1.5 ${
-                          cap.liveReady
-                            ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-400"
-                            : cap.supportsLive
-                            ? "bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-400"
-                            : "bg-slate-100 dark:bg-slate-800/40 border-surface-border text-slate-400"
-                        }`}
-                        title={
-                          cap.liveReady
-                            ? `${cap.name}: Live execution ready (API keys active in unlocked vault)`
-                            : cap.supportsLive
-                            ? `${cap.name}: Live execution supported, but credentials missing or vault is locked`
-                            : `${cap.name}: Read-only market data venue (no live order placement API)`
-                        }
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${
-                            cap.liveReady
-                              ? "bg-emerald-500 animate-pulse"
-                              : cap.supportsLive
-                              ? "bg-amber-500"
-                              : "bg-slate-400"
-                          }`}
-                        />
-                        <span className="font-semibold">{cap.name}</span>:{" "}
-                        {cap.liveReady ? "LIVE READY" : cap.supportsLive ? "CREDS NEEDED" : "READ ONLY"}
-                      </span>
-                    ))}
-                  </div>
-                )}
 
                 <div className="flex items-center space-x-4 pt-1">
                   <label
@@ -2505,23 +1228,32 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </label>
                   <label
                     className={`flex items-center space-x-2 ${
-                      canSwitchToLive ? "cursor-pointer" : "cursor-not-allowed opacity-60"
+                      canSwitchToLive || !vaultStatus?.is_unlocked ? "cursor-pointer" : "cursor-not-allowed opacity-60"
                     }`}
                     title={
                       !vaultStatus?.is_unlocked
-                        ? "Vault is locked. Unlock the vault to enable real trading."
+                        ? "Vault is locked. Click to enter password and unlock the vault."
                         : liveReadyVenues.length < 2
-                        ? `Requires at least 2 live-ready venues (currently ${liveReadyVenues.length}: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Aster & Hyperliquid support live API orders.`
+                        ? `Requires at least 2 live-ready venues (currently ${liveReadyVenues.length}: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Configure and enable API keys in the Exchanges tab.`
                         : "Switch to Real Trading"
                     }
+                    onClick={() => {
+                      if (!vaultStatus?.is_unlocked && api.isTauri) {
+                        setShowVaultModal(true);
+                      }
+                    }}
                   >
                     <input
                       type="radio"
                       name="trading_mode"
                       value="real"
                       checked={tradingMode === "real"}
-                      disabled={!canSwitchToLive}
+                      disabled={!canSwitchToLive && (vaultStatus?.is_unlocked ?? false)}
                       onChange={() => {
+                        if (!vaultStatus?.is_unlocked && api.isTauri) {
+                          setShowVaultModal(true);
+                          return;
+                        }
                         if (canSwitchToLive) {
                           if (!liveRiskAgreed && tradingMode !== "real") {
                             setShowLiveRiskModal(true);
@@ -2530,12 +1262,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                           }
                         }
                       }}
-                      className="text-red-600 focus:ring-red-600"
+                      className="text-loss focus:ring-loss"
                     />
                     <span className="font-semibold text-slate-800 flex items-center gap-1.5">
                       Real Trading
                       {tradingMode === "real" && (
-                        <span className="text-[10px] bg-red-600 text-white font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider animate-pulse">
+                        <span className="text-[10px] bg-loss text-white font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider animate-pulse">
                           LIVE
                         </span>
                       )}
@@ -2544,10 +1276,21 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 </div>
 
                 {!canSwitchToLive && (
-                  <p className="text-[11px] text-amber-600 dark:text-amber-400 font-mono mt-0.5">
-                    {!vaultStatus?.is_unlocked
-                      ? "🔒 Real trading locked: Unlock the secure credential vault to enable live orders."
-                      : `⚠️ Real trading requires at least 2 live-ready venues with API keys enabled (${liveReadyVenues.length}/2 ready: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Aster & Hyperliquid support live order execution.`}
+                  <p className="text-[11px] text-warn font-mono mt-0.5">
+                    {!vaultStatus?.is_unlocked ? (
+                      <span className="flex items-center space-x-1.5">
+                        <span>🔒 Real trading locked: Unlock secure credential vault to enable live orders.</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowVaultModal(true)}
+                          className="underline hover:text-accent font-bold cursor-pointer"
+                        >
+                          Unlock Now
+                        </button>
+                      </span>
+                    ) : (
+                      `⚠️ Real trading requires at least 2 live-ready venues with API keys enabled (${liveReadyVenues.length}/2 ready: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}).`
+                    )}
                   </p>
                 )}
               </div>
@@ -2757,8 +1500,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
 
               {updateMsg && (
-                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-lg text-xs font-mono flex items-center space-x-2">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <div className="p-3 bg-profit-dim border border-profit-border text-profit rounded-xl text-xs font-mono flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-profit shrink-0" />
                   <span>{updateMsg}</span>
                 </div>
               )}
@@ -2856,96 +1599,159 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     isOpen={showVaultModal && api.isTauri}
     vaultStatus={vaultStatus}
     onClose={() => setShowVaultModal(false)}
-    onSuccess={(status) => {
+    onSuccess={async (status) => {
       setVaultStatus(status);
       setShowVaultModal(false);
+      try {
+        const sanitized = await api.getEngineSettings();
+        setConfiguredVenues(sanitized.configured_venues || []);
+        if (sanitized.trading_mode === "real" || sanitized.trading_mode === "paper") {
+          setTradingMode(sanitized.trading_mode);
+        }
+        setAccountsEpoch((prev) => prev + 1);
+        api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
+        await loadVenueBalances();
+      } catch (err) {
+        console.warn("Failed to refresh settings after vault unlock:", err);
+      }
     }}
   />
 
   {/* Live Trading Risk Confirmation Modal */}
   {showLiveRiskModal && (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
-      <div className="bg-surface-raised border-2 border-red-500/50 rounded-xl shadow-2xl max-w-lg w-full p-6 text-slate-100 animate-in fade-in zoom-in-95 duration-150">
-        <div className="flex items-center space-x-3 text-red-400 mb-4 pb-3 border-b border-surface-border">
-          <div className="p-2 bg-red-500/10 rounded-lg border border-red-500/30">
-            <AlertTriangle className="w-6 h-6 text-red-500" />
+    <div className="modal-backdrop">
+      <div className="modal-card max-w-lg w-full p-6 text-slate-900 border border-surface-border rounded-2xl shadow-xl">
+        <div className="flex items-center space-x-3 mb-4 pb-3 border-b border-surface-border">
+          <div className="p-2.5 bg-loss-dim rounded-xl border border-loss-border text-loss shadow-2xs">
+            <ShieldAlert className="w-6 h-6 text-loss" />
           </div>
           <div>
-            <h3 className="text-lg font-bold text-slate-100">Institutional Risk Warning</h3>
-            <p className="text-xs text-red-400/90 font-mono">Live Automated Execution Activation</p>
+            <h3 className="text-base font-bold font-sans text-slate-900 leading-snug">
+              Live Trading Risk Disclosure
+            </h3>
+            <p className="text-xs text-loss font-mono">Real-Capital Execution Activation</p>
           </div>
         </div>
 
-        <div className="space-y-3 text-xs text-slate-300 mb-6 leading-relaxed">
-          <div className="p-3 bg-red-950/30 border border-red-800/40 rounded-lg text-red-200 space-y-1.5 font-mono text-[11px]">
-            <p className="font-bold text-red-300">⚠️ CAPITAL AT RISK — TWO SIGMA EXECUTION DISCIPLINE</p>
-            <p>
-              You are enabling real-money automated order submission. Live orders will be placed directly to connected exchange order books.
+        <div className="space-y-3.5 text-xs text-slate-600 mb-5 leading-relaxed">
+          <div className="p-3 bg-loss-dim border border-loss-border rounded-xl text-loss space-y-1 font-mono text-[11px]">
+            <p className="font-bold text-loss flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span>REAL CAPITAL AT RISK</span>
+            </p>
+            <p className="text-slate-700 leading-normal font-sans text-xs">
+              You are enabling real-money automated order execution. Live orders will be submitted directly to connected exchange order books using your real account balances.
             </p>
           </div>
 
-          <div className="space-y-2 text-slate-300">
-            <div className="flex items-start gap-2">
-              <span className="font-bold text-accent font-mono">1.</span>
-              <p>
-                <strong className="text-slate-100">Selective Live Execution:</strong> Only venue pairs where <span className="text-emerald-400 font-semibold">BOTH venues support live API execution</span> (currently Aster & Hyperliquid) will submit live orders. Routes involving read-only venues will fail closed to prevent naked unhedged legs.
-              </p>
+          <div className="space-y-3 text-slate-700">
+            <div className="flex items-start gap-2.5">
+              <span className="w-5 h-5 rounded-full bg-accent/10 text-accent font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                1
+              </span>
+              <div>
+                <strong className="text-slate-900 font-semibold">Authenticated Venues Only:</strong> Orders are routed exclusively between venues with authenticated API credentials in your unlocked vault. Routes involving unauthenticated or read-only venues automatically fail closed to prevent unhedged exposure.
+              </div>
             </div>
-            <div className="flex items-start gap-2">
-              <span className="font-bold text-accent font-mono">2.</span>
-              <p>
-                <strong className="text-slate-100">Market Risk & Latency:</strong> Slippage, network jitter, and orderbook changes can result in price deviation or partial fills.
-              </p>
+
+            <div className="flex items-start gap-2.5">
+              <span className="w-5 h-5 rounded-full bg-accent/10 text-accent font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                2
+              </span>
+              <div>
+                <strong className="text-slate-900 font-semibold">Execution Latency &amp; Market Risk:</strong> Network jitter, exchange rate limits, and rapid orderbook depth fluctuations can cause slippage or partial fills. Real exchange fees and funding rates apply to all fills.
+              </div>
             </div>
-            <div className="flex items-start gap-2">
-              <span className="font-bold text-accent font-mono">3.</span>
-              <p>
-                <strong className="text-slate-100">Kill Switch:</strong> Use the <span className="font-mono text-amber-400 font-semibold">PAUSE</span> button in the header at any time to immediately halt new order submissions.
-              </p>
+
+            <div className="flex items-start gap-2.5">
+              <span className="w-5 h-5 rounded-full bg-accent/10 text-accent font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                3
+              </span>
+              <div>
+                <strong className="text-slate-900 font-semibold">Safety Controls &amp; Emergency Stop:</strong> Delta guards, max grid steps, and minimum profit hurdles remain enforced. Use <span className="font-mono font-bold text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200">PAUSE</span> in the header to freeze new submissions while preserving open positions, or <span className="font-mono font-bold text-loss bg-loss-dim px-1 py-0.5 rounded border border-loss-border">EMERGENCY STOP</span> to immediately halt the engine and flatten open legs.
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2.5">
+              <span className="w-5 h-5 rounded-full bg-accent/10 text-accent font-bold font-mono text-[11px] flex items-center justify-center shrink-0 mt-0.5">
+                4
+              </span>
+              <div>
+                <strong className="text-slate-900 font-semibold">Vault Security:</strong> All API keys remain encrypted on-device. Relocking the vault or closing the application immediately stops live execution.
+              </div>
             </div>
           </div>
 
-          <div className="pt-2 border-t border-surface-border">
-            <label className="text-[11px] font-mono text-slate-400 block mb-1.5">
-              To confirm activation, please type <span className="text-red-400 font-bold select-all">CONFIRM LIVE TRADING</span> below:
+          <div className="pt-3 border-t border-surface-border space-y-2.5">
+            <label className="flex items-start space-x-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={liveRiskAck}
+                onChange={(e) => setLiveRiskAck(e.target.checked)}
+                className="mt-0.5 rounded text-loss focus:ring-loss border-surface-border"
+              />
+              <span className="text-[11px] text-slate-700 font-medium leading-normal">
+                I acknowledge the risks of automated real-money trading and confirm my risk parameters and exchange credentials.
+              </span>
             </label>
-            <input
-              type="text"
-              value={liveRiskConfirmationInput}
-              onChange={(e) => setLiveRiskConfirmationInput(e.target.value)}
-              placeholder="CONFIRM LIVE TRADING"
-              className="w-full px-3 py-2 bg-surface border border-surface-border rounded-md text-slate-100 font-mono text-xs focus:outline-none focus:ring-1 focus:ring-red-500 placeholder-slate-600"
-            />
+
+            <div>
+              <div className="flex items-center justify-between text-[11px] font-mono text-slate-500 mb-1.5">
+                <span>
+                  Type <span className="text-loss font-bold select-all">CONFIRM</span> below to enable:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLiveRiskConfirmationInput("CONFIRM");
+                    setLiveRiskAck(true);
+                  }}
+                  className="text-[11px] text-accent hover:underline font-mono cursor-pointer"
+                >
+                  Quick fill
+                </button>
+              </div>
+              <input
+                type="text"
+                value={liveRiskConfirmationInput}
+                onChange={(e) => setLiveRiskConfirmationInput(e.target.value)}
+                placeholder="Type CONFIRM"
+                className="input-field w-full font-mono text-xs text-slate-900"
+              />
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center justify-end space-x-3 pt-3 border-t border-surface-border">
+        <div className="flex items-center justify-end space-x-2.5 pt-3 border-t border-surface-border">
           <button
             type="button"
             onClick={() => {
               setShowLiveRiskModal(false);
               setLiveRiskConfirmationInput("");
+              setLiveRiskAck(false);
             }}
-            className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors"
+            className="btn-secondary px-4 py-2 text-xs cursor-pointer"
           >
             Cancel (Keep Paper)
           </button>
           <button
             type="button"
-            disabled={liveRiskConfirmationInput !== "CONFIRM LIVE TRADING"}
+            disabled={
+              !liveRiskAck ||
+              (liveRiskConfirmationInput.trim().toUpperCase() !== "CONFIRM" &&
+               liveRiskConfirmationInput.trim().toUpperCase() !== "CONFIRM LIVE TRADING")
+            }
             onClick={() => {
-              if (liveRiskConfirmationInput === "CONFIRM LIVE TRADING") {
+              const inputNorm = liveRiskConfirmationInput.trim().toUpperCase();
+              if (liveRiskAck && (inputNorm === "CONFIRM" || inputNorm === "CONFIRM LIVE TRADING")) {
                 setLiveRiskAgreed(true);
                 setTradingMode("real");
                 setShowLiveRiskModal(false);
                 setLiveRiskConfirmationInput("");
+                setLiveRiskAck(false);
               }
             }}
-            className={`px-4 py-2 text-xs font-bold rounded-lg uppercase tracking-wider transition-all ${
-              liveRiskConfirmationInput === "CONFIRM LIVE TRADING"
-                ? "bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-900/30 cursor-pointer"
-                : "bg-red-950/40 text-red-500/40 border border-red-900/30 cursor-not-allowed"
-            }`}
+            className="btn-danger px-4 py-2 text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Activate Live Trading
           </button>

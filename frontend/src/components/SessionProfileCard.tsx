@@ -58,7 +58,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
   };
 
   return (
-    <div className="bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs">
+    <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-2.5 shadow-card">
       <label className="text-xs text-slate-700 font-medium flex items-center justify-between">
         <span className="flex items-center">
           Session Profile
@@ -79,20 +79,20 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
             : "Loading session aggregates…"}
         </div>
       ) : (
-        <div className="space-y-1.5">
+        <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {profile.isWeekend && (
-              <span className="px-1.5 py-0.5 rounded-sm border border-amber-300 bg-amber-50 text-amber-700">
+              <span className="px-2 py-0.5 rounded-md border border-warn-border bg-warn-dim text-warn font-medium">
                 weekend x0.5
               </span>
             )}
             {profile.inFundingMask && (
-              <span className="px-1.5 py-0.5 rounded-sm border border-rose-300 bg-rose-50 text-rose-700">
+              <span className="px-2 py-0.5 rounded-md border border-loss-border bg-loss-dim text-loss font-medium">
                 funding stand-down
               </span>
             )}
             <span
-              className="px-1.5 py-0.5 rounded-sm border border-surface-border bg-surface-raised text-slate-600"
+              className="px-2 py-0.5 rounded-md border border-surface-border bg-surface-raised text-slate-600 font-medium"
               title="US cash equity hours (Ondo equity-leg gate)"
             >
               US cash {profile.usCashOpen ? "open" : "closed"}
@@ -103,16 +103,16 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
               No calibrated sessions yet — history accumulates while order books are polled.
             </div>
           ) : (
-            <table className="w-full text-xs font-mono">
+            <table className="w-full text-xs font-mono tabular-nums">
               <thead>
-                <tr className="text-slate-400 text-left">
-                  <th className="py-0.5 pr-2 font-medium">Session</th>
-                  <th className="py-0.5 pr-2 font-medium text-right">Episodes</th>
-                  <th className="py-0.5 pr-2 font-medium text-right">Med bps</th>
-                  <th className="py-0.5 font-medium text-right">Win</th>
+                <tr className="text-slate-400 text-left border-b border-surface-border">
+                  <th className="py-1.5 pr-2 font-medium">Session</th>
+                  <th className="py-1.5 pr-2 font-medium text-right">Episodes</th>
+                  <th className="py-1.5 pr-2 font-medium text-right">Med bps</th>
+                  <th className="py-1.5 font-medium text-right">Win</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y divide-surface-border/60">
                 {profile.sessions.map((s) => (
                   <tr
                     key={s.sessionId}
@@ -122,20 +122,20 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
                         : "text-slate-500"
                     }
                   >
-                    <td className="py-0.5 pr-2">
+                    <td className="py-1 pr-2">
                       {s.sessionId}
                       {s.provisional && <span className="text-slate-400"> *</span>}
                     </td>
-                    <td className="py-0.5 pr-2 text-right">{s.nEpisodes}</td>
-                    <td className="py-0.5 pr-2 text-right">{fmtMed(s.medAbsSpreadBps)}</td>
-                    <td className="py-0.5 text-right">{fmtRate(s.winRate)}</td>
+                    <td className="py-1 pr-2 text-right">{s.nEpisodes}</td>
+                    <td className="py-1 pr-2 text-right">{fmtMed(s.medAbsSpreadBps)}</td>
+                    <td className="py-1 text-right">{fmtRate(s.winRate)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           )}
           <div className="text-xs text-slate-400">* provisional — neutral x1.0, flagged</div>
-          <div className="flex flex-wrap items-center gap-1.5 text-xs pt-1">
+          <div className="flex flex-wrap items-center gap-2 text-xs pt-1">
             <span className="text-slate-500">
               {profile.promotion == null
                 ? "Phase-1 baseline — no promoted tables"
@@ -145,7 +145,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
               type="button"
               onClick={handleRecalibrate}
               disabled={promoRunning}
-              className="px-2 py-0.5 rounded-sm border border-surface-border bg-surface-raised text-slate-600 hover:text-slate-900 transition cursor-pointer disabled:opacity-50"
+              className="btn-secondary px-2.5 py-1 text-xs"
               title="Run the nightly HAR-anchor + walk-forward promotion job now (same code path as the scheduler)"
             >
               {promoRunning ? "Recalibrating…" : "Recalibrate now"}

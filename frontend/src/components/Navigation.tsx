@@ -90,27 +90,27 @@ export const Navigation: React.FC<NavigationProps> = ({
           <button
             key={t.id}
             onClick={() => onSelectTab(t.id)}
-            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-xs font-mono transition select-none group cursor-pointer ${
+            className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2.5 text-xs transition-colors select-none group cursor-pointer ${
               isActive
-                ? "text-accent font-bold bg-surface"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/50 font-medium"
+                ? "text-accent font-sans font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/70 font-sans font-medium"
             }`}
             title={t.label}
           >
             <Icon
-              className={`w-3 h-3 xl:w-3.5 xl:h-3.5 transition shrink-0 ${
+              className={`w-3.5 h-3.5 transition-colors shrink-0 ${
                 isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
               }`}
             />
-            <span className="truncate tracking-tight font-mono">
+            <span className="truncate tracking-tight font-sans text-xs">
               {t.label}
             </span>
 
             {/* Render badge only when present to give maximum room to labels */}
             {t.badge !== undefined && (
-              <span className="inline-flex items-center justify-center min-w-[16px] h-4 shrink-0">
+              <span className="inline-flex items-center justify-center shrink-0">
                 <span
-                  className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
+                  className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono min-w-[18px] text-center leading-none transition-all ${
                     isActive
                       ? "bg-accent text-white shadow-2xs"
                       : "bg-accent-dim text-accent border border-accent-line/60"
@@ -121,9 +121,9 @@ export const Navigation: React.FC<NavigationProps> = ({
               </span>
             )}
 
-            {/* CommBank-style active bottom underline bar */}
+            {/* Institutional active bottom underline bar with rounded top caps */}
             {isActive && (
-              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent rounded-t-sm" />
             )}
           </button>
         );

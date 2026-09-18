@@ -10,7 +10,7 @@ test("badge renders the session label and the allow multiplier", () => {
   );
   assert.match(html, /OVERLAP/);
   assert.match(html, /x1\.0/);
-  assert.match(html, /bg-emerald-50/);
+  assert.match(html, /bg-profit-dim/);
 });
 
 test("provisional badge flags neutral multipliers and renders the dot", () => {
@@ -19,7 +19,7 @@ test("provisional badge flags neutral multipliers and renders the dot", () => {
   );
   assert.match(html, /ASIA/);
   assert.match(html, /provisional/);
-  assert.match(html, /bg-amber-50/);
+  assert.match(html, /bg-warn-dim/);
 });
 
 test("funding mask allow of zero renders the blocked style", () => {
@@ -28,7 +28,7 @@ test("funding mask allow of zero renders the blocked style", () => {
   );
   assert.match(html, /DEAD/);
   assert.match(html, /x0\.0/);
-  assert.match(html, /bg-rose-50/);
+  assert.match(html, /bg-loss-dim/);
 });
 
 test("unknown session renders an em dash, never a fabricated label", () => {
@@ -39,5 +39,5 @@ test("unknown session renders an em dash, never a fabricated label", () => {
     React.createElement(SessionBadge, { sessionId: undefined, allow: NaN }),
   );
   assert.match(undefinedHtml, /—/);
-  assert.match(undefinedHtml, /bg-slate-100/);
+  assert.match(undefinedHtml, /bg-surface-raised/);
 });

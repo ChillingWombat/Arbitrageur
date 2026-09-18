@@ -10,6 +10,7 @@ use arbitrager_core::position::{AccountSnapshot, Balance, Position};
 use arbitrager_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrager_core::types::{dec, Decimal, Side, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use parking_lot::RwLock;
 
 /// Lighter zk-Rollup DEX adapter.
 #[allow(dead_code)]
@@ -17,8 +18,8 @@ pub struct LighterAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    account_index: Option<u64>,
-    api_key_private_key: Option<String>,
+    account_index: RwLock<Option<u64>>,
+    api_key_private_key: RwLock<Option<String>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -42,17 +43,40 @@ impl LighterAdapter {
         let base = base_url.unwrap_or_else(|| "https://mainnet.zklighter.elliot.ai".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().build().unwrap_or_default(),
+            client: {
+                let mut headers = reqwest::header::HeaderMap::new();
+                headers.insert(
+                    reqwest::header::USER_AGENT,
+                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36".parse().unwrap(),
+                );
+                headers.insert(
+                    reqwest::header::ACCEPT,
+                    "application/json, text/plain, */*".parse().unwrap(),
+                );
+                Client::builder()
+                    .default_headers(headers)
+                    .build()
+                    .unwrap_or_default()
+            },
             base_url: base,
-            account_index,
-            api_key_private_key,
+            account_index: parking_lot::RwLock::new(account_index),
+            api_key_private_key: parking_lot::RwLock::new(api_key_private_key),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
 
+    pub fn update_credentials(
+        &self,
+        account_index: Option<u64>,
+        api_key_private_key: Option<String>,
+    ) {
+        *self.account_index.write() = account_index;
+        *self.api_key_private_key.write() = api_key_private_key;
+    }
+
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
         // 1. Check rate limiter and in-memory single-flight cache
-        if let Ok(Some(cached_str)) = self.rate_limiter.acquire_or_cache_path(path, true).await {
+        if let Some(cached_str) = self.rate_limiter.acquire_or_cache_path(path, true).await? {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
                 return Ok(val);
             }
@@ -206,13 +230,15 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let coin = symbol
-            .trim()
-            .replace('/', "-")
-            .split('-')
-            .next()
-            .unwrap_or("")
-            .to_uppercase();
+        let clean = symbol.trim().replace('/', "-");
+        let parts: Vec<&str> = clean.split('-').collect();
+        if parts.len() >= 2 {
+            let quote = parts[1];
+            if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("USD") {
+                anyhow::bail!("Lighter markets are quoted in USDC/USD; '{symbol}' is not supported");
+            }
+        }
+        let coin = parts.first().copied().unwrap_or("").to_uppercase();
         if coin.is_empty() {
             anyhow::bail!("Lighter funding-rate request carries no market identifier");
         }
@@ -304,6 +330,7 @@ impl ExchangeAdapter for LighterAdapter {
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
         let idx = self
             .account_index
+            .read()
             .ok_or_else(|| anyhow::anyhow!("Lighter account fetch requires an account index"))?;
         let path = format!("/api/v1/account?by=index&value={}", idx);
 
@@ -408,6 +435,17 @@ impl ExchangeAdapter for LighterAdapter {
         })
     }
 
+    fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn has_live_credentials(&self) -> bool {
+        self.api_key_private_key
+            .read()
+            .as_ref()
+            .map_or(false, |k| !k.trim().is_empty())
+    }
+
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
         anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
     }
@@ -492,7 +530,14 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
         );
     }
 
-    let base = lookup.split('-').next().unwrap_or(lookup.as_str());
+    let parts: Vec<&str> = lookup.split('-').collect();
+    if parts.len() >= 2 {
+        let quote = parts[1];
+        if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("USD") {
+            anyhow::bail!("Lighter markets are quoted in USDC/USD; '{symbol}' is not supported");
+        }
+    }
+    let base = parts.first().copied().unwrap_or(lookup.as_str());
     let matched: Vec<u64> = entries
         .iter()
         .filter(|e| matches_type(e))
@@ -601,6 +646,17 @@ mod tests {
             { "symbol": "sol", "market_id": 77, "market_type": "perp" }
         ]));
         assert!(resolve_market_id(&d, "SOL").is_err());
+    }
+
+    #[test]
+    fn resolve_market_id_rejects_unsupported_quote() {
+        let d = details(serde_json::json!([
+            { "symbol": "BTC", "market_id": 1, "market_type": "perp" },
+            { "symbol": "SOL", "market_id": 2, "market_type": "perp" }
+        ]));
+        assert_eq!(resolve_market_id(&d, "BTC-USDC").unwrap(), 1);
+        assert!(resolve_market_id(&d, "BTC-SOL").is_err());
+        assert!(resolve_market_id(&d, "BTC-ETH").is_err());
     }
 
     #[tokio::test]

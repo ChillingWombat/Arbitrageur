@@ -74,6 +74,24 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 37. As a multi-exchange arbitrageur, I want support for Hyperliquid, Lighter, Vanta (Orderly), Robinhood Arbitrum, Arcus, PopDEX, Polymarket, and Kalshi, so that I can execute across all major venues.
 38. As an operator, I want local untracked credentials (e.g. in `keychain.toml`) to load seamlessly without ever being tracked in version control, so that private keys remain private.
 
+### Multi-Ticker Funding Rate Arbitrage Monitor
+39. As a quantitative carry trader, I want the Funding Rate tab to continuously monitor and rank delta-neutral carry opportunities across all shared, non-hidden tickers simultaneously, rather than being locked to the single spread strategy's active ticker.
+40. As an operator, I want each ranked opportunity card to clearly display its contract symbol (e.g. `[BTC-USDC]`, `[ETH-USDC]`), so that I know exactly which instrument is targeted.
+41. As a trader, I want in-tab asset filter pills (`ALL`, `BTC`, `ETH`, `SOL`, etc.) above the carry cards, so that I can focus on opportunities for a specific asset with one click.
+42. As a carry trader, I want clicking any opportunity card to select and project it in the Carry Yield Amortization Simulator, so that I can visualize break-even hours, trading fees, and projected net carry over 1 to 90 days.
+43. As an automated trader, I want the Funding Carry bot lifecycle controls to operate strategy-wide (`strategyId: "funding"`), executing the highest net APY opportunity meeting minimum APR across all monitored tickers.
+
+### Strategy Auto-Filters: Exchange 24h Volume & Price Resolution
+44. As a risk manager, I want the `Auto Min 24h Volume` filter to evaluate authentic 24h trading turnover reported by the exchanges (e.g. Hyperliquid `dayNtlVlm`, Lighter `daily_quote_token_volume`, Binance `quoteVolume`), rather than internal system execution samples.
+45. As an operator, I want `Auto Min 24h Volume` to aggregate across venues that actively report volume (`min_reported >= floor`), so that an exchange adapter lacking a volume endpoint or experiencing temporary rate-limits does not disqualify high-volume assets like BTC or ETH.
+46. As an algorithmic trader, I want `Auto Min Mid Price` to evaluate against a 3-tier price hierarchy (live orderbook mid -> exchange mark price -> benchmark catalog price), so that background tickers not currently polled in the hub orderbook cache are not mistakenly hidden.
+47. As a trader, I want setting `Auto Min Mid Price = 0.5` to automatically hide sub-$0.50 meme tokens (e.g. PEPE, BONK, SHIB, DOGE) while keeping major assets (BTC $78k+, ETH $2.4k+, SOL $100+) visible and tradable.
+48. As a system operator, I want math operations calculating funding APR, APY, and daily income to use checked decimal arithmetic, preventing multiplication overflows on extreme values or large trade sizes.
+
+### Modern DEX Account Credentials & Copilot
+49. As a Decibel trader, I want Aptos Ed25519 accounts (`account_address` + `ed25519_private_key`) to be recognized by `has_credentials`, so that saved Decibel credentials display as configured rather than "no credential configured".
+50. As an AI Copilot user, I want duplicate Gemini API entries removed from settings, so that AI assistant configuration is clean and unambiguous.
+
 ---
 
 ## Implementation Decisions
@@ -124,6 +142,32 @@ pub struct TickerStrategyConfigDto {
 2. **Unlock Flow**: User enters password -> invokes `api.unlockVault(password)` -> sets in-memory encryption key -> returns `is_unlocked: true` -> overlay unmounts -> credentials render.
 3. **Auto-Lock Timeout**: Closing the settings modal starts a 60-second countdown (`setTimeout(60000)`). If the user reopens settings before expiration, the timeout is cleared. If the timer fires, `api.lockVault()` is called, immediately purging decrypted keys from memory.
 4. **App Termination**: A `beforeunload` event handler invokes `api.lockVault()` synchronously or via fire-and-forget, guaranteeing that memory is wiped when the process ends.
+
+### Multi-Ticker Funding Rate Radar & Execution Engine
+1. **Decoupled Architecture**: `FundingRadar.tsx` does not bind to the single spread strategy's `selectedSymbol`. Instead, it accepts `availableTickers` and periodically scans all shared non-hidden tickers simultaneously.
+2. **Batch IPC Scanning**:
+   - `scan_funding_opportunities` accepts `symbol: Option<String>`, `symbols: Option<Vec<String>>`, and `trade_size_usd: f64`.
+   - `scan_funding_opportunities_batch_impl` iterates across target tickers, queries cached funding rates from `MarketDataHub`, aggregates cross-venue carry permutations via `evaluate_funding_carry`, and sorts descending by `net_apy_pct`.
+   - If an empty symbol or no symbols are provided, it automatically discovers all shared markets across $\ge 2$ active venues.
+3. **In-Tab Filter & Amortization Projection**:
+   - In-tab asset filter tabs (`ALL`, `BTC`, `ETH`, `SOL`, etc.) allow filtering opportunity cards.
+   - Clicking an opportunity highlights the card and sets it as the active selection for the interactive Amortization Simulator, dynamically projecting gross funding collected, trading fees, and net yield across 1, 14, 30, 60, and 90-day holding periods.
+4. **Strategy-Wide Bot Lifecycle**:
+   - Automated funding carry trading runs via `useBotLifecycle({ strategyId: "funding" })` at the strategy level, evaluating the highest-yielding opportunity meeting the `minAprPct` hurdle.
+
+### Strategy Auto-Filters & Price Resolution Architecture
+1. **Real Exchange 24h Volume Aggregation**:
+   - Queries authentic exchange 24h quote volume endpoints: Hyperliquid `dayNtlVlm`, Lighter `daily_quote_token_volume`, Vanta `marketSummary` (`24h_amount`), Binance `quoteVolume`, OKX `volCcy24h`, and Kraken `vol24h`.
+   - Evaluates the minimum volume across venues that **actively report volume** (`min_reported >= floor`). Venues lacking volume endpoints (or experiencing temporary rate-limits) contribute nothing to aggregates without failing closed or locking out high-volume assets.
+2. **3-Tier Price Resolution**:
+   - Resolves mid prices using a strict 3-tier hierarchy:
+     1. Live orderbook mid from `market_data_hub` (`hub_mid_usd`).
+     2. Cached exchange mark/last price from 24h market feeds.
+     3. Authoritative benchmark catalog price (`benchmark_base_price` in Rust, `getTickerBenchmarkPrice` in TypeScript).
+   - This ensures background tickers not currently polled in the hub orderbook cache are evaluated against their true market price rather than being blocked as missing data.
+   - Setting `Auto Min Mid Price = 0.5` reliably filters sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) while keeping major assets (BTC, ETH, SOL) visible.
+3. **Safe Decimal Arithmetic**:
+   - `evaluate_funding_carry` in `arbitrager-math` utilizes `checked_mul` and `checked_div` for funding APR, APY, and daily income calculations, eliminating panic risks on extreme inputs or stress test values.
 
 ---
 

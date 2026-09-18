@@ -50,26 +50,33 @@ function SignalTrendGadgetInner({
   const [series, setSeries] = useState<SignalSeriesDto | null>(null);
   const [failed, setFailed] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
-  const svgRef = useRef<SVGSVGElement | null>(null);
-  const [chartSize, setChartSize] = useState({ w: 800, h: 176 });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [chartWidth, setChartWidth] = useState<number>(0);
 
   useEffect(() => {
-    const el = svgRef.current;
+    const el = containerRef.current;
     if (!el) return;
     const update = () => {
       const w = el.clientWidth;
-      const h = el.clientHeight;
-      if (w > 0 || h > 0)
-        setChartSize((prev) =>
-          prev.w === w && prev.h === h ? prev : { w: w > 0 ? w : prev.w, h: h > 0 ? h : prev.h },
-        );
+      if (w > 0) {
+        setChartWidth((prev) => (prev === w ? prev : w));
+      }
     };
     update();
     if (typeof ResizeObserver !== "undefined") {
-      const ro = new ResizeObserver(update);
+      const ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          const w = Math.round(entry.contentRect.width);
+          if (w > 0) {
+            setChartWidth((prev) => (prev === w ? prev : w));
+          }
+        }
+      });
       ro.observe(el);
       return () => ro.disconnect();
     }
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
   }, []);
 
   const windowOptions = useMemo(() => {
@@ -131,11 +138,19 @@ function SignalTrendGadgetInner({
     return out;
   }, [series]);
 
+  // Gap threshold: if consecutive timestamps differ by more than ~3 nominal
+  // bucket steps (min 60s), consider it an engine downtime gap so we don't
+  // draw fake interpolation lines or a false dislocation band across it.
+  const nominalBucketMs = Math.max(1000, Math.floor((windowSec * 1000) / 500));
+  const gapThreshold = Math.max(nominalBucketMs * 3, 60_000);
+
   const latestBandIdx = bandIdx[bandIdx.length - 1];
   // Only treat the band as "current" when its newest ≥2-venue bucket is at
   // the head of the window — otherwise the badge would quote a stale spread.
   const bandIsFresh =
-    latestBandIdx !== undefined && pointCount - 1 - latestBandIdx <= 2;
+    latestBandIdx !== undefined &&
+    pointCount - 1 - latestBandIdx <= 2 &&
+    (pointCount === 0 || Date.now() - (series?.ts_ms[pointCount - 1] ?? 0) <= gapThreshold);
   const dislocationBps =
     bandIsFresh && series
       ? series.band_max_bps[latestBandIdx] - series.band_min_bps[latestBandIdx]
@@ -165,16 +180,14 @@ function SignalTrendGadgetInner({
     return rows;
   }, [series]);
 
-  // Chart geometry — the svg renders 1:1 (width/height attrs, no viewBox),
-  // so user units are device px and hover fractions map exactly. W/H track
-  // the measured element size; the !== guard in the observer holds the fixed
-  // point so resizes settle instead of looping.
+  // Chart geometry — W tracks the measured container width so lines and
+  // gridlines stretch across the full available space without empty margins.
   const PAD_L = 46;
   const PAD_R = 10;
   const PAD_T = 10;
   const PAD_B = 20;
-  const W = Math.max(320, chartSize.w);
-  const H = Math.max(120, chartSize.h);
+  const W = Math.max(320, chartWidth || 800);
+  const H = 176;
 
   const maxAbsDev = useMemo(() => {
     let m = 0;
@@ -191,7 +204,7 @@ function SignalTrendGadgetInner({
   const yOf = (dev: number): number =>
     PAD_T + (1 - (dev + maxAbsDev) / (2 * maxAbsDev)) * (H - PAD_T - PAD_B);
 
-  // Per-venue paths: a null bucket breaks the line (gaps stay gaps).
+  // Per-venue paths: a null bucket or downtime gap breaks the line (gaps stay gaps).
   const venuePaths = useMemo(() => {
     if (!series) return new Map<string, string>();
     const map = new Map<string, string>();
@@ -204,6 +217,9 @@ function SignalTrendGadgetInner({
           pen = false;
           return;
         }
+        if (i > 0 && t - series.ts_ms[i - 1] > gapThreshold) {
+          pen = false;
+        }
         d += `${pen ? "L" : "M"}${xOf(t).toFixed(1)},${yOf(v).toFixed(1)}`;
         pen = true;
       });
@@ -211,10 +227,10 @@ function SignalTrendGadgetInner({
     });
     return map;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, maxAbsDev, t0, spanMs, W, H]);
+  }, [series, maxAbsDev, t0, spanMs, W, H, gapThreshold]);
 
-  // Isolated observations (no adjacent non-null bucket) draw no visible
-  // line — render them as dots so sparse history doesn't silently vanish.
+  // Isolated observations (no adjacent non-null bucket within gapThreshold)
+  // draw no visible line — render them as dots so sparse history doesn't vanish.
   const isolatedDots = useMemo(() => {
     if (!series) return [] as { vid: string; x: number; y: number }[];
     const n = series.ts_ms.length;
@@ -223,32 +239,61 @@ function SignalTrendGadgetInner({
       for (let i = 0; i < n; i++) {
         const v = series.dev_bps[i][j];
         if (v === null) continue;
-        const prev = i > 0 ? series.dev_bps[i - 1][j] : null;
-        const next = i < n - 1 ? series.dev_bps[i + 1][j] : null;
-        if (prev === null && next === null) {
+        const prevNullOrGap =
+          i === 0 ||
+          series.dev_bps[i - 1][j] === null ||
+          series.ts_ms[i] - series.ts_ms[i - 1] > gapThreshold;
+        const nextNullOrGap =
+          i === n - 1 ||
+          series.dev_bps[i + 1][j] === null ||
+          series.ts_ms[i + 1] - series.ts_ms[i] > gapThreshold;
+        if (prevNullOrGap && nextNullOrGap) {
           dots.push({ vid, x: xOf(series.ts_ms[i]), y: yOf(v) });
         }
       }
     });
     return dots;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, maxAbsDev, t0, spanMs, W, H]);
+  }, [series, maxAbsDev, t0, spanMs, W, H, gapThreshold]);
 
+  // Dislocation band: partitioned into contiguous segments so downtime gaps aren't shaded.
   const bandPath = useMemo(() => {
     if (!series || bandIdx.length < 2) return "";
-    const top = bandIdx.map(
-      (i, k) =>
-        `${k === 0 ? "M" : "L"}${xOf(series.ts_ms[i]).toFixed(1)},${yOf(series.band_max_bps[i]).toFixed(1)}`,
-    );
-    const bottom = [...bandIdx]
-      .reverse()
-      .map(
-        (i) =>
-          `L${xOf(series.ts_ms[i]).toFixed(1)},${yOf(series.band_min_bps[i]).toFixed(1)}`,
+    const segments: number[][] = [];
+    let current: number[] = [];
+    for (let k = 0; k < bandIdx.length; k++) {
+      const idx = bandIdx[k];
+      if (current.length > 0) {
+        const prevIdx = current[current.length - 1];
+        if (series.ts_ms[idx] - series.ts_ms[prevIdx] > gapThreshold) {
+          segments.push(current);
+          current = [];
+        }
+      }
+      current.push(idx);
+    }
+    if (current.length > 0) {
+      segments.push(current);
+    }
+
+    const paths: string[] = [];
+    for (const seg of segments) {
+      if (seg.length < 2) continue;
+      const top = seg.map(
+        (i, k) =>
+          `${k === 0 ? "M" : "L"}${xOf(series.ts_ms[i]).toFixed(1)},${yOf(series.band_max_bps[i]).toFixed(1)}`,
       );
-    return `${top.join(" ")} ${bottom.join(" ")} Z`;
+      const bottom = [...seg]
+        .reverse()
+        .map(
+          (i) =>
+            `L${xOf(series.ts_ms[i]).toFixed(1)},${yOf(series.band_min_bps[i]).toFixed(1)}`,
+        );
+      paths.push(`${top.join(" ")} ${bottom.join(" ")} Z`);
+    }
+    return paths.join(" ");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [series, bandIdx, maxAbsDev, t0, spanMs, W, H]);
+  }, [series, bandIdx, maxAbsDev, t0, spanMs, W, H, gapThreshold]);
 
   const hoverDevs = useMemo(() => {
     if (hoverIdx === null || !series || !series.ts_ms[hoverIdx]) return null;
@@ -382,7 +427,10 @@ function SignalTrendGadgetInner({
       )}
 
       {/* Chart */}
-      <div className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs relative">
+      <div
+        ref={containerRef}
+        className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs relative"
+      >
         {failed ? (
           <EmptyState
             icon={Activity}
@@ -406,9 +454,9 @@ function SignalTrendGadgetInner({
           />
         ) : (
           <svg
-            ref={svgRef}
             width={W}
             height={H}
+            viewBox={`0 0 ${W} ${H}`}
             className="w-full h-auto block"
             onMouseLeave={() => setHoverIdx(null)}
             onMouseMove={(e) => {
@@ -504,30 +552,40 @@ function SignalTrendGadgetInner({
               />
             ))}
 
-            {/* Hover crosshair */}
+            {/* Hover crosshair + timestamp badge */}
             {hoverIdx !== null && series && series.ts_ms[hoverIdx] !== undefined && (
-              <line
-                x1={xOf(series.ts_ms[hoverIdx])}
-                x2={xOf(series.ts_ms[hoverIdx])}
-                y1={PAD_T}
-                y2={H - PAD_B}
-                stroke="#64748b"
-                strokeWidth={1}
-                strokeDasharray="3 3"
-              />
+              <g>
+                <line
+                  x1={xOf(series.ts_ms[hoverIdx])}
+                  x2={xOf(series.ts_ms[hoverIdx])}
+                  y1={PAD_T}
+                  y2={H - PAD_B}
+                  stroke="#64748b"
+                  strokeWidth={1}
+                  strokeDasharray="3 3"
+                />
+                <text
+                  x={Math.min(W - PAD_R - 24, Math.max(PAD_L + 24, xOf(series.ts_ms[hoverIdx])))}
+                  y={PAD_T + 9}
+                  textAnchor="middle"
+                  className="fill-slate-600 font-mono font-bold"
+                  fontSize="9"
+                >
+                  {fmtTick(series.ts_ms[hoverIdx], spanMs)}
+                </text>
+              </g>
             )}
 
-            {/* X-axis time ticks — time fractions, never sample indices:
-                clustered sampling would otherwise pile labels together. */}
+            {/* X-axis time ticks — adaptive density based on chart width */}
             {series &&
-              [0, 0.5, 1].map((f) => {
+              (W >= 640 ? [0, 0.25, 0.5, 0.75, 1] : [0, 0.5, 1]).map((f) => {
                 const t = t0 + f * spanMs;
                 return (
                   <text
                     key={f}
                     x={xOf(t)}
                     y={H - 6}
-                    textAnchor="middle"
+                    textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
                     className="fill-slate-400"
                     fontSize="9"
                     fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"

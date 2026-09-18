@@ -51,6 +51,8 @@ rand = "0.8"
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = { version = "1.8", features = ["derive"] }
+base64 = "0.22"
+bs58 = "0.5"
 
 # Internal crates
 arbitrager-core = { path = "crates/arbitrager-core" }

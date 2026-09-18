@@ -10,7 +10,7 @@ interface BotLifecycleControlsProps {
   reduceOnlyAvailable?: boolean;
   onStart: () => void;
   onPause: () => void;
-  onReduceOnly: () => void;
+  onReduceOnly?: () => void;
   onStop: () => void;
 }
 
@@ -33,7 +33,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
   phase,
   hasOpenPositions,
   disabled = false,
-  reduceOnlyAvailable = false,
+  reduceOnlyAvailable = true,
   onStart,
   onPause,
   onReduceOnly,
@@ -55,7 +55,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       icon: <Play className="w-3 h-3" />,
       enabled: availability.start,
       onClick: onStart,
-      activeClass: "text-emerald-700 hover:bg-emerald-50 border-emerald-300",
+      activeClass: "text-profit hover:bg-profit-dim border-profit-border",
     },
     {
       key: "pause",
@@ -65,19 +65,28 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       // Suspending is safe — stays available even when entries are disabled
       enabled: availability.pause,
       onClick: onPause,
-      activeClass: "text-slate-700 hover:bg-slate-100 border-slate-300",
+      activeClass: "text-slate-700 hover:bg-surface-raised border-surface-border",
     },
-    {
-      key: "reduce",
-      label: "Reduce Only",
-      title: reduceOnlyAvailable
-        ? "Exit-only mode — stops automatically once this strategy is flat"
-        : "Reduce-only exit scheduling is unavailable; use Stop to flatten paper positions",
-      icon: <TrendingDown className="w-3 h-3" />,
-      enabled: availability.reduceOnly,
-      onClick: onReduceOnly,
-      activeClass: "text-amber-700 hover:bg-amber-50 border-amber-300",
-    },
+    ...(reduceOnlyAvailable !== false
+      ? [
+          {
+            key: "reduce",
+            label: "Reduce Only",
+            title:
+              phase === "reduce_only"
+                ? "Currently in Reduce-Only mode (exits only)"
+                : !hasOpenPositions
+                ? "Reduce Only requires open positions to drain"
+                : phase !== "running" && phase !== "paused"
+                ? "Reduce Only requires bot to be running or paused"
+                : "Exit-only mode — stops automatically once this strategy is flat",
+            icon: <TrendingDown className="w-3 h-3" />,
+            enabled: availability.reduceOnly,
+            onClick: onReduceOnly ?? (() => {}),
+            activeClass: "text-warn hover:bg-warn-dim border-warn-border",
+          },
+        ]
+      : []),
     {
       key: "stop",
       label: stopping ? "Stopping…" : "Stop",
@@ -87,7 +96,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       // Emergency exit stays armed while a phase is active or positions remain
       enabled: availability.stop,
       onClick: onStop,
-      activeClass: "text-red-700 hover:bg-red-50 border-red-300",
+      activeClass: "text-loss hover:bg-loss-dim border-loss-border",
     },
   ];
 
@@ -99,7 +108,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       : null;
 
   return (
-    <div className="flex items-center space-x-1.5 px-1.5 py-1 bg-surface border border-surface-border rounded-md shadow-2xs">
+    <div className="flex items-center space-x-1.5 px-2 py-1 bg-surface border border-surface-border rounded-lg shadow-xs">
       <div className="flex items-center gap-1">
         {buttons.map((b) => (
           <button
@@ -108,7 +117,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
             title={b.title}
             disabled={!b.enabled}
             onClick={b.onClick}
-            className={`flex items-center space-x-1 px-2 py-1 rounded-md border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+            className={`flex items-center space-x-1 px-2.5 py-1 rounded-md border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
               b.enabled ? b.activeClass : "text-slate-400 border-surface-border bg-surface-raised/40"
             }`}
           >
@@ -118,7 +127,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
         ))}
       </div>
       {phaseLabel && (
-        <span className="text-xs font-mono font-bold px-1.5 py-0.5 rounded-sm bg-amber-50 text-amber-700 border border-amber-200">
+        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn border border-warn-border">
           {phaseLabel}
         </span>
       )}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   ArrowLeftRight,
   CheckCircle2,
   Eye,
@@ -15,6 +16,8 @@ import type {
   AccountDto,
   EngineSettingsDto,
   StrategyAccountRouteDto,
+  VenueBalanceInfo,
+  VenueLaneStatusDto,
 } from "../types";
 import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
 import { ToggleSwitch } from "./ToggleSwitch";
@@ -32,6 +35,7 @@ interface CredFieldSpec {
   numeric?: boolean;
   placeholder?: string;
   optional?: boolean;
+  hint?: string;
 }
 
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
@@ -91,12 +95,36 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiSecret", label: "Orderly Secret", secret: true },
     { key: "subaccountIndex", label: "Subaccount Index", numeric: true, optional: true, placeholder: "0 = main account" },
   ],
-  // Decibel (Aptos): Geomi client key for reads, node key for SDK access, API wallet key signs txs
+  // Decibel (Aptos): Geomi client key for REST API, node key for optional Aptos Fullnode RPC, API wallet key signs txs
   decibel: [
-    { key: "walletAddress", label: "Login Wallet Address (Aptos)", placeholder: "0x..." },
-    { key: "privateKey", label: "API Wallet Private Key", secret: true, placeholder: "0x..." },
-    { key: "apiKey", label: "Client API Key (Geomi)", secret: true },
-    { key: "passphrase", label: "Node API Key (Geomi)", secret: true, optional: true },
+    {
+      key: "walletAddress",
+      label: "Login Wallet Address (Aptos)",
+      placeholder: "0x...",
+      hint: "Your Aptos account / wallet address.",
+    },
+    {
+      key: "privateKey",
+      label: "API Wallet Private Key",
+      secret: true,
+      placeholder: "0x...",
+      hint: "Private key of the API wallet delegated on Decibel.",
+    },
+    {
+      key: "apiKey",
+      label: "Client API Key (Decibel REST API)",
+      secret: true,
+      placeholder: "Geomi Client API Key",
+      hint: "Bearer API key from geomi.dev for Decibel REST queries.",
+    },
+    {
+      key: "passphrase",
+      label: "Node API Key (Aptos Fullnode RPC)",
+      secret: true,
+      optional: true,
+      placeholder: "Optional Fullnode RPC Key",
+      hint: "Optional. Only needed if using an authenticated private Aptos RPC node.",
+    },
   ],
   // Interactive Brokers: API connects via the TWS/IB Gateway session — account ID is the only stored credential
   ibkr: [
@@ -303,6 +331,9 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               </button>
             )}
           </div>
+          {f.hint && (
+            <p className="text-[10px] text-slate-400 mt-1 leading-tight">{f.hint}</p>
+          )}
         </div>
       );
     })}
@@ -310,21 +341,160 @@ const CredentialGrid: React.FC<CredGridProps> = ({
 );
 
 /* ------------------------------------------------------------------ */
+/* Venue balance & rate budget panel                                   */
+/* ------------------------------------------------------------------ */
+
+/** Venue margin/metrics block rendered inside each account card. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
+export const VenueBalancePanel: React.FC<{
+  bal: VenueBalanceInfo | null;
+  lane?: VenueLaneStatusDto | null;
+  accountTier?: string;
+  isDefault?: boolean;
+}> = ({ bal, lane, accountTier, isDefault }) => {
+  const displayTier = accountTier || lane?.accountTier || "standard";
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
+        {/* Metric 1: Equity */}
+        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+          <div className="flex items-center justify-between text-slate-400">
+            <span className="text-xs font-bold tracking-wider">Total Equity</span>
+            <span className="text-xs">USD</span>
+          </div>
+          <div className="text-xl font-bold text-slate-900 tracking-tight">
+            {bal
+              ? `$${bal.equity_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : "N/A"}
+          </div>
+        </div>
+
+        {/* Metric 2: Available Margin */}
+        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+          <div className="flex items-center justify-between text-slate-400">
+            <span className="text-xs font-bold tracking-wider">Available Margin</span>
+            <span className="text-xs">USD</span>
+          </div>
+          <div className={`text-xl font-bold font-mono tracking-tight tabular-nums ${bal ? "text-profit" : "text-slate-900"}`}>
+            {bal
+              ? `$${bal.available_margin_usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              : "N/A"}
+          </div>
+        </div>
+
+        {/* Metric 3: Margin Rate */}
+        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
+          <div className="flex items-center justify-between text-slate-400">
+            <span className="text-xs font-bold tracking-wider">Margin Rate</span>
+            <span className="text-xs">Utilization</span>
+          </div>
+          <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight font-mono tabular-nums">
+            {bal?.margin_rate_pct != null ? (
+              <>
+                <span>{bal.margin_rate_pct.toFixed(1)}%</span>
+                <span className="text-xs font-normal text-slate-400 font-sans">utilized</span>
+              </>
+            ) : (
+              <span>N/A</span>
+            )}
+          </div>
+          <div className="w-full bg-slate-200 h-1.5 rounded-full overflow-hidden mt-1.5">
+            <div
+              className={`h-full rounded-full transition-all duration-300 ${
+                (bal?.margin_rate_pct ?? 0) > 80
+                  ? "bg-loss"
+                  : (bal?.margin_rate_pct ?? 0) > 50
+                  ? "bg-warn"
+                  : "bg-accent"
+              }`}
+              style={{ width: `${Math.min(100, bal?.margin_rate_pct ?? 0)}%` }}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5 flex-wrap gap-y-1">
+        {lane ? (
+          <>
+            <span
+              className={`px-1.5 py-0.5 rounded-sm border font-bold tracking-wider ${
+                lane.backingOff
+                  ? "bg-loss-dim border-loss-border text-loss"
+                  : "bg-surface-raised border-surface-border text-slate-600"
+              }`}
+              title="Read requests used in the last minute vs the venue's per-minute budget"
+            >
+              {lane.usedLastMin}/{lane.readBudgetPerMin.toFixed(0)}/min{lane.backingOff ? " backoff" : ""}
+            </span>
+            <span>
+              Rate budget · tier {displayTier} · refresh {lane.refreshIntervalSecs.toFixed(0)}s · {lane.symbols} symbols
+            </span>
+          </>
+        ) : (
+          <span>No monitor lane — venue is not streaming market data.</span>
+        )}
+      </div>
+
+      <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
+        {bal ? (
+          bal.is_live ? (
+            <>
+              <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 font-bold tracking-wider text-emerald-800">
+                Live
+              </span>
+              <span>Real exchange balance — live account equity and available margin from connected exchange API.</span>
+            </>
+          ) : (
+            <>
+              <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider text-slate-600">
+                Paper
+              </span>
+              <span>Simulated account balance — virtual funds from the paper-trading engine, not your real exchange balance.</span>
+            </>
+          )
+        ) : isDefault === false ? (
+          <span>Secondary account — set as default to connect live streaming and balance monitoring.</span>
+        ) : (
+          <span>No account balance available for this account.</span>
+        )}
+      </div>
+
+      {bal?.status === "NO_CREDENTIALS" && (
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 flex items-start space-x-2">
+          <span>No live API credentials configured. Add credentials in the accounts section below and unlock the vault to view live balances.</span>
+        </div>
+      )}
+
+      {bal?.status === "ERROR" && (
+        <div className="p-2.5 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss flex items-start space-x-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-loss shrink-0 mt-0.5" />
+          <span>{bal.recommended_action || "Failed to retrieve account balance from exchange."}</span>
+        </div>
+      )}
+
+      {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && (
+        <div className="p-2.5 bg-warn-dim border border-warn-border rounded-lg text-xs font-mono text-warn flex items-start space-x-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-warn shrink-0 mt-0.5" />
+          <span>{bal.recommended_action}</span>
+        </div>
+      )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
 /* Account card                                                        */
 /* ------------------------------------------------------------------ */
 
-interface AccountCardProps {
+export interface AccountCardProps {
   account: AccountDto;
   /** 1-based position of this account within the venue, used for the title. */
   ordinal: number;
   locked: boolean;
-  /** When true the zone header owns this account's label — the in-card field is hidden. */
+  bal?: VenueBalanceInfo | null;
+  lane?: VenueLaneStatusDto | null;
+  /** Legacy flag preserved for caller backwards-compatibility */
   labelInHeader?: boolean;
-  /**
-   * When true the zone header owns this account's enable/default/delete
-   * controls — the card renders credentials only. Each exchange zone is one
-   * account; controls must not appear twice.
-   */
+  /** Legacy flag preserved for caller backwards-compatibility */
   controlsInHeader?: boolean;
   onChanged: () => void;
 }
@@ -349,7 +519,14 @@ function normalizeLeverageText(raw: string): string {
   return Number.isFinite(n) ? String(n) : t;
 }
 
-const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, labelInHeader = false, controlsInHeader = false, onChanged }) => {
+export const AccountCard: React.FC<AccountCardProps> = ({
+  account,
+  ordinal,
+  locked,
+  bal,
+  lane,
+  onChanged,
+}) => {
   const fields = ACCOUNT_CREDENTIAL_FIELDS[account.venue] ?? [
     { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
     { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
@@ -519,74 +696,87 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
       account.maxLeverage != null ? String(account.maxLeverage) : ""
     ) ||
     Object.keys(drafts).length > 0;
+
   // Lighter-family venues document per-account rate-limit tiers that share
   // the IP budget — the monitor derives its read cadence from the lowest
   // tier present on the venue.
   const showTier = account.venue === "lighter" || account.venue === "robinhood";
 
   return (
-    <div className="border border-surface-border rounded-lg bg-surface overflow-hidden">
-      {/* Card header: title + per-account actions — only for secondary
-          accounts; the primary account's controls live in the zone header. */}
-      {!controlsInHeader && (
-        <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 bg-slate-50/70 border-b border-surface-border">
-          <div className="flex items-center gap-2 min-w-0 flex-1">
-            <span className="text-xs font-mono font-bold text-slate-900 truncate">
-              {venueDisplay(account.venue)} Account {ordinal}
+    <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+      {/* Card header: title + inline label + default badge + delete, default, toggle */}
+      <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
+        <div className="flex items-center space-x-2 min-w-0 flex-1">
+          <h3 className="text-[13px] font-mono font-bold text-slate-900 shrink-0">
+            {venueDisplay(account.venue)} #{ordinal}
+          </h3>
+          <input
+            type="text"
+            value={label}
+            disabled={busy}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && dirty) void handleSave();
+            }}
+            placeholder={`${venueDisplay(account.venue)} Account ${ordinal}`}
+            title="Account label used in strategy routing"
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          {account.isDefault && (
+            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
+              Default
             </span>
-            {account.isDefault && (
-              <span className="px-1.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-amber-50 text-amber-700 border border-amber-200 tracking-wide shrink-0">
-                Default
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-3 shrink-0">
-            <button
-              type="button"
-              disabled={busy}
-              onClick={handleDelete}
-              className="text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
-              title="Delete this account and its stored credentials"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-              type="button"
-              disabled={busy || account.isDefault}
-              onClick={() => void handleSetDefault()}
-              className="px-3 py-1.5 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
-              title={account.isDefault ? "This account is the venue default" : "Set this account as the venue default"}
-            >
-              Set As Default
-            </button>
-            <ToggleSwitch
-              size="sm"
-              checked={account.enabled}
-              onChange={() => void handleToggleEnabled()}
-              disabled={busy}
-              label={account.enabled ? "Enabled" : "Off"}
-            />
-          </div>
+          )}
         </div>
+        <div className="flex items-center space-x-3 shrink-0">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={handleDelete}
+            className="p-1.5 text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
+            title="Delete this account and its stored credentials"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+          <button
+            type="button"
+            disabled={busy || account.isDefault}
+            onClick={() => void handleSetDefault()}
+            className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+            title={account.isDefault ? "This account is the venue default" : "Set this account as the venue default"}
+          >
+            Set As Default
+          </button>
+          <ToggleSwitch
+            size="sm"
+            checked={account.enabled}
+            onChange={() => void handleToggleEnabled()}
+            disabled={busy}
+            label={account.enabled ? "Enabled" : "Off"}
+          />
+        </div>
+      </div>
+
+      {/* Per-account Balance Information Gadget */}
+      {!account.enabled ? (
+        <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg flex items-center justify-between text-xs font-mono text-slate-500">
+          <div className="flex items-center space-x-2">
+            <span className="w-2 h-2 rounded-full bg-slate-400" />
+            <span>Account is disabled — live balance and trading are paused.</span>
+          </div>
+          <span className="text-slate-400">Toggle switch above to enable</span>
+        </div>
+      ) : (
+        <VenueBalancePanel
+          bal={bal ?? null}
+          lane={lane}
+          accountTier={tier}
+          isDefault={account.isDefault}
+        />
       )}
 
-      {/* Card body: label + credentials */}
-      <div className="p-3.5 space-y-3">
-        {!labelInHeader && (
-          <div className="text-xs font-mono flex items-center justify-between gap-3">
-            <label className="text-slate-600 flex-1">
-              Account Label <span className="text-slate-400">(used in strategy routing)</span>:
-            </label>
-            <input
-              type="text"
-              value={label}
-              disabled={busy}
-              onChange={(e) => setLabel(e.target.value)}
-              placeholder={`${venueDisplay(account.venue)} Account ${ordinal}`}
-              className="w-44 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-            />
-          </div>
-        )}
+      {/* Account configuration and credentials */}
+      <div className="space-y-3 pt-1">
         {showTier && (
           <div className="text-xs font-mono">
             <label className="text-slate-600 block mb-1">
@@ -662,7 +852,7 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
         </div>
 
         {error && (
-          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600 flex items-start gap-1.5">
+          <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss flex items-start gap-1.5">
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
@@ -676,27 +866,40 @@ const AccountCard: React.FC<AccountCardProps> = ({ account, ordinal, locked, lab
 /* Add-account form                                                    */
 /* ------------------------------------------------------------------ */
 
-/** Label drafts keyed by venue — the zone-header label input writes here so a not-yet-created account form can read it at submit time. */
+/** Label drafts keyed by venue — preserved for backwards compatibility. */
 const accountLabelDrafts = new Map<string, string>();
 
 interface AddAccountFormProps {
   venue: string;
   hasDefault: boolean;
   locked: boolean;
-  /** When true the account label is owned by the zone header input — the form omits its own label field. */
+  bal?: VenueBalanceInfo | null;
+  lane?: VenueLaneStatusDto | null;
+  fallbackEnabled?: boolean;
+  onFallbackChange?: (enabled: boolean) => void;
   labelFromHeader?: boolean;
-  /** Next account number used when auto-naming a blank label. */
   nextOrdinal?: number;
   onDone: () => void;
   onCancel?: () => void;
 }
 
-const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, locked, labelFromHeader = false, nextOrdinal = 1, onDone, onCancel }) => {
+const AddAccountForm: React.FC<AddAccountFormProps> = ({
+  venue,
+  hasDefault,
+  locked,
+  bal: _bal,
+  lane: _lane,
+  fallbackEnabled,
+  onFallbackChange,
+  nextOrdinal = 1,
+  onDone,
+  onCancel,
+}) => {
   const fields = ACCOUNT_CREDENTIAL_FIELDS[venue] ?? [
     { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
     { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
   ];
-  const autoLabel = `${venueDisplay(venue)} #${nextOrdinal}`;
+  const autoLabel = `${venueDisplay(venue)} Account ${nextOrdinal}`;
   const [label, setLabel] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
@@ -707,10 +910,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
     setBusy(true);
     setError(null);
     try {
-      // Blank label auto-names the account — never a dead-end save.
-      const effectiveLabel = labelFromHeader
-        ? (accountLabelDrafts.get(venue)?.trim() || autoLabel)
-        : (label.trim() || autoLabel);
+      const effectiveLabel = label.trim() || autoLabel;
       const creds: AccountCredentialInput = {};
       let any = false;
       for (const f of fields) {
@@ -725,6 +925,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
         }
         any = true;
       }
+      persistVenueFlag(venue, true);
       await api.upsertAccount({
         venue,
         label: effectiveLabel,
@@ -741,38 +942,53 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
   };
 
   return (
-    <div className="border border-accent-line/60 rounded-lg bg-blue-50/30 overflow-hidden">
-      <div className="px-3.5 py-2.5 bg-blue-50/70 border-b border-accent-line/40 flex items-center justify-between">
-        <span className="text-xs font-mono font-bold text-slate-800 tracking-wide">
-          Account Credential
-        </span>
-        {onCancel && (
-          <button
-            type="button"
-            onClick={onCancel}
+    <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+      <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
+        <div className="flex items-center space-x-2 min-w-0 flex-1">
+          <h3 className="text-[13px] font-mono font-bold text-slate-900 shrink-0">
+            {venueDisplay(venue)} #{nextOrdinal}
+          </h3>
+          <input
+            type="text"
+            value={label}
             disabled={busy}
-            className="text-slate-400 hover:text-slate-600 text-xs font-mono cursor-pointer"
-          >
-            Cancel
-          </button>
-        )}
-      </div>
-      <div className="p-3.5 space-y-3">
-        {!labelFromHeader && (
-          <div className="text-xs font-mono flex items-center justify-between gap-3">
-            <label className="text-slate-600 flex-1">Account Label:</label>
-            <input
-              type="text"
-              value={label}
+            placeholder={autoLabel}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void handleCreate();
+            }}
+            autoFocus={nextOrdinal > 1}
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+          />
+          {!hasDefault && (
+            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
+              Default
+            </span>
+          )}
+        </div>
+        <div className="flex items-center space-x-3 shrink-0">
+          {onCancel && (
+            <button
+              type="button"
+              onClick={onCancel}
               disabled={busy}
-              placeholder={autoLabel}
-              onChange={(e) => setLabel(e.target.value)}
-              autoFocus
-              className="w-44 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+              className="px-2.5 py-1 rounded-md border border-surface-border text-xs font-mono text-slate-500 hover:text-slate-800 transition cursor-pointer"
+            >
+              Cancel
+            </button>
+          )}
+          {onFallbackChange && (
+            <ToggleSwitch
+              size="sm"
+              checked={fallbackEnabled ?? true}
+              onChange={(en) => onFallbackChange(en)}
+              label={(fallbackEnabled ?? true) ? "Enabled" : "Off"}
             />
-          </div>
-        )}
+          )}
+        </div>
+      </div>
 
+      <div className="space-y-3 pt-1">
         <CredentialGrid
           fields={fields}
           values={drafts}
@@ -783,19 +999,19 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
           toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
         />
         {locked && (
-          <p className="text-xs font-mono text-amber-600">
+          <p className="text-xs font-mono text-warn">
             Vault is locked: the account can be created now, but credentials require an unlocked vault.
           </p>
         )}
 
         {error && (
-          <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600 flex items-start gap-1.5">
+          <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss flex items-start gap-1.5">
             <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
             <span>{error}</span>
           </div>
         )}
 
-        <div className="flex justify-end">
+        <div className="flex justify-end pt-1">
           <button
             type="button"
             disabled={busy}
@@ -814,19 +1030,25 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({ venue, hasDefault, lock
 /* Venue accounts section (balance + account cards)                    */
 /* ------------------------------------------------------------------ */
 
-interface VenueAccountsSectionProps {
+export interface VenueAccountsSectionProps {
   venue: string;
   locked: boolean;
+  bal?: VenueBalanceInfo | null;
+  lane?: VenueLaneStatusDto | null;
+  fallbackEnabled?: boolean;
+  onFallbackChange?: (enabled: boolean) => void;
   compact?: boolean;
-  /** Bump to force a reload (e.g. after an account is created elsewhere). */
   refreshKey?: number;
-  /** Notifies the parent when account data mutates (so sibling controls like the zone header can refresh). */
   onChanged?: () => void;
 }
 
 export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
   venue,
   locked,
+  bal,
+  lane,
+  fallbackEnabled = false,
+  onFallbackChange,
   compact = false,
   refreshKey = 0,
   onChanged,
@@ -848,11 +1070,9 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
   }, [reload, refreshKey]);
 
   return (
-    <div className={compact ? "space-y-3" : "space-y-3 border-t border-surface-border/60 pt-3"}>
-
-
+    <div className={compact ? "space-y-3" : "space-y-4"}>
       {loadError && (
-        <div className="p-2 bg-red-50 border border-red-200 rounded-md text-xs font-mono text-red-600">
+        <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
           {loadError}
         </div>
       )}
@@ -862,7 +1082,11 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
           venue={venue}
           hasDefault={false}
           locked={locked}
-          labelFromHeader
+          bal={null}
+          lane={lane}
+          fallbackEnabled={fallbackEnabled}
+          onFallbackChange={onFallbackChange}
+          nextOrdinal={1}
           onDone={() => {
             accountLabelDrafts.delete(venue);
             void reload();
@@ -871,12 +1095,44 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
         />
       )}
 
-      {/* This section is one account — only the extra `accounts[1..]` cards keep their own header controls. */}
-      <div className="space-y-2.5">
-        {(accounts ?? []).map((a, i) => (
-          <AccountCard key={a.id} account={a} ordinal={i + 1} locked={locked} labelInHeader={i === 0} controlsInHeader={i === 0} onChanged={() => { void reload(); onChanged?.(); }} />
-        ))}
-      </div>
+      {accounts && accounts.length > 0 && (
+        <div className="space-y-4">
+          {accounts.map((a, i) => {
+            const accountBal = (() => {
+              if (!a.enabled) return null;
+              if (bal?.account_id) {
+                return bal.account_id === a.id ? bal : null;
+              }
+              return a.isDefault || accounts.length === 1 ? bal : null;
+            })();
+            return (
+              <AccountCard
+                key={a.id}
+                account={a}
+                ordinal={i + 1}
+                locked={locked}
+                bal={accountBal}
+                lane={lane}
+                onChanged={() => {
+                  void reload();
+                  onChanged?.();
+                }}
+              />
+            );
+          })}
+
+          <AddAccountSlot
+            venue={venue}
+            locked={locked}
+            bal={null}
+            lane={lane}
+            onChanged={() => {
+              void reload();
+              onChanged?.();
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 };
@@ -889,8 +1145,10 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
 export const AddAccountSlot: React.FC<{
   venue: string;
   locked: boolean;
+  bal?: VenueBalanceInfo | null;
+  lane?: VenueLaneStatusDto | null;
   onChanged?: () => void;
-}> = ({ venue, locked, onChanged }) => {
+}> = ({ venue, locked, bal: _bal, lane, onChanged }) => {
   const [adding, setAdding] = useState(false);
   const [accounts, setAccounts] = useState<AccountDto[] | null>(null);
 
@@ -907,6 +1165,8 @@ export const AddAccountSlot: React.FC<{
         venue={venue}
         hasDefault={(accounts ?? []).some((a) => a.isDefault)}
         locked={locked}
+        bal={null}
+        lane={lane}
         nextOrdinal={(accounts?.length ?? 0) + 1}
         onDone={() => {
           setAdding(false);
@@ -1034,7 +1294,7 @@ export const VenueDefaultControl: React.FC<{
           })
           .finally(() => setBusy(false));
       }}
-      className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-amber-600 hover:border-amber-300 transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+      className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
       title={
         !account
           ? "No account configured for this venue"
@@ -1096,7 +1356,7 @@ export const AccountCredentialsDelete: React.FC<{
           )
           .finally(() => setBusy(false));
       }}
-      className="p-1.5 text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
+      className="p-1.5 text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
       title={`Remove stored credentials for ${account.label}`}
     >
       <Trash2 className="w-3.5 h-3.5" />
@@ -1189,6 +1449,7 @@ export const STRATEGIES: { id: string; name: string; desc: string }[] = [
   { id: "radar", name: STRATEGY_DISPLAY_NAMES.radar, desc: "Radar-dispatched spatial executions — shares futures venues, tracked separately" },
   { id: "funding", name: STRATEGY_DISPLAY_NAMES.funding, desc: "Long/short perp pairs capturing funding differentials" },
   { id: "spot", name: STRATEGY_DISPLAY_NAMES.spot, desc: "Spot basis vs. perp or spot venues" },
+  { id: "triangle", name: STRATEGY_DISPLAY_NAMES.triangle, desc: "Sequential 3-leg currency cycle on a single venue" },
   { id: "prediction", name: STRATEGY_DISPLAY_NAMES.prediction, desc: "Binary market and cross-venue parity trades" },
   { id: "stat_arb", name: STRATEGY_DISPLAY_NAMES.stat_arb, desc: "Mean-reversion and basket spread strategies" },
 ];
@@ -1265,14 +1526,14 @@ const RouteLegPicker: React.FC<RouteLegPickerProps> = ({
   );
 };
 
-interface StrategyRouteCardProps {
+export interface StrategyRouteCardProps {
   strategy: { id: string; name: string; desc: string };
   routes: StrategyAccountRouteDto[];
   accounts: AccountDto[];
   onChanged: () => void;
 }
 
-const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes, accounts, onChanged }) => {
+export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes, accounts, onChanged }) => {
   const [adding, setAdding] = useState(false);
   const [venueA, setVenueA] = useState("");
   const [acctA, setAcctA] = useState("");
@@ -1395,7 +1656,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
               type="button"
               disabled={busy}
               onClick={() => void handleDelete(r)}
-              className="text-slate-400 hover:text-red-500 disabled:opacity-40 transition cursor-pointer"
+              className="text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
               title="Delete route"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -1442,7 +1703,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
             className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {error && (
-            <div className="text-xs font-mono text-red-600 flex items-center gap-1">
+            <div className="text-xs font-mono text-loss flex items-center gap-1">
               <AlertCircle className="w-3 h-3" />
               <span>{error}</span>
             </div>
@@ -1469,7 +1730,7 @@ const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, routes,
       )}
 
       {error && !adding && (
-        <div className="text-xs font-mono text-red-600 flex items-center gap-1">
+        <div className="text-xs font-mono text-loss flex items-center gap-1">
           <AlertCircle className="w-3 h-3" />
           <span>{error}</span>
         </div>
@@ -1516,7 +1777,7 @@ export const StrategyRoutingPanel: React.FC = () => {
       </div>
 
       {loadError && (
-        <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs font-mono text-red-600">
+        <div className="p-3 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
           {loadError}
         </div>
       )}

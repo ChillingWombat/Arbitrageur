@@ -210,11 +210,14 @@ impl OndoPerpsAdapter {
             .strip_suffix(".P")
             .or_else(|| trimmed.strip_suffix(".p"))
             .unwrap_or(trimmed);
-        let base = without_suffix
-            .split(['-', '/', '_'])
-            .next()
-            .unwrap_or("")
-            .trim();
+        let tokens: Vec<&str> = without_suffix.split(['-', '/', '_']).collect();
+        if tokens.len() >= 2 {
+            let quote = tokens[1];
+            if !quote.eq_ignore_ascii_case("USD") && !quote.eq_ignore_ascii_case("USDC") {
+                anyhow::bail!("Ondo Perps markets are quoted in USD/USDC; '{symbol}' is not supported");
+            }
+        }
+        let base = tokens.first().copied().unwrap_or("").trim();
         if base.is_empty() || !base.chars().all(|c| c.is_ascii_alphanumeric()) {
             anyhow::bail!("Ondo Perps symbol '{symbol}' has no usable base asset");
         }
@@ -232,7 +235,7 @@ impl OndoPerpsAdapter {
 
     #[allow(dead_code)]
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
-        if let Ok(Some(cached_str)) = self.rate_limiter.acquire_or_cache_path(path, true).await {
+        if let Some(cached_str) = self.rate_limiter.acquire_or_cache_path(path, true).await? {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
                 return Ok(val);
             }
@@ -450,6 +453,8 @@ mod tests {
         );
         assert!(OndoPerpsAdapter::to_venue_symbol("").is_err());
         assert!(OndoPerpsAdapter::to_venue_symbol("BTC!").is_err());
+        assert!(OndoPerpsAdapter::to_venue_symbol("BTC-SOL").is_err());
+        assert!(OndoPerpsAdapter::to_venue_symbol("BTC-ETH").is_err());
     }
 
     #[test]

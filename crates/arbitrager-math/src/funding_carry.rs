@@ -60,12 +60,25 @@ pub fn evaluate_funding_carry(
         return None;
     }
 
-    let net_rate_8h = net_hourly * dec!(8);
-    let net_apr = net_hourly * dec!(24) * dec!(365);
+    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
+    let net_apr = net_hourly
+        .checked_mul(dec!(8760))
+        .unwrap_or(dec!(999999));
 
     // APY = (1 + net_hourly)^8760 - 1
     let hourly_f64 = net_hourly.to_string().parse::<f64>().unwrap_or(0.0);
-    let apy_f64 = (1.0 + hourly_f64).powf(8760.0) - 1.0;
+    let apy_f64 = if hourly_f64 > 0.0 && hourly_f64 < 1.0 {
+        let compounding = (1.0 + hourly_f64).powf(8760.0) - 1.0;
+        if compounding.is_finite() && compounding < 100_000.0 {
+            compounding
+        } else {
+            100_000.0
+        }
+    } else if hourly_f64 >= 1.0 {
+        100_000.0
+    } else {
+        0.0
+    };
     let net_apy = Decimal::from_str_exact(&format!("{:.6}", apy_f64))
         .ok()
         .or_else(|| Decimal::from_f64_retain(apy_f64))
@@ -73,12 +86,15 @@ pub fn evaluate_funding_carry(
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
     let break_even_hours = if net_hourly > dec!(0) {
-        fee_ratio / net_hourly
+        fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999))
     } else {
         dec!(999999)
     };
 
-    let daily_income_usd = trade_size_usd * net_hourly * dec!(24);
+    let daily_income_usd = trade_size_usd
+        .checked_mul(net_hourly)
+        .and_then(|d| d.checked_mul(dec!(24)))
+        .unwrap_or(dec!(999999));
 
     Some(FundingCarryOpportunity {
         long_venue,
@@ -115,17 +131,22 @@ pub fn evaluate_spot_perp_carry(
         return None;
     }
 
-    let net_rate_8h = net_hourly * dec!(8);
-    let net_apr = net_hourly * dec!(24) * dec!(365);
+    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
+    let net_apr = net_hourly
+        .checked_mul(dec!(8760))
+        .unwrap_or(dec!(999999));
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
     let break_even_hours = if net_hourly > dec!(0) {
-        fee_ratio / net_hourly
+        fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999))
     } else {
         dec!(999999)
     };
 
-    let daily_income_usd = trade_size_usd * net_hourly * dec!(24);
+    let daily_income_usd = trade_size_usd
+        .checked_mul(net_hourly)
+        .and_then(|d| d.checked_mul(dec!(24)))
+        .unwrap_or(dec!(999999));
 
     Some(FundingCarryOpportunity {
         long_venue: "SPOT".to_string(),

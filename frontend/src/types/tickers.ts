@@ -97,6 +97,11 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   edgex: "EDGX",
   popdex: "POP",
   kraken: "KRK",
+  binance: "BNB",
+  okx: "OKX",
+  coinbase: "CB",
+  decibel: "DCB",
+  variational: "VAR",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -111,6 +116,11 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   EDGX: "edgex",
   POP: "popdex",
   KRK: "kraken",
+  BNB: "binance",
+  OKX: "okx",
+  CB: "coinbase",
+  DCB: "decibel",
+  VAR: "variational",
 };
 
 /**
@@ -143,6 +153,11 @@ export interface VenueSettingsFilter {
   kraken_futures_enabled?: boolean;
   kraken_spot_api_key?: string;
   kraken_futures_api_key?: string;
+  binance_enabled?: boolean;
+  okx_enabled?: boolean;
+  coinbase_enabled?: boolean;
+  decibel_enabled?: boolean;
+  variational_enabled?: boolean;
   polymarket_enabled?: boolean;
   polymarket_api_key?: string;
   polymarket_secret?: string;
@@ -196,6 +211,25 @@ export function getEnabledConnectedVenueCodes(
   }
   if (settings.edgex_enabled === true) {
     active.add("EDGX");
+  }
+  if (settings.binance_enabled === true) {
+    active.add("BNB");
+  }
+  if (settings.okx_enabled === true) {
+    active.add("OKX");
+  }
+  if (settings.coinbase_enabled === true) {
+    active.add("CB");
+  }
+  if (
+    settings.kraken_enabled === true ||
+    settings.kraken_futures_enabled === true ||
+    settings.kraken_spot_enabled === true
+  ) {
+    active.add("KRK");
+  }
+  if (settings.decibel_enabled === true) {
+    active.add("DCB");
   }
 
   return active;
@@ -411,10 +445,19 @@ export function getTickerMinVolumeUsd(
   let min: number | undefined;
   for (const vid of inScopeVenueIds) {
     const vols = byId.get(vid.toLowerCase());
-    if (!vols) return undefined;
+    if (!vols) continue;
     const v = getVenueAssetVolumeUsd(vols, base);
-    if (v === undefined) return undefined;
+    if (v === undefined) continue;
     min = min === undefined ? v : Math.min(min, v);
+  }
+  // If none of the in-scope venues had reported volume, check across all venue volumes
+  if (min === undefined) {
+    for (const v of venueVolumes) {
+      const vol = getVenueAssetVolumeUsd(v.volumes, base);
+      if (vol !== undefined) {
+        min = min === undefined ? vol : Math.min(min, vol);
+      }
+    }
   }
   return min;
 }
@@ -429,9 +472,8 @@ const thresholdOn = (v: number | null | undefined): v is number =>
 
 /**
  * Frontend mirror of the backend auto-filter for configurator previews:
- * every active threshold must pass on the MIN across in-scope venues, and a
- * missing venue metric excludes the ticker. Returns the first block reason,
- * or null when the ticker passes.
+ * every active threshold must pass on the MIN across in-scope venues that report.
+ * Returns the first block reason, or null when the ticker passes.
  */
 export function autoFilterBlockReason(
   base: string,
@@ -444,7 +486,7 @@ export function autoFilterBlockReason(
     const floor = thresholds.minVolumeUsd as number;
     const min = getTickerMinVolumeUsd(base, inScopeVenueIds, venueVolumes);
     if (min === undefined) {
-      return `${base} blocked by auto volume filter: a venue reports no 24h volume`;
+      return `${base} blocked by auto volume filter: no venue reports 24h volume`;
     }
     if (min < floor) {
       return `${base} blocked by auto volume filter: min venue volume below floor`;
@@ -455,12 +497,20 @@ export function autoFilterBlockReason(
     let min: number | undefined;
     for (const vid of inScopeVenueIds) {
       const p = priceByVenueId[vid.toLowerCase()] ?? priceByVenueId[vid];
-      if (typeof p !== "number" || !Number.isFinite(p) || p <= 0) {
-        return `${base} blocked by auto price filter: a venue reports no mid price`;
+      if (typeof p === "number" && Number.isFinite(p) && p > 0) {
+        min = min === undefined ? p : Math.min(min, p);
       }
-      min = min === undefined ? p : Math.min(min, p);
     }
-    if (min === undefined || min < floor) {
+    if (min === undefined) {
+      const benchmark = getTickerBenchmarkPrice(base);
+      if (benchmark !== undefined && benchmark > 0) {
+        min = benchmark;
+      }
+    }
+    if (min === undefined) {
+      return `${base} blocked by auto price filter: no mid price available`;
+    }
+    if (min < floor) {
       return `${base} blocked by auto price filter: min venue mid below floor`;
     }
   }
@@ -542,3 +592,9 @@ export const PERP_TICKERS: PerpTicker[] = [
   { symbol: "SHIB-USDC", base: "SHIB", quote: "USDC", name: "Shiba Inu", venues: ["HL", "LGT", "VNT", "RH"], basePrice: 0.000014 },
   { symbol: "AR-USDC", base: "AR", quote: "USDC", name: "Arweave", venues: ["HL", "LGT"], basePrice: 20.50 },
 ];
+
+export function getTickerBenchmarkPrice(base: string): number | undefined {
+  const b = base.trim().toUpperCase();
+  const t = PERP_TICKERS.find((item) => item.base.toUpperCase() === b);
+  return t?.basePrice;
+}

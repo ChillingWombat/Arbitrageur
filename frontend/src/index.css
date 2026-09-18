@@ -36,6 +36,9 @@
     color: #141923;
     font-family: 'Roboto Variable', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
     user-select: none;
     -webkit-user-select: none;
   }
@@ -43,6 +46,7 @@
   /* Tailwind preflight hardcodes these to ui-monospace — pin them to Roboto Mono. */
   code, kbd, pre, samp {
     font-family: 'Roboto Mono Variable', 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
   }
 
   /* Hide native number-input spinner buttons everywhere — steppers are
@@ -74,10 +78,78 @@
   }
 }
 
+@layer components {
+  /* High-end institutional button tokens */
+  .btn-primary {
+    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-white bg-primary hover:bg-primary-hover active:scale-[0.98] rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center font-sans font-medium text-xs text-slate-700 bg-surface hover:bg-slate-50 active:scale-[0.98] border border-surface-border hover:border-slate-300 rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-white bg-loss hover:bg-red-700 active:scale-[0.98] rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-danger-subtle {
+    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-rose-700 bg-rose-50 hover:bg-rose-100 active:scale-[0.98] border border-rose-200 hover:border-rose-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-warning-subtle {
+    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 active:scale-[0.98] border border-amber-200 hover:border-amber-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-success-subtle {
+    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-emerald-700 bg-emerald-50 hover:bg-emerald-100 active:scale-[0.98] border border-emerald-200 hover:border-emerald-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+
+  /* Standardized inputs */
+  .input-field {
+    @apply bg-surface border border-surface-border rounded-lg px-2.5 py-1 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all duration-150;
+  }
+
+  /* Modern cards */
+  .card-panel {
+    @apply bg-surface border border-surface-border rounded-xl shadow-card transition-shadow duration-150;
+  }
+
+  /* Badge pill */
+  .badge-pill {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium tracking-tight;
+  }
+
+  /* Standardized Strategy Ribbon & Parameter Pills */
+  .ribbon-container {
+    @apply shrink-0 px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs select-none;
+  }
+  .ribbon-pill {
+    @apply flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono;
+  }
+
+  /* Standardized Modals */
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none;
+  }
+  .modal-card {
+    @apply bg-surface border border-surface-border rounded-2xl shadow-2xl overflow-hidden;
+  }
+
+  /* Semantic Status Badges */
+  .badge-status-profit {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-profit-dim text-profit border border-profit-border shadow-2xs;
+  }
+  .badge-status-loss {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-loss-dim text-loss border border-loss-border shadow-2xs;
+  }
+  .badge-status-warn {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-warn-dim text-warn border border-warn-border shadow-2xs;
+  }
+  .badge-status-info {
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-accent-dim text-accent border border-accent-line/60 shadow-2xs;
+  }
+}
+
 /* Minimalist utility classes - glows replaced by subtle clean accents */
 .glow-cyan,
 .glow-green,
 .glow-rose {
   box-shadow: none;
 }
+
 

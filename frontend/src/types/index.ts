@@ -221,6 +221,10 @@ export interface StrategyParamsDto {
   spotTradeSizeUsd: number;
   spotMaxSlippageBps: number;
   spotMinNetSpreadBps: number;
+  // Triangular Arbitrage
+  triangleTradeSizeUsd?: number;
+  triangleMinProfitBps?: number;
+  triangleMaxSlippageBps?: number;
   // Passive limit unwinds: one control set per strategy with a live reduce
   // path. Optional in persisted rows (older saves) — callers must fall back
   // to DEFAULT_PASSIVE_UNWIND when absent.
@@ -495,6 +499,7 @@ export interface ExecutionLogEntry {
   net_profit: number;
   latency_us: number;
   note: string;
+  is_live?: boolean;
 }
 
 export interface EngineSettingsDto {
@@ -626,6 +631,8 @@ export interface VenueBalanceInfo {
   margin_rate_pct: number;
   status: "HEALTHY" | "LOW_MARGIN" | "DEPLETED" | string;
   recommended_action?: string | null;
+  is_live?: boolean;
+  account_id?: string | null;
 }
 
 // Multi-account model: one durable account profile per exchange login.

@@ -265,7 +265,23 @@ fn perp_coin(symbol: &str) -> anyhow::Result<String> {
             "Hyperliquid spot instrument '{symbol}' needs spot metadata this adapter does not implement; refusing to return perp data"
         );
     }
-    Ok(clean.split('-').next().unwrap_or(clean.as_str()).to_string())
+    let parts: Vec<&str> = clean.split(['-', '_']).collect();
+    if parts.len() >= 2 {
+        let quote = parts[1];
+        if !quote.eq_ignore_ascii_case("USDC")
+            && !quote.eq_ignore_ascii_case("USD")
+            && !quote.eq_ignore_ascii_case("PERP")
+        {
+            anyhow::bail!(
+                "Hyperliquid perpetual markets are quoted in USDC/USD; '{symbol}' is not supported"
+            );
+        }
+    }
+    let base = parts.first().copied().unwrap_or(clean.as_str());
+    if base.is_empty() {
+        anyhow::bail!("Hyperliquid symbol '{symbol}' has empty coin");
+    }
+    Ok(base.to_string())
 }
 
 #[async_trait]
@@ -767,6 +783,8 @@ mod tests {
         assert!(perp_coin("eth/spot").is_err());
         // A perp actually named SPOT must still resolve as a perp.
         assert_eq!(perp_coin("SPOT-USDC").unwrap(), "SPOT");
+        assert!(perp_coin("BTC-SOL").is_err());
+        assert!(perp_coin("BTC-ETH").is_err());
     }
 
     #[tokio::test]

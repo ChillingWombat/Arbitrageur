@@ -48,7 +48,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
 
   return (
     <>
-      <div className="bg-surface border border-surface-border rounded-lg p-3 text-xs font-mono shadow-2xs mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
+      <div className="bg-surface border border-surface-border rounded-xl p-3.5 text-xs font-mono shadow-card mb-3 flex flex-wrap items-center justify-between gap-3 select-none">
         {/* Left: Quantitative Strategy Parameters Summary Chips */}
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center space-x-1.5 text-slate-500 font-medium">
@@ -57,45 +57,45 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           </div>
 
           <span
-            className="bg-blue-50 text-blue-700 px-2 py-0.5 rounded-sm border border-blue-200/60 font-semibold"
+            className="bg-accent-dim text-accent px-2.5 py-1 rounded-md border border-accent-line/60 font-semibold tabular-nums"
             title="Target profit locked in per round-trip after fees and friction"
           >
             TP {config.targetProfitBps.toFixed(1)} bps
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded-sm border border-surface-border"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
             title={`Nominal Hurdle: ${nominalHurdleBps.toFixed(1)} bps (${avgFeeBps.toFixed(1)} fee + ${avgSpreadBps.toFixed(1)} friction + ${config.targetProfitBps.toFixed(1)} tp)`}
           >
             Hurdle <strong className="text-slate-900 font-semibold">{nominalHurdleBps.toFixed(1)} bps</strong>
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded-sm border border-surface-border"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
             title="Historical sliding window percentile trigger"
           >
             Window P{config.windowPercentile}%
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded-sm border border-surface-border"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border"
             title="Execution Mode"
           >
             {config.executionMode === "DOUBLE_WAY" ? "Double-Way (Expand & Converge)" : "Single-Way (Divergence)"}
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded-sm border border-surface-border"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
             title="Grid unit sizing and current accumulated units"
           >
             Grid <strong className="text-slate-900">{config.currentAccumulatedUnits}/{config.maxAccumulatedUnits}u</strong> ({config.unitSize} {ticker.base})
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2 py-0.5 rounded-sm border border-surface-border flex items-center space-x-1"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border flex items-center space-x-1.5 tabular-nums"
             title={`Effective Safe Leverage: ${safeLeverage.effectiveLeverage}x | Margin: $${safeLeverage.totalMarginRequiredUsd.toFixed(2)} USD/unit | Buffer: ${safeLeverage.liquidationBufferPct.toFixed(1)}%`}
           >
-            <ShieldCheck className="w-3 h-3 text-emerald-600" />
+            <ShieldCheck className="w-3.5 h-3.5 text-profit" />
             <span>Lev {safeLeverage.effectiveLeverage}x</span>
             <span className="text-slate-300">|</span>
             <span className="text-slate-600">${safeLeverage.totalMarginRequiredUsd.toFixed(0)}/u</span>
@@ -106,7 +106,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
         <button
           type="button"
           onClick={handleOpenModal}
-          className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+          className="btn-secondary flex items-center space-x-1.5 text-xs font-mono"
           title="Configure Single Spread strategy parameters (applies to all tickers)"
         >
           <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />

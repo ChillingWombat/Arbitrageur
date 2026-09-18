@@ -13,6 +13,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { TriangularArbitrage } from "./components/TriangularArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
+import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api } from "./services/api";
 import type {
   SystemStatusDto,
@@ -32,6 +33,7 @@ import type {
   SpatialCandidateInput,
   TickerPositionState,
   OpenPositionDto,
+  VaultStatus,
 } from "./types";
 
 import {
@@ -66,7 +68,7 @@ const TAB_STRATEGY: Record<ActiveTab, { id: string | null; label: string }> = {
   spot_arb: { id: "spot", label: STRATEGY_DISPLAY_NAMES.spot },
   prediction: { id: "prediction", label: STRATEGY_DISPLAY_NAMES.prediction },
   statarb: { id: "stat_arb", label: STRATEGY_DISPLAY_NAMES.stat_arb },
-  triangle: { id: null, label: STRATEGY_DISPLAY_NAMES.triangle },
+  triangle: { id: "triangle", label: STRATEGY_DISPLAY_NAMES.triangle },
   portfolio_monitor: { id: null, label: "Portfolio" },
 };
 
@@ -184,21 +186,26 @@ export const App: React.FC = () => {
     strategy: "futures",
   });
 
-  // Auto-lock vault 1 minute after exiting the settings modal, and when the program exits
+  // Vault state & startup unlock prompt
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
+  const [showVaultModal, setShowVaultModal] = useState(false);
+
+  // Check vault status on app startup: if running in desktop app and vault is locked,
+  // prompt user immediately to unlock or create master password.
   useEffect(() => {
-    let timer: NodeJS.Timeout | null = null;
-    if (!isSettingsOpen) {
-      // Exited settings modal: start 60-second auto-lock timer
-      timer = setTimeout(() => {
-        api.lockVault().catch((err) => {
-          console.warn("Auto-lock vault failed:", err);
-        });
-      }, 60000);
-    }
-    return () => {
-      if (timer) clearTimeout(timer);
-    };
-  }, [isSettingsOpen]);
+    if (!api.isTauri) return;
+    api
+      .getVaultStatus()
+      .then((status) => {
+        setVaultStatus(status);
+        if (status && !status.is_unlocked) {
+          setShowVaultModal(true);
+        }
+      })
+      .catch((err) => {
+        console.warn("Startup vault status check failed:", err);
+      });
+  }, []);
 
   useEffect(() => {
     const handleBeforeUnload = () => {
@@ -352,7 +359,12 @@ export const App: React.FC = () => {
         api.getEngineSettings(),
         selectedSymbol ? api.fetchOrderbooks(selectedSymbol) : Promise.resolve([]),
         selectedSymbol ? api.scanSpatialOpportunities(selectedSymbol, minBps, qty) : Promise.resolve([]),
-        selectedSymbol ? api.scanFundingOpportunities(selectedSymbol, fundingTradeSize) : Promise.resolve([]),
+        api
+          .scanFundingOpportunities(
+            availableTickers.length > 0 ? availableTickers.map((t) => t.symbol) : undefined,
+            fundingTradeSize
+          )
+          .catch(() => []),
         api.scanPredictionOpportunities(""),
         api.getRiskOverview(),
         api.getExecutionLogs(),
@@ -366,6 +378,9 @@ export const App: React.FC = () => {
       ]);
 
       setSystemStatus(status);
+      if (api.isTauri) {
+        api.getVaultStatus().then(setVaultStatus).catch(() => {});
+      }
       if (status && typeof status.is_paused === "boolean") {
         setIsPaused(status.is_paused);
       }
@@ -516,13 +531,6 @@ export const App: React.FC = () => {
     [refreshAllData],
   );
 
-  const handleToggleLiveMode = useCallback(
-    async (enabled: boolean) => {
-      await api.setLiveMode(enabled);
-      await refreshAllData();
-    },
-    [refreshAllData],
-  );
 
   const handleExecuteTrade = useCallback(
     async (opp: SpatialOpportunityDto) => {
@@ -607,7 +615,13 @@ export const App: React.FC = () => {
         symbol: symbol || "BTC-USDC",
         strategy:
           strategy ||
-          (activeTab === "funding" ? "funding" : activeTab === "spot_arb" ? "spot" : "futures"),
+          (activeTab === "funding"
+            ? "funding"
+            : activeTab === "spot_arb"
+            ? "spot"
+            : activeTab === "triangle"
+            ? "triangle"
+            : "futures"),
       });
     },
     [activeTab],
@@ -746,8 +760,6 @@ export const App: React.FC = () => {
         onTogglePause={handleTogglePause}
         onResetCircuitBreaker={handleResetCircuitBreaker}
         onEmergencyKillswitch={handleEmergencyKillswitch}
-        onToggleLiveMode={handleToggleLiveMode}
-        onOpenSettings={handleOpenSettings}
         refreshing={refreshing}
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
@@ -804,6 +816,7 @@ export const App: React.FC = () => {
           {activeTab === "funding" && (
             <FundingRadar
               opportunities={fundingOpps}
+              availableTickers={availableTickers}
               symbol={selectedSymbol}
               tradeSize={fundingTradeSize}
               minAprPct={fundingParams.minAprPct}
@@ -832,8 +845,10 @@ export const App: React.FC = () => {
             <TriangularArbitrage
               executionLogs={executionLogs}
               onRefreshAll={refreshAllData}
+              onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
+              params={strategyParams.get("triangle")}
             />
           )}
 
@@ -886,6 +901,18 @@ export const App: React.FC = () => {
         tickerSymbol={tickerConfigModal.symbol}
         initialStrategy={tickerConfigModal.strategy}
         onSaveConfig={handleSaveStrategyParams}
+      />
+
+      {/* Pop-Out Vault Unlock / Password Creation Modal */}
+      <VaultUnlockModal
+        isOpen={showVaultModal && api.isTauri}
+        vaultStatus={vaultStatus}
+        onClose={() => setShowVaultModal(false)}
+        onSuccess={(status) => {
+          setVaultStatus(status);
+          setShowVaultModal(false);
+          refreshAllData();
+        }}
       />
         </div>
       </div>

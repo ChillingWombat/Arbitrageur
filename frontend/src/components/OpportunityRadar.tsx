@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  Bot,
   Check,
   Search,
   SlidersHorizontal,
@@ -13,10 +14,9 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import { AutoBotGadget } from "./AutoBotGadget";
+import { BotLifecycleControls } from "./BotLifecycleControls";
 import { BotStatCards } from "./BotStatCards";
 import { InfoTooltip } from "./InfoTooltip";
-import { SessionBadge } from "./SessionBadge";
 import { SwitchToggle } from "./SwitchToggle";
 import type {
   MonitorSnapshotDto,
@@ -30,6 +30,7 @@ import type {
 import { api } from "../services/api";
 import {
   buildHeldSet,
+  botControlsDisabled,
   defaultRadarBotConfig,
   isRowHeld,
   resolveRadarExecSize,
@@ -76,11 +77,11 @@ const fmtTs = (ms: number | null | undefined) =>
   ms == null ? "—" : new Date(ms).toLocaleTimeString();
 
 const STATUS_STYLE: Record<string, string> = {
-  qualified: "bg-emerald-50 text-emerald-700 border-emerald-300",
-  signaled: "bg-amber-50 text-amber-700 border-amber-300",
+  qualified: "bg-profit-dim text-profit border-profit-border",
+  signaled: "bg-warn-dim text-warn border-warn-border",
   watching: "bg-sky-50 text-sky-700 border-sky-300",
-  collecting: "bg-slate-100 text-slate-600 border-slate-300",
-  stale: "bg-rose-50 text-rose-700 border-rose-300",
+  collecting: "bg-surface-raised text-slate-600 border-surface-border",
+  stale: "bg-loss-dim text-loss border-loss-border",
 };
 
 const VENUE_LABEL: Record<string, string> = {
@@ -107,7 +108,17 @@ const VENUE_LABEL: Record<string, string> = {
   variational: "VAR",
 };
 
-const LIVE_CAPABLE_VENUES = new Set(["aster", "hyperliquid"]);
+const LIVE_CAPABLE_VENUES = new Set([
+  "aster",
+  "hyperliquid",
+  "lighter",
+  "robinhood",
+  "vanta",
+  "binance",
+  "okx",
+  "coinbase",
+  "kraken",
+]);
 const isLiveCapableRoute = (v1: string, v2: string): boolean =>
   LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
 
@@ -123,6 +134,20 @@ const MONITOR_SECTIONS: { id: string; label: string; tooltip: string; icon: Sect
   { id: "qualification", label: "Qualification window", tooltip: "Configure how much spread history qualifies a pair: auto from mean-reversion half-life or an explicit manual window.", icon: Clock },
   { id: "signal", label: "Signal thresholds", tooltip: "Configure the edge, capacity, and win-probability floors a deviation must clear to surface.", icon: TrendingUp },
   { id: "execution", label: "Execution", tooltip: "Configure one-way versus two-way execution and the transaction reserve haircut.", icon: Layers },
+  { id: "bot", label: "Auto-Bot", tooltip: "Autonomous convergence bot mode, entry guardrails, notional caps, and risk stop multipliers.", icon: Bot },
+];
+
+const BOT_NUM_FIELDS: { key: keyof RadarBotConfigDto; label: string; tooltip: string; step?: string }[] = [
+  { key: "minExpectedProfitBps", label: "Min expected profit (bps)", tooltip: "Entry hurdle on probability-weighted expected profit after friction." },
+  { key: "maxConcurrentPositions", label: "Max concurrent positions", tooltip: "Cap on simultaneously managed convergence positions.", step: "1" },
+  { key: "maxNotionalPerPositionUsd", label: "Max $ per position", tooltip: "Per-entry notional cap in USD." },
+  { key: "maxNotionalPerVenueUsd", label: "Max $ per venue", tooltip: "Open bot notional cap summed per venue leg in USD." },
+  { key: "maxNotionalPerSymbolUsd", label: "Max $ per symbol", tooltip: "Open bot notional cap per ticker in USD." },
+  { key: "pairCooldownSecs", label: "Pair cooldown (s)", tooltip: "Re-entry blackout per pair after an exit or stop.", step: "1" },
+  { key: "holdTimeoutMult", label: "Hold timeout ×", tooltip: "Max-hold deadline as a multiple of the signal's expected convergence time." },
+  { key: "stopMult", label: "Stop × entry dev", tooltip: "Stop band as a multiple of entry |deviation|, floored at the friction band." },
+  { key: "staleUnwindSecs", label: "Stale unwind (s)", tooltip: "Grace while a pair is unwatched before reduce-only unwind.", step: "1" },
+  { key: "pollIntervalSecs", label: "Poll interval (s)", tooltip: "Executor tick cadence.", step: "1" },
 ];
 
 /** Factory defaults for Reset Defaults — untouched backend fields are preserved from the opened config. */
@@ -149,19 +174,21 @@ const DEFAULT_MONITOR_CONFIG: MonitorConfigDto = {
 };
 
 const INPUT_INLINE_CLS =
-  "w-28 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-bold text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]";
+  "w-28 shrink-0 px-3 py-2 bg-surface border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all h-[38px] font-mono tabular-nums shadow-2xs";
 const SELECT_INLINE_CLS =
-  "w-44 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 font-medium text-xs focus:outline-none focus:ring-1 focus:ring-accent h-[38px]";
+  "w-44 shrink-0 px-3 py-2 bg-surface border border-surface-border rounded-lg text-slate-900 font-medium text-xs focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all h-[38px] shadow-2xs";
 const CARD_CLS =
-  "bg-surface p-3.5 rounded-lg border border-surface-border space-y-1.5 shadow-2xs";
-const LABEL_CLS = "text-xs text-slate-700 font-medium flex items-center";
+  "bg-surface p-4 rounded-xl border border-surface-border space-y-1.5 shadow-card hover:border-slate-300 transition-all";
+const LABEL_CLS = "text-xs text-slate-700 font-medium flex items-center font-sans";
 
 const ConfigPanel: React.FC<{
   cfg: MonitorConfigDto;
-  onSave: (c: MonitorConfigDto) => Promise<void>;
+  botCfg: RadarBotConfigDto;
+  onSave: (c: MonitorConfigDto, b: RadarBotConfigDto) => Promise<void>;
   onClose: () => void;
-}> = ({ cfg, onSave, onClose }) => {
+}> = ({ cfg, botCfg, onSave, onClose }) => {
   const [draft, setDraft] = useState<MonitorConfigDto>(cfg);
+  const [botDraft, setBotDraft] = useState<RadarBotConfigDto>(botCfg);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +196,10 @@ const ConfigPanel: React.FC<{
   const set = <K extends keyof MonitorConfigDto>(k: K, v: MonitorConfigDto[K]) => {
     setError(null);
     setDraft((d) => ({ ...d, [k]: v }));
+  };
+  const setBot = <K extends keyof RadarBotConfigDto>(k: K, v: RadarBotConfigDto[K]) => {
+    setError(null);
+    setBotDraft((d) => ({ ...d, [k]: v }));
   };
 
   const num = (v: string, fallback: number) => {
@@ -192,6 +223,7 @@ const ConfigPanel: React.FC<{
       maxSymbolIntervalSecs: d.maxSymbolIntervalSecs,
       minSymbolIntervalSecs: d.minSymbolIntervalSecs,
     }));
+    setBotDraft(defaultRadarBotConfig());
   };
 
   const handleSave = async () => {
@@ -199,7 +231,7 @@ const ConfigPanel: React.FC<{
     setSaveSuccess(false);
     setError(null);
     try {
-      await onSave(draft);
+      await onSave({ ...draft, enabled: true }, botDraft);
       setSaveSuccess(true);
       setTimeout(onClose, 400);
     } catch (e) {
@@ -211,12 +243,12 @@ const ConfigPanel: React.FC<{
 
   return (
     <div
-      className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150"
+      className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150"
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-surface border border-surface-border rounded-xl w-[960px] h-[680px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+      <div className="bg-surface border border-surface-border rounded-2xl w-[960px] h-[680px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
@@ -224,16 +256,17 @@ const ConfigPanel: React.FC<{
               <SlidersHorizontal className="w-4 h-4" />
             </div>
             <div>
-              <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 leading-tight">
+              <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
                 Spread Radar Configurator
               </h2>
+              <p className="text-[11px] font-sans text-slate-500">Monitor thresholds, probability gates, and execution mode</p>
             </div>
           </div>
           <div className="flex items-center space-x-3">
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition border border-transparent hover:border-surface-border cursor-pointer"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Configurator (ESC)"
             >
               <X className="w-4 h-4" />
@@ -284,19 +317,6 @@ const ConfigPanel: React.FC<{
           <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-surface">
             {activeSection === "monitor" && (
               <div className="space-y-3">
-                <div className={CARD_CLS}>
-                  <label className={`${LABEL_CLS} justify-between`}>
-                    <span className="flex items-center">
-                      Monitor enabled
-                      <InfoTooltip text="Master switch for the spread monitor. When off, no pairs are watched and the radar table stays empty." />
-                    </span>
-                    <SwitchToggle
-                      size="sm"
-                      checked={draft.enabled}
-                      onChange={(v) => set("enabled", v)}
-                    />
-                  </label>
-                </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
@@ -542,6 +562,73 @@ const ConfigPanel: React.FC<{
                 </div>
               </div>
             )}
+
+            {activeSection === "bot" && (
+              <div className="space-y-3">
+                <div className={CARD_CLS}>
+                  <label className={`${LABEL_CLS} justify-between`}>
+                    <span className="flex items-center">
+                      Mode
+                      <InfoTooltip text="auto trades entries+exits; paused/reduce_only run exits only; off is fully inert. Arming requires enabled + auto." />
+                    </span>
+                    <select
+                      className="px-2.5 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-bold font-mono shadow-2xs"
+                      value={botDraft.mode}
+                      onChange={(e) => setBot("mode", e.target.value as RadarBotConfigDto["mode"])}
+                    >
+                      <option value="off">off</option>
+                      <option value="auto">auto</option>
+                      <option value="paused">paused</option>
+                      <option value="reduce_only">reduce_only</option>
+                    </select>
+                  </label>
+                  <label className={`${LABEL_CLS} justify-between mt-2 pt-2 border-t border-surface-border/60`}>
+                    <span className="flex items-center">
+                      Arm auto entries
+                      <InfoTooltip text="Master opt-in. Entries fire only when armed AND mode is auto. Ships off." />
+                    </span>
+                    <SwitchToggle size="sm" checked={botDraft.enabled} onChange={(v) => setBot("enabled", v)} />
+                  </label>
+                </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Min win probability (%)
+                      <InfoTooltip text="Entry conviction floor — demand higher P_win than the monitor display threshold." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={50}
+                    max={99.9}
+                    step="0.1"
+                    value={(botDraft.minPWin * 100).toFixed(1)}
+                    onChange={(e) => setBot("minPWin", num(e.target.value, 93) / 100)}
+                  />
+                </div>
+                {BOT_NUM_FIELDS.map((f) => (
+                  <div className={`${CARD_CLS} flex items-center justify-between gap-3`} key={f.key}>
+                    <label className={`${LABEL_CLS} flex-1`}>
+                      <span className="flex items-center">
+                        {f.label}
+                        <InfoTooltip text={f.tooltip} />
+                      </span>
+                    </label>
+                    <input
+                      className={INPUT_INLINE_CLS}
+                      type="number"
+                      min={0}
+                      step={f.step ?? "any"}
+                      value={Number(botDraft[f.key])}
+                      onChange={(e) =>
+                        setBot(f.key, num(e.target.value, Number(botDraft[f.key])) as never)
+                      }
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
@@ -558,7 +645,7 @@ const ConfigPanel: React.FC<{
           </button>
           <div className="flex items-center space-x-3">
             {error && (
-              <span className="text-xs font-mono text-red-600 max-w-72 truncate" title={error}>
+              <span className="text-xs font-mono text-loss max-w-72 truncate" title={error}>
                 {error}
               </span>
             )}
@@ -601,7 +688,7 @@ const ConfigPanel: React.FC<{
 
 const LadderRow: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => (
   <tr className="bg-surface-raised/70">
-    <td colSpan={18} className="px-6 py-2">
+    <td colSpan={17} className="px-6 py-2">
       <div className="flex items-end gap-3">
         {row.capacityLadder.length === 0 && (
           <span className="text-slate-400">no depth data</span>
@@ -658,75 +745,75 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
     return (
       <React.Fragment>
         <tr
-          className="border-b border-surface-border/60 hover:bg-slate-50 cursor-pointer"
+          className="border-b border-surface-border/60 hover:bg-blue-50/25 transition-colors cursor-pointer"
           onClick={() => onToggle(k)}
         >
-          <td className="px-2 py-1.5 text-slate-400">
-            {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          <td className="px-2 py-2 text-slate-400">
+            {open ? <ChevronDown size={12} className="text-accent" /> : <ChevronRight size={12} />}
           </td>
-          <td className="px-2 py-1.5 font-bold text-slate-900">
+          <td className="px-2 py-2 font-bold font-sans text-xs text-slate-900">
             {r.symbol}
             {held && (
               <span
-                className="ml-1.5 px-1 py-px rounded-sm border border-emerald-300 bg-emerald-50 text-emerald-700 text-xs font-mono"
+                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
                 title="Bot-managed convergence position open on this pair"
               >
                 bot
               </span>
             )}
           </td>
-          <td className="px-2 py-1.5">
-            <span className="text-slate-700 font-mono">
+          <td className="px-2 py-2">
+            <span className="text-slate-700 font-mono text-xs">
               {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
               {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
             </span>
             {isLiveCapableRoute(r.buyVenue, r.sellVenue) ? (
               <span
-                className="ml-1.5 px-1 py-px rounded-xs border border-emerald-400 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[10px] font-mono font-bold"
-                title="Both venues support live API execution (Aster ↔ Hyperliquid)"
+                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold shadow-xs"
+                title="Both venues support live API execution"
               >
                 LIVE
               </span>
             ) : (
               <span
-                className="ml-1.5 px-1 py-px rounded-xs border border-surface-border bg-slate-100 dark:bg-slate-800 text-slate-400 text-[10px] font-mono"
+                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
                 title="Route involves a read-only venue — paper execution only"
               >
                 PAPER
               </span>
             )}
           </td>
-          <td className="px-2 py-1.5 text-right font-bold text-accent">
+          <td className="px-2 py-2 text-right font-bold text-accent font-mono tabular-nums">
             {fmtBpsU(r.expectedProfitBps)}
           </td>
-          <td className="px-2 py-1.5 text-right">{fmtBpsU(r.netCaptureBps)}</td>
-          <td className="px-2 py-1.5 text-right text-slate-500">
+          <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtBpsU(r.netCaptureBps)}</td>
+          <td className="px-2 py-2 text-right text-slate-500 font-mono tabular-nums">
             {fmtBpsU(r.baselineBps)}
           </td>
           <td
-            className={`px-2 py-1.5 text-right ${
-              (r.deviationBps ?? 0) >= 0 ? "text-emerald-600" : "text-rose-600"
+            className={`px-2 py-2 text-right font-mono tabular-nums ${
+              (r.deviationBps ?? 0) >= 0 ? "text-profit font-bold" : "text-loss font-bold"
             }`}
           >
             {fmtBpsU(r.deviationBps)}
           </td>
-          <td className="px-2 py-1.5 text-right">{fmtPct(r.pWin)}</td>
-          <td className="px-2 py-1.5 text-right" title="Fraction of in-window buckets at/above entry (persistence gate)">
+          <td className="px-2 py-2 text-right font-mono">{fmtPct(r.pWin)}</td>
+          <td className="px-2 py-2 text-right font-mono" title="Fraction of in-window buckets at/above entry (persistence gate)">
             {fmtPct(r.thresholdRatio)}
           </td>
-          <td className="px-2 py-1.5 text-right" title="Fraction of expected window buckets with both venues observed (coverage gate)">
+          <td className="px-2 py-2 text-right font-mono" title="Fraction of expected window buckets with both venues observed (coverage gate)">
             {fmtPct(r.coverage)}
           </td>
-          <td className="px-2 py-1.5 text-right">{fmtUsd(r.expectedProfitUsd)}</td>
-          <td className="px-2 py-1.5 text-right">{fmtUsd(r.optimalSizeUsd)}</td>
-          <td className="px-2 py-1.5 text-right">{fmtUsd(r.breakevenSizeUsd)}</td>
-          <td className="px-2 py-1.5 text-right" title={`first seen ${fmtTs(r.firstSeenMs)}`}>
+          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.expectedProfitUsd)}</td>
+          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.optimalSizeUsd)}</td>
+          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.breakevenSizeUsd)}</td>
+          <td className="px-2 py-2 text-right font-mono" title={`first seen ${fmtTs(r.firstSeenMs)}`}>
             {fmtDur(r.signalAgeSecs)}
           </td>
-          <td className="px-2 py-1.5 text-right">{fmtDur(r.expectedConvergeSecs)}</td>
-          <td className="px-2 py-1.5">
+          <td className="px-2 py-2 text-right font-mono">{fmtDur(r.expectedConvergeSecs)}</td>
+          <td className="px-2 py-2">
             <span
-              className={`px-1.5 py-0.5 rounded-sm border text-xs ${STATUS_STYLE[r.status]}`}
+              className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
               title={
                 r.status === "collecting"
                   ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
@@ -738,18 +825,10 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
             </span>
           </td>
-          <td className="px-2 py-1.5" title="UTC session regime and its size-allowance multiplier">
-            <SessionBadge
-              sessionId={r.sessionId}
-              provisional={r.sessionProvisional}
-              allow={r.sessionAllow}
-              sizeMult={r.sessionSizeMult}
-            />
-          </td>
-          <td className="px-2 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-end gap-1">
+          <td className="px-2 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-end gap-1.5">
               <input
-                className="w-14 bg-surface border border-surface-border rounded-md px-1 py-0.5 text-right text-xs text-slate-800"
+                className="w-16 bg-surface border border-surface-border rounded-lg px-2 py-1 text-right text-xs text-slate-800 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all shadow-2xs font-mono tabular-nums"
                 type="number"
                 min={0}
                 placeholder={fmtUsd(r.optimalSizeUsd ?? 1000)}
@@ -757,7 +836,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 onChange={(e) => onSizeChange(k, Number(e.target.value))}
               />
               <button
-                className="px-2 py-1 rounded-md bg-accent-dim border border-accent-line text-accent text-xs hover:bg-blue-100 disabled:opacity-30 disabled:cursor-not-allowed"
+                className="btn-primary px-2.5 py-1 text-xs rounded-lg shadow-2xs cursor-pointer"
                 disabled={!r.executable || executing}
                 title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
                 onClick={() => onExecute(r)}
@@ -772,152 +851,6 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
     );
   },
 );
-
-/* ------------------------------------------------------------------ */
-/* Auto-bot config modal (separate DTO from the monitor configurator)   */
-/* ------------------------------------------------------------------ */
-
-const BOT_NUM_FIELDS: { key: keyof RadarBotConfigDto; label: string; tooltip: string; step?: string }[] = [
-  { key: "minExpectedProfitBps", label: "Min expected profit (bps)", tooltip: "Entry hurdle on probability-weighted expected profit after friction." },
-  { key: "maxConcurrentPositions", label: "Max concurrent positions", tooltip: "Cap on simultaneously managed convergence positions.", step: "1" },
-  { key: "maxNotionalPerPositionUsd", label: "Max $ per position", tooltip: "Per-entry notional cap in USD." },
-  { key: "maxNotionalPerVenueUsd", label: "Max $ per venue", tooltip: "Open bot notional cap summed per venue leg in USD." },
-  { key: "maxNotionalPerSymbolUsd", label: "Max $ per symbol", tooltip: "Open bot notional cap per ticker in USD." },
-  { key: "pairCooldownSecs", label: "Pair cooldown (s)", tooltip: "Re-entry blackout per pair after an exit or stop.", step: "1" },
-  { key: "holdTimeoutMult", label: "Hold timeout ×", tooltip: "Max-hold deadline as a multiple of the signal's expected convergence time." },
-  { key: "stopMult", label: "Stop × entry dev", tooltip: "Stop band as a multiple of entry |deviation|, floored at the friction band." },
-  { key: "staleUnwindSecs", label: "Stale unwind (s)", tooltip: "Grace while a pair is unwatched before reduce-only unwind.", step: "1" },
-  { key: "pollIntervalSecs", label: "Poll interval (s)", tooltip: "Executor tick cadence.", step: "1" },
-];
-
-const BotConfigPanel: React.FC<{
-  cfg: RadarBotConfigDto;
-  onSave: (c: RadarBotConfigDto) => Promise<void>;
-  onClose: () => void;
-}> = ({ cfg, onSave, onClose }) => {
-  const [draft, setDraft] = useState<RadarBotConfigDto>(cfg);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const set = <K extends keyof RadarBotConfigDto>(k: K, v: RadarBotConfigDto[K]) => {
-    setError(null);
-    setDraft((d) => ({ ...d, [k]: v }));
-  };
-  const num = (v: string, fallback: number) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : fallback;
-  };
-  const handleSave = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await onSave(draft);
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-  return (
-    <div
-      className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="bg-surface border border-surface-border rounded-xl w-[560px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-surface-border shrink-0">
-          <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-            Auto-Bot Configurator
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-md text-slate-400 hover:text-slate-700 hover:bg-surface-raised transition cursor-pointer"
-            title="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono">
-          <div className={CARD_CLS}>
-            <label className={`${LABEL_CLS} justify-between`}>
-              <span className="flex items-center">
-                Mode
-                <InfoTooltip text="auto trades entries+exits; paused/reduce_only run exits only; off is fully inert. Arming requires enabled + auto." />
-              </span>
-              <select
-                className="px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-bold"
-                value={draft.mode}
-                onChange={(e) => set("mode", e.target.value as RadarBotConfigDto["mode"])}
-              >
-                <option value="off">off</option>
-                <option value="auto">auto</option>
-                <option value="paused">paused</option>
-                <option value="reduce_only">reduce_only</option>
-              </select>
-            </label>
-            <label className={`${LABEL_CLS} justify-between mt-2`}>
-              <span className="flex items-center">
-                Arm auto entries
-                <InfoTooltip text="Master opt-in. Entries fire only when armed AND mode is auto. Ships off." />
-              </span>
-              <SwitchToggle size="sm" checked={draft.enabled} onChange={(v) => set("enabled", v)} />
-            </label>
-          </div>
-          <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-            <label className={`${LABEL_CLS} flex-1`}>
-              <span className="flex items-center">
-                Min win probability (%)
-                <InfoTooltip text="Entry conviction floor — demand higher P_win than the monitor display threshold." />
-              </span>
-            </label>
-            <input
-              className={INPUT_INLINE_CLS}
-              type="number"
-              min={50}
-              max={99.9}
-              step="0.1"
-              value={(draft.minPWin * 100).toFixed(1)}
-              onChange={(e) => set("minPWin", num(e.target.value, 93) / 100)}
-            />
-          </div>
-          {BOT_NUM_FIELDS.map((f) => (
-            <div className={`${CARD_CLS} flex items-center justify-between gap-3`} key={f.key}>
-              <label className={`${LABEL_CLS} flex-1`}>
-                <span className="flex items-center">
-                  {f.label}
-                  <InfoTooltip text={f.tooltip} />
-                </span>
-              </label>
-              <input
-                className={INPUT_INLINE_CLS}
-                type="number"
-                min={0}
-                step={f.step ?? "any"}
-                value={Number(draft[f.key])}
-                onChange={(e) =>
-                  set(f.key, num(e.target.value, Number(draft[f.key])) as never)
-                }
-              />
-            </div>
-          ))}
-          {error && <div className="text-xs font-mono text-red-600">{error}</div>}
-        </div>
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-surface-border shrink-0">
-          <button
-            type="button"
-            onClick={handleSave}
-            disabled={saving}
-            className="px-3 py-1.5 rounded-md bg-accent text-white text-xs font-mono font-bold disabled:opacity-40 cursor-pointer"
-          >
-            {saving ? "Saving…" : "Save"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-};
 
 /* Auto-bot status gadget lives in ./AutoBotGadget (single radar bot
    control; backend BotMode is the source of truth). */
@@ -955,7 +888,6 @@ const OpportunityRadarInner: React.FC = () => {
   // single source of truth — no page-local lifecycle phase.
   const [botCfg, setBotCfg] = useState<RadarBotConfigDto | null>(null);
   const [botStatus, setBotStatus] = useState<RadarBotStatusDto | null>(null);
-  const [showBotConfig, setShowBotConfig] = useState(false);
   const [botError, setBotError] = useState<string | null>(null);
   const [flattening, setFlattening] = useState(false);
   const [flattenError, setFlattenError] = useState<string | null>(null);
@@ -1118,9 +1050,14 @@ const OpportunityRadarInner: React.FC = () => {
       {showConfig && cfg && (
         <ConfigPanel
           cfg={cfg}
-          onSave={async (c) => {
-            await api.setMonitorConfig(c);
+          botCfg={botCfg ?? defaultRadarBotConfig()}
+          onSave={async (c, b) => {
+            await Promise.all([
+              api.setMonitorConfig(c),
+              api.setRadarBotConfig(b),
+            ]);
             setCfg(c);
+            setBotCfg(b);
           }}
           onClose={() => setShowConfig(false)}
         />
@@ -1132,13 +1069,6 @@ const OpportunityRadarInner: React.FC = () => {
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
-          <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
-            title="Master monitor switch — edit via Configure Strategy"
-          >
-            <span className="text-slate-400">Status</span>
-            <span className="font-bold text-slate-900">{cfg ? (cfg.enabled ? "ON" : "OFF") : "—"}</span>
-          </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
             title="Qualification window mode — edit via Configure Strategy"
@@ -1178,7 +1108,7 @@ const OpportunityRadarInner: React.FC = () => {
         <div className="flex items-center space-x-3 shrink-0">
           {(execError || flattenError) && (
             <span
-              className="text-xs font-mono text-red-600 max-w-72 truncate"
+              className="text-xs font-mono text-loss max-w-72 truncate"
               title={execError ?? flattenError ?? ""}
             >
               {execError ?? flattenError}
@@ -1186,7 +1116,7 @@ const OpportunityRadarInner: React.FC = () => {
           )}
           {execSuccess && !execError && !flattenError && (
             <span
-              className="text-xs font-mono text-emerald-600 max-w-96 truncate"
+              className="text-xs font-mono text-profit max-w-96 truncate"
               title={execSuccess}
             >
               {execSuccess}
@@ -1195,154 +1125,158 @@ const OpportunityRadarInner: React.FC = () => {
           <button
             type="button"
             onClick={() => setShowConfig(true)}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-slate-100 text-accent font-semibold text-xs font-mono rounded-md border border-accent-line/60 hover:border-accent transition shadow-2xs cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
             title="Configure Spread Radar monitor parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
             <span>Configure Strategy</span>
           </button>
+
+          <BotLifecycleControls
+            phase={
+              flattening
+                ? "stopping"
+                : botCfg?.mode === "auto" && botCfg.enabled
+                ? "running"
+                : botCfg?.mode === "paused"
+                ? "paused"
+                : botCfg?.mode === "reduce_only"
+                ? "reduce_only"
+                : "idle"
+            }
+            hasOpenPositions={(botStatus?.openPositions ?? []).length > 0}
+            disabled={botControlsDisabled(botCfg)}
+            onStart={() => void handleBotMode("auto")}
+            onPause={() => void handleBotMode("paused")}
+            onReduceOnly={() => void handleBotMode("reduce_only")}
+            onStop={() => void handleFlatten()}
+          />
+          {botError && (
+            <span className="text-xs font-mono text-loss max-w-56 truncate" title={botError}>
+              {botError}
+            </span>
+          )}
         </div>
       </div>
 
-      {showBotConfig && botCfg && (
-        <BotConfigPanel
-          cfg={botCfg}
-          onSave={async (c) => {
-            await api.setRadarBotConfig(c);
-            setBotCfg(c);
-          }}
-          onClose={() => setShowBotConfig(false)}
-        />
-      )}
-
-      <AutoBotGadget
-        cfg={botCfg}
-        status={botStatus}
-        flattening={flattening}
-        onMode={(m) => void handleBotMode(m)}
-        onConfigure={() => setShowBotConfig(true)}
-        onFlatten={() => void handleFlatten()}
-      />
       <BotStatCards stats={cycleStats} />
-      {(botError) && (
-        <div className="px-4 py-2 bg-red-50 border border-red-200 rounded-lg text-xs font-mono text-red-600 shrink-0">
-          {botError}
-        </div>
-      )}
 
       {/* Radar gadget — filter strip + table in a single card.
           Filters are display-only; none of these affect the monitor or strategy. */}
-      <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-surface-border text-xs font-mono shrink-0">
-        <div
-          className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
-          title="Display filter — symbol contains"
-        >
-          <Search size={11} className="text-slate-400" />
-          <span className="text-slate-400">Symbol</span>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="bg-transparent w-28 outline-none font-bold text-slate-900 uppercase"
-          />
-        </div>
-        <div className="relative" ref={venueMenuRef}>
-          <button
-            type="button"
-            onClick={() => setShowVenueMenu((v) => !v)}
-            className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5 font-mono transition cursor-pointer hover:border-slate-300"
-            title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
+      <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden">
+        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-surface-border text-xs font-sans shrink-0 bg-surface-raised/40">
+          <div
+            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+            title="Display filter — symbol contains"
           >
-            <span className="text-slate-400">Venue</span>
-            <span className="font-bold text-slate-900">
-              {venueFilters.length === 0
-                ? "ALL"
-                : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
-            </span>
-            <ChevronDown
-              className={`w-3 h-3 text-slate-400 transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+            <Search size={13} className="text-slate-400 shrink-0" />
+            <span className="text-slate-400 font-medium">Symbol</span>
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="ALL"
+              className="bg-transparent w-24 outline-none font-bold text-slate-900 uppercase font-mono text-xs placeholder:text-slate-300"
             />
-          </button>
-          {showVenueMenu && (
-            <div className="absolute left-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
-              <button
-                type="button"
-                onClick={() => setVenueFilters([])}
-                className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
-                  venueFilters.length === 0
-                    ? "bg-accent/10 text-accent font-semibold"
-                    : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                }`}
-              >
-                <span>All</span>
-                {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
-              </button>
-              <div className="border-t border-surface-border/60 my-1 -mx-1" />
-              {venues.map((v) => {
-                const on = venueFilters.includes(v);
-                return (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() =>
-                      setVenueFilters((prev) =>
-                        prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
-                      )
-                    }
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-sm ${
-                      on
-                        ? "bg-accent/10 text-accent font-semibold"
-                        : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                    }`}
-                  >
-                    <span>{VENUE_LABEL[v] ?? v}</span>
-                    {on && <Check className="w-3.5 h-3.5" />}
-                  </button>
-                );
-              })}
-            </div>
-          )}
+          </div>
+          <div className="relative" ref={venueMenuRef}>
+            <button
+              type="button"
+              onClick={() => setShowVenueMenu((v) => !v)}
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
+              title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
+            >
+              <span className="text-slate-400 font-medium">Venue</span>
+              <span className="font-bold text-slate-900 font-mono text-xs">
+                {venueFilters.length === 0
+                  ? "ALL"
+                  : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
+              </span>
+              <ChevronDown
+                className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+              />
+            </button>
+            {showVenueMenu && (
+              <div className="absolute left-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
+                <button
+                  type="button"
+                  onClick={() => setVenueFilters([])}
+                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                    venueFilters.length === 0
+                      ? "bg-accent/10 text-accent font-semibold"
+                      : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                  }`}
+                >
+                  <span>All</span>
+                  {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
+                </button>
+                <div className="border-t border-surface-border/60 my-1 -mx-1" />
+                {venues.map((v) => {
+                  const on = venueFilters.includes(v);
+                  return (
+                    <button
+                      key={v}
+                      type="button"
+                      onClick={() =>
+                        setVenueFilters((prev) =>
+                          prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
+                        )
+                      }
+                      className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                        on
+                          ? "bg-accent/10 text-accent font-semibold"
+                          : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                      }`}
+                    >
+                      <span className="font-mono text-xs">{VENUE_LABEL[v] ?? v}</span>
+                      {on && <Check className="w-3.5 h-3.5" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+          <div
+            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+            title="Display filter — minimum expected profit"
+          >
+            <span className="text-slate-400 font-medium">Min Exp</span>
+            <input
+              value={minExpBps}
+              onChange={(e) => setMinExpBps(e.target.value)}
+              placeholder="0"
+              className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+            />
+            <span className="text-slate-400 text-[11px] font-medium">BPS</span>
+          </div>
+          <div
+            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+            title="Display filter — minimum win probability"
+          >
+            <span className="text-slate-400 font-medium">Min Win</span>
+            <input
+              value={minPWin}
+              onChange={(e) => setMinPWin(e.target.value)}
+              placeholder="0"
+              className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+            />
+            <span className="text-slate-400 text-[11px] font-medium">%</span>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {(snap?.exempted.length ?? 0) > 0 && (
+              <span className="text-slate-500 flex items-center gap-1 text-[11px] font-sans">
+                <EyeOff size={12} /> {snap?.exempted.length} hidden
+              </span>
+            )}
+          </div>
         </div>
-        <div
-          className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
-          title="Display filter — minimum expected profit"
-        >
-          <span className="text-slate-400">Min Exp</span>
-          <input
-            value={minExpBps}
-            onChange={(e) => setMinExpBps(e.target.value)}
-            className="bg-transparent w-16 outline-none text-right font-bold text-slate-900"
-          />
-          <span className="text-slate-400">BPS</span>
-        </div>
-        <div
-          className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-md px-2.5 py-1.5"
-          title="Display filter — minimum win probability"
-        >
-          <span className="text-slate-400">Min Win</span>
-          <input
-            value={minPWin}
-            onChange={(e) => setMinPWin(e.target.value)}
-            className="bg-transparent w-16 outline-none text-right font-bold text-slate-900"
-          />
-          <span className="text-slate-400">%</span>
-        </div>
-        <div className="ml-auto flex items-center gap-2">
-          {(snap?.exempted.length ?? 0) > 0 && (
-            <span className="text-slate-500 flex items-center gap-1">
-              <EyeOff size={11} /> {snap?.exempted.length} hidden
-            </span>
-          )}
-        </div>
-      </div>
 
-      <div className="flex-1 overflow-auto min-h-0">
-        <table className="w-full text-xs font-mono">
-          <thead className="sticky top-0 z-10 bg-surface-raised text-slate-500 text-xs tracking-wider">
-            <tr className="text-slate-600 font-semibold tracking-wider text-left border-b border-surface-border">
-              <th className="px-2 py-1.5 w-6" />
-              <th className="px-2 py-1.5">Symbol</th>
-              <th className="px-2 py-1.5" title="Buy venue → sell venue">Route</th>
+        <div className="flex-1 overflow-auto min-h-0">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs text-slate-500 font-sans text-[11px] uppercase tracking-wider font-semibold">
+              <tr className="border-b border-surface-border text-left">
+                <th className="px-2 py-2 w-6" />
+                <th className="px-2 py-2">Symbol</th>
+                <th className="px-2 py-2" title="Buy venue → sell venue">Route</th>
               <th className="px-2 py-1.5 text-right" title="Probability-weighted expected profit, basis points">
                 Exp Profit
               </th>
@@ -1380,16 +1314,13 @@ const OpportunityRadarInner: React.FC = () => {
                 Time to Converge
               </th>
               <th className="px-2 py-1.5">Status</th>
-              <th className="px-2 py-1.5" title="UTC session regime and its size-allowance multiplier">
-                Session
-              </th>
               <th className="px-2 py-1.5 text-right">Action</th>
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={18}>
+                <td colSpan={17}>
                   {snap == null ? (
                     <EmptyState pulse icon={Activity} title="Monitor Warming Up" hint="Collecting spread samples…" />
                   ) : snap.watchlist.length === 0 ? (

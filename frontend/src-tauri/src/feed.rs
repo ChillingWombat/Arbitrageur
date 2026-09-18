@@ -6,9 +6,10 @@ use arbitrager_core::quote::OrderBook;
 use arbitrager_core::types::{Decimal, VenueId};
 use arbitrager_exchanges::ws::{
     HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS, apply_lighter_delta, hyperliquid_subscribe_message,
-    lighter_book_from_sides, lighter_delta_continuous, lighter_market_symbol_map,
-    lighter_subscribe_message, lighter_ws_url, parse_hyperliquid_l2book_data, parse_lighter_delta,
-    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_subscribe_message, vanta_ws_url,
+    lighter_book_from_sides, lighter_default_market_symbol_map, lighter_delta_continuous,
+    lighter_market_symbol_map, lighter_subscribe_message, lighter_ws_url,
+    parse_hyperliquid_l2book_data, parse_lighter_delta, parse_lighter_snapshot_book,
+    parse_vanta_ws_book, vanta_public_ws_url, vanta_subscribe_message, vanta_ws_url,
 };
 use chrono::Utc;
 use futures::{Sink, SinkExt, StreamExt};
@@ -232,18 +233,45 @@ async fn run_lighter_protocol(
     let venue_id = VenueId::new(venue);
     let ws_url = lighter_ws_url(base_url)?;
     let trimmed = base_url.trim().trim_end_matches('/');
-    let client = reqwest::Client::new();
-    let details: serde_json::Value = client
+    let client = {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36".parse().unwrap(),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            "application/json, text/plain, */*".parse().unwrap(),
+        );
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_default()
+    };
+    let details_res = client
         .get(format!("{trimmed}/api/v1/orderBookDetails"))
         .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let symbol_map = lighter_market_symbol_map(&details);
-    if symbol_map.is_empty() {
-        anyhow::bail!("{venue} orderBookDetails resolved no markets");
-    }
+        .await;
+
+    let symbol_map = match details_res {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(details) = resp.json::<serde_json::Value>().await {
+                let map = lighter_market_symbol_map(&details);
+                if !map.is_empty() {
+                    map
+                } else {
+                    lighter_default_market_symbol_map()
+                }
+            } else {
+                lighter_default_market_symbol_map()
+            }
+        }
+        _ => {
+            tracing::info!("{venue} HTTP orderBookDetails failed/WAF challenge; falling back to default perp market map");
+            lighter_default_market_symbol_map()
+        }
+    };
     let (ws, _) = connect_async(&ws_url).await?;
     let (mut write, mut read) = ws.split();
     for market_id in symbol_map.keys() {
@@ -351,11 +379,12 @@ where
 
 async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     let account_id = state.settings.read().vanta_account_id.clone();
-    let ws_url = match vanta_ws_url(&account_id) {
-        Ok(url) => url,
-        Err(_) => {
-            tracing::info!("feed: vanta has no account_id configured — WS skipped, REST only");
-            return Ok(FeedOutcome::Stop);
+    let ws_url = if account_id.trim().is_empty() {
+        vanta_public_ws_url()
+    } else {
+        match vanta_ws_url(&account_id) {
+            Ok(url) => url,
+            Err(_) => vanta_public_ws_url(),
         }
     };
     let venue_id = VenueId::new("vanta");

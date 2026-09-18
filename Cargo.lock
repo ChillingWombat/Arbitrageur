@@ -238,6 +238,8 @@ dependencies = [
  "arbitrager-core",
  "arbitrager-math",
  "async-trait",
+ "base64 0.22.1",
+ "bs58",
  "chrono",
  "dashmap",
  "ed25519-dalek",

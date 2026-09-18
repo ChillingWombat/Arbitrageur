@@ -10,6 +10,7 @@ import {
   formatDuration,
   getMatrixCellVisuals,
   getVenueFeeBps,
+  getVenueShortLabel,
   parseDuration,
   WINDOW_SECONDS,
   type TickerMarketQuote,
@@ -748,3 +749,12 @@ test("buildCrossVenueMatrix allows convergence unwind without route economics", 
   assert.equal(cell.isConvergenceUnwind, true);
   assert.equal(cell.isExecutable, true);
 });
+
+test("getVenueShortLabel correctly distinguishes Robinhood Lighter from Lighter", () => {
+  assert.equal(getVenueShortLabel("Robinhood Lighter"), "Robinhood Lighter");
+  assert.equal(getVenueShortLabel("robinhood"), "Robinhood Lighter");
+  assert.equal(getVenueShortLabel("Lighter"), "Lighter");
+  assert.equal(getVenueShortLabel("Hyperliquid"), "Hyperliquid");
+  assert.equal(getVenueShortLabel("Vanta"), "Vanta");
+});
+

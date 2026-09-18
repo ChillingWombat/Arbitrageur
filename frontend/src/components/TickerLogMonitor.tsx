@@ -43,7 +43,7 @@ const getLevelBadgeClass = (level: LogItem["level"]) => {
     case "SCAN":
       return "bg-slate-100 text-slate-700 border-slate-200";
     case "WARN":
-      return "bg-amber-50 text-amber-700 border-amber-200";
+      return "bg-warn-dim text-warn border-warn-border";
     case "ERROR":
       return "bg-loss-dim text-loss border-loss-border";
     default:
@@ -65,12 +65,12 @@ interface LogRowProps {
 const LogRow: React.FC<LogRowProps> = React.memo(
   ({ timestamp, level, source, route, message, netPnl, status }) => (
     <tr className="hover:bg-surface-raised/60 transition">
-      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-[11px]">
+      <td className="py-2 px-3 text-slate-500 whitespace-nowrap text-[11px] tabular-nums">
         {timestamp}
       </td>
       <td className="py-2 px-2.5 whitespace-nowrap">
         <span
-          className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold border ${getLevelBadgeClass(
+          className={`px-2 py-0.5 rounded-md text-[11px] font-bold border ${getLevelBadgeClass(
             level
           )}`}
         >
@@ -90,7 +90,7 @@ const LogRow: React.FC<LogRowProps> = React.memo(
         <span>{message}</span>
         {netPnl !== undefined && (
           <span
-            className={`ml-1.5 font-bold ${
+            className={`ml-1.5 font-bold tabular-nums ${
               netPnl >= 0 ? "text-profit" : "text-loss"
             }`}
           >
@@ -104,7 +104,7 @@ const LogRow: React.FC<LogRowProps> = React.memo(
             status === "SUCCESS"
               ? "text-profit"
               : status === "WARNING"
-              ? "text-amber-600"
+              ? "text-warn"
               : status === "REJECTED"
               ? "text-loss"
               : "text-slate-500"
@@ -403,15 +403,15 @@ function TickerLogMonitorInner({
         {/* Right: Controls (Level Filters, Search, Clear) */}
         <div className="flex flex-wrap items-center gap-2">
           {/* Level Filter Chips */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px]">
             {(["ALL", "TRADES", "TRIGGER", "SCAN", "ERRORS"] as const).map((lvl) => (
               <button
                 key={lvl}
                 type="button"
                 onClick={() => setLevelFilter(lvl)}
-                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
+                className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
                   levelFilter === lvl
-                    ? "bg-accent text-white shadow-2xs"
+                    ? "bg-accent text-white shadow-xs font-semibold"
                     : "text-slate-500 hover:text-slate-900"
                 }`}
               >
@@ -421,7 +421,7 @@ function TickerLogMonitorInner({
           </div>
 
           {/* Depth / Time-Window Filter */}
-          <div className="flex items-center bg-surface-raised px-2 py-0.5 rounded-md border border-surface-border text-xs">
+          <div className="flex items-center bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border text-xs">
             <select
               value={logDepth}
               onChange={(e) => setLogDepth(e.target.value)}
@@ -440,13 +440,13 @@ function TickerLogMonitorInner({
 
           {/* Search Bar */}
           <div className="relative">
-            <Search className="w-3 h-3 text-slate-400 absolute left-2 top-2" />
+            <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               placeholder="Search logs..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-7 pr-2 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-md text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+              className="pl-7 pr-2.5 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-lg text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent transition-colors"
             />
           </div>
 
@@ -454,7 +454,7 @@ function TickerLogMonitorInner({
           <button
             type="button"
             onClick={handleClearLogs}
-            className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
             title="Clear runtime telemetry logs"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -463,7 +463,7 @@ function TickerLogMonitorInner({
       </div>
 
       {/* 2. Log Stream Table */}
-      <div className="rounded-lg border border-surface-border bg-surface overflow-hidden shadow-2xs">
+      <div className="rounded-xl border border-surface-border bg-surface overflow-hidden shadow-card">
         {filteredLogs.length === 0 ? (
           <EmptyState
             icon={Activity}
@@ -473,14 +473,14 @@ function TickerLogMonitorInner({
           />
         ) : (
           <div className="overflow-x-auto max-h-[380px] overflow-y-auto divide-y divide-surface-border">
-            <table className="w-full text-left font-mono text-[11px]">
-              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[11px] text-slate-500 tracking-wider">
+            <table className="w-full text-left font-mono text-[11px] tabular-nums">
+              <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-[11px] text-slate-500 font-semibold tracking-wider">
                 <tr>
-                  <th className="py-2 px-3 w-40">Timestamp</th>
-                  <th className="py-2 px-2.5 w-20">Level</th>
-                  <th className="py-2 px-3 w-36">Source / Route</th>
-                  <th className="py-2 px-3">Telemetry Details</th>
-                  <th className="py-2 px-3 text-right w-24">Status</th>
+                  <th className="py-2.5 px-3 w-40">Timestamp</th>
+                  <th className="py-2.5 px-2.5 w-20">Level</th>
+                  <th className="py-2.5 px-3 w-36">Source / Route</th>
+                  <th className="py-2.5 px-3">Telemetry Details</th>
+                  <th className="py-2.5 px-3 text-right w-24">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-border text-[11px]">

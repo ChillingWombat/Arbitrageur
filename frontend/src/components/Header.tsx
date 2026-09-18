@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Pause, Play } from "lucide-react";
+import { AlertTriangle, OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
 import { ArbitragerLogo } from "./ArbitragerLogo";
@@ -10,8 +10,6 @@ interface HeaderProps {
   onTogglePause?: (paused: boolean) => void;
   onResetCircuitBreaker: () => void;
   onEmergencyKillswitch: () => void;
-  onToggleLiveMode?: (enabled: boolean) => void;
-  onOpenSettings?: () => void;
   refreshing: boolean;
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
@@ -45,16 +43,20 @@ export const Header: React.FC<HeaderProps> = ({
   return (
     <>
       <header className="h-12 border-b border-surface-border bg-surface flex items-stretch select-none">
-      {/* Left: Minimalist Branding (w-72 aligned with PositionsPanel's right border) */}
-      <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
+        {/* Left: Institutional Branding (w-72 aligned with PositionsPanel's right border) */}
+        <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
           <div
-            className="flex items-center space-x-2.5 cursor-default"
-            title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER"}
+            className="flex items-center space-x-2.5 cursor-default group"
+            title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER Quant Platform"}
           >
-            <ArbitragerLogo className="w-5 h-5 text-accent shrink-0" />
-            <span className="font-bold tracking-tight text-sm font-mono text-slate-900">
-              ARBITRAGER
-            </span>
+            <div className="relative flex items-center justify-center">
+              <ArbitragerLogo className="w-5 h-5 text-accent shrink-0 drop-shadow-xs" />
+            </div>
+            <div className="flex items-center">
+              <span className="font-black tracking-tight text-sm font-sans text-slate-900">
+                ARBITRAGER
+              </span>
+            </div>
           </div>
         </div>
 
@@ -72,46 +74,26 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
 
         {/* Right: Metrics & Risk Actions */}
-        <div className="border-l border-surface-border flex items-center space-x-2.5 px-4 shrink-0">
-          {/* Trading Mode Indicator Badge */}
-          <div
-            className={`px-2.5 py-1 rounded-md text-xs font-mono font-bold flex items-center space-x-1.5 border transition-all ${
-              status?.is_live_mode
-                ? "bg-loss-dim text-loss border-loss/40 animate-pulse shadow-2xs"
-                : "bg-profit-dim text-profit border-profit/40"
-            }`}
-            title={
-              status?.is_live_mode
-                ? "LIVE REAL TRADING ACTIVE: Orders will be signed and executed with real funds on supported venues."
-                : "PAPER TRADING ACTIVE: Virtual execution simulation using live market data feeds."
-            }
-          >
-            <span
-              className={`w-2 h-2 rounded-full ${
-                status?.is_live_mode ? "bg-loss animate-ping" : "bg-profit"
-              }`}
-            />
-            <span>{status?.is_live_mode ? "LIVE TRADING" : "PAPER TRADING"}</span>
-          </div>
-
+        <div className="border-l border-surface-border flex items-center space-x-2 px-3 lg:px-4 shrink-0">
           {/* Reset CB if tripped */}
           {isTripped && (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-2 py-1 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-medium transition cursor-pointer"
+              className="btn-warning-subtle text-xs font-mono font-bold flex items-center space-x-1.5"
               title="Reset Circuit Breaker"
             >
-              Reset CB
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Reset CB</span>
             </button>
           )}
 
           {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
           <button
             onClick={() => onTogglePause?.(!isPaused)}
-            className={`px-2 py-1 rounded-md text-xs font-mono font-medium transition flex items-center space-x-1.5 cursor-pointer shadow-2xs ${
+            className={`px-2.5 py-1.5 rounded-lg text-xs font-sans font-semibold transition-all flex items-center space-x-1.5 cursor-pointer shadow-2xs active:scale-[0.98] ${
               isPaused
-                ? "bg-amber-500 hover:bg-amber-600 text-white animate-pulse"
-                : "bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border"
+                ? "bg-amber-500 hover:bg-amber-600 text-white shadow-xs animate-pulse"
+                : "bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border"
             }`}
             title={
               isPaused
@@ -135,28 +117,35 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="px-2 py-1 bg-loss hover:bg-red-700 text-white rounded-md text-xs font-mono font-medium transition shadow-2xs cursor-pointer"
+            className="btn-danger px-2.5 py-1.5 text-xs font-sans font-bold flex items-center space-x-1.5 shadow-xs"
             title="Emergency Killswitch: Stop All Trading"
           >
-            Stop All
+            <OctagonX className="w-3.5 h-3.5" />
+            <span>Stop All</span>
           </button>
         </div>
       </header>
 
       {/* Kill Switch Modal */}
       {showKillModal && (
-        <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-surface border border-surface-border rounded-lg p-6 max-w-md w-full shadow-xl space-y-4">
-            <div>
-              <h3 className="text-base font-bold font-mono tracking-wider text-slate-900">Emergency Stop</h3>
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-loss-dim border border-loss/30 flex items-center justify-center text-loss">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold font-sans text-slate-900 leading-snug">Emergency Stop</h3>
+                <p className="text-xs text-slate-500">Trip circuit breaker &amp; halt all trading</p>
+              </div>
             </div>
-            <p className="text-sm text-slate-600">
+            <p className="text-sm text-slate-600 leading-relaxed">
               This will immediately stop all trading coordination, trip the risk circuit breaker, and cancel pending orders across all venues.
             </p>
-            <div className="flex justify-end space-x-3 pt-2">
+            <div className="flex justify-end space-x-2.5 pt-3 border-t border-surface-border">
               <button
                 onClick={() => setShowKillModal(false)}
-                className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 rounded-md text-sm font-mono transition"
+                className="btn-secondary px-4 py-2 text-sm"
               >
                 Cancel
               </button>
@@ -165,7 +154,7 @@ export const Header: React.FC<HeaderProps> = ({
                   onEmergencyKillswitch();
                   setShowKillModal(false);
                 }}
-                className="px-4 py-2 bg-loss hover:bg-red-700 text-white font-medium rounded-md text-sm font-mono transition shadow-2xs"
+                className="btn-danger px-4 py-2 text-sm font-bold shadow-sm"
               >
                 Confirm Stop
               </button>

@@ -42,3 +42,36 @@ export function scopeAndSortPositions(
   }
   return sorted;
 }
+
+const REDUCE_ONLY_STORAGE_KEY = "arbitrager:reduce_only_positions";
+
+export function getReduceOnlyPositions(): string[] {
+  if (typeof window === "undefined" || !window.localStorage) return [];
+  try {
+    const raw = window.localStorage.getItem(REDUCE_ONLY_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function isPositionReduceOnly(symbol: string): boolean {
+  const list = getReduceOnlyPositions();
+  return list.includes(symbol.toUpperCase());
+}
+
+export function setPositionReduceOnly(symbol: string, reduceOnly: boolean): void {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  try {
+    const set = new Set(getReduceOnlyPositions());
+    if (reduceOnly) {
+      set.add(symbol.toUpperCase());
+    } else {
+      set.delete(symbol.toUpperCase());
+    }
+    window.localStorage.setItem(REDUCE_ONLY_STORAGE_KEY, JSON.stringify(Array.from(set)));
+    window.dispatchEvent(new Event("arbitrager:reduce_only_changed"));
+  } catch {
+    // ignore storage errors
+  }
+}

@@ -58,9 +58,38 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
   }, [logs, symbol, filterStatus, filterDirection, searchQuery]);
 
   return (
-    <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs transition">
+    <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card transition">
       {/* Header Bar */}
-      <div className="flex flex-col md:flex-row md:items-center justify-end pb-2.5 border-b border-surface-border gap-3">
+      <div className="flex flex-col md:flex-row md:items-center justify-between pb-2.5 border-b border-surface-border gap-3">
+        <div className="flex items-center space-x-2">
+          <span className="text-xs font-bold text-slate-800 font-mono tracking-wide">
+            Transaction Records
+          </span>
+          {tickerLogs.length > 0 ? (
+            tickerLogs[0].is_live ? (
+              <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
+                Live Trading
+              </span>
+            ) : (
+              <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
+                Paper Trading
+              </span>
+            )
+          ) : (
+            logs.length > 0 && (
+              logs[0].is_live ? (
+                <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
+                  Live Trading
+                </span>
+              ) : (
+                <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
+                  Paper Trading
+                </span>
+              )
+            )
+          )}
+        </div>
+
         {/* Filter & Search Bar */}
         <div className="flex items-center space-x-2">
           <div className="relative">
@@ -70,38 +99,38 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
               placeholder="Filter venue/note..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-2.5 py-1 text-xs font-mono bg-surface-raised border border-surface-border rounded-md text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent w-40"
+              className="pl-8 pr-2.5 py-1 text-xs font-mono bg-surface-raised border border-surface-border rounded-lg text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent w-40 transition-colors"
             />
           </div>
 
-          <div className="flex items-center bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px] font-mono">
+          <div className="flex items-center bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px] font-mono">
             <button
               onClick={() => setFilterStatus("ALL")}
-              className={`px-2 py-1 rounded transition ${
-                filterStatus === "ALL" ? "bg-accent text-white shadow-2xs" : "text-slate-500 hover:text-slate-900"
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                filterStatus === "ALL" ? "bg-accent text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               All ({tickerLogs.length})
             </button>
             <button
               onClick={() => setFilterStatus("FILLED")}
-              className={`px-2 py-1 rounded transition ${
-                filterStatus === "FILLED" ? "bg-emerald-600 text-white font-medium" : "text-slate-500 hover:text-slate-900"
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                filterStatus === "FILLED" ? "bg-profit text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               Filled
             </button>
             <button
               onClick={() => setFilterStatus("FAILED")}
-              className={`px-2 py-1 rounded transition ${
-                filterStatus === "FAILED" ? "bg-rose-600 text-white font-medium" : "text-slate-500 hover:text-slate-900"
+              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+                filterStatus === "FAILED" ? "bg-loss text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
               Failed
             </button>
           </div>
 
-          <div className="flex items-center bg-surface-raised px-2 py-1 rounded-md border border-surface-border text-xs font-mono">
+          <div className="flex items-center bg-surface-raised px-2.5 py-1 rounded-lg border border-surface-border text-xs font-mono">
             <select
               value={filterDirection}
               onChange={(e) => setFilterDirection(e.target.value)}
@@ -117,18 +146,18 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
       {/* History Table */}
       <div className="mt-4 overflow-x-auto">
-        <table className="w-full text-left text-[11px] font-mono border-collapse">
+        <table className="w-full text-left text-[11px] font-mono tabular-nums border-collapse">
           <thead>
-            <tr className="border-b border-surface-border text-slate-500 text-[11px] tracking-wider bg-surface-raised/40">
-              <th className="py-2.5 px-3 font-semibold">DateTime</th>
-              <th className="py-2.5 px-3 font-semibold">Direction & Action</th>
-              <th className="py-2.5 px-3 font-semibold">Venues (Buy ➔ Sell)</th>
-              <th className="py-2.5 px-3 font-semibold text-right">Trigger Spread</th>
-              <th className="py-2.5 px-3 font-semibold text-right">Signal Baseline (Mean & Δ)</th>
-              <th className="py-2.5 px-3 font-semibold text-center">Position Step</th>
-              <th className="py-2.5 px-3 font-semibold text-right">Nominal Hurdle</th>
-              <th className="py-2.5 px-3 font-semibold text-right">Net PnL</th>
-              <th className="py-2.5 px-3 font-semibold">Status / Diagnostic Note</th>
+            <tr className="border-b border-surface-border text-slate-500 text-[11px] font-semibold tracking-wider bg-surface-raised/60">
+              <th className="py-2.5 px-3">DateTime</th>
+              <th className="py-2.5 px-3">Direction & Action</th>
+              <th className="py-2.5 px-3">Venues (Buy ➔ Sell)</th>
+              <th className="py-2.5 px-3 text-right">Trigger Spread</th>
+              <th className="py-2.5 px-3 text-right">Signal Baseline (Mean & Δ)</th>
+              <th className="py-2.5 px-3 text-center">Position Step</th>
+              <th className="py-2.5 px-3 text-right">Nominal Hurdle</th>
+              <th className="py-2.5 px-3 text-right">Net PnL</th>
+              <th className="py-2.5 px-3">Status / Diagnostic Note</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-surface-border">
@@ -178,7 +207,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                   <tr key={log.id} className="hover:bg-surface-raised/40 transition">
                     {/* DateTime */}
                     <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
-                      <div className="font-medium text-slate-900">{timeFormatted}</div>
+                      <div className="font-semibold text-slate-900">{timeFormatted}</div>
                       <div className="text-[11px] text-slate-400">{dateFormatted}</div>
                     </td>
 
@@ -186,9 +215,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     <td className="py-2.5 px-3 whitespace-nowrap">
                       <div className="flex items-center space-x-1.5">
                         <span
-                          className={`px-2 py-0.5 rounded-sm text-[11px] font-mono font-medium border ${
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold border ${
                             isConvergence
-                              ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                              ? "bg-profit-dim text-profit border-profit-border"
                               : isCarry
                               ? "bg-purple-50 text-purple-700 border-purple-200"
                               : "bg-blue-50 text-blue-700 border-blue-200"
@@ -202,9 +231,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     {/* Venues */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-slate-800">
                       <div className="flex items-center space-x-1.5">
-                        <span className="font-medium text-slate-900">{log.venue_a}</span>
+                        <span className="font-semibold text-slate-900">{log.venue_a}</span>
                         <ArrowRight className="w-3 h-3 text-slate-400" />
-                        <span className="font-medium text-slate-900">{log.venue_b}</span>
+                        <span className="font-semibold text-slate-900">{log.venue_b}</span>
                       </div>
                     </td>
 
@@ -229,8 +258,8 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="text-slate-700 font-medium">{baselineMean.toFixed(1)} BPS</div>
                           {dislocation !== null && (
                             <div
-                              className={`text-[11px] font-medium ${
-                                dislocation >= 0 ? "text-emerald-600" : "text-rose-600"
+                              className={`text-[11px] font-semibold ${
+                                dislocation >= 0 ? "text-profit" : "text-loss"
                               }`}
                             >
                               Δ {dislocation >= 0 ? `+${dislocation.toFixed(1)}` : dislocation.toFixed(1)} BPS
@@ -244,7 +273,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
                     {/* Position Step Number */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-center">
-                      <div className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-sm bg-surface-raised border border-surface-border text-[11px] font-mono font-medium text-slate-700">
+                      <div className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-surface-raised border border-surface-border text-[11px] font-mono font-medium text-slate-700">
                         <Layers className="w-3 h-3 text-slate-400" />
                         <span>
                           Step {step} / {maxUnits}
@@ -259,8 +288,8 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="text-slate-700">{hurdle.toFixed(1)} BPS</div>
                           {hurdleBuffer !== null && (
                             <div
-                              className={`text-[11px] ${
-                                hurdleBuffer >= 0 ? "text-emerald-600" : "text-rose-600"
+                              className={`text-[11px] font-semibold ${
+                                hurdleBuffer >= 0 ? "text-profit" : "text-loss"
                               }`}
                             >
                               Margin {hurdleBuffer >= 0 ? `+${hurdleBuffer.toFixed(1)}` : hurdleBuffer.toFixed(1)}
@@ -274,7 +303,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
                     {/* Net PnL */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-right">
-                      <div className={`font-bold ${log.net_profit >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                      <div className={`font-bold tabular-nums ${log.net_profit >= 0 ? "text-profit" : "text-loss"}`}>
                         {formatCurrencyPnl(log.net_profit)}
                       </div>
                       <div className="text-[11px] text-slate-400">{log.latency_us} µs</div>
@@ -284,9 +313,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     <td className="py-2.5 px-3 text-slate-600 max-w-xs truncate">
                       <div className="flex items-center space-x-1.5">
                         {log.success ? (
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-profit shrink-0" />
                         ) : (
-                          <span className="w-1.5 h-1.5 rounded-full bg-rose-500 shrink-0" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-loss shrink-0" />
                         )}
                         <span className="truncate text-[11px] text-slate-600" title={log.note}>
                           {log.note}

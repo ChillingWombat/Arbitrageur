@@ -179,13 +179,13 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   return (
     <div className="w-full p-4 space-y-4 overflow-y-auto h-full select-none pb-24">
       {/* 1. Header Control Bar */}
-      <div className="bg-surface p-3.5 rounded-lg border border-surface-border flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+      <div className="bg-surface p-4 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-3 shadow-card">
         <div>
           <div className="flex items-center space-x-2">
             <Activity className="w-4 h-4 text-accent" />
             <h1 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">Portfolio Monitor</h1>
             <span
-              className={`px-2.5 py-0.5 rounded-sm text-xs font-mono font-bold ${
+              className={`px-2.5 py-0.5 rounded-full text-xs font-mono font-bold ${
                 isTripped
                   ? "bg-loss-dim text-loss border border-loss-border"
                   : isPaused
@@ -204,7 +204,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
             <select
               value={strategyFilter}
               onChange={(e) => setStrategyFilter(e.target.value)}
-              className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer"
+              className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer"
               title="Select which strategy to monitor"
             >
               <option value="all">All</option>
@@ -219,14 +219,14 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-md text-xs font-mono font-bold flex items-center transition shadow-2xs cursor-pointer"
+              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer"
             >
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="px-3 py-1.5 bg-loss-dim hover:bg-red-100 text-loss border border-loss-border rounded-md text-xs font-mono font-bold flex items-center transition shadow-2xs cursor-pointer"
+              className="btn-danger px-3 py-1.5 text-xs font-mono font-bold flex items-center shadow-xs cursor-pointer"
             >
               <span>Trigger Manual Trip</span>
             </button>
@@ -237,60 +237,60 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       {/* 2. Top Executive KPI Metric Strip */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         {/* Total Equity */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Consolidated Equity</span>
-          <div className="text-xl lg:text-2xl font-bold font-mono text-slate-900 tracking-tight">
+          <div className="text-xl lg:text-2xl font-bold font-mono text-slate-900 tracking-tight tabular-nums">
             ${(riskData?.total_portfolio_value_usd ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
         </div>
 
         {/* Realized PnL */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Realized PnL</span>
-          <div className={`text-xl lg:text-2xl font-bold font-mono tracking-tight ${totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
+          <div className={`text-xl lg:text-2xl font-bold font-mono tracking-tight tabular-nums ${totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
             {totalPnlUsd >= 0 ? `+$${totalPnlUsd.toFixed(2)}` : `-$${Math.abs(totalPnlUsd).toFixed(2)}`}
           </div>
         </div>
 
         {/* Win Rate */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Cycle Win Rate</span>
-          <div className="text-xl lg:text-2xl font-bold font-mono text-profit tracking-tight">
+          <div className="text-xl lg:text-2xl font-bold font-mono text-profit tracking-tight tabular-nums">
             {overallWinRate.toFixed(1)}%
           </div>
         </div>
 
         {/* Sharpe Ratio */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Sharpe / APR</span>
-          <div className="text-xl lg:text-2xl font-bold font-mono text-accent tracking-tight flex items-baseline space-x-1.5">
+          <div className="text-xl lg:text-2xl font-bold font-mono text-accent tracking-tight flex items-baseline space-x-1.5 tabular-nums">
             <span>{avgSharpe.toFixed(2)}</span>
             <span className="text-xs font-normal text-slate-500 font-mono">({avgApr.toFixed(0)}% APR)</span>
           </div>
         </div>
 
         {/* Margin Proximity */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Liquidation Buffer</span>
-          <div className={`text-xl lg:text-2xl font-bold font-mono tracking-tight ${margin ? "text-profit" : "text-slate-400"}`}>
+          <div className={`text-xl lg:text-2xl font-bold font-mono tracking-tight tabular-nums ${margin ? "text-profit" : "text-slate-400"}`}>
             {margin ? `+${margin.liquidation_distance_pct.toFixed(1)}%` : "—"}
           </div>
         </div>
 
         {/* Circuit Breaker Safety */}
-        <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
+        <div className="bg-surface border border-surface-border rounded-xl p-4 shadow-card space-y-1.5">
           <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Tripwire Limit</span>
-          <div className="text-xl lg:text-2xl font-bold font-mono text-slate-900 tracking-tight">
+          <div className="text-xl lg:text-2xl font-bold font-mono text-slate-900 tracking-tight tabular-nums">
             ${riskData?.max_drawdown_limit_usd ?? 1000}
           </div>
-          <span className="text-xs font-mono text-slate-400">{riskData?.consecutive_failures ?? 0} / {riskData?.max_failures_allowed ?? 3} err count</span>
+          <span className="text-xs font-mono text-slate-400 tabular-nums">{riskData?.consecutive_failures ?? 0} / {riskData?.max_failures_allowed ?? 3} err count</span>
         </div>
       </div>
 
       {/* 3. DeltaGuard & Risk Operations Grid */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         {/* Left 2 Cols: DeltaGuard Net Position Neutrality Table */}
-        <div className="xl:col-span-2 bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
+        <div className="xl:col-span-2 bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
           <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <div>
               <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
@@ -301,20 +301,20 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 Aggregates all open legs across venues to enforce delta-neutrality ($200 USD strict unhedged tolerance).
               </p>
             </div>
-            <span className="px-2.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-profit-dim text-profit border border-profit-border">
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-profit-dim text-profit border border-profit-border">
               Guard Active
             </span>
           </div>
 
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs font-mono">
-              <thead className="bg-surface-raised">
-                <tr className="border-b border-surface-border text-slate-500 text-xs tracking-wider">
-                  <th className="py-2 px-2.5">Base Asset</th>
-                  <th className="py-2 px-2.5">Net Quantity</th>
-                  <th className="py-2 px-2.5">Signed USD Exposure</th>
-                  <th className="py-2 px-2.5">Tolerance Limit</th>
-                  <th className="py-2 px-2.5 text-right">Status</th>
+            <table className="w-full text-left text-xs font-mono tabular-nums">
+              <thead className="bg-surface-raised/60">
+                <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                  <th className="py-2.5 px-3">Base Asset</th>
+                  <th className="py-2.5 px-3">Net Quantity</th>
+                  <th className="py-2.5 px-3">Signed USD Exposure</th>
+                  <th className="py-2.5 px-3">Tolerance Limit</th>
+                  <th className="py-2.5 px-3 text-right">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-surface-border">
@@ -322,12 +322,12 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                   riskData.net_deltas.map((delta) => {
                     const isNeutral = Math.abs(delta.net_exposure_usd) <= delta.delta_limit_usd;
                     return (
-                      <tr key={delta.asset} className="hover:bg-surface-raised transition">
-                        <td className="py-2 px-2.5 font-bold text-sm text-slate-900">{delta.asset}</td>
-                        <td className="py-2 px-2.5 text-slate-700">
+                      <tr key={delta.asset} className="hover:bg-surface-raised/40 transition">
+                        <td className="py-2.5 px-3 font-bold text-sm text-slate-900">{delta.asset}</td>
+                        <td className="py-2.5 px-3 text-slate-700">
                           {delta.net_quantity >= 0 ? `+${delta.net_quantity.toFixed(4)}` : delta.net_quantity.toFixed(4)}
                         </td>
-                        <td className="py-2 px-2.5">
+                        <td className="py-2.5 px-3">
                           <span
                             className={`font-bold ${
                               Math.abs(delta.net_exposure_usd) > delta.delta_limit_usd ? "text-loss" : "text-slate-900"
@@ -336,14 +336,14 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                             ${delta.net_exposure_usd.toFixed(2)}
                           </span>
                         </td>
-                        <td className="py-2 px-2.5 text-slate-500">${delta.delta_limit_usd.toLocaleString()} max</td>
-                        <td className="py-2 px-2.5 text-right whitespace-nowrap">
+                        <td className="py-2.5 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString()} max</td>
+                        <td className="py-2.5 px-3 text-right whitespace-nowrap">
                           {isNeutral ? (
-                            <span className="px-2.5 py-0.5 rounded-sm text-xs font-bold bg-profit-dim text-profit border border-profit-border whitespace-nowrap inline-block">
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-profit-dim text-profit border border-profit-border whitespace-nowrap inline-block">
                               Delta Neutral
                             </span>
                           ) : (
-                            <span className="px-2.5 py-0.5 rounded-sm text-xs font-bold bg-warn-dim text-warn border border-warn-border whitespace-nowrap inline-block">
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-warn-dim text-warn border border-warn-border whitespace-nowrap inline-block">
                               Exposure Skew
                             </span>
                           )}
@@ -367,9 +367,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
         </div>
 
         {/* Right 1 Col: Margin Proximity & Circuit Breaker Tripwires */}
-        <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
+        <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold border-b border-surface-border pb-2.5 flex items-center space-x-2">
-            <ShieldCheck className="w-5 h-5 text-emerald-600" />
+            <ShieldCheck className="w-5 h-5 text-profit" />
             <span>Safety Tripwires & Margin Health</span>
           </h2>
 
@@ -420,7 +420,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       <ExchangeVenueGadget rows={exchangeRows} />
 
       {/* 4. Strategy Performance Attribution Breakdown */}
-      <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
+      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
         <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
           <div>
             <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
@@ -440,9 +440,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           {visibleMetrics.map((m) => {
             const winRate = m.total_cycles_completed > 0 ? (m.winning_cycles / m.total_cycles_completed) * 100 : 0;
             return (
-              <div key={m.strategy_id} className="bg-surface-raised/60 border border-surface-border rounded-md p-3 space-y-2">
+              <div key={m.strategy_id} className="bg-surface-raised/60 border border-surface-border rounded-xl p-3.5 space-y-2.5 shadow-2xs">
                 <div className="flex items-center space-x-3">
-                  <div className="p-2 bg-surface rounded-md border border-surface-border shadow-2xs">
+                  <div className="p-2 bg-surface rounded-lg border border-surface-border shadow-xs">
                     {getStrategyIcon(m.strategy_id)}
                   </div>
                   <div className="min-w-0 flex-1">
@@ -453,7 +453,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                   </div>
                 </div>
 
-                <div className="space-y-2 pt-1 text-xs font-mono">
+                <div className="space-y-2 pt-1 text-xs font-mono tabular-nums">
                   <div className="flex justify-between">
                     <span className="text-slate-500">Realized PnL:</span>
                     <span className={`font-bold ${m.total_pnl_usd >= 0 ? "text-profit" : "text-loss"}`}>
@@ -480,7 +480,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       </div>
 
       {/* 5. Walk-Forward Optimization (WFO) Engine Preview */}
-      <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
+      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border pb-2.5">
           <div>
             <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
@@ -496,7 +496,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
             onClick={runCalibration}
             disabled
             title="Native WFO requires recorded quote history — not yet available"
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 disabled:bg-slate-400 disabled:hover:bg-slate-400 text-white rounded-md text-xs font-mono font-bold transition shadow-2xs flex items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
+            className="px-3.5 py-2 bg-accent hover:bg-blue-600 disabled:bg-slate-300 disabled:text-slate-500 text-white rounded-lg text-xs font-mono font-bold transition shadow-xs flex items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
           >
             <Sliders className={`w-4 h-4 ${calibrating ? "animate-spin" : ""}`} />
             <span>
@@ -507,7 +507,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
         {wfoResult ? (
           <div className="space-y-3 font-mono text-xs">
-            <div className="p-3.5 rounded-md bg-blue-50/80 border border-blue-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
+            <div className="p-3.5 rounded-xl bg-blue-50/80 border border-blue-200 flex flex-col md:flex-row md:items-center justify-between gap-3">
               <div className="flex items-start space-x-3.5">
                 <CheckCircle2 className="w-5 h-5 text-accent shrink-0 mt-0.5" />
                 <div>
@@ -515,7 +515,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                     <span className="text-sm font-bold font-mono text-slate-900">
                       Optimal Estimator: {wfoResult.optimal_estimator} ({wfoResult.optimal_window_size} Quote Updates)
                     </span>
-                    <span className="px-2.5 py-0.5 rounded-sm text-xs font-mono font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    <span className="px-2.5 py-0.5 rounded-md text-xs font-mono font-bold bg-profit-dim text-profit border border-profit-border">
                       OOS Score: {wfoResult.out_of_sample_score.toFixed(2)}
                     </span>
                   </div>
@@ -523,7 +523,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center space-x-4 shrink-0 text-xs font-mono">
+              <div className="flex items-center space-x-4 shrink-0 text-xs font-mono tabular-nums">
                 <div className="text-right">
                   <span className="text-xs text-slate-400 block">In-Sample</span>
                   <span className="font-bold text-slate-900">{wfoResult.in_sample_score.toFixed(2)}</span>
@@ -536,27 +536,27 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
             </div>
 
             {wfoResult.candidate_evaluations && wfoResult.candidate_evaluations.length > 0 && (
-              <div className="border border-surface-border rounded-md overflow-hidden">
-                <table className="w-full text-left text-xs font-mono">
+              <div className="border border-surface-border rounded-xl overflow-hidden">
+                <table className="w-full text-left text-xs font-mono tabular-nums">
                   <thead>
-                    <tr className="bg-surface-raised border-b border-surface-border text-slate-500 text-xs tracking-wider">
-                      <th className="py-2 px-2.5">Estimator</th>
-                      <th className="py-2 px-2.5">Window</th>
-                      <th className="py-2 px-2.5">In-Sample Sharpe</th>
-                      <th className="py-2 px-2.5">Out-of-Sample Sharpe</th>
-                      <th className="py-2 px-2.5">Sim. Net Profit</th>
-                      <th className="py-2 px-2.5 text-right">Win Rate</th>
+                    <tr className="bg-surface-raised/60 border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                      <th className="py-2.5 px-3">Estimator</th>
+                      <th className="py-2.5 px-3">Window</th>
+                      <th className="py-2.5 px-3">In-Sample Sharpe</th>
+                      <th className="py-2.5 px-3">Out-of-Sample Sharpe</th>
+                      <th className="py-2.5 px-3">Sim. Net Profit</th>
+                      <th className="py-2.5 px-3 text-right">Win Rate</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-surface-border">
                     {wfoResult.candidate_evaluations.map((c, idx) => (
-                      <tr key={idx} className="hover:bg-surface-raised transition">
-                        <td className="py-2 px-2.5 font-semibold text-slate-900">{c.estimator}</td>
-                        <td className="py-2 px-2.5 text-slate-700">{c.window_size} ticks</td>
-                        <td className="py-2 px-2.5 text-slate-800">{c.in_sample_sharpe.toFixed(2)}</td>
-                        <td className="py-2 px-2.5 font-bold text-accent">{c.out_of_sample_sharpe.toFixed(2)}</td>
-                        <td className="py-2 px-2.5 text-profit font-semibold">+{c.simulated_net_profit_bps.toFixed(1)} BPS</td>
-                        <td className="py-2 px-2.5 text-right text-slate-800">{c.win_rate_pct.toFixed(1)}%</td>
+                      <tr key={idx} className="hover:bg-surface-raised/40 transition">
+                        <td className="py-2.5 px-3 font-semibold text-slate-900">{c.estimator}</td>
+                        <td className="py-2.5 px-3 text-slate-700">{c.window_size} ticks</td>
+                        <td className="py-2.5 px-3 text-slate-800">{c.in_sample_sharpe.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 font-bold text-accent">{c.out_of_sample_sharpe.toFixed(2)}</td>
+                        <td className="py-2.5 px-3 text-profit font-semibold">+{c.simulated_net_profit_bps.toFixed(1)} BPS</td>
+                        <td className="py-2.5 px-3 text-right text-slate-800">{c.win_rate_pct.toFixed(1)}%</td>
                       </tr>
                     ))}
                   </tbody>

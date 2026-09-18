@@ -22,7 +22,7 @@ function fmtPct(v: number | null): string {
  * in the tooltip while history is absent, never a fabricated window.
  */
 export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> = ({ rows }) => (
-  <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
+  <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
     <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
       <div>
         <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
@@ -45,40 +45,40 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
       />
     ) : (
       <div className="overflow-x-auto">
-        <table className="w-full text-left text-xs font-mono">
-          <thead className="bg-surface-raised">
-            <tr className="border-b border-surface-border text-slate-500 text-xs tracking-wider">
-              <th className="py-2 px-2.5">Venue</th>
-              <th className="py-2 px-2.5 text-right" title="Execution events involving this venue">Trades</th>
-              <th className="py-2 px-2.5 text-right" title="Total net profit / trades">Avg PnL / trade</th>
-              <th className="py-2 px-2.5 text-right" title="Sum of fee-inclusive net profit">Total PnL</th>
-              <th className="py-2 px-2.5 text-right" title="Current paper equity">Equity</th>
-              <th className="py-2 px-2.5 text-right" title="Used margin / equity, current snapshot">Utilisation</th>
-              <th className="py-2 px-2.5 text-right" title="Time-averaged utilisation over 24h">24h avg util</th>
+        <table className="w-full text-left text-xs font-mono tabular-nums">
+          <thead className="bg-surface-raised/60">
+            <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+              <th className="py-2.5 px-3">Venue</th>
+              <th className="py-2.5 px-3 text-right" title="Execution events involving this venue">Trades</th>
+              <th className="py-2.5 px-3 text-right" title="Total net profit / trades">Avg PnL / trade</th>
+              <th className="py-2.5 px-3 text-right" title="Sum of fee-inclusive net profit">Total PnL</th>
+              <th className="py-2.5 px-3 text-right" title="Current paper equity">Equity</th>
+              <th className="py-2.5 px-3 text-right" title="Used margin / equity, current snapshot">Utilisation</th>
+              <th className="py-2.5 px-3 text-right" title="Time-averaged utilisation over 24h">24h avg util</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-surface-border">
             {rows.map((r) => (
-              <tr key={r.venue} className="hover:bg-surface-raised transition">
-                <td className="py-2 px-2.5 font-bold text-sm text-slate-900">{r.venue}</td>
-                <td className="py-2 px-2.5 text-right text-slate-700">{r.trades}</td>
-                <td className="py-2 px-2.5 text-right">
+              <tr key={r.venue} className="hover:bg-surface-raised/40 transition">
+                <td className="py-2.5 px-3 font-bold text-sm text-slate-900">{r.venue}</td>
+                <td className="py-2.5 px-3 text-right text-slate-700">{r.trades}</td>
+                <td className="py-2.5 px-3 text-right">
                   <span className={`font-bold ${r.avgPnlUsd == null ? "text-slate-400" : r.avgPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
                     {r.avgPnlUsd == null ? "—" : fmtMoney(r.avgPnlUsd)}
                   </span>
                 </td>
-                <td className="py-2 px-2.5 text-right">
+                <td className="py-2.5 px-3 text-right">
                   <span className={`font-bold ${r.totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
                     {fmtMoney(r.totalPnlUsd)}
                   </span>
                 </td>
-                <td className="py-2 px-2.5 text-right text-slate-800" title={r.equityUsd == null ? "No balance snapshot for this venue." : undefined}>
+                <td className="py-2.5 px-3 text-right text-slate-800" title={r.equityUsd == null ? "No balance snapshot for this venue." : undefined}>
                   {r.equityUsd == null ? "—" : `$${r.equityUsd.toFixed(2)}`}
                 </td>
-                <td className="py-2 px-2.5 text-right text-slate-800" title={r.utilisationPct == null ? "No balance snapshot for this venue." : undefined}>
+                <td className="py-2.5 px-3 text-right text-slate-800" title={r.utilisationPct == null ? "No balance snapshot for this venue." : undefined}>
                   {fmtPct(r.utilisationPct)}
                 </td>
-                <td className="py-2 px-2.5 text-right text-slate-400" title={r.avgUtilisationNote ?? undefined}>
+                <td className="py-2.5 px-3 text-right text-slate-400" title={r.avgUtilisationNote ?? undefined}>
                   {r.avgUtilisationPct == null ? "—" : fmtPct(r.avgUtilisationPct)}
                 </td>
               </tr>

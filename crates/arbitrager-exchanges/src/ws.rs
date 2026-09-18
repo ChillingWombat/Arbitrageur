@@ -194,6 +194,30 @@ pub fn lighter_market_symbol_map(details: &serde_json::Value) -> HashMap<u64, St
     out
 }
 
+/// Fallback market ID to canonical symbol map for Lighter protocol when
+/// the cold-start orderBookDetails HTTP call is unavailable or rate-limited.
+pub fn lighter_default_market_symbol_map() -> HashMap<u64, String> {
+    let mut out = HashMap::new();
+    let defaults = [
+        (0, "BTC"),
+        (1, "ETH"),
+        (2, "SOL"),
+        (3, "DOGE"),
+        (4, "AVAX"),
+        (5, "LINK"),
+        (6, "ARB"),
+        (7, "OP"),
+        (8, "SUI"),
+        (9, "APT"),
+        (10, "PEPE"),
+        (11, "WIF"),
+    ];
+    for (id, sym) in defaults {
+        out.insert(id, sym.to_string());
+    }
+    out
+}
+
 /// Parse a snapshot payload (subscribe ack) into a validated-shape book plus
 /// its nonce. Level parsing reuses the REST adapter parser.
 pub fn parse_lighter_snapshot_book(
@@ -329,6 +353,11 @@ pub fn vanta_ws_url(account_id: &str) -> anyhow::Result<String> {
         anyhow::bail!("Vanta WS requires an account_id; none configured — WS skipped, REST only");
     }
     Ok(format!("wss://{VANTA_WS_HOST}/ws/stream/{id}"))
+}
+
+/// Public Orderly EVM WS URL for anonymous orderbook streaming.
+pub fn vanta_public_ws_url() -> String {
+    format!("wss://{VANTA_WS_HOST}/ws/stream/public")
 }
 
 /// `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}`.

@@ -773,7 +773,7 @@ COMMIT;";
 const MIGRATION_V6_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params (
-  strategy_id TEXT PRIMARY KEY COLLATE NOCASE CHECK(strategy_id IN ('futures','funding','spot')),
+  strategy_id TEXT PRIMARY KEY COLLATE NOCASE CHECK(strategy_id IN ('futures','funding','spot','triangle')),
   params_json TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -982,6 +982,21 @@ CREATE TABLE margin_snapshots (
 CREATE INDEX ix_margin_snapshots_venue_ts
     ON margin_snapshots(venue, ts_ms);
 PRAGMA user_version = 16;
+COMMIT;";
+
+/// v17 admits 'triangle' into the strategy_params CHECK constraint.
+const MIGRATION_V17_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE strategy_params_v17 (
+  strategy_id TEXT PRIMARY KEY COLLATE NOCASE CHECK(strategy_id IN ('futures','funding','spot','triangle')),
+  params_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+INSERT INTO strategy_params_v17 (strategy_id, params_json, updated_at)
+  SELECT strategy_id, params_json, updated_at FROM strategy_params;
+DROP TABLE strategy_params;
+ALTER TABLE strategy_params_v17 RENAME TO strategy_params;
+PRAGMA user_version = 17;
 COMMIT;";
 
 /// v11 adds the convergence-bot open-position table. Positions are keyed by
@@ -1365,7 +1380,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 16 {
+        if version > 17 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1460,6 +1475,12 @@ impl StateStore {
         }
         if version <= 15 {
             if let Err(err) = conn.execute_batch(MIGRATION_V16_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 16 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V17_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -3819,7 +3840,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 16);
+            assert_eq!(version, 17);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4568,7 +4589,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 16);
+            assert_eq!(version, 17);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -4869,7 +4890,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 16);
+        assert_eq!(v10, 17);
         let kept: i64 = conn
             .query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))
             .unwrap();

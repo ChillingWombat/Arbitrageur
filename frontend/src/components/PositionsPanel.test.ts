@@ -84,3 +84,44 @@ test("current-strategy scope disables gracefully on strategy-less tabs", () => {
   // The scope button renders disabled with the explanatory tooltip.
   assert.match(html, /This page has no single-strategy scope/);
 });
+
+test("position card has right-click context menu hint", () => {
+  const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
+  assert.match(html, /Right-click for position menu: Reduce-Only, Emergency Clear, Non-Emergency Clear/);
+});
+
+test("position card renders Reduce-Only badge when marked reduce-only", () => {
+  const storage = new Map<string, string>();
+  storage.set("arbitrager:reduce_only_positions", JSON.stringify(["BTC-USDC"]));
+  const mockLocalStorage = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, val: string) => {
+      storage.set(key, val);
+    },
+    removeItem: (key: string) => {
+      storage.delete(key);
+    },
+    clear: () => {
+      storage.clear();
+    },
+  };
+
+  const origWindow = (globalThis as any).window;
+  (globalThis as any).window = {
+    localStorage: mockLocalStorage,
+    dispatchEvent: () => true,
+  };
+
+  try {
+    const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
+    assert.match(html, /Reduce-Only/);
+    assert.match(html, /No new step increases; position closes on target profit/);
+  } finally {
+    if (origWindow === undefined) {
+      delete (globalThis as any).window;
+    } else {
+      (globalThis as any).window = origWindow;
+    }
+  }
+});
+

@@ -25,38 +25,38 @@ export const BotStatCards: React.FC<{ stats: BotCycleStats | null }> = ({ stats 
       ? "Bot cycle stats unavailable."
       : "Attributed realized PnL from closed radar fills, net of fees.");
   return (
-    <div className="grid grid-cols-3 gap-4 shrink-0">
-      <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
-        <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Bot Net Profit</span>
+    <div className="grid grid-cols-3 gap-3.5 shrink-0">
+      <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
+        <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Bot Net Profit</span>
         <div
-          className={`text-xl font-bold font-mono tracking-tight ${unknown || stats?.netProfitUsd == null ? "text-slate-400" : stats.netProfitUsd >= 0 ? "text-profit" : "text-loss"}`}
+          className={`text-xl font-bold font-mono tracking-tight tabular-nums ${unknown || stats?.netProfitUsd == null ? "text-slate-400" : stats.netProfitUsd >= 0 ? "text-profit" : "text-loss"}`}
           title={profitTitle}
         >
           {unknown ? "—" : fmtMoney(stats?.netProfitUsd ?? null)}
         </div>
-        <div className="text-xs font-mono text-slate-400" title={profitTitle}>
+        <div className="text-xs font-mono tabular-nums text-slate-400" title={profitTitle}>
           {unknown ? "—" : fmtBps(stats?.netProfitBps ?? null)}
         </div>
       </div>
-      <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
-        <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Completed Cycles</span>
+      <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
+        <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Completed Cycles</span>
         <div
-          className="text-xl font-bold font-mono tracking-tight text-slate-900"
+          className="text-xl font-bold font-mono tracking-tight tabular-nums text-slate-900"
           title="Entered-then-closed round trips, any size"
         >
           {unknown ? "—" : (stats?.completedCycles ?? 0)}
         </div>
-        <div className="text-xs font-mono text-slate-400">entered → closed</div>
+        <div className="text-xs font-sans text-slate-400">entered → closed</div>
       </div>
-      <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-1.5">
-        <span className="text-xs font-mono tracking-wider text-slate-500 font-semibold">Open Cycles</span>
+      <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
+        <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Open Cycles</span>
         <div
-          className="text-xl font-bold font-mono tracking-tight text-slate-900"
+          className="text-xl font-bold font-mono tracking-tight tabular-nums text-slate-900"
           title="Entered, not yet closed"
         >
           {unknown ? "—" : (stats?.openCycles ?? 0)}
         </div>
-        <div className="text-xs font-mono text-slate-400">entered, open</div>
+        <div className="text-xs font-sans text-slate-400">entered, open</div>
       </div>
     </div>
   );

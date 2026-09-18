@@ -7,6 +7,7 @@ import {
   getTickerActiveVenues,
   getTickerAvgVolumeUsd,
   getTickerMinVolumeUsd,
+  getTickerBenchmarkPrice,
   autoFilterBlockReason,
   applyTickerVisibility,
   filterAvailableTickers,
@@ -21,7 +22,7 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT/AST/ONDO/GRVT/EDGX in paper mode", () => {
+test("getEnabledConnectedVenueCodes returns enabled supported venues in paper mode and ignores unsupported", () => {
   const settings: VenueSettingsFilter = {
     trading_mode: "paper",
     hyperliquid_enabled: true,
@@ -30,18 +31,30 @@ test("getEnabledConnectedVenueCodes returns only enabled HL/LGT/RH/VNT/AST/ONDO/
     vanta_enabled: true,
     vanta_orderly_key: "ed25519:validkey",
     robinhood_enabled: true,
-    arcus_enabled: true,
-    popdex_enabled: true,
+    arcus_enabled: true, // scaffold only, unsupported
+    popdex_enabled: true, // parked domain, unsupported
     aster_enabled: true,
     ondoperps_enabled: true,
     grvt_enabled: true, // admitted to paper read-only
     edgex_enabled: true, // admitted to paper read-only
-    kraken_enabled: true,
-    polymarket_enabled: true,
-    kalshi_enabled: true,
+    kraken_enabled: true, // admitted to paper read-only
+    polymarket_enabled: true, // unsupported
+    kalshi_enabled: true, // unsupported
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "EDGX", "GRVT", "HL", "LGT", "ONDO", "RH", "VNT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "EDGX", "GRVT", "HL", "KRK", "LGT", "ONDO", "RH", "VNT"]);
+});
+
+test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, CB, DCB)", () => {
+  const settings: VenueSettingsFilter = {
+    trading_mode: "paper",
+    binance_enabled: true,
+    okx_enabled: true,
+    coinbase_enabled: true,
+    decibel_enabled: true,
+  };
+  const codes = getEnabledConnectedVenueCodes(settings, false);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["BNB", "CB", "DCB", "OKX"]);
 });
 
 test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {
@@ -325,12 +338,18 @@ test("getTickerMinVolumeUsd takes the MIN across in-scope venues", () => {
   assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid"], vols), 1_000_000_000);
 });
 
-test("getTickerMinVolumeUsd excludes on any missing venue (fail-closed)", () => {
+test("getTickerMinVolumeUsd evaluates reporting venues and excludes when completely unreported", () => {
   const vols = [{ venue_id: "hyperliquid", volumes: { BTC: 1_000_000 } }];
-  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "vanta"], vols), undefined);
-  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "lighter"], vols), undefined);
+  // When hyperliquid reports but vanta has no volume feed, reporting venue volume is returned
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "vanta"], vols), 1_000_000);
+  assert.strictEqual(getTickerMinVolumeUsd("BTC", ["hyperliquid", "lighter"], vols), 1_000_000);
+  // When no venue reports volume for this asset, it returns undefined
   assert.strictEqual(
     getTickerMinVolumeUsd("BTC", ["hyperliquid"], [{ venue_id: "hyperliquid", volumes: { ETH: 5 } }]),
+    undefined
+  );
+  assert.strictEqual(
+    getTickerMinVolumeUsd("UNKNOWN", ["hyperliquid", "vanta"], vols),
     undefined
   );
 });
@@ -343,7 +362,7 @@ test("getTickerMinVolumeUsd honors K/1000 normalization like the mean helper", (
   assert.strictEqual(getTickerMinVolumeUsd("PEPE", ["hyperliquid", "lighter"], vols), 8_000_000);
 });
 
-test("autoFilterBlockReason enforces MIN volume and MIN mid with missing-metric exclusion", () => {
+test("autoFilterBlockReason enforces MIN volume and MIN mid with reporting venues and benchmark fallback", () => {
   const vols = [
     { venue_id: "hyperliquid", volumes: { BTC: 1_000_000 } },
     { venue_id: "lighter", volumes: { BTC: 900_000 } },
@@ -361,13 +380,28 @@ test("autoFilterBlockReason enforces MIN volume and MIN mid with missing-metric 
     (autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100, lighter: 40 }, { minVolumeUsd: null, minPriceUsd: 50 }) ?? "").includes("price"),
     "price uses the minimum mid"
   );
-  assert.ok(
-    (autoFilterBlockReason("BTC", scope, vols, { hyperliquid: 100 }, { minVolumeUsd: null, minPriceUsd: 50 }) ?? "").includes("price"),
-    "missing mid excludes fail-closed"
+  // Reporting venue volume allows liquid tickers to pass even when one venue reports no volume
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", ["hyperliquid", "vanta"], vols, { hyperliquid: 100, vanta: 100 }, { minVolumeUsd: 500_000, minPriceUsd: null }),
+    null,
+    "reporting venue volume >= floor passes even if another venue has no volume feed"
   );
+  // But if reported volume is below floor, it fails
   assert.ok(
-    autoFilterBlockReason("BTC", ["hyperliquid", "vanta"], vols, { hyperliquid: 100, vanta: 100 }, { minVolumeUsd: 1, minPriceUsd: null }) !== null,
-    "missing venue volume excludes fail-closed"
+    (autoFilterBlockReason("BTC", ["hyperliquid", "vanta"], vols, { hyperliquid: 100, vanta: 100 }, { minVolumeUsd: 2_000_000, minPriceUsd: null }) ?? "").includes("volume"),
+    "reported volume below floor blocks"
+  );
+  // Benchmark fallback price is used when live mid is not in cache
+  assert.strictEqual(getTickerBenchmarkPrice("BTC"), 78550.0);
+  assert.strictEqual(
+    autoFilterBlockReason("BTC", scope, vols, {}, { minVolumeUsd: null, minPriceUsd: 50 }),
+    null,
+    "benchmark price allows BTC ($78k) to pass minPrice 50"
+  );
+  // Sub-floor benchmark price blocks penny tokens
+  assert.ok(
+    (autoFilterBlockReason("PEPE", scope, vols, {}, { minVolumeUsd: null, minPriceUsd: 0.5 }) ?? "").includes("price"),
+    "PEPE benchmark price < 0.5 blocks"
   );
   assert.strictEqual(
     autoFilterBlockReason("BTC", scope, vols, {}, { minVolumeUsd: null, minPriceUsd: null }),

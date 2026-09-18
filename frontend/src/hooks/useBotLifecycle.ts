@@ -103,7 +103,7 @@ export function getBotControlAvailability(
   phase: BotPhase,
   hasOpenPositions: boolean,
   entriesDisabled: boolean,
-  reduceOnlyAvailable = false,
+  reduceOnlyAvailable = true,
 ): BotControlAvailability {
   const stopping = phase === "stopping";
   return {

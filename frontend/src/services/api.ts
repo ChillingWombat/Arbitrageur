@@ -501,8 +501,20 @@ export const api = {
     });
   },
 
-  async scanFundingOpportunities(symbol: string, tradeSizeUsd: number): Promise<FundingOpportunityDto[]> {
-    return invokeDesktop("scan_funding_opportunities", { symbol, tradeSizeUsd });
+  async scanFundingOpportunities(
+    symbolOrSymbols?: string | string[],
+    tradeSizeUsd: number = 25000
+  ): Promise<FundingOpportunityDto[]> {
+    if (Array.isArray(symbolOrSymbols)) {
+      return invokeDesktop("scan_funding_opportunities", {
+        symbols: symbolOrSymbols,
+        tradeSizeUsd,
+      });
+    }
+    return invokeDesktop("scan_funding_opportunities", {
+      symbol: symbolOrSymbols ?? "",
+      tradeSizeUsd,
+    });
   },
 
   async scanPredictionOpportunities(market: string): Promise<PredictionOpportunityDto[]> {
@@ -616,8 +628,8 @@ export const api = {
     return invokeDesktop<string>("trigger_emergency_killswitch");
   },
 
-  async getExecutionLogs(): Promise<ExecutionLogEntry[]> {
-    return invokeDesktop<ExecutionLogEntry[]>("get_execution_logs");
+  async getExecutionLogs(isLive?: boolean): Promise<ExecutionLogEntry[]> {
+    return invokeDesktop<ExecutionLogEntry[]>("get_execution_logs", isLive !== undefined ? { isLive } : {});
   },
 
   async getVenueExecutionCapabilities(): Promise<VenueCapabilityDto[]> {
@@ -792,11 +804,13 @@ export const api = {
 
   async flattenTickerPositions(
     symbol: string | null,
-    strategyId: string
+    strategyId: string,
+    executionType?: "emergency_market" | "non_emergency_limit"
   ): Promise<FlattenResultDto> {
     return invokeDesktop<FlattenResultDto>("flatten_ticker_positions", {
       symbol,
       strategyId,
+      executionType: executionType ?? null,
     });
   },
 

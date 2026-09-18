@@ -3,15 +3,21 @@ use arbitrager_core::hub::MarketDataHub;
 use arbitrager_core::types::{dec, Decimal};
 use arbitrager_exchanges::arcus::ArcusAdapter;
 use arbitrager_exchanges::aster::AsterAdapter;
+use arbitrager_exchanges::binance::BinanceAdapter;
+use arbitrager_exchanges::coinbase::CoinbaseAdapter;
+use arbitrager_exchanges::decibel::DecibelAdapter;
 use arbitrager_exchanges::edgex::EdgeXAdapter;
 use arbitrager_exchanges::grvt::GrvtAdapter;
 use arbitrager_exchanges::hyperliquid::HyperliquidAdapter;
+use arbitrager_exchanges::kraken::KrakenAdapter;
 use arbitrager_exchanges::lighter::LighterAdapter;
-use arbitrager_exchanges::popdex::PopDexAdapter;
+use arbitrager_exchanges::okx::OkxAdapter;
 use arbitrager_exchanges::ondoperps::OndoPerpsAdapter;
+use arbitrager_exchanges::popdex::PopDexAdapter;
 use arbitrager_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrager_exchanges::simulated::SimulatedExchange;
 use arbitrager_exchanges::vanta::VantaAdapter;
+use arbitrager_exchanges::variational::VariationalAdapter;
 use arbitrager_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrager_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrager_execution::smart_routing::SmartOrderRouter;
@@ -58,6 +64,8 @@ pub struct ExecutionLogEntry {
     pub max_units: Option<u32>,
     #[serde(default)]
     pub nominal_hurdle_bps: Option<f64>,
+    #[serde(default)]
+    pub is_live: bool,
 }
 
 fn default_unattributed_strategy() -> String {
@@ -202,6 +210,13 @@ pub struct StrategyParamsDto {
     pub spot_trade_size_usd: f64,
     pub spot_max_slippage_bps: f64,
     pub spot_min_net_spread_bps: f64,
+    // Triangular Arbitrage
+    #[serde(default = "default_triangle_trade_size")]
+    pub triangle_trade_size_usd: f64,
+    #[serde(default = "default_triangle_min_profit")]
+    pub triangle_min_profit_bps: f64,
+    #[serde(default = "default_max_slippage")]
+    pub triangle_max_slippage_bps: f64,
     // Passive limit unwinds/rebalances: one control set per strategy with a
     // live reduce path (futures/spread, funding, spot). Disabled by default
     // (opt-in). Prediction carries no instance: prediction adapters are
@@ -249,6 +264,9 @@ impl StrategyParamsDto {
             spot_trade_size_usd: 1000.0,
             spot_max_slippage_bps: 5.0,
             spot_min_net_spread_bps: 15.0,
+            triangle_trade_size_usd: default_triangle_trade_size(),
+            triangle_min_profit_bps: default_triangle_min_profit(),
+            triangle_max_slippage_bps: default_max_slippage(),
             futures_passive_unwind: PassiveUnwindConfig::default(),
             funding_passive_unwind: PassiveUnwindConfig::default(),
             spot_passive_unwind: PassiveUnwindConfig::default(),
@@ -286,6 +304,12 @@ fn default_funding_max_entry_spread() -> f64 {
 }
 fn default_min_depth_ratio() -> f64 {
     3.0
+}
+fn default_triangle_trade_size() -> f64 {
+    10000.0
+}
+fn default_triangle_min_profit() -> f64 {
+    2.0
 }
 fn default_hyperliquid_url() -> String {
     "https://api.hyperliquid.xyz".into()
@@ -374,6 +398,10 @@ pub struct VenueBalanceInfo {
     pub margin_rate_pct: f64,
     pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED"
     pub recommended_action: Option<String>,
+    #[serde(default)]
+    pub is_live: bool,
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 // Intentionally no Debug: this DTO transiently holds credential material
@@ -949,6 +977,12 @@ pub struct AppEngineState {
     pub ex_ondoperps: Arc<SimulatedExchange>,
     pub ex_grvt: Arc<SimulatedExchange>,
     pub ex_edgex: Arc<SimulatedExchange>,
+    pub ex_binance: Arc<SimulatedExchange>,
+    pub ex_okx: Arc<SimulatedExchange>,
+    pub ex_coinbase: Arc<SimulatedExchange>,
+    pub ex_kraken: Arc<SimulatedExchange>,
+    pub ex_decibel: Arc<SimulatedExchange>,
+    pub ex_variational: Arc<SimulatedExchange>,
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
@@ -959,6 +993,12 @@ pub struct AppEngineState {
     pub live_ondoperps: Arc<OndoPerpsAdapter>,
     pub live_grvt: Arc<GrvtAdapter>,
     pub live_edgex: Arc<EdgeXAdapter>,
+    pub live_binance: Arc<BinanceAdapter>,
+    pub live_okx: Arc<OkxAdapter>,
+    pub live_coinbase: Arc<CoinbaseAdapter>,
+    pub live_kraken: Arc<KrakenAdapter>,
+    pub live_decibel: Arc<DecibelAdapter>,
+    pub live_variational: Arc<VariationalAdapter>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -968,6 +1008,7 @@ pub struct AppEngineState {
     pub kalman_filter: RwLock<HedgeRatioKalmanFilter>,
     pub is_live_mode: RwLock<bool>,
     pub total_realized_profit: RwLock<Decimal>,
+    pub total_realized_profit_live: RwLock<Decimal>,
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
     pub sim_step_counter: RwLock<usize>,
     pub settings: RwLock<EngineSettingsDto>,
@@ -1029,10 +1070,18 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "vanta" | "vnt" | "vanta.exchange" | "vanta (orderly)" | "vanta (orderly, read-only)" => {
             Some("vanta")
         }
-        "aster" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
+        "aster" | "ast" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
         "ondo" | "ondoperps" | "ondo perps" | "ondo perps (read-only)" => Some("ondoperps"),
         "grvt" | "grvt (perp dex)" | "grvt (perp dex, read-only)" => Some("grvt"),
-        "edgex" | "edge_x" | "edgex (starkex)" | "edgex (starkex, read-only)" => Some("edgex"),
+        "edgex" | "edgx" | "edge_x" | "edgex (starkex)" | "edgex (starkex, read-only)" => Some("edgex"),
+        "arcus" | "arc" | "arcus dex" | "arcus (fast clob)" | "arcus (perp dex)" => Some("arcus"),
+        "popdex" | "pop" | "popdex (hybrid)" | "popdex (solana dex)" => Some("popdex"),
+        "binance" | "bnb" | "bin" | "binance futures" | "binance (perp)" => Some("binance"),
+        "okx" | "okx swaps" | "okx (perp)" => Some("okx"),
+        "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
+        "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
+        "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
+        "variational" | "var" | "variational (omni-perp)" => Some("variational"),
         _ => None,
     }
 }
@@ -1162,6 +1211,48 @@ impl AppEngineState {
             dec!(4.5),
             dec!(100000.0),
         ));
+        let ex_binance = Arc::new(SimulatedExchange::new(
+            "binance",
+            "Binance",
+            2,
+            dec!(2.0),
+            dec!(100000.0),
+        ));
+        let ex_okx = Arc::new(SimulatedExchange::new(
+            "okx",
+            "OKX",
+            2,
+            dec!(2.0),
+            dec!(100000.0),
+        ));
+        let ex_coinbase = Arc::new(SimulatedExchange::new(
+            "coinbase",
+            "Coinbase",
+            3,
+            dec!(10.0),
+            dec!(100000.0),
+        ));
+        let ex_kraken = Arc::new(SimulatedExchange::new(
+            "kraken",
+            "Kraken",
+            3,
+            dec!(2.0),
+            dec!(100000.0),
+        ));
+        let ex_decibel = Arc::new(SimulatedExchange::new(
+            "decibel",
+            "Decibel",
+            4,
+            dec!(2.5),
+            dec!(100000.0),
+        ));
+        let ex_variational = Arc::new(SimulatedExchange::new(
+            "variational",
+            "Variational",
+            4,
+            dec!(0.0),
+            dec!(100000.0),
+        ));
 
         // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
         // from live venue APIs once API credentials are configured by the user.
@@ -1183,6 +1274,12 @@ impl AppEngineState {
         let live_ondoperps = Arc::new(OndoPerpsAdapter::new(None));
         let live_grvt = Arc::new(GrvtAdapter::new(None));
         let live_edgex = Arc::new(EdgeXAdapter::new(None));
+        let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
+        let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
+        let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
+        let live_kraken = Arc::new(KrakenAdapter::new(None, None, None, None));
+        let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
+        let live_variational = Arc::new(VariationalAdapter::new(None, None, None));
         let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
         let market_data_hub = MarketDataHub::new(1024, 400);
@@ -1200,6 +1297,11 @@ impl AppEngineState {
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
 
         let mut initial_settings = EngineSettingsDto::default();
+        if let Ok(Some(mode)) = state_store.kv_get("engine.trading_mode") {
+            if mode == "real" || mode == "paper" {
+                initial_settings.trading_mode = mode;
+            }
+        }
         if let Ok(Some(raw)) = state_store.kv_get("retention.max_days") {
             if let Ok(days) = raw.parse::<u32>() {
                 if days > 0 {
@@ -1233,6 +1335,12 @@ impl AppEngineState {
             ex_ondoperps,
             ex_grvt,
             ex_edgex,
+            ex_binance,
+            ex_okx,
+            ex_coinbase,
+            ex_kraken,
+            ex_decibel,
+            ex_variational,
             live_hl,
             live_lighter,
             live_vanta,
@@ -1243,6 +1351,12 @@ impl AppEngineState {
             live_ondoperps,
             live_grvt,
             live_edgex,
+            live_binance,
+            live_okx,
+            live_coinbase,
+            live_kraken,
+            live_decibel,
+            live_variational,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1252,6 +1366,7 @@ impl AppEngineState {
             kalman_filter,
             is_live_mode: RwLock::new(false),
             total_realized_profit: RwLock::new(dec!(0)),
+            total_realized_profit_live: RwLock::new(dec!(0)),
             execution_logs: RwLock::new(initial_logs),
             sim_step_counter: RwLock::new(8),
             settings,
@@ -1287,43 +1402,183 @@ impl AppEngineState {
         if !vault.is_unlocked() {
             self.live_aster.update_credentials(None, None);
             self.live_hl.update_credentials(None, None);
+            self.live_lighter.update_credentials(None, None);
+            self.live_robinhood.update_credentials(None, None);
+            self.live_vanta.update_credentials(None, None, None);
+            self.live_binance.update_credentials(None, None);
+            self.live_okx.update_credentials(None, None, None);
+            self.live_coinbase.update_credentials(None, None, None);
+            self.live_kraken.update_credentials(None, None);
+            self.live_decibel.update_credentials(None, None, None, None);
             return;
         }
 
         if let Ok(data) = vault.get_data() {
+            let get_active_cred = |venues: &[&str]| -> Option<&crate::vault::ExchangeCredentials> {
+                for &v in venues {
+                    if let Ok(Some(acc)) = self.state_store.default_account(v) {
+                        if let Some(cred) = data.credentials.iter().find(|c| {
+                            c.enabled && c.profile_id.as_deref() == Some(&acc.id)
+                        }) {
+                            return Some(cred);
+                        }
+                    }
+                    let has_accounts = self
+                        .state_store
+                        .list_accounts(Some(v))
+                        .map(|l| !l.is_empty())
+                        .unwrap_or(false);
+                    if has_accounts {
+                        return None;
+                    }
+                }
+                data.credentials.iter().find(|c| {
+                    c.enabled && venues.iter().any(|v| c.venue.eq_ignore_ascii_case(v))
+                })
+            };
+
             let mut aster_key = None;
             let mut aster_secret = None;
+            if let Some(cred) = get_active_cred(&["aster", "asterdex"]) {
+                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                    aster_key = Some(cred.api_key.clone());
+                    aster_secret = Some(cred.api_secret.clone());
+                }
+            }
+
             let mut hl_wallet = None;
             let mut hl_pk = None;
+            if let Some(cred) = get_active_cred(&["hyperliquid", "hl"]) {
+                let wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                let pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+                if wallet.is_some() && pk.is_some() {
+                    hl_wallet = wallet;
+                    hl_pk = pk;
+                }
+            }
 
-            for cred in &data.credentials {
-                if !cred.enabled {
-                    continue;
+            let mut lighter_idx = None;
+            let mut lighter_key = None;
+            if let Some(cred) = get_active_cred(&["lighter"]) {
+                let key = if !cred.api_key.trim().is_empty() {
+                    Some(cred.api_key.clone())
+                } else {
+                    cred.private_key.clone().filter(|k| !k.trim().is_empty())
+                };
+                if key.is_some() {
+                    lighter_key = key;
+                    lighter_idx = cred.account_index;
                 }
-                match cred.venue.to_lowercase().as_str() {
-                    "aster" | "asterdex" => {
-                        if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                            aster_key = Some(cred.api_key.clone());
-                            aster_secret = Some(cred.api_secret.clone());
-                        }
-                    }
-                    "hyperliquid" | "hl" => {
-                        let wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                        let pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-                        if wallet.is_some() && pk.is_some() {
-                            hl_wallet = wallet;
-                            hl_pk = pk;
-                        }
-                    }
-                    _ => {}
+            }
+
+            let mut rh_idx = None;
+            let mut rh_key = None;
+            if let Some(cred) = get_active_cred(&["robinhood", "robinhood lighter", "rh"]) {
+                let key = if !cred.api_key.trim().is_empty() {
+                    Some(cred.api_key.clone())
+                } else {
+                    cred.private_key.clone().filter(|k| !k.trim().is_empty())
+                };
+                if key.is_some() {
+                    rh_key = key;
+                    rh_idx = cred.account_index;
                 }
+            }
+
+            let mut vanta_acc = None;
+            let mut vanta_key = None;
+            let mut vanta_sec = None;
+            if let Some(cred) = get_active_cred(&["vanta", "orderly"]) {
+                if !cred.api_key.trim().is_empty() {
+                    vanta_key = Some(cred.api_key.clone());
+                }
+                if !cred.api_secret.trim().is_empty() {
+                    vanta_sec = Some(cred.api_secret.clone());
+                }
+                vanta_acc = cred.account_id.clone().filter(|a| !a.trim().is_empty())
+                    .or_else(|| cred.wallet_address.clone().filter(|a| !a.trim().is_empty()));
+            }
+
+            let mut binance_key = None;
+            let mut binance_sec = None;
+            if let Some(cred) = get_active_cred(&["binance", "bnb"]) {
+                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                    binance_key = Some(cred.api_key.clone());
+                    binance_sec = Some(cred.api_secret.clone());
+                }
+            }
+
+            let mut okx_key = None;
+            let mut okx_sec = None;
+            let mut okx_pass = None;
+            if let Some(cred) = get_active_cred(&["okx"]) {
+                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                    okx_key = Some(cred.api_key.clone());
+                    okx_sec = Some(cred.api_secret.clone());
+                    okx_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
+                }
+            }
+
+            let mut cb_key = None;
+            let mut cb_sec = None;
+            let mut cb_pass = None;
+            if let Some(cred) = get_active_cred(&["coinbase", "cb"]) {
+                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                    cb_key = Some(cred.api_key.clone());
+                    cb_sec = Some(cred.api_secret.clone());
+                    cb_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
+                }
+            }
+
+            let mut kraken_key = None;
+            let mut kraken_sec = None;
+            if let Some(cred) = get_active_cred(&["kraken", "krk", "kraken_futures", "kraken_spot"]) {
+                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                    kraken_key = Some(cred.api_key.clone());
+                    kraken_sec = Some(cred.api_secret.clone());
+                }
+            }
+
+            let mut decibel_key = None;
+            let mut decibel_node_key = None;
+            let mut decibel_wallet = None;
+            let mut decibel_pk = None;
+            if let Some(cred) = get_active_cred(&["decibel", "dcb", "decibel (aptos)"]) {
+                if !cred.api_key.trim().is_empty() {
+                    decibel_key = Some(cred.api_key.clone());
+                }
+                decibel_node_key = cred.passphrase.clone().filter(|p| !p.trim().is_empty())
+                    .or_else(|| if !cred.api_secret.trim().is_empty() { Some(cred.api_secret.clone()) } else { None });
+                decibel_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                decibel_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
             }
 
             self.live_aster.update_credentials(aster_key, aster_secret);
             self.live_hl.update_credentials(hl_wallet, hl_pk);
+            self.live_lighter.update_credentials(lighter_idx, lighter_key);
+            self.live_robinhood.update_credentials(rh_idx, rh_key);
+            self.live_vanta.update_credentials(vanta_acc, vanta_key, vanta_sec);
+            self.live_binance.update_credentials(binance_key, binance_sec);
+            self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
+            self.live_coinbase.update_credentials(cb_key, cb_sec, cb_pass);
+            self.live_kraken.update_credentials(kraken_key, kraken_sec);
+            self.live_decibel.update_credentials(
+                decibel_key,
+                decibel_node_key,
+                decibel_wallet,
+                decibel_pk,
+            );
         } else {
             self.live_aster.update_credentials(None, None);
             self.live_hl.update_credentials(None, None);
+            self.live_lighter.update_credentials(None, None);
+            self.live_robinhood.update_credentials(None, None);
+            self.live_vanta.update_credentials(None, None, None);
+            self.live_binance.update_credentials(None, None);
+            self.live_okx.update_credentials(None, None, None);
+            self.live_coinbase.update_credentials(None, None, None);
+            self.live_kraken.update_credentials(None, None);
+            self.live_decibel.update_credentials(None, None, None, None);
         }
     }
 
@@ -1404,6 +1659,41 @@ impl AppEngineState {
                 self.live_edgex.clone(),
             ));
         }
+        if s.binance_enabled || account_enabled("binance") {
+            list.push((
+                "binance",
+                "Binance",
+                self.live_binance.clone(),
+            ));
+        }
+        if s.okx_enabled || account_enabled("okx") {
+            list.push((
+                "okx",
+                "OKX",
+                self.live_okx.clone(),
+            ));
+        }
+        if s.coinbase_enabled || account_enabled("coinbase") {
+            list.push((
+                "coinbase",
+                "Coinbase",
+                self.live_coinbase.clone(),
+            ));
+        }
+        if s.kraken_enabled || s.kraken_futures_enabled || s.kraken_spot_enabled || account_enabled("kraken") {
+            list.push((
+                "kraken",
+                "Kraken",
+                self.live_kraken.clone(),
+            ));
+        }
+        if s.decibel_enabled || account_enabled("decibel") {
+            list.push((
+                "decibel",
+                "Decibel",
+                self.live_decibel.clone(),
+            ));
+        }
         list
     }
 
@@ -1443,6 +1733,11 @@ impl AppEngineState {
             "ondoperps" => Some(self.ex_ondoperps.clone()),
             "grvt" => Some(self.ex_grvt.clone()),
             "edgex" => Some(self.ex_edgex.clone()),
+            "binance" => Some(self.ex_binance.clone()),
+            "okx" => Some(self.ex_okx.clone()),
+            "coinbase" => Some(self.ex_coinbase.clone()),
+            "kraken" => Some(self.ex_kraken.clone()),
+            "decibel" => Some(self.ex_decibel.clone()),
             _ => None,
         }
     }
@@ -1640,7 +1935,8 @@ mod tests {
         assert!(state.get_venues().len() > 0);
         assert!(state.get_adapter("hyperliquid").unwrap().supports_live_execution());
         assert!(state.get_adapter("aster").unwrap().supports_live_execution());
-        assert!(!state.get_adapter("vanta").unwrap().supports_live_execution());
+        assert!(state.get_adapter("vanta").unwrap().supports_live_execution());
+        assert!(!state.get_adapter("ondoperps").unwrap().supports_live_execution());
         assert!(!state.get_adapter("hyperliquid").unwrap().has_live_credentials());
     }
 

@@ -34,12 +34,12 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
             onChange(!checked);
           }
         }}
-        className={`relative inline-flex items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
+        className={`relative inline-flex items-center rounded-full transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/30 ${
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
         } ${disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer"} ${
           checked
-            ? "bg-emerald-500 border border-emerald-600 shadow-2xs"
-            : "bg-white border border-slate-300 hover:border-slate-400 shadow-2xs"
+            ? "bg-accent border border-accent shadow-xs"
+            : "bg-white border border-slate-300 hover:border-slate-400 shadow-xs"
         }`}
         title={label ? `${label}: ${checked ? "ON" : "OFF"}` : checked ? "ON" : "OFF"}
       >
@@ -60,7 +60,7 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
       {showStatusText && (
         <span
           className={`text-xs font-mono font-bold transition-colors ${
-            checked ? "text-emerald-600" : "text-slate-400"
+            checked ? "text-accent" : "text-slate-400"
           }`}
         >
           {checked ? "ON" : "OFF"}

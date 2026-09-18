@@ -56,6 +56,27 @@ This document captures the failure modes, production bugs identified during the 
 
 ---
 
+### 1.6 Bug 6: Strategy Auto-Filter Missing Venue Lockout & Hub Cache Starvation
+- **Symptom:** When setting `Auto Min 24h Volume` (e.g. 500,000 USD) or `Auto Min Mid Price` (e.g. 0.5 USD), all 52 tickers in the terminal disappeared.
+- **Root Causes:**
+  1. **Unreporting Venue Lockout:** The volume filter failed closed if *any* in-scope venue reported no volume data. Because almost all tickers have Vanta in scope, and Vanta lacked a volume endpoint (or rate-limited), every ticker was disqualified.
+  2. **Hub Orderbook Cache Starvation:** Mid prices were pulled strictly from the live orderbook hub cache (`hub_mid_usd`). The hub only caches books for the single ticker actively selected and polled in the UI. All other 51 tickers returned `None`, triggering an instant missing-metric block.
+- **Our Solution:**
+  1. **Reporting-Venue Aggregation:** Evaluates the MIN volume across venues that *actively report volume* (`min_reported >= floor`). Unreporting or rate-limited venues contribute nothing to aggregates without locking out liquid assets.
+  2. **3-Tier Price Resolution:** Resolves mid price via live orderbook mid -> exchange mark price -> authoritative benchmark catalog reference prices (`benchmark_base_price` in Rust and `getTickerBenchmarkPrice` in TypeScript). Sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) are reliably filtered while major assets (BTC, ETH, SOL) stay visible.
+  3. **Vanta 24h Turnover Endpoint:** Implemented `fetch_volumes_24h` on `VantaAdapter` to extract `24h_amount` from Vanta's `marketSummary` endpoint.
+
+---
+
+### 1.7 Bug 7: Decimal Multiplication Overflow in Large-Size / Extreme Funding Rates
+- **Symptom:** Scanner or carry bot panics with `Multiplication overflowed` in `rust_decimal::arithmetic_impls`.
+- **Root Cause:** Naive arithmetic `trade_size_usd * net_hourly * dec!(24)` or `net_hourly * dec!(24) * dec!(365)` overflows the maximum 96-bit integer capacity of `Decimal` when evaluated against large test trade sizes or extreme annualized rates.
+- **Our Solution:**
+  1. **Checked Multiplication:** Switched to `.checked_mul()` and `.checked_div()` with `Decimal::MAX` clamp fallback.
+  2. **Bounded Annualization:** Safely converts hourly rates to floating-point representation before compounding APY (`(1.0 + r).powf(8760.0) - 1.0`).
+
+---
+
 ## 2. Operational Runbook
 
 ### 2.1 Pre-Flight Deployment Checklist

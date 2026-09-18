@@ -226,10 +226,10 @@ export function getVenueFeeBps(venueIdOrName: string): number {
  * Clean short label for venue.
  */
 export function getVenueShortLabel(name: string): string {
+  if (name.includes("Robinhood") || name.toLowerCase() === "robinhood" || name.toLowerCase() === "rh") return "Robinhood Lighter";
   if (name.includes("Hyperliquid") || name.toLowerCase() === "hl") return "Hyperliquid";
   if (name.includes("Lighter") || name.toLowerCase() === "lighter" || name.toLowerCase() === "lgt") return "Lighter";
   if (name.includes("Vanta") || name.toLowerCase() === "vanta" || name.toLowerCase() === "vnt") return "Vanta";
-  if (name.includes("Robinhood") || name.toLowerCase() === "robinhood" || name.toLowerCase() === "rh") return "Robinhood";
   if (name.includes("Arcus") || name.toLowerCase() === "arcus" || name.toLowerCase() === "arc") return "Arcus";
   if (name.includes("PopDEX") || name.toLowerCase() === "popdex" || name.toLowerCase() === "pop") return "PopDEX";
   return name.split(" ")[0];
