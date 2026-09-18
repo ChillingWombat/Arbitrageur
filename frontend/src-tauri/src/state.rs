@@ -396,7 +396,10 @@ fn default_arcus_url() -> String {
     "https://api.arcus.exchange".into()
 }
 fn default_popdex_url() -> String {
-    "https://api.popdex.trade".into()
+    // PopDEX is in closed beta with no public API (api.popdex.trade is a
+    // parked domain). Empty = unconfigured; the operator pastes the beta
+    // base URL in Exchange Accounts. See PopDexAdapter docs.
+    String::new()
 }
 fn default_popdex_account_index() -> String {
     "0".into()
@@ -1583,6 +1586,50 @@ impl AppEngineState {
                 decibel_wallet,
                 decibel_pk,
             );
+
+            // PopDEX (closed beta): base URL from settings, key/secret +
+            // optional EVM wallet from the vault. The adapter normalizes
+            // dead placeholder hosts to unconfigured.
+            let popdex_base = {
+                let guards = self.settings.read();
+                let b = guards.popdex_url.trim().to_string();
+                if b.is_empty() { None } else { Some(b) }
+            };
+            let mut popdex_key = None;
+            let mut popdex_sec = None;
+            let mut popdex_wallet = None;
+            let mut popdex_pk = None;
+            if let Some(cred) = get_active_cred(&["popdex", "pop"]) {
+                popdex_key = Some(cred.api_key.clone()).filter(|k| !k.trim().is_empty());
+                popdex_sec = Some(cred.api_secret.clone()).filter(|k| !k.trim().is_empty());
+                popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                popdex_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_popdex.update_credentials(
+                popdex_base,
+                popdex_key,
+                popdex_sec,
+                popdex_wallet,
+                popdex_pk,
+            ) {
+                tracing::warn!("PopDEX credential sync refused: {e}");
+            }
+
+            // Variational: no API-key flow exists; only an EVM wallet for the
+            // future RFQ-signing path. A private key alone is accepted (the
+            // address is derived and cross-checked when both are supplied).
+            let mut variational_wallet = None;
+            let mut variational_pk = None;
+            if let Some(cred) = get_active_cred(&["variational", "var"]) {
+                variational_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                variational_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_variational.update_credentials(
+                variational_wallet,
+                variational_pk,
+            ) {
+                tracing::warn!("Variational credential sync refused: {e}");
+            }
         } else {
             self.live_aster.update_credentials(None, None);
             self.live_hl.update_credentials(None, None);
@@ -1594,13 +1641,17 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
+            let _ = self.live_popdex.update_credentials(None, None, None, None, None);
+            let _ = self.live_variational.update_credentials(None, None);
         }
     }
 
     /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
-    /// Lighter, Vanta (Orderly), Aster, Ondo Perps, GRVT, and edgeX are
-    /// exposed as native market-data adapters. Public read-only feeds require
-    /// enablement, not secrets.
+    /// Lighter, Vanta (Orderly), Aster, Ondo Perps, GRVT, edgeX, and
+    /// Variational are exposed as native market-data adapters. Public
+    /// read-only feeds require enablement, not secrets. PopDEX stays out
+    /// until its closed-beta REST shape is published (its adapter is
+    /// credential-ready but its market-data paths fail closed).
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -1709,6 +1760,15 @@ impl AppEngineState {
                 self.live_decibel.clone(),
             ));
         }
+        // Variational Omni: public read-only stats API, no secrets needed.
+        // Order paths fail closed (RFQ + on-chain settlement, wallet-gated).
+        if s.variational_enabled || account_enabled("variational") {
+            list.push((
+                "variational",
+                "Variational",
+                self.live_variational.clone(),
+            ));
+        }
         list
     }
 
@@ -1753,6 +1813,7 @@ impl AppEngineState {
             "coinbase" => Some(self.ex_coinbase.clone()),
             "kraken" => Some(self.ex_kraken.clone()),
             "decibel" => Some(self.ex_decibel.clone()),
+            "variational" => Some(self.ex_variational.clone()),
             _ => None,
         }
     }

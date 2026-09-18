@@ -158,9 +158,14 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   edgex: [],
   grvt: [],
   ondoperps: [],
-  // Variational: public API is read-only today; trading auth is in development
+  // Variational Omni: market data is public (no credentials needed).
+  // There is no API-token trading — orders are RFQ quotes settled on-chain
+  // on Arbitrum, signed by a locally-held EVM key (vault-encrypted, never
+  // leaves this host). Paste the wallet now to prepare; execution stays
+  // disabled until the RFQ flow is implemented and audited.
   variational: [
-    { key: "apiKey", label: "API Token", secret: true, optional: true },
+    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true },
+    { key: "privateKey", label: "Wallet Private Key (EVM, RFQ signing)", secret: true, placeholder: "0x...", optional: true },
   ],
   // Coinbase Advanced Trade (CDP): API key name + EC private key (PEM)
   coinbase: [

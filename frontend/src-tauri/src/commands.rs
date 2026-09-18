@@ -691,8 +691,10 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
 
 /// Verified public endpoint per venue for latency probes when no adapter
 /// exists. Every URL was curl-verified to return a real response — venues
-/// with no reachable public API (popdex: parked domain; variational: no
-/// public REST API; ibkr: local TWS gateway) return None → honest N/A.
+/// with no reachable public API (popdex: closed beta, no public routes —
+/// its app backend answers API-shaped errors only to signed session calls;
+/// ibkr: local TWS gateway) return None → honest N/A. Variational *does*
+/// expose a public read-only stats API and has its own arm below.
 ///
 /// `accept_4xx`: for endpoints that require auth, an application-level 4xx
 /// (e.g. IG's JSON `error.security.api-key-missing`) still proves the
@@ -745,6 +747,12 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
         // IG has no public endpoint; the session route returns an
         // app-level JSON 400 that proves the API gateway responded.
         "ig" => p("https://api.ig.com/gateway/deal/session", true),
+        // Variational Omni public read-only stats (documented; ~550
+        // listings, RFQ quotes + funding + volumes, no auth).
+        "variational" => p(
+            "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats",
+            false,
+        ),
         _ => None,
     }
 }

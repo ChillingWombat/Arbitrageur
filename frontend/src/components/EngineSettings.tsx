@@ -184,7 +184,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [popdexEnabled, setPopdexEnabled] = useState(false);
   const [popdexAccountIndex, setPopdexAccountIndex] = useState("0");
   const [popdexApiKey, setPopdexApiKey] = useState("");
-  const [popdexUrl, setPopdexUrl] = useState("https://api.popdex.trade");
+  const [popdexUrl, setPopdexUrl] = useState(""); // Closed beta: no public endpoint; paste the beta base URL when granted.
 
   // Kraken (Spot & Futures)
   const [krakenSpotApiKey, setKrakenSpotApiKey] = useState("");
@@ -445,7 +445,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
         setPopdexAccountIndex(s.popdex_account_index || "0");
         setPopdexApiKey(s.popdex_api_key || "");
-        setPopdexUrl(s.popdex_url || "https://api.popdex.trade");
+        setPopdexUrl(s.popdex_url || ""); // Dead parked-domain default removed; empty = unconfigured.
 
         setKrakenSpotApiKey(s.kraken_spot_api_key || "");
         setKrakenSpotSecret(s.kraken_spot_secret || "");

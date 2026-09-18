@@ -986,3 +986,44 @@ overhaul pass committed as `23d4aed`).
   rows; permanently-disabled WFO gadget removed (dead UI).
 - **Wiring**: new `openPositions` prop from the App fan-out (no new IPC).
 - **Verification**: tsc clean, frontend 11 shards green.
+
+## 29. Session Handoff — 2026-09-19 (No-API Venue Connectivity: Variational Live, PopDEX Beta Model, Wallet Signer)
+
+- **Research outcome**: neither venue has API-key trading. Variational Omni
+  (Arbitrum RFQ, ~550 listings, OI ~$800M+) publishes a **real public
+  read-only API** (`omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats`,
+  curl-verified: mark prices, OLP quotes at $1k/$100k/$1m notionals, funding
+  rate + interval, 24h volumes, OI; 10 req/10s/IP; zero trading fees —
+  OLP captures spread). PopDEX (closed-beta CLOB on Morph) has **no public
+  API at all**: `api.popdex.trade` is a parked domain, `app.popdex.xyz/api/*`
+  serves the SPA shell, and its `/v1/uta/*` paths are same-origin proxied
+  with session auth (gateway returns `code 50005` unauthenticated).
+- **Variational adapter rewritten** (`variational.rs`, was scaffold against
+  guessed `api.variational.io`): real markets/funding-bulk/volumes/ticker
+  from one 60s-cached stats fetch; orderbook synthesizes honest indicative
+  tiers (notional/price, quote timestamp preserved, RFQ-not-firm documented);
+  interval derived from `funding_interval_s`; fees corrected to 0/0bps.
+  Admitted to `get_venues` (public data, no secrets) + paper arm; latency
+  probe points at the real stats URL. Execution/account fail closed with
+  RFQ-specific guidance.
+- **PopDEX adapter rewritten** (`popdex.rs`): closed-beta credential model —
+  configurable base URL + key/secret + EVM wallet, vault-held; dead hosts
+  (`api.popdex.trade`, `api.popdex.xyz`) normalize to unconfigured; every
+  market-data path fails closed ("closed beta … refusing to fabricate").
+  NOT admitted to `get_venues` until its beta REST shape is published.
+  `default_popdex_url` + EngineSettings.tsx fallback changed from the parked
+  domain to empty (= unconfigured).
+- **New `wallet.rs` foundation**: `EvmWalletSigner` (k256 local signing,
+  EIP-191 + digest, zeroizing bytes, redacted Debug, address/key-match
+  validation) + `wallet_execution_unavailable` standard refusal. Both
+  adapters bind vault wallet material via `update_credentials`, synced on
+  unlock/lock in `state.rs` (PopDEX: settings URL + vault key/wallet;
+  Variational: vault wallet/key). Variational account-card schema updated to
+  wallet fields (was a fictional "API Token").
+- **Verification**: exchanges 111+/0 incl. live-shape ignored test run OK
+  against the real API; desktop 302/0 (one triangle test flaked under full
+  parallelism, passed solo + on re-run); tsc clean; frontend 150/5/4/3 green.
+- **Still deferred**: Variational RFQ quote-acceptance + Arbitrum settlement
+  execution (needs frontend-private RFQ API + audited ABIs — signer is
+  ready); PopDEX beta REST shape (needs beta grant); empirical funding
+  half-life (history accumulating); native execution stays disabled.

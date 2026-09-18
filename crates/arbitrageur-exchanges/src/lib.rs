@@ -1,4 +1,5 @@
 pub mod rate_limiter;
+pub mod wallet;
 pub mod hyperliquid;
 pub mod lighter;
 pub mod vanta;
@@ -20,6 +21,7 @@ pub mod prediction;
 pub mod simulated;
 
 pub use rate_limiter::*;
+pub use wallet::*;
 pub use hyperliquid::*;
 pub use lighter::*;
 pub use vanta::*;
