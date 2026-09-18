@@ -854,3 +854,22 @@ overhaul pass committed as `23d4aed`).
 - **Known pre-existing**: production bundle warns on a 607KB main chunk
   (code-splitting candidate, untouched); clippy `map_or`/`sort_by_key`
   style lints elsewhere untouched.
+
+## 22. Session Handoff — 2026-09-18 (System Rename Arbitrager → Arbitrageur)
+
+- Case-sensitive rename across 121 files: `Arbitrager→Arbitrageur`,
+  `arbitrager→arbitrageur`, `ARBITRAGER→ARBITRAGEUR`.
+- Crate dirs `crates/arbitrageur-*`, component `ArbitrageurLogo`,
+  Tauri `productName` + identifier `com.arbitrageur.desktop`, binaries
+  `arbitrageur` (CLI) and `arbitrageur-desktop` (Tauri), repo URLs now
+  `github.com/Dav1D1010/Arbitrageur`, deploy samples, specs, pixi tasks.
+- Project root moved to `/mnt/Data/Projects/Arbitrageur`; local launcher
+  files recreated; `.cargo` sysroot path follows the move.
+- Verification: `cargo check --workspace` clean, `tsc` clean, frontend
+  suite green, dev server `HTTP:200` from the new path. Stale Tauri dep
+  cache cleared (`cargo clean -p tauri`) after the move.
+- TODO (owner): rename the GitHub repo to `Arbitrageur`, then
+  `git remote set-url origin https://github.com/Dav1D1010/Arbitrageur.git`;
+  rebuild the release binary (`target/release/arbitrageur-desktop` does not
+  exist yet — the `Arbitrageur` launcher symlink points at it); `keychain.toml`
+  is gitignored and unaffected.
