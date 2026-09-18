@@ -155,13 +155,13 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               <button
                 onClick={handleResetFilter}
                 title="Reset Filter History"
-                className="btn-secondary !text-xs !py-1.5 !px-2.5 font-mono cursor-pointer"
+                className="btn-secondary !text-xs !py-2 !px-2 font-mono cursor-pointer"
               >
                 Reset
               </button>
               <button
                 onClick={handleStep}
-                className="btn-primary !text-xs !py-1.5 !px-3 font-mono flex items-center"
+                className="btn-primary !text-xs !py-2 !px-2 font-mono flex items-center"
               >
                 <span>Step Iteration</span>
               </button>
@@ -174,7 +174,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               <span className="text-xs text-slate-500">Input Mode:</span>
               <button
                 onClick={() => setIsManual(false)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                className={`px-2 py-2 rounded-lg text-xs font-semibold transition cursor-pointer border ${
                   !isManual ? "bg-accent text-white border-accent shadow-xs" : "text-slate-500 hover:text-slate-900 border-surface-border bg-surface hover:border-slate-300"
                 }`}
               >
@@ -182,7 +182,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </button>
               <button
                 onClick={() => setIsManual(true)}
-                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                className={`px-2 py-2 rounded-lg text-xs font-semibold transition cursor-pointer border ${
                   isManual ? "bg-accent text-white border-accent shadow-xs" : "text-slate-500 hover:text-slate-900 border-surface-border bg-surface hover:border-slate-300"
                 }`}
               >
@@ -320,7 +320,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
 
             <button
               onClick={handleSolveBertram}
-              className="btn-primary !text-xs !py-1.5 !px-3 font-mono"
+              className="btn-primary !text-xs !py-2 !px-2 font-mono"
             >
               Optimize
             </button>

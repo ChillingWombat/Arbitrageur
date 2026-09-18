@@ -192,7 +192,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Spatial strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -384,9 +384,9 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                               e.stopPropagation();
                               handleSelectOpp(opp);
                             }}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
+                            className={`px-2 py-2 rounded-lg text-xs font-medium transition cursor-pointer ${
                               isSelected
-                                ? "btn-primary !py-1 !px-2.5 !text-xs"
+                                ? "btn-primary !py-2 !px-2 !text-xs"
                                 : "bg-surface-raised border border-surface-border text-slate-700 hover:border-accent hover:text-accent"
                             }`}
                           >

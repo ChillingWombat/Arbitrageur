@@ -205,7 +205,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             <button
               type="button"
               onClick={() => setScope("all")}
-              className={`flex-1 px-2.5 py-1 rounded-lg transition cursor-pointer text-xs ${
+              className={`flex-1 px-2 py-2 rounded-lg transition cursor-pointer text-xs ${
                 scope === "all"
                   ? "bg-accent text-white shadow-2xs font-semibold"
                   : "text-slate-500 hover:text-slate-900 font-medium"
@@ -218,7 +218,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               type="button"
               onClick={() => currentStrategyId && setScope("current")}
               disabled={!currentStrategyId}
-              className={`flex-1 px-2.5 py-1 rounded-lg transition truncate text-xs ${
+              className={`flex-1 px-2 py-2 rounded-lg transition truncate text-xs ${
                 scope === "current"
                   ? "bg-accent text-white shadow-2xs font-semibold"
                   : "text-slate-500 hover:text-slate-900 font-medium"
@@ -278,7 +278,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                       setSortOption(id);
                       setShowSortMenu(false);
                     }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                       sortOption === id
                         ? "bg-accent/10 text-accent font-semibold"
                         : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -449,7 +449,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               <button
                 type="button"
                 onClick={onResetCircuitBreaker}
-                className="btn-warning-subtle text-xs font-mono font-bold px-2 py-0.5"
+                className="btn-warning-subtle text-xs font-mono font-bold px-2 py-2"
                 title="Reset Circuit Breaker"
               >
                 Reset
@@ -461,7 +461,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         <button
           type="button"
           onClick={onOpenPortfolioMonitor}
-          className={`w-full py-2 px-3 rounded-lg text-xs font-sans font-semibold transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer border active:scale-[0.98] ${
+          className={`w-full py-2 px-2 rounded-lg text-xs font-sans font-semibold transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer border active:scale-[0.98] ${
             isPortfolioActive
               ? "bg-accent text-white border-accent shadow-xs font-bold"
               : "bg-surface hover:bg-slate-50 text-slate-800 hover:text-slate-900 border-surface-border hover:border-slate-300"
@@ -475,7 +475,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         <button
           type="button"
           onClick={onOpenSettings}
-          className="w-full py-1.5 px-3 bg-surface hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-surface-border hover:border-slate-300 rounded-lg text-xs font-sans font-medium transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer active:scale-[0.98]"
+          className="w-full py-2 px-2 bg-surface hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-surface-border hover:border-slate-300 rounded-lg text-xs font-sans font-medium transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer active:scale-[0.98]"
           title="System Setting &amp; Exchange API Keys"
         >
           <Settings className="w-3.5 h-3.5 text-slate-500" />
@@ -503,7 +503,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             <button
               type="button"
               onClick={() => handleToggleReduceOnly(contextMenu.position)}
-              className="w-full flex items-start space-x-2.5 px-2.5 py-2 text-left rounded-lg transition hover:bg-warn-dim/40 cursor-pointer group"
+              className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-warn-dim/40 cursor-pointer group"
             >
               <TrendingDown className="w-4 h-4 text-warn shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
@@ -524,7 +524,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               type="button"
               disabled={actionInProgress !== null}
               onClick={() => void handleClearEmergently(contextMenu.position)}
-              className="w-full flex items-start space-x-2.5 px-2.5 py-2 text-left rounded-lg transition hover:bg-loss-dim cursor-pointer group disabled:opacity-50"
+              className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-loss-dim cursor-pointer group disabled:opacity-50"
             >
               <Zap className="w-4 h-4 text-loss shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
@@ -543,7 +543,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               type="button"
               disabled={actionInProgress !== null}
               onClick={() => void handleClearNonEmergently(contextMenu.position)}
-              className="w-full flex items-start space-x-2.5 px-2.5 py-2 text-left rounded-lg transition hover:bg-blue-50/70 cursor-pointer group disabled:opacity-50"
+              className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-blue-50/70 cursor-pointer group disabled:opacity-50"
             >
               <Clock className="w-4 h-4 text-accent shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">

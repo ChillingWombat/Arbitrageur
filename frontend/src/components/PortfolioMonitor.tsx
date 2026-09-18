@@ -208,14 +208,14 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer"
+              className="px-2 py-2 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer"
             >
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="btn-danger px-3 py-1.5 text-xs font-mono font-bold flex items-center shadow-xs cursor-pointer"
+              className="btn-danger px-2 py-2 text-xs font-mono font-bold flex items-center shadow-xs cursor-pointer"
             >
               <span>Trigger Manual Trip</span>
             </button>
@@ -483,7 +483,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
             onClick={runCalibration}
             disabled
             title="Native WFO requires recorded quote history — not yet available"
-            className="px-3.5 py-2 bg-accent hover:bg-blue-600 disabled:bg-slate-300 disabled:text-slate-500 text-white rounded-lg text-xs font-mono font-bold transition shadow-xs flex items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
+            className="px-2 py-2 bg-accent hover:bg-blue-600 disabled:bg-slate-300 disabled:text-slate-500 text-white rounded-lg text-xs font-mono font-bold transition shadow-xs flex items-center space-x-2 cursor-pointer disabled:cursor-not-allowed"
           >
             <Sliders className={`w-4 h-4 ${calibrating ? "animate-spin" : ""}`} />
             <span>

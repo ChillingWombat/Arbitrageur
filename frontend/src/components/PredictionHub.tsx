@@ -99,7 +99,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.("PREDICTION", "prediction")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Prediction Market strategy parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -119,7 +119,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             </div>
             <button
               type="submit"
-              className="btn-secondary !py-1.5 !px-3 !text-xs font-mono cursor-pointer"
+              className="btn-secondary !py-2 !px-2 !text-xs font-mono cursor-pointer"
             >
               Filter
             </button>
@@ -234,7 +234,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   <button
                     onClick={() => handleExecute(opp)}
                     disabled={executingId === opp.id}
-                    className="btn-primary !px-3 !py-1.5 !text-xs font-mono transition flex items-center"
+                    className="btn-primary !px-2 !py-2 !text-xs font-mono transition flex items-center"
                   >
                     <span>{executingId === opp.id ? "Routing..." : "Execute Parity"}</span>
                   </button>

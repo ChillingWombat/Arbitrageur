@@ -17,7 +17,7 @@ use arbitrager_math::autotune::{
     TuneHistory, TuneParams, recommend,
 };
 use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
-use arbitrager_math::funding_carry::evaluate_funding_carry;
+use arbitrager_math::funding_carry::{evaluate_funding_carry, funding_entry_capacity};
 use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrager_math::ou_process::OuModelParams;
 use arbitrager_math::pair_monitor::build_pair_series;
@@ -142,6 +142,12 @@ pub struct FundingOpportunityDto {
     pub break_even_hours: f64,
     pub estimated_daily_income_usd: f64,
     pub trade_size_usd: f64,
+    /// Depth-supported executable size from the live orderbooks (USD).
+    /// Falls back to `trade_size_usd` when either book is unavailable.
+    pub optimal_size_usd: f64,
+    /// Measured entry cross (long-ask vs short-bid VWAP) in bps, as a
+    /// positive cost. -1.0 when unmeasured (no book data).
+    pub entry_spread_bps: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2490,6 +2496,50 @@ async fn scan_funding_opportunities_for_symbol(
             let (_id_b, _name_b, ref r_b) = rates[j];
 
             if let Some(opp) = evaluate_funding_carry(r_a, r_b, fee_total, size_dec) {
+                // Depth-aware executable size: walk both legs' live books so
+                // the quoted volume reflects what can actually be entered —
+                // the same orderbook discipline as the spread scanner.
+                // Falls back to the requested size when books are missing.
+                let vid_for = |name: &str| -> Option<&str> {
+                    rates
+                        .iter()
+                        .find(|(_, _, r)| r.venue.as_str() == name)
+                        .map(|(vid, _, _)| *vid)
+                };
+                let depth: Option<(f64, f64)> = (|| {
+                    let size_f = size_dec.to_string().parse::<f64>().ok()?;
+                    if !(size_f.is_finite() && size_f > 0.0) {
+                        return None;
+                    }
+                    let book_of = |name: &str| {
+                        let vid = vid_for(name)?;
+                        state.market_data_hub.get_valid_orderbook(
+                            &VenueId::from(vid),
+                            symbol,
+                            Some(std::time::Duration::from_secs(120)),
+                        )
+                    };
+                    let long_book = book_of(&opp.long_venue)?;
+                    let short_book = book_of(&opp.short_venue)?;
+                    let to_pair = |levels: &[arbitrager_core::quote::BookLevel]| {
+                        levels
+                            .iter()
+                            .filter_map(|l| {
+                                let px = l.price.to_string().parse::<f64>().ok()?;
+                                let q = l.size.to_string().parse::<f64>().ok()?;
+                                (px.is_finite() && q.is_finite()).then_some((px, q))
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    let rep = funding_entry_capacity(
+                        &to_pair(&long_book.asks),
+                        &to_pair(&short_book.bids),
+                        &[size_f * 0.5, size_f, size_f * 2.0],
+                    );
+                    let optimal = rep.optimal_size_usd?;
+                    let cost = rep.entry_spread_bps.map(|e| (-e).max(0.0))?;
+                    Some((optimal, cost))
+                })();
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -2529,6 +2579,8 @@ async fn scan_funding_opportunities_for_symbol(
                         .parse::<f64>()
                         .unwrap_or(0.0),
                     trade_size_usd,
+                    optimal_size_usd: depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
+                    entry_spread_bps: depth.map(|(_, e)| e).unwrap_or(-1.0),
                 });
             }
         }

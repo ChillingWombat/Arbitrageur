@@ -593,7 +593,11 @@ export const App: React.FC = () => {
     async (opp: FundingOpportunityDto) => {
       // Never deploy more than either leg's venue can fund — cap the
       // configured trade size at the lower of the two venue balances.
+      // Depth-aware optimal size (when measured) caps it further.
       let size = opp.trade_size_usd;
+      if (opp.optimal_size_usd != null && opp.optimal_size_usd > 0 && opp.optimal_size_usd < size) {
+        size = opp.optimal_size_usd;
+      }
       try {
         const balances = await api.getVenueBalances().catch(() => []);
         const fundsFor = (venue: string): number | null => {

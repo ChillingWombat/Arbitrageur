@@ -771,7 +771,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("execution")}
-            className={`relative h-10 flex items-center space-x-2 px-4 sm:px-5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "execution"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -791,7 +791,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
-            className={`relative h-10 flex items-center space-x-2 px-4 sm:px-5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "exchanges"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -817,7 +817,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("network")}
-            className={`relative h-10 flex items-center space-x-2 px-4 sm:px-5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "network"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -837,7 +837,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("about")}
-            className={`relative h-10 flex items-center space-x-2 px-4 sm:px-5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "about"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -861,7 +861,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <button
               type="button"
               onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
-              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+              className="px-2 py-2 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
               title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
             >
               {isVaultLocked ? (
@@ -883,7 +883,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
-                className="px-2.5 py-1 rounded-lg border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2 py-2 rounded-lg border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Permanently remove the stored HSM token from the vault"
               >
                 <Trash2 className="w-3.5 h-3.5 text-loss" />
@@ -920,7 +920,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     }}
                     disabled={pinging}
                     title="Measure HTTP round-trip to all enabled venue API endpoints now"
-                    className="px-2 py-1 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
+                    className="px-2 py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3 h-3 ${pinging ? "animate-spin" : ""}`} />
                     <span>Ping</span>
@@ -1057,7 +1057,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <button
                       type="button"
                       onClick={() => setShowVaultModal(true)}
-                      className="btn-accent px-3 py-1.5 text-xs font-mono font-bold flex items-center space-x-1.5 shrink-0 ml-3 cursor-pointer"
+                      className="btn-accent px-2 py-2 text-xs font-mono font-bold flex items-center space-x-1.5 shrink-0 ml-3 cursor-pointer"
                     >
                       <Unlock className="w-3.5 h-3.5" />
                       <span>{isVaultInitializing ? "Create Password" : "Unlock Vault"}</span>
@@ -1414,7 +1414,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
+                    className="px-2 py-2 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
@@ -1501,7 +1501,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-lg transition shadow-2xs cursor-pointer"
+              className="px-2.5 py-2.5 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-lg transition shadow-2xs cursor-pointer"
             >
               Cancel
             </button>
@@ -1509,7 +1509,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
+            className="px-2.5 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
           >
             {saving ? (
               <span>Saving...</span>
@@ -1663,7 +1663,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               setLiveRiskConfirmationInput("");
               setLiveRiskAck(false);
             }}
-            className="btn-secondary px-4 py-2 text-xs cursor-pointer"
+            className="btn-secondary px-2.5 py-2.5 text-xs cursor-pointer"
           >
             Cancel (Keep Paper)
           </button>
@@ -1684,7 +1684,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 setLiveRiskAck(false);
               }
             }}
-            className="btn-danger px-4 py-2 text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+            className="btn-danger px-2.5 py-2.5 text-xs font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             Activate Live Trading
           </button>

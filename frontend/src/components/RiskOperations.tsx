@@ -40,14 +40,14 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-3 py-1.5 bg-warn-dim hover:bg-warn-dim/80 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
+              className="px-2 py-2 bg-warn-dim hover:bg-warn-dim/80 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
             >
               <span>Reset Circuit Breaker</span>
             </button>
           ) : (
             <button
               onClick={onTriggerKillswitch}
-              className="px-3 py-1.5 bg-loss-dim hover:bg-loss-dim/80 text-loss border border-loss-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
+              className="px-2 py-2 bg-loss-dim hover:bg-loss-dim/80 text-loss border border-loss-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
             >
               <span>Trigger Manual Trip</span>
             </button>

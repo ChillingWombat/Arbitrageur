@@ -90,7 +90,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
           <button
             onClick={() => onTogglePause?.(!isPaused)}
-            className={`px-2.5 py-1.5 rounded-lg text-xs font-sans font-semibold transition-all flex items-center space-x-1.5 cursor-pointer shadow-2xs active:scale-[0.98] ${
+            className={`px-2 py-2 rounded-lg text-xs font-sans font-semibold transition-all flex items-center space-x-1.5 cursor-pointer shadow-2xs active:scale-[0.98] ${
               isPaused
                 ? "bg-amber-500 hover:bg-amber-600 text-white shadow-xs animate-pulse"
                 : "bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border"
@@ -117,7 +117,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="btn-danger px-2.5 py-1.5 text-xs font-sans font-bold flex items-center space-x-1.5 shadow-xs"
+            className="btn-danger px-2 py-2 text-xs font-sans font-bold flex items-center space-x-1.5 shadow-xs"
             title="Emergency Killswitch: Stop All Trading"
           >
             <OctagonX className="w-3.5 h-3.5" />
@@ -145,7 +145,7 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="flex justify-end space-x-2.5 pt-3 border-t border-surface-border">
               <button
                 onClick={() => setShowKillModal(false)}
-                className="btn-secondary px-4 py-2 text-sm"
+                className="btn-secondary px-2.5 py-2.5 text-sm"
               >
                 Cancel
               </button>
@@ -154,7 +154,7 @@ export const Header: React.FC<HeaderProps> = ({
                   onEmergencyKillswitch();
                   setShowKillModal(false);
                 }}
-                className="btn-danger px-4 py-2 text-sm font-bold shadow-sm"
+                className="btn-danger px-2.5 py-2.5 text-sm font-bold shadow-sm"
               >
                 Confirm Stop
               </button>

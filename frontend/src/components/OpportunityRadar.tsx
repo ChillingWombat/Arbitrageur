@@ -293,7 +293,7 @@ const ConfigPanel: React.FC<{
                       key={s.id}
                       type="button"
                       onClick={() => setActiveSection(s.id)}
-                      className={`w-full flex items-center space-x-2.5 px-3 py-2.5 rounded-lg font-mono text-[11px] transition cursor-pointer text-left ${
+                      className={`w-full flex items-center space-x-2.5 px-2.5 py-2.5 rounded-lg font-mono text-[11px] transition cursor-pointer text-left ${
                         activeSection === s.id
                           ? "bg-accent text-white font-bold shadow-2xs border border-accent"
                           : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
@@ -637,7 +637,7 @@ const ConfigPanel: React.FC<{
           <button
             type="button"
             onClick={handleResetDefaults}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-lg border border-surface-border transition cursor-pointer"
+            className="flex items-center space-x-1.5 px-2 py-2 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-lg border border-surface-border transition cursor-pointer"
             title="Reset to default monitor parameters"
           >
             <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -652,7 +652,7 @@ const ConfigPanel: React.FC<{
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer"
+              className="px-2.5 py-2.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer"
             >
               Cancel
             </button>
@@ -660,7 +660,7 @@ const ConfigPanel: React.FC<{
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
+              className={`flex items-center space-x-1.5 px-2.5 py-2.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
                 saveSuccess
                   ? "bg-profit text-white border border-profit-border"
                   : "bg-accent hover:bg-blue-600 text-white"
@@ -862,7 +862,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               onChange={(e) => onSizeChange(rowKey, Number(e.target.value))}
             />
             <button
-              className="btn-primary px-4 py-1.5 text-xs rounded-lg shadow-2xs cursor-pointer"
+              className="btn-primary px-2.5 py-2.5 text-xs rounded-lg shadow-2xs cursor-pointer"
               disabled={!r.executable || executing}
               title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
               onClick={() => onExecute(r)}
@@ -984,7 +984,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 onChange={(e) => onSizeChange(k, Number(e.target.value))}
               />
               <button
-                className="btn-primary px-2.5 py-1 text-xs rounded-lg shadow-2xs cursor-pointer"
+                className="btn-primary px-2 py-2 text-xs rounded-lg shadow-2xs cursor-pointer"
                 disabled={!r.executable || executing}
                 title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
                 onClick={() => onExecute(r)}
@@ -1271,7 +1271,7 @@ const OpportunityRadarInner: React.FC = () => {
           <button
             type="button"
             onClick={() => setShowConfig(true)}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Spread Radar monitor parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -1328,7 +1328,7 @@ const OpportunityRadarInner: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowVenueMenu((v) => !v)}
-              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2 py-2 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
               title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
             >
               <span className="text-slate-400 font-medium">Venue</span>
@@ -1346,7 +1346,7 @@ const OpportunityRadarInner: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => setVenueFilters([])}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     venueFilters.length === 0
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -1367,7 +1367,7 @@ const OpportunityRadarInner: React.FC = () => {
                           prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
                         )
                       }
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                      className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                         on
                           ? "bg-accent/10 text-accent font-semibold"
                           : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"

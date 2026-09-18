@@ -685,7 +685,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
               type="button"
               disabled={busy}
               onClick={() => void handleSetDefault()}
-              className="px-3 py-1 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+              className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
               title="Set this account as the venue default"
             >
               Set As Default
@@ -794,7 +794,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             type="button"
             disabled={busy || locked || !dirty}
             onClick={() => void handleSave()}
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="px-2 py-2 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
             {saved && !dirty ? <CheckCircle2 className="w-3 h-3" /> : null}
             <span>{busy ? "Saving..." : saved && !dirty ? "Saved" : "Save Account"}</span>
@@ -922,7 +922,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               type="button"
               onClick={onCancel}
               disabled={busy}
-              className="px-2.5 py-1 rounded-lg border border-surface-border text-xs font-mono text-slate-500 hover:text-slate-800 transition cursor-pointer"
+              className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono text-slate-500 hover:text-slate-800 transition cursor-pointer"
             >
               Cancel
             </button>
@@ -966,7 +966,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
             type="button"
             disabled={busy}
             onClick={() => void handleCreate()}
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="px-2 py-2 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
             <span>{busy ? "Saving..." : "Save Account"}</span>
           </button>
@@ -1244,7 +1244,7 @@ export const VenueDefaultControl: React.FC<{
           })
           .finally(() => setBusy(false));
       }}
-      className="px-3 py-1 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+      className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
       title={
         !account
           ? "No account configured for this venue"
@@ -1564,7 +1564,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
         <button
           type="button"
           onClick={() => setAdding((v) => !v)}
-          className="px-2 py-1 rounded-lg border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+          className="px-2 py-2 rounded-lg border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
         >
           <Plus className="w-3 h-3" />
           <span>Add Route</span>
@@ -1663,7 +1663,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               type="button"
               onClick={resetForm}
               disabled={busy}
-              className="px-2.5 py-1 text-xs font-mono text-slate-500 hover:text-slate-700 cursor-pointer"
+              className="px-2 py-2 text-xs font-mono text-slate-500 hover:text-slate-700 cursor-pointer"
             >
               Cancel
             </button>
@@ -1671,7 +1671,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               type="button"
               disabled={busy || !acctA || !acctB}
               onClick={() => void handleAdd()}
-              className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition disabled:opacity-40 cursor-pointer"
+              className="px-2 py-2 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition disabled:opacity-40 cursor-pointer"
             >
               {busy ? "Adding..." : "Add Route"}
             </button>

@@ -102,6 +102,24 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
               <CarryDetailField label="APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
               <CarryDetailField label="Trade size" value={`$${size.toLocaleString()}`} />
+              <CarryDetailField
+                label="Executable size"
+                value={
+                  opp.optimal_size_usd != null && opp.optimal_size_usd > 0
+                    ? `$${opp.optimal_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                    : "—"
+                }
+                title="Depth-supported size from both legs' live orderbooks"
+              />
+              <CarryDetailField
+                label="Entry spread"
+                value={
+                  opp.entry_spread_bps != null && opp.entry_spread_bps >= 0
+                    ? `${opp.entry_spread_bps.toFixed(1)} bps`
+                    : "—"
+                }
+                title="Measured long-ask vs short-bid cross at executable size"
+              />
               <CarryDetailField label="Fee breakeven" value={`${opp.break_even_hours.toFixed(1)} hrs`} />
               <CarryDetailField label="Daily income" value={`+$${opp.estimated_daily_income_usd.toFixed(2)}`} />
               <CarryDetailField
@@ -133,7 +151,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 type="button"
                 onClick={() => onExecute(opp)}
                 disabled={executing}
-                className="btn-primary !text-xs !py-1.5 !px-4 font-sans cursor-pointer"
+                className="btn-primary !text-xs !py-2.5 !px-2.5 font-sans cursor-pointer"
               >
                 <span>{executing ? "Opening..." : "Open Carry"}</span>
               </button>
@@ -228,7 +246,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.(symbol || "BTC-USDC", "funding")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Funding Rate strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -330,7 +348,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           handleExecute(opp);
                         }}
                         disabled={executingId === opp.id}
-                        className="btn-primary !text-[10px] !py-1 !px-2 font-sans cursor-pointer"
+                        className="btn-primary !text-[10px] !py-2 !px-2 font-sans cursor-pointer"
                       >
                         <span>{executingId === opp.id ? "Opening..." : "Open Carry"}</span>
                       </button>

@@ -237,9 +237,10 @@ mod tests {
     async fn test_simulated_set_leverage_rejects_out_of_range() {
         let exchange = SimulatedExchange::new("sim_i", "Simulated Exchange I", 0, dec!(0.0), dec!(10000.0));
         assert!(exchange.set_leverage("BTC-USDC", 0).await.is_err());
-        assert!(exchange.set_leverage("BTC-USDC", 6).await.is_err());
+        assert!(exchange.set_leverage("BTC-USDC", 126).await.is_err());
         assert!(exchange.set_leverage("BTC-USDC", 1).await.is_ok());
         assert!(exchange.set_leverage("BTC-USDC", 5).await.is_ok());
+        assert!(exchange.set_leverage("BTC-USDC", 50).await.is_ok());
     }
 
     #[tokio::test]

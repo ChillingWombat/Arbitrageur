@@ -26,9 +26,9 @@ pub struct SimulatedExchange {
     /// P&L is measured against. Updated by `reset_account` when the
     /// configured starting balance changes.
     initial_equity: RwLock<Decimal>,
-    /// Per-account leverage ceiling (1..=5, `None` = unlimited). New
+    /// Per-account leverage ceiling (1..=125, `None` = unlimited). New
     /// positions are booked at min(symbol leverage, cap) and `set_leverage`
-    /// above the cap is refused, so order-time min(strategy, account, venue)
+    /// above the cap is refused, so order-time min(strategy, account)
     /// holds even if a caller passes the raw strategy target.
     max_leverage_cap: RwLock<Option<u32>>,
 }
@@ -86,15 +86,14 @@ impl SimulatedExchange {
         *self.max_leverage_cap.read()
     }
 
-    /// Set the per-account leverage ceiling. `None` clears it (unlimited,
-    /// still bounded by the backend hard ceiling of 5); `Some(v)` must be
-    /// within 1..=5. The cap survives `reset_account`: resets move equity,
-    /// not account policy.
+    /// Set the per-account leverage ceiling. `None` clears it (unlimited);
+    /// `Some(v)` must be within 1..=125. The cap survives `reset_account`:
+    /// resets move equity, not account policy.
     pub fn set_max_leverage_cap(&self, cap: Option<u32>) -> anyhow::Result<()> {
         if let Some(v) = cap {
-            if !(1..=5).contains(&v) {
+            if !(1..=125).contains(&v) {
                 anyhow::bail!(
-                    "[{}] max leverage cap {} out of range; must be 1..=5 or unset",
+                    "[{}] max leverage cap {} out of range; must be 1..=125 or unset",
                     self.name,
                     v
                 );
@@ -104,11 +103,12 @@ impl SimulatedExchange {
         Ok(())
     }
 
-    /// Effective booking leverage for a symbol: min(configured, cap, 5).
+    /// Effective booking leverage for a symbol: min(configured, cap).
+    /// Strategy default is 5x; no venue term and no 5x ceiling.
     fn effective_leverage_for(&self, symbol: &str) -> u32 {
-        let configured = self.leverages.get(symbol).map(|v| *v).unwrap_or(5).clamp(1, 5);
+        let configured = self.leverages.get(symbol).map(|v| *v).unwrap_or(5).clamp(1, 125);
         match self.max_leverage_cap() {
-            Some(cap) => configured.min(cap.clamp(1, 5)),
+            Some(cap) => configured.min(cap.clamp(1, 125)),
             None => configured,
         }
     }
@@ -534,8 +534,8 @@ impl ExchangeAdapter for SimulatedExchange {
         if symbol.trim().is_empty() {
             anyhow::bail!("[{}] Symbol must be nonempty for leverage update", self.name);
         }
-        if !(1..=5).contains(&leverage) {
-            anyhow::bail!("[{}] Leverage {} out of range; must be 1..=5", self.name, leverage);
+        if !(1..=125).contains(&leverage) {
+            anyhow::bail!("[{}] Leverage {} out of range; must be 1..=125", self.name, leverage);
         }
         if let Some(cap) = self.max_leverage_cap() {
             if leverage > cap {
@@ -665,7 +665,9 @@ mod tests {
         let ex = seeded();
         assert_eq!(ex.max_leverage_cap(), None);
         assert!(ex.set_max_leverage_cap(Some(0)).is_err());
-        assert!(ex.set_max_leverage_cap(Some(6)).is_err());
+        assert!(ex.set_max_leverage_cap(Some(126)).is_err());
+        ex.set_max_leverage_cap(Some(6)).expect("above old 5x ceiling ok");
+        ex.set_max_leverage_cap(Some(50)).expect("venue-scale cap ok");
         ex.set_max_leverage_cap(Some(3)).expect("valid cap");
         assert_eq!(ex.max_leverage_cap(), Some(3));
         ex.set_max_leverage_cap(None).expect("clear");

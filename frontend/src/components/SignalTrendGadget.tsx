@@ -350,7 +350,7 @@ function SignalTrendGadgetInner({
                     ? "Baseline = volume-weighted mean of venue mids"
                     : "Baseline = most-liquid venue's mid (anchored at 0)"
                 }
-                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
+                className={`px-2 py-2 rounded font-medium transition cursor-pointer ${
                   baselineMode === m
                     ? "bg-accent text-white shadow-2xs"
                     : "text-slate-500 hover:text-slate-900"
@@ -372,7 +372,7 @@ function SignalTrendGadgetInner({
                     ? `Bot's configured trailing window (${fmtWindow(w.s)})`
                     : `${fmtWindow(w.s)} of recorded history`
                 }
-                className={`px-2 py-1 rounded font-medium transition cursor-pointer ${
+                className={`px-2 py-2 rounded font-medium transition cursor-pointer ${
                   windowSec === w.s
                     ? "bg-accent text-white shadow-2xs"
                     : "text-slate-500 hover:text-slate-900"

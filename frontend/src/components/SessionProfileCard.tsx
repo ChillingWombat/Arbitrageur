@@ -145,7 +145,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
               type="button"
               onClick={handleRecalibrate}
               disabled={promoRunning}
-              className="btn-secondary px-2.5 py-1 text-xs"
+              className="btn-secondary px-2 py-2 text-xs"
               title="Run the nightly HAR-anchor + walk-forward promotion job now (same code path as the scheduler)"
             >
               {promoRunning ? "Recalibrating…" : "Recalibrate now"}

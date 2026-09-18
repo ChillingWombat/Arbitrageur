@@ -213,7 +213,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.("BTC-USDC", "triangle")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Triangle strategy parameters (applies to all 3-leg cycles)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
@@ -363,7 +363,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
               <button
                 onClick={handleDeployCycle}
                 disabled={!activeOpp || isPaused || botStatus === "verifying" || botStatus === "dispatching"}
-                className="btn-primary w-full !py-2.5 !px-4 text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                className="btn-primary w-full !py-2.5 !px-2.5 text-xs font-bold transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
               >
                 <Zap className="w-4 h-4 fill-current" />
                 <span>
@@ -414,7 +414,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 <button
                   key={asset}
                   onClick={() => setSelectedAsset(asset)}
-                  className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium transition cursor-pointer ${
+                  className={`px-2 py-2 rounded-lg text-[11px] font-mono font-medium transition cursor-pointer ${
                     selectedAsset === asset
                       ? "bg-accent text-white shadow-2xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -489,7 +489,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                             handleDeployCycle();
                           }}
                           disabled={isPaused}
-                          className="px-3 py-1.5 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-lg text-xs font-medium transition cursor-pointer"
+                          className="px-2 py-2 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-lg text-xs font-medium transition cursor-pointer"
                         >
                           Fill Cycle
                         </button>

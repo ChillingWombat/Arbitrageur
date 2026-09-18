@@ -249,7 +249,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
             type="button"
             onClick={handleCopy}
             disabled={!recommendation || loading}
-            className="flex items-center space-x-1.5 px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer disabled:opacity-50"
+            className="flex items-center space-x-1.5 px-2.5 py-2.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer disabled:opacity-50"
             title="Copy READY values as param=value lines for manual transcription"
           >
             {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
@@ -259,7 +259,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
             type="button"
             onClick={handleApply}
             disabled={selectedReady.length === 0 || applying || loading}
-            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold transition cursor-pointer disabled:opacity-50"
+            className="px-2.5 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold transition cursor-pointer disabled:opacity-50"
             title="Write selected READY rows through saveStrategyParams/saveTickerStrategyConfig with an audit line"
           >
             {applying ? "Applying…" : `Apply selected (${selectedReady.length})`}
@@ -267,7 +267,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-1.5 bg-accent hover:bg-blue-600 text-white rounded-lg font-semibold transition cursor-pointer"
+            className="px-2.5 py-2.5 bg-accent hover:bg-blue-600 text-white rounded-lg font-semibold transition cursor-pointer"
           >
             Close
           </button>

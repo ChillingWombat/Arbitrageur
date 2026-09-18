@@ -377,6 +377,10 @@ export interface FundingOpportunityDto {
   break_even_hours: number;
   estimated_daily_income_usd: number;
   trade_size_usd: number;
+  /** Depth-supported executable size (absent on stale backends). */
+  optimal_size_usd?: number;
+  /** Measured entry cross as a positive cost in bps; negative = unmeasured. */
+  entry_spread_bps?: number;
 }
 
 export interface PredictionOpportunityDto {

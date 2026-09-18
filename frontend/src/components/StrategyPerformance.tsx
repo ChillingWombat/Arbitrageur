@@ -100,7 +100,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           <button
             onClick={loadMetrics}
             disabled={loading}
-            className="px-3 py-1.5 bg-surface border border-surface-border hover:bg-surface-raised text-slate-700 rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5 cursor-pointer"
+            className="px-2 py-2 bg-surface border border-surface-border hover:bg-surface-raised text-slate-700 rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-1.5 cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-accent" : ""}`} />
             <span>Refresh Telemetry</span>
@@ -261,7 +261,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
             onClick={runCalibration}
             disabled
             title="Native WFO requires recorded quote history — not yet available"
-            className="px-3.5 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0 cursor-pointer"
+            className="px-2 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0 cursor-pointer"
           >
             <Sliders className={`w-3.5 h-3.5 ${calibrating ? "animate-spin" : ""}`} />
             <span>

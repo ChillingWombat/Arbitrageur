@@ -106,7 +106,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <div className="flex items-center bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px] font-mono">
             <button
               onClick={() => setFilterStatus("ALL")}
-              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+              className={`px-2 py-2 rounded-lg transition cursor-pointer ${
                 filterStatus === "ALL" ? "bg-accent text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
@@ -114,7 +114,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
             </button>
             <button
               onClick={() => setFilterStatus("FILLED")}
-              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+              className={`px-2 py-2 rounded-lg transition cursor-pointer ${
                 filterStatus === "FILLED" ? "bg-profit text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
@@ -122,7 +122,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
             </button>
             <button
               onClick={() => setFilterStatus("FAILED")}
-              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
+              className={`px-2 py-2 rounded-lg transition cursor-pointer ${
                 filterStatus === "FAILED" ? "bg-loss text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >

@@ -547,7 +547,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                       setBotFilter(option.value);
                       setShowBotMenu(false);
                     }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                    className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                       botFilter === option.value
                         ? "bg-accent/10 text-accent font-semibold"
                         : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -607,7 +607,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     setSortOption("alpha");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "alpha"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -625,7 +625,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     setSortOption("trades");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "trades"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -643,7 +643,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     setSortOption("pnl");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "pnl"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -661,7 +661,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     setSortOption("liquidity");
                     setShowSortMenu(false);
                   }}
-                  className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-lg cursor-pointer ${
+                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "liquidity"
                       ? "bg-accent/10 text-accent font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
@@ -706,7 +706,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                 <button
                   type="button"
                   onClick={onOpenSettings}
-                  className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-lg font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
+                  className="mt-2 inline-flex items-center space-x-1.5 px-2 py-2 text-xs bg-accent text-white rounded-lg font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
                 >
                   <Settings className="w-3.5 h-3.5" />
                   <span>Open System Setting</span>
@@ -752,7 +752,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               key={id}
               role="menuitem"
               onClick={() => handleSelectContextItem(id)}
-              className="w-full flex items-center space-x-2 px-2.5 py-1.5 text-left transition rounded-lg text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+              className="w-full flex items-center space-x-2 px-2 py-2 text-left transition rounded-lg text-slate-700 hover:bg-surface-raised hover:text-slate-900"
             >
               <Icon className="w-3.5 h-3.5 text-slate-600" />
               <span>{label}</span>

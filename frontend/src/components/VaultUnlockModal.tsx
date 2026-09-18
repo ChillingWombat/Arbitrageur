@@ -171,7 +171,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             <button
               type="submit"
               disabled={loading || password.length === 0 || (isInitializing && confirmPassword.length === 0)}
-              className="w-full btn-primary px-4 py-2.5 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full btn-primary px-2.5 py-2.5 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? (
                 <span className="animate-pulse">Processing...</span>
@@ -184,7 +184,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 type="button"
                 onClick={onClose}
                 disabled={loading}
-                className="w-full mt-2 btn-secondary px-3.5 py-2 text-xs font-mono cursor-pointer"
+                className="w-full mt-2 btn-secondary px-2 py-2 text-xs font-mono cursor-pointer"
               >
                 Cancel
               </button>
