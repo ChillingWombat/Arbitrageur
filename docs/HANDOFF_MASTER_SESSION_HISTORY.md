@@ -819,3 +819,38 @@ history (`git log --all` empty for each):
   present) with the benchmark catalog in `frontend/src/types/tickers.ts`
   and `commands.rs:6627`. Behavior claims left standing; historic test-count
   figures not re-verified.
+
+## 21. Session Handoff — 2026-09-18 (Post-Audit Work Pass)
+
+Follow-up to the §20 errata audit. Committed as `651e9e0` (prior UI
+overhaul pass committed as `23d4aed`).
+
+- **Button padding canon**: all 138 `<button>` paddings normalized to
+  symmetric tiers (p-1.5 / p-2 / p-2.5 by size; middle-ground direction —
+  revisit if taller or tighter is preferred). Shared tokens updated
+  (btn-*, dropdown-trigger, native selects keep chevron room on the right).
+  Menu rows and table cells intentionally untouched (list geometry, not
+  buttons). Full frontend suite green.
+- **Paper-engine leverage caps lifted**: `simulated.rs` 1..=5 bounds →
+  1..=125 (sanity ceiling above all venue contract maxima of 50x);
+  booking rule is now min(configured, cap), strategy default stays 5x.
+  Doc comments updated; pinned tests rewritten (`lib.rs`,
+  `simulated.rs`). `cargo test -p arbitrager-exchanges`: 98/0.
+- **Depth-aware funding sizing (gap closure)**: new
+  `funding_entry_capacity` lockstep depth walk in
+  `arbitrager-math/src/funding_carry.rs` (+4 unit tests; math crate 78/0),
+  wired into `scan_funding_opportunities` via hub orderbooks (120s
+  freshness). DTO gains `optimal_size_usd` (falls back to requested size)
+  and `entry_spread_bps` (-1.0 = unmeasured). Frontend popup shows both;
+  carry execution caps at min(size, balances, measured optimal).
+  Desktop suite: 299/0. No clippy warnings in new code.
+- **Verification answers**: funding previously sized flat (echo) with a
+  static 3.5bps fee — now depth-aware; spread already folds in
+  conservative funding carry (`pair_monitor.rs:543`).
+- **Deferred (needs backend persistence)**: funding-convergence half-life
+  estimator. Only spread samples persist (`spread_samples` table); funding
+  rates live in a 120s hub cache, so a decay fit has nothing to train on.
+  Requires a funding-rate history table + sampler before modeling.
+- **Known pre-existing**: production bundle warns on a 607KB main chunk
+  (code-splitting candidate, untouched); clippy `map_or`/`sort_by_key`
+  style lints elsewhere untouched.
