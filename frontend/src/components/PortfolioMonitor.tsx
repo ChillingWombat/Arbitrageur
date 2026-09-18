@@ -16,6 +16,7 @@ import {
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
 import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
+import { RebalanceEstimatorGadget } from "./RebalanceEstimatorGadget";
 import { formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
 import { computeExchangeStats } from "../services/exchangeStats";
@@ -361,6 +362,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           </div>
         </div>
       </div>
+
+      {/* 2b. Rebalance friction: what moving money venue-to-venue costs.
+          Pure frontend estimate over researched fee rails (no IPC); helps the
+          user decide rebalance vs fresh deposit vs skip. */}
+      <RebalanceEstimatorGadget venueBalances={venueBalances} />
 
       {/* 3. Attention: what needs the user, worst first */}
       <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">

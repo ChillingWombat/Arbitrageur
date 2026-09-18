@@ -1027,3 +1027,28 @@ overhaul pass committed as `23d4aed`).
   execution (needs frontend-private RFQ API + audited ABIs — signer is
   ready); PopDEX beta REST shape (needs beta grant); empirical funding
   half-life (history accumulating); native execution stays disabled.
+
+## 30. Session Handoff — 2026-09-19 (Rebalance Estimator + Walkthrough + Push)
+
+- **Rebalance Friction Estimator gadget** (owner request 3): new Portfolio
+  Monitor section (after Capital Allocation) pricing venue → venue moves.
+  `frontend/src/services/rebalanceFees.ts` — researched 15-venue rail table
+  (Hyperliquid $1 verified; Lighter gasless documented; Variational $0.10
+  documented; Vanta/ASTER/edgeX/GRVT/CEX rows estimated ranges; PopDEX/
+  Robinhood-crypto null fail-closed) + pure `estimateRebalance()` (withdraw +
+  gas + deposit + optional 15bps swap; direct saves ~$0.25 wallet hop; null
+  poisons totals; 2x worth-it rule) + 9 node:test unit tests green.
+  `frontend/src/components/RebalanceEstimatorGadget.tsx` — from/to/amount/
+  profit form + direct/via-wallet toggle + swap flag + receipt + cheapest-path
+  + verdict + re-check warnings. Wired into `PortfolioMonitor.tsx` (§2b).
+- **Code comments / rebuild guide** (owner request 4): new files carry
+  tutorial-grade header + section comments (purpose, research method, rebuild
+  drills); new `docs/07_CODE_WALKTHROUGH_FOR_REBUILD.md` maps every Rust crate
+  + frontend layer in rebuild order with conventions. Honest scope: legacy
+  files predate this pass — line-by-line across the whole repo is ongoing,
+  one file per session suggested (e.g. `matrixQuant.ts` next).
+- **Spec + handoff** (owner requests 1–2): SPEC gained the estimator section;
+  `04_EXCHANGE_INTEGRATIONS_GUIDE` gained §6 transfer-rails table; this entry
+  is the handoff update. tsc clean; commit + push authorized and done.
+- **Still deferred**: live fee-schedule IPC (static research table for now);
+  empirical funding half-life; native execution disabled backend-wide.

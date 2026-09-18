@@ -210,6 +210,28 @@ pub struct TickerStrategyConfigDto {
 
 ---
 
+
+### Rebalance Friction Estimator (Portfolio Monitor gadget)
+1. **Purpose**: price venue → venue fund moves (withdraw fee + network gas +
+   deposit fee + optional coin-swap friction) so the user can choose rebalance
+   vs fresh deposit vs skip. Inputs: from / to / amount / route (direct vs via
+   own wallet) / swap flag / expected opportunity profit.
+2. **Researched rails** (`frontend/src/services/rebalanceFees.ts`): Hyperliquid
+   $1 withdraw / free deposit (verified); Lighter gasless + bridge gas only
+   (documented); Variational $0.10 flat (documented); Vanta/Aster/edgeX/GRVT/
+   Decibel/Ondo/CEX rows estimated as ranges; PopDEX + Robinhood-crypto
+   unpriceable (null, fail-closed). Every figure carries `FeeConfidence`
+   (verified / documented / estimated / unknown) + source note + as-of context.
+3. **Direct vs via-wallet**: EVM-settling venues + CEXs support withdrawing
+   straight to another venue's deposit address, saving one wallet-hop gas leg
+   (~$0.25) and waiting time. The estimator prices both and recommends direct
+   where both sides support it.
+4. **Worth-it rule**: profit >= friction x 2 (safety multiple) => "worth it";
+   else "prefer fresh deposit or skip". Null (unpriceable) legs poison the total
+   to null — the UI shows "cannot price", never a lowball sum.
+5. **Swap friction**: optional leg at adjustable bps (default 15 = taker fee +
+   spread) when the moved coin must convert (e.g. SOL -> USDC).
+
 ## Out of Scope
 - Direct custody of funds: Arbitrageur connects to smart contracts and exchange APIs via user-owned keys; it does not operate custodial wallets.
 - Centralized server syncing: All configurations, vaults, and execution logs remain purely local on the user's workstation.

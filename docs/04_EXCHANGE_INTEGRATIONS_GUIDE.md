@@ -296,3 +296,25 @@ enveloped `{"code": "SUCCESS", "data": ...}`; any other code fails closed.
 `BTC`, `BTC-USDC`, `BTCUSDC` all resolve through live metadata to the
 numeric contract id (USDC-settled preferred, then USDT). Raw numeric ids pass
 through only after metadata confirms they name a tradable contract.
+
+---
+
+## 6. Transfer Rails & Rebalance Friction (researched 2026-09-19)
+
+| Venue | Deposit rails | Withdraw rails | Withdraw fee | Deposit fee | Direct venue→venue? | Confidence |
+|---|---|---|---|---|---|---|
+| Hyperliquid | USDC (Arbitrum) | USDC (Arbitrum) | $1.00 flat | Free | Yes | verified |
+| Lighter | USDC (ETH/ARB bridge) | USDC | $0 protocol | Free | Yes | documented |
+| Variational | USDC | USDC | $0.10 flat | $0.10 flat | Yes | documented |
+| Vanta (Orderly) | USDC (ARB/OP/Base) | USDC | ~$1.00 | Free | Yes | estimated |
+| Aster / edgeX / GRVT / Decibel / Ondo | USDC(/USDT) | USDC(/USDT) | ~$0.50–1.00 | Free | Yes | estimated |
+| Binance / OKX | USDC + multis | USDC + multis | ~$0.40–0.50 (ARB) | Free | Yes | estimated |
+| Coinbase | USDC/USD | USDC/USD | network only | Free | Yes | estimated |
+| Kraken | USDC/USD | USDC/USD | ~$2.50 | Free | Yes | estimated |
+| Robinhood | USD (crypto limited) | USD | unknown | Free | No | unknown |
+| PopDEX (beta) | TBD | TBD | unknown | unknown | No | unknown |
+
+Notes: CEX fees vary by withdrawal network — always choose Arbitrum over ERC-20
+for cents-vs-dollars gas. Swap friction default 15 bps (taker + spread),
+adjustable. Estimated rows MUST be re-checked on the venue withdraw page before
+moving size. Full table + estimator: `frontend/src/services/rebalanceFees.ts`.
