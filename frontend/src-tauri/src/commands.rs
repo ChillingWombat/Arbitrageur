@@ -17,6 +17,7 @@ use arbitrageur_math::autotune::{
     TuneHistory, TuneParams, recommend,
 };
 use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
+use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
     evaluate_funding_carry, evaluate_spot_perp_basis, funding_entry_capacity,
     funding_win_probability,
@@ -171,6 +172,11 @@ pub struct FundingOpportunityDto {
     /// executability — same contract as the spread monitor's field.
     #[serde(default)]
     pub win_probability: Option<f64>,
+    /// Marginal entry-cost slope in bps per extra $1k notional, summed over
+    /// both legs at the requested trade size. `None` when either leg's book
+    /// is missing/thin. Informational: describes cost shape, never sizes.
+    #[serde(default)]
+    pub depth_slope_bps_per_1k: Option<f64>,
 }
 
 fn default_funding_opp_kind() -> String {
@@ -2615,6 +2621,23 @@ async fn scan_funding_opportunities_for_symbol(
                     let cost = rep.entry_spread_bps.map(|e| (-e).max(0.0))?;
                     Some((optimal, cost))
                 })();
+                // Marginal cost gradient at the requested size (informational).
+                // Computed before the push: opp's venue strings move into the DTO.
+                let slope: Option<f64> = (|| {
+                    let size_f = size_dec.to_string().parse::<f64>().ok()?;
+                    if !(size_f.is_finite() && size_f > 0.0) {
+                        return None;
+                    }
+                    let vid_for = |name: &str| -> Option<&str> {
+                        rates
+                            .iter()
+                            .find(|(_, _, r)| r.venue.as_str() == name)
+                            .map(|(vid, _, _)| *vid)
+                    };
+                    let (long_asks, _) = perp_books.get(vid_for(&opp.long_venue)?)?;
+                    let (_, short_bids) = perp_books.get(vid_for(&opp.short_venue)?)?;
+                    entry_gradient(long_asks, short_bids, size_f).map(|g| g.slope_bps_per_1k)
+                })();
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -2656,6 +2679,7 @@ async fn scan_funding_opportunities_for_symbol(
                     trade_size_usd,
                     optimal_size_usd: depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
                     entry_spread_bps: depth.map(|(_, e)| e).unwrap_or(-1.0),
+                    depth_slope_bps_per_1k: slope,
                     kind: "carry".to_string(),
                     basis_bps: None,
                     spot_price: None,
@@ -2833,9 +2857,14 @@ async fn scan_funding_opportunities_for_symbol(
                             })
                             .collect::<Vec<_>>()
                     };
+                    let spot_asks = to_pair(&spot.asks);
+                    let perp_bids = to_pair(&perp.bids);
+                    // Marginal cost gradient at the requested size (informational).
+                    let slope = entry_gradient(&spot_asks, &perp_bids, size_f)
+                        .map(|g| g.slope_bps_per_1k);
                     let rep = funding_entry_capacity(
-                        &to_pair(&spot.asks),
-                        &to_pair(&perp.bids),
+                        &spot_asks,
+                        &perp_bids,
                         &[size_f * 0.5, size_f, size_f * 2.0],
                     );
                     let depth = rep.optimal_size_usd.and_then(|optimal| {
@@ -2907,6 +2936,7 @@ async fn scan_funding_opportunities_for_symbol(
                         } else {
                             None
                         },
+                        depth_slope_bps_per_1k: slope,
                         // Informational only: positive entry basis is an
                         // expected exit tailwind (convergence), and a
                         // positive predicted perp rate confirms the carry.
@@ -10337,6 +10367,32 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
         // ... and the spot leg under the `-SPOT` market-type suffix.
         seed_test_book(&state, "lighter", "BTC-SPOT", dec!(60000.0), dec!(60005.0));
+        // Deepen both tails so the gradient walk has multiple samples.
+        for sym in ["BTC-USDC", "BTC-SPOT"] {
+            let vid = arbitrageur_core::types::VenueId::new("lighter");
+            if let Some(mut book) = state.market_data_hub.get_valid_orderbook(
+                &vid,
+                sym,
+                Some(std::time::Duration::from_secs(120)),
+            ) {
+                let (bb, ba) = (
+                    book.best_bid_price().unwrap(),
+                    book.best_ask_price().unwrap(),
+                );
+                for k in 1..=5 {
+                    let step_dec = dec!(5.0) * Decimal::from(k);
+                    book.bids.push(arbitrageur_core::quote::BookLevel::new(
+                        bb - step_dec,
+                        dec!(10.0),
+                    ));
+                    book.asks.push(arbitrageur_core::quote::BookLevel::new(
+                        ba + step_dec,
+                        dec!(10.0),
+                    ));
+                }
+                state.market_data_hub.update_orderbook(book);
+            }
+        }
 
         let opps = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
             .await
@@ -10358,6 +10414,9 @@ mod tests {
         assert!((0.02..=0.98).contains(&w), "win prob out of bounds: {w}");
         // Depth: 10-unit books at ~$60k hold the $25k tier twice over.
         assert!(b.optimal_size_usd > 0.0);
+        // Gradient: multi-level tails must yield a finite slope read-out.
+        let slope = b.depth_slope_bps_per_1k.expect("depth slope");
+        assert!(slope.is_finite() && slope >= 0.0, "slope={slope}");
     }
 
     #[tokio::test]

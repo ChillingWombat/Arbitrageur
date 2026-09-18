@@ -109,6 +109,11 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 title="Experimental fee-coverage heuristic over a 24h hold (informational only — never gates entries)"
               />
               <CarryDetailField
+                label="Depth slope"
+                value={opp.depth_slope_bps_per_1k != null ? `${opp.depth_slope_bps_per_1k.toFixed(2)} bps/$1k` : "—"}
+                title="Marginal entry-cost gradient summed over both legs at trade size — how fast slippage grows per extra $1k (informational only)"
+              />
+              <CarryDetailField
                 label="Type"
                 value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
                 title="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding"

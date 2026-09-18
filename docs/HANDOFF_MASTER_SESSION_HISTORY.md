@@ -926,3 +926,22 @@ overhaul pass committed as `23d4aed`).
 - **Still deferred**: empirical half-life/persistence modeling on the new
   history (needs days of accumulation); native order execution (disabled
   backend-wide, fail-closed); Current-Position trend graphs package.
+
+## 26. Session Handoff — 2026-09-19 (Orderbook Gradient + Background Ingestion)
+
+- **Gradient question answered**: VWAP walks (spatial exact-qty, funding
+  0.5x/1x/2x tiers, two-way exit) DO price level-gaps into every capacity
+  figure — but no explicit marginal-gradient metric existed. Added
+  `arbitrageur-math/src/book_gradient.rs`: `entry_gradient` (bps/$1k slope
+  both legs, top-5 imbalance, microprice; fixed 10-step fractional walk;
+  None when thin) + 4 unit tests incl. a theoretical-slope check on a
+  linear-worsening book. Wired into carry + basis DTOs
+  (`depth_slope_bps_per_1k`) and the detail modal. Limits documented:
+  point-in-time snapshots, no replenishment/impact-beyond-book/time-decay.
+- **Background ingestion**: rebuilt release (`npm run build` + release
+  profile, incl. basis/win-prob/history/gradient) and launched
+  `target/release/arbitrageur-desktop` via `run.sh` (nohup, DISPLAY=:0) so
+  funding samples accumulate for the half-life estimator.
+- **Verification**: math 90/0 (+4), desktop funding 8/0, tsc clean.
+- **Next**: empirical funding-persistence / half-life model on the growing
+  history; Current-Position trend graphs; native execution stays disabled.

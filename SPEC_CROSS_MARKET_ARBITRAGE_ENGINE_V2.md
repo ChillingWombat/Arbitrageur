@@ -167,6 +167,7 @@ pub struct TickerStrategyConfigDto {
 7. **Funding-Rate History Log (schema v18)**:
    - `funding_rate_samples(venue_id, symbol, ts_ms[minute-bucketed], rate_8h, interval_hours)` records every scan's observed prints (REPLACE-idempotent); read via `funding_rate_series`, pruned by the shared retention pass. Training substrate for the deferred persistence / half-life estimator.
 8. **Scan Perf**: per-venue perp books are snapshot-parsed once per scan (O(V) hub clones) instead of per carry pair (O(V^2)).
+9. **Orderbook Gradient**: VWAP walks already price level-gaps into every capacity tier, and the new `book_gradient::entry_gradient` makes the MARGINAL cost explicit — bps per extra $1k summed over both legs (fixed fractional 10-step walk, level-lump independent), plus top-5 imbalance and microprice. Reported per funding/basis opp as `depth_slope_bps_per_1k` (None when thin — never a fabricated zero). Still point-in-time: no replenishment, impact beyond the visible book, or time decay.
 
 ### Strategy Auto-Filters & Price Resolution Architecture
 1. **Real Exchange 24h Volume Aggregation**:

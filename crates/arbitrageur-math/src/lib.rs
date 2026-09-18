@@ -14,6 +14,7 @@ pub mod autotune;
 pub mod session;
 pub mod seasonality;
 pub mod triangular;
+pub mod book_gradient;
 
 pub use rolling_stats::*;
 pub use spatial_spread::*;
