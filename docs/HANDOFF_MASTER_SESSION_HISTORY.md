@@ -882,3 +882,17 @@ overhaul pass committed as `23d4aed`).
   orphaned Tauri build-script caches referencing the old absolute path;
   cleared 27 stale `target/release/build/tauri*` dirs and rebuilt clean.
   App launched from the new binary.
+
+## 24. Session Handoff — 2026-09-18 (Save-Stall Fix + Configurator Polish)
+
+- **Stuck save diagnosed**: configurator save awaited unbounded IPC with no
+  timeout anywhere — all 19 reqwest clients had no timeout and
+  `refreshAllData` awaited 15 calls (most without fallbacks), so one hung
+  venue endpoint stuck the modal on "Saving..." forever. Fixed at both
+  layers: 15s timeout on every exchange HTTP client; each fan-out leg races
+  a 30s timeout into its empty fallback. Saves now always settle.
+- Double-Way display strings → Divergence & Convergence (enum values kept).
+- Removed red LIVE badge (Trading Mode) and Exchanges tab count badge.
+- SettingRow + Trading-Mode balance rows rearranged: input adjacent to the
+  setting name on top, description divided below (three zones).
+- Stop All icon–text gap tightened; telemetry KPI strip is 6 even columns.
