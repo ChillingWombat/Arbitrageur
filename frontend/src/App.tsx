@@ -908,9 +908,9 @@ export const App: React.FC = () => {
 
           {activeTab === "portfolio_monitor" && (
             <PortfolioMonitor
-              activeSymbol={selectedSymbol}
               riskData={riskData}
               status={systemStatus}
+              openPositions={openPositions}
               onResetCircuitBreaker={handleResetCircuitBreaker}
               onTriggerKillswitch={handleEmergencyKillswitch}
             />

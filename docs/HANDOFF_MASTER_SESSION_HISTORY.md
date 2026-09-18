@@ -972,3 +972,17 @@ overhaul pass committed as `23d4aed`).
   preset no longer exist after redesigns).
 - **Verification**: tsc clean, frontend 11 shards green, desktop suite
   re-run on commit.
+
+## 28. Session Handoff — 2026-09-19 (Portfolio Monitor Redesign)
+
+- **Rebuilt around user questions** (can I trade? where is my money? what
+  needs me?): health header with HALTED/PAUSED/ATTENTION/HEALTHY verdict +
+  equity + realized/unrealized/total PnL; Capital Allocation by Venue bars
+  with free margin + recommended actions; Deployed-vs-Idle with open count;
+  auto-derived Needs-Attention list (breaker, margin >= 70/90, liq buffer
+  <= 25/10, skews, error budget, venue LOW_MARGIN/DEPLETED); DeltaGuard +
+  margin + breaker controls (killswitch moved out of the header into Safety);
+  venue gadget kept; attribution cards gain open-count badges + unrealized
+  rows; permanently-disabled WFO gadget removed (dead UI).
+- **Wiring**: new `openPositions` prop from the App fan-out (no new IPC).
+- **Verification**: tsc clean, frontend 11 shards green.
