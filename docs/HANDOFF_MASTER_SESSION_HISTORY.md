@@ -873,3 +873,12 @@ overhaul pass committed as `23d4aed`).
   rebuild the release binary (`target/release/arbitrageur-desktop` does not
   exist yet — the `Arbitrageur` launcher symlink points at it); `keychain.toml`
   is gitignored and unaffected.
+
+## 23. Session Handoff — 2026-09-18 (Remote Switch + Desktop Rebuild)
+
+- GitHub repo renamed to `Arbitrageur` by owner; remote switched to
+  `https://github.com/Dav1D1010/Arbitrageur.git` (verified HEAD matches).
+- Rebuilt `target/release/arbitrageur-desktop` (27MB). The folder move had
+  orphaned Tauri build-script caches referencing the old absolute path;
+  cleared 27 stale `target/release/build/tauri*` dirs and rebuilt clean.
+  App launched from the new binary.
