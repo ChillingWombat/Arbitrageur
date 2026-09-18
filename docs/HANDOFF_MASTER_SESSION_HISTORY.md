@@ -1,11 +1,11 @@
-# Master Handoff & Session History: Arbitrager Cross-Market Quantitative Terminal
+# Master Handoff & Session History: Arbitrageur Cross-Market Quantitative Terminal
 
 > **Historical record.** This document captures the development history as it happened. Some feature claims below describe aspirational or since-disabled functionality; for the current, accurate safety and capability status, see `README.md` → *Current Safety Status*.
 
 **Document Version**: 2.3.0  
 **Generated At**: 2026-09-18  
-**Repository**: `/mnt/Data/Projects/Arbitrager`  
-**Application**: Arbitrager (High-Frequency Multi-Venue Arbitrage & Quantitative Terminal)  
+**Repository**: `/mnt/Data/Projects/Arbitrageur`  
+**Application**: Arbitrageur (High-Frequency Multi-Venue Arbitrage & Quantitative Terminal)  
 **Primary Stack**: Rust (Cargo Workspace), Tauri v2, Pixi, React 18, TypeScript, Tailwind CSS
 
 ---
@@ -38,7 +38,7 @@ The project originated with hands-on testing, deployment, and decompilation of o
 ### Phase 2: Native Rust Engine Architecture & Quant Models
 The user requested a ground-up Rust engine managed with Pixi:
 - **Core Requirement**:
-  *"Create a Cross-market Arbitrager tool for Price Difference and Funding rate difference across multiple markets at the same time. Blockchain coins first, then predictive markets, then traditional markets. Web3: Hyperliquid, Lighter, Vanta.exchange, Robinhood, Arcus, PopDEX. Use Rust for speed. Modular design with Pixi."*
+  *"Create a Cross-market Arbitrageur tool for Price Difference and Funding rate difference across multiple markets at the same time. Blockchain coins first, then predictive markets, then traditional markets. Web3: Hyperliquid, Lighter, Vanta.exchange, Robinhood, Arcus, PopDEX. Use Rust for speed. Modular design with Pixi."*
 - **Mathematical Formulations Built**:
   1. **Spatial Spread Dislocation**: Evaluates orderbook bid/ask depth VWAP minus taker fees across all permutations $(i, j)$ where $i \ne j$.
   2. **Funding Rate Carry (Delta-Neutral APR)**: Normalizes disparate funding periods (Hyperliquid 1h vs. Lighter 8h) to continuous hourly rates and compounds to annual percentage rate:
@@ -100,7 +100,7 @@ The user requested a ground-up Rust engine managed with Pixi:
 ## 3. Project Directory Structure
 
 ```
-/mnt/Data/Projects/Arbitrager/
+/mnt/Data/Projects/Arbitrageur/
 ├── Cargo.toml                    # Root Cargo workspace configuration
 ├── pixi.toml                     # Pixi environment & task definitions
 ├── .gitignore                    # Strictly ignores keychain.toml, *.key, target/
@@ -114,10 +114,10 @@ The user requested a ground-up Rust engine managed with Pixi:
 │   ├── 06_MOB_STRATEGY_VAULTS_AND_RWA_RESEARCH.md
 │   └── HANDOFF_MASTER_SESSION_HISTORY.md # [THIS FILE]
 ├── crates/                       # Modular Rust Backend Crates
-│   ├── arbitrager-core/          # Domain models, Decimal math, ExchangeAdapter traits
-│   ├── arbitrager-math/          # Spatial spread, OU process, Bertram solver, WFO
-│   ├── arbitrager-execution/     # Concurrent execution coordinator, virtual ledger
-│   └── arbitrager-strategy/      # Arbitrage strategies (Spatial, Carry, Prediction)
+│   ├── arbitrageur-core/          # Domain models, Decimal math, ExchangeAdapter traits
+│   ├── arbitrageur-math/          # Spatial spread, OU process, Bertram solver, WFO
+│   ├── arbitrageur-execution/     # Concurrent execution coordinator, virtual ledger
+│   └── arbitrageur-strategy/      # Arbitrage strategies (Spatial, Carry, Prediction)
 └── frontend/                     # Tauri Desktop & React UI
     ├── package.json              # Vite, React, Lucide-React, Tailwind CSS
     ├── src-tauri/                # Tauri v2 Desktop Host
@@ -185,7 +185,7 @@ cargo test --workspace
 
 # 2. Run backend Tauri command tests (25 passing tests)
 cd frontend/src-tauri
-cargo test --bin arbitrager-desktop
+cargo test --bin arbitrageur-desktop
 cd ../..
 
 # 3. Run frontend unit tests (node:test via --experimental-strip-types; 32 passing tests)
@@ -199,32 +199,32 @@ npm run build
 cd ..
 
 # 5. Compile release desktop binary
-cargo build --release --bin arbitrager-desktop
+cargo build --release --bin arbitrageur-desktop
 
 # 6. Launch release binary on local X11/Wayland display
 DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
-/mnt/Data/Projects/Arbitrager/target/release/arbitrager-desktop
+/mnt/Data/Projects/Arbitrageur/target/release/arbitrageur-desktop
 ```
 
 ---
 
 ## 6. Open Items & Backlog for Future Sessions
 
-0. **Adaptive Dislocation Analytics & Auto-Calibrated Parameters** *(spec published — [GitHub Issue #3](https://github.com/Dav1D1010/Arbitrager/issues/3), label `ready-for-agent`)*:
-   - Persist venue mid/dislocation samples in SQLite WAL; compute deviation series + analytics in `arbitrager-math` (not the frontend); chart windows default to the bot's trailing window and extend to days via rollups.
+0. **Adaptive Dislocation Analytics & Auto-Calibrated Parameters** *(spec published — [GitHub Issue #3](https://github.com/Dav1D1010/Arbitrageur/issues/3), label `ready-for-agent`)*:
+   - Persist venue mid/dislocation samples in SQLite WAL; compute deviation series + analytics in `arbitrageur-math` (not the frontend); chart windows default to the bot's trailing window and extend to days via rollups.
    - Seasonality (hour-of-day, day-of-week), per-pair mean/half-life, regime-shift detection; parameter recommendations (hurdle, window, units, leverage) validated out-of-sample via existing WFO module; opt-in auto-tune modes; curated default presets for distribution.
    - Data-first mandate: accumulate our own corpus and analyze patterns before offering auto-tune to external users.
-1. **WebSocket Orderbook Streaming Integration** *(spec published — [GitHub Issue #4](https://github.com/Dav1D1010/Arbitrager/issues/4), label `ready-for-agent`)*:
+1. **WebSocket Orderbook Streaming Integration** *(spec published — [GitHub Issue #4](https://github.com/Dav1D1010/Arbitrageur/issues/4), label `ready-for-agent`)*:
    - Hyperliquid already features direct REST/WS endpoints.
    - Wire persistent WebSockets for Lighter zkDEX, Vanta (Orderly), and Robinhood EVM to achieve continuous sub-10ms quote updates. Robinhood has no CLOB API — spec routes it to honestly-attributed on-chain pool quotes; Vanta/Robinhood now fail closed until feeds land (post-sweep they contribute zero orderbook data).
 2. **Triangular Backend Migration**:
    - `TriangularArbitrage.tsx` currently delegates to `api.scanTriangleOpportunities`.
    - Implement native `scan_triangular_opportunities` and `execute_triangular_arbitrage` in `frontend/src-tauri/src/commands.rs`.
 3. **Live Transaction Signing**:
-   - Hyperliquid EIP-712 agent wallet signing is scaffolded in `arbitrager-core`.
+   - Hyperliquid EIP-712 agent wallet signing is scaffolded in `arbitrageur-core`.
    - Connect live signing when Vault is unlocked and trading mode is switched to `Live`.
 4. **Cloud Multi-Bot Deployment Scripts**:
-   - Package systemd service templates (`arbitrager@9100.service`, `arbitrager@9101.service`) for multi-instance deployment on remote Ubuntu VPS instances.
+   - Package systemd service templates (`arbitrageur@9100.service`, `arbitrageur@9101.service`) for multi-instance deployment on remote Ubuntu VPS instances.
 
 ---
 
@@ -276,7 +276,7 @@ The gadget is now backend-driven end to end; no frontend math.
 - `record_spread_samples` (batch tx, drops non-finite/non-positive mids, no-op on empty batches), `spread_samples(symbol, from, to)` range query, `earliest_spread_sample_ts`, `prune_spread_samples(retention, row_cap)`.
 - `fetch_orderbooks_impl` records every poll's per-venue top-of-book best-effort (store failures never break market data); hourly prune keeps **30 days**, capped at **4M rows** (`AppEngineState::sample_prune_at` tracks the last prune hour).
 
-**Math** (`arbitrager-math/src/dislocation.rs`)
+**Math** (`arbitrageur-math/src/dislocation.rs`)
 - `compute_deviation_series(samples, weights, mode, bucket_ms, max_points)` → bucketed per-venue bps deviations from baseline + max–min dislocation band; null-preserved gaps; endpoint-preserving stride downsample to `max_points`.
 - `BaselineMode::Consensus` = volume-weighted mean of mids (equal-weight when unreported); `BaselineMode::Leader` = highest-weight venue pinned at 0.
 - 6 unit tests cover: weighting, leader anchoring, gap preservation, endpoint-preserving downsample, invalid-mid drops.
@@ -302,7 +302,7 @@ The gadget is now backend-driven end to end; no frontend math.
 
 ### 7.11 Verification (all green at handoff)
 ```bash
-cargo test --workspace                  # all crates green (arbitrager-math 23, incl. 7 dislocation)
+cargo test --workspace                  # all crates green (arbitrageur-math 23, incl. 7 dislocation)
 cd frontend/src-tauri && cargo test     # 96 pass / 0 fail (3 store + 5 signal-series/recorder tests)
 cd frontend && npx tsc --noEmit         # clean
 node --experimental-strip-types --test  # 32 pass / 0 fail (node:test)
@@ -336,7 +336,7 @@ Two workstreams: (a) completing the venue layer — Robinhood wired as a real Li
 - Settings-page scroll jank: removed full-screen `backdrop-blur` (GPU re-composite per frame), `EngineSettings` wrapped in `React.memo` with venue-aware equality (was re-rendering the ~2400-line tree every 3s status poll), App callbacks stabilized with `useCallback`.
 
 ### 8.4 Spread Range Monitor — backend
-- **Math** (`arbitrager-math/src/pair_monitor.rs`, new): time-aligned directional pair series; episode segmentation (open on threshold, win on revert-to-band, stop at k·σ, else open); empirical conditional `P_win(dev)` — for a fresh entry at deviation x the lookup uses the *smallest observed threshold ≥ x* (excursions whose peak reached at least x); capacity ladder walking **both** books with per-level deviation→probability weighting, `optimal_size_usd` (argmax expected USD under participation cap) and `breakeven_size_usd` (largest tier with E>0 **and** marginal p ≥ `minWinProbability`, default 0.90); conservative funding carry (`f_A − f_B` × horizon, cost→`max(t̂,8h)`, gain→`min(t̂,1h)`). All outputs fail closed below data floors — never fabricated zeroes.
+- **Math** (`arbitrageur-math/src/pair_monitor.rs`, new): time-aligned directional pair series; episode segmentation (open on threshold, win on revert-to-band, stop at k·σ, else open); empirical conditional `P_win(dev)` — for a fresh entry at deviation x the lookup uses the *smallest observed threshold ≥ x* (excursions whose peak reached at least x); capacity ladder walking **both** books with per-level deviation→probability weighting, `optimal_size_usd` (argmax expected USD under participation cap) and `breakeven_size_usd` (largest tier with E>0 **and** marginal p ≥ `minWinProbability`, default 0.90); conservative funding carry (`f_A − f_B` × horizon, cost→`max(t̂,8h)`, gain→`min(t̂,1h)`). All outputs fail closed below data floors — never fabricated zeroes.
 - **Bulk funding** on `ExchangeAdapter::fetch_funding_rates()` (default empty): Lighter `/api/v1/funding-rates` filtered to the venue's own entries; Hyperliquid `metaAndAssetCtxs` (one call, all coins). Feeds a per-(venue,symbol) EMA — funding is noisy, snapshots lie.
 - **Schema V4**: `account_tier` on `exchange_accounts` (standard/plus/premium/builder; Plus adds the documented +0.5bps), `ticker_exemptions` table. **Schema V5**: `monitor_config` JSON row + `monitor_signals` durable lifecycle table.
 - **`SpreadMonitorEngine`** (`frontend/src-tauri/src/monitor.rs`, tokio task spawned in `main.rs`):
@@ -361,9 +361,9 @@ Two workstreams: (a) completing the venue layer — Robinhood wired as a real Li
 
 ### 8.6 Verification (all green at handoff)
 ```bash
-cargo test -p arbitrager-desktop    # 110 pass / 0 fail (7 monitor tests incl. end-to-end evaluate)
-cargo test -p arbitrager-math       # 32 pass
-cargo test -p arbitrager-exchanges  # 31 pass
+cargo test -p arbitrageur-desktop    # 110 pass / 0 fail (7 monitor tests incl. end-to-end evaluate)
+cargo test -p arbitrageur-math       # 32 pass
+cargo test -p arbitrageur-exchanges  # 31 pass
 cd frontend && npx tsc --noEmit     # clean
 npm test                            # 37 pass (node:test — NOT vitest)
 git diff --check                    # clean
@@ -372,7 +372,7 @@ git diff --check                    # clean
 ### 8.7 Working tree state & open items
 - **Everything uncommitted** — the session's full diff spans `crates/`, `frontend/src-tauri/`, and `frontend/src/`. `docs/HANDOFF_*.md` + `SPEC_SPREAD_RANGE_MONITOR.md` updated.
 - **Not done / next**: (1) the autonomous opportunities bot consuming `qualified_opportunities()` — spec'd seam only; (2) depth-dependent *exit* walk for two-way mode (current exit estimate is a top-of-book floor); (3) live `sendTx` remains unimplemented everywhere — monitor execution is paper-only and the execute gate hard-blocks live mode; (4) monitor's lane budget doesn't count requests the *UI itself* issues to the same Lighter IP — `txReservePct` is the mitigation, revisit if WAF pressure reappears; (5) no PR/merge state — local working tree only.
-- Rebuild the desktop binary (`cargo build --release --bin arbitrager-desktop` or the debug `cargo build -p arbitrager-desktop`) before relaunching — last-pass fixes landed after the running binary was built.
+- Rebuild the desktop binary (`cargo build --release --bin arbitrageur-desktop` or the debug `cargo build -p arbitrageur-desktop`) before relaunching — last-pass fixes landed after the running binary was built.
 
 ---
 
@@ -435,7 +435,7 @@ Three workstreams: (a) the **consolidated Positions panel** and Portfolio Monito
 ### 9.9 Verification (all green at handoff)
 ```bash
 cd frontend/src-tauri && cargo check      # clean
-cargo test -p arbitrager-desktop          # strategy tests pass (incl. config CRUD)
+cargo test -p arbitrageur-desktop          # strategy tests pass (incl. config CRUD)
 cd frontend && npx tsc --noEmit           # clean
 npm test                                  # 48 pass (node:test)
 ```
@@ -444,7 +444,7 @@ Live-verified via Obscura: all three configurators render strategy-scoped (Singl
 ### 9.10 Working tree state & open items
 - **Everything uncommitted** — diff spans `frontend/src-tauri` (state.rs, commands.rs, main.rs, monitor.rs, state_store.rs) and `frontend/src` (~20 components + api.ts, types, contractSpecs).
 - **Not done / next**: (1) **strategy params are session-only** — `strategy_params` and `strategy_configs` are both in-memory; durable persistence needs a state-store schema migration (spec'd as follow-up in issue #6); (2) `unit_size_usd`→base derivation uses the static reference `basePrice` — consider live-price normalization later; (3) per-ticker parameter overrides are rejected by design — would be a new seam if ever wanted; (4) Prediction/Statistical have no params record; Spread Radar keeps its own monitor configurator; (5) the modal's `isEnabled`/`onToggleEnabled` for futures toggles the *context* ticker's enable flag — a per-ticker gate, kept deliberately; (6) no PR/merge state — local working tree only.
-- Rebuild the desktop binary before relaunching to pick up the new commands (`cargo build -p arbitrager-desktop`).
+- Rebuild the desktop binary before relaunching to pick up the new commands (`cargo build -p arbitrageur-desktop`).
 
 ### 9.11 Bugfix — "connected accounts but no tickers" (venue status/admission drift)
 
@@ -477,7 +477,7 @@ Deliberately kept `rounded-lg`: card panels, list tiles (exchange rows, position
 
 **Padding-balance sweep**: user flagged the BotLifecycleControls group container (`px-2 py-1` — left gap 8px vs top/bottom 4px) → `px-1.5 py-1`. Then a full audit normalized every framed interactive element to horizontal padding ≤ ~2× vertical. Convention: compact chips/buttons `px-2 py-1` (8/4); standard buttons `px-3 py-1.5` (12/6); large `px-4 py-1.5/2`. Fixes: `py-0.5` chips → `py-1` (SignalTrendGadget mode/window, TickerLogMonitor level, StatArbLab input-mode, OpportunityRadar Exec, EngineSettings un-hide chips, ExchangeAccounts label input); `px-3 py-1` → `px-3 py-1.5` (EngineSettings/ExchangeAccounts secondary buttons, LiveMatrix exec cell, SpotArb Select, TickerConfigModal exec-mode pair, TriangularArb Fill Cycle); Header PAUSE ALL/STOP ALL `px-2.5 py-1` → `px-2 py-1`. Intentionally untouched: full-height strip tabs (py-0, fills parent), non-interactive badges/spans, `px-1 py-0.5` compact table inputs, `w-full py-2/3` CTAs. Live audit after: zero buttons above 2:1.
 
-**Label-case canon**: all word labels are sentence case (first char uppercase only). Removed `uppercase` utility from BotLifecycleControls buttons + phase badge, ExchangeAccounts "Default" badge, TickerExplorer "Issue" badge, EngineSettings "Paper" badge. Literal-caps → sentence case: SignalTrend CONSENSUS/LEADER + Sell/Buy legend, Header Pause All/Continue All/Stop All, OpportunityRadar venue "All", LiveMatrix Perp + Best badges, StrategyPerformance "Active", TickerExplorer Perp/Off, PredictionHub Buy Yes/Buy No. TickerLogMonitor filter chips + level badges keep caps **values** (filter keys `ALL`/`TRADES`/`EXEC`/etc.) but render transformed via `lvl.charAt(0) + lvl.slice(1).toLowerCase()`. EngineSettings mode badge capitalizes `tradingMode` ("Paper"/"Real"). Kept uppercase: unit codes (USD, BPS), venue/strategy codes (HL/LGT/SS), brand (ARBITRAGER), ticker symbols, search-input `uppercase` transform.
+**Label-case canon**: all word labels are sentence case (first char uppercase only). Removed `uppercase` utility from BotLifecycleControls buttons + phase badge, ExchangeAccounts "Default" badge, TickerExplorer "Issue" badge, EngineSettings "Paper" badge. Literal-caps → sentence case: SignalTrend CONSENSUS/LEADER + Sell/Buy legend, Header Pause All/Continue All/Stop All, OpportunityRadar venue "All", LiveMatrix Perp + Best badges, StrategyPerformance "Active", TickerExplorer Perp/Off, PredictionHub Buy Yes/Buy No. TickerLogMonitor filter chips + level badges keep caps **values** (filter keys `ALL`/`TRADES`/`EXEC`/etc.) but render transformed via `lvl.charAt(0) + lvl.slice(1).toLowerCase()`. EngineSettings mode badge capitalizes `tradingMode` ("Paper"/"Real"). Kept uppercase: unit codes (USD, BPS), venue/strategy codes (HL/LGT/SS), brand (ARBITRAGEUR), ticker symbols, search-input `uppercase` transform.
 
 **Tooltip rework**: `InfoTooltip` was `absolute`-inside-`relative` — clipped by any ancestor `overflow-hidden`/`overflow-y-auto` (e.g. Dislocation Matrix "?" at a container edge). Now renders via `createPortal` to `document.body` at `position: fixed` with viewport clamping (8px margin), auto top/bottom flip when space is short, arrow tracks trigger center, closes on scroll. Styling: dark `bg-slate-900/95` → light-blue `bg-accent-dim/95` + `border-accent-line` + `text-slate-700` (z-100, above modals). SignalTrendGadget chart hover readout restyled to match. Kept dark intentionally: `bg-slate-900` code block (serve command) and modal scrims.
 
@@ -550,7 +550,7 @@ legend/ticker cleanups from prior turns).
   limits (Lighter rate-limits WS alongside abused REST) — it relieves them
   (Lighter books cost 2 REST slots today; HL one info conn/IP push-on-change;
   Orderly ~1 s snapshot pushes at `wss://ws-evm.orderly.org/ws/stream/{account_id}`).
-- New `crates/arbitrager-exchanges/src/ws.rs` (pure parse helpers, fixture
+- New `crates/arbitrageur-exchanges/src/ws.rs` (pure parse helpers, fixture
   tests) + `frontend/src-tauri/src/feed.rs` per-venue supervisors writing to
   `MarketDataHub`; REST `fetch_orderbooks_impl` untouched as fallback;
   disconnects go `stale` via hub TTL. Vanta WS skipped without account_id.
@@ -581,7 +581,7 @@ relaunching.
 
 ## 11. Session Handoff — 2026-09-16 (Aster, Ondo Perps, GRVT, edgeX Venue Support)
 
-New adapters in `crates/arbitrager-exchanges/src/`: `aster.rs` (fapi/v3,
+New adapters in `crates/arbitrageur-exchanges/src/`: `aster.rs` (fapi/v3,
 quote parsed from exchangeInfo — USDT/USD1/U, never hardcoded),
 `ondoperps.rs` (`BASE→BASE-USD.P`, `success:true` envelope, 1100 ms
 coordinator), `grvt.rs` (depth allowlist {10,50,100} per live 3031 probe),
@@ -617,7 +617,7 @@ before relaunching.
 
 ## 13. Session Handoff — 2026-09-16 (Auto-Tune Phase 1, Recommend-Only)
 
-New pure module `crates/arbitrager-math/src/autotune.rs`: 70/30
+New pure module `crates/arbitrageur-math/src/autotune.rs`: 70/30
 chronological walk-forward over alias-aware spread history; 7 candidates
 fit-only (window 2×OU half-life; target friction+margin; percentile
 inverted-CDF snapped down; step/maxStep from capacity ladder + 0.5%
@@ -639,7 +639,7 @@ before relaunching.
 
 ## 14. Session Handoff — 2026-09-16 (Session-Aware Seasonality, Phase 1)
 
-New `arbitrager-math/src/session.rs`: UTC session clock (Asia 00–08 /
+New `arbitrageur-math/src/session.rs`: UTC session clock (Asia 00–08 /
 Europe 08–13 / overlap 13–17 / US-late 17–22 / dead 22–24 + weekend),
 funding masks (±120s around 00/08/16 + 04/12/20 + hourly), DST-aware US
 cash hours + seeded NYSE holidays, winsorized empirical-Bayes shrinkage
@@ -715,19 +715,19 @@ rebuild desktop binary before relaunching.
   - User reported: "neither of these two filters are functioning correctly at the moment, the tickers are all hide. it should be the volumne of ticker in the exchanges, not the value catptured and recorded in our system".
 - **Volume Filter Fix (Real Exchange Turnover)**:
   - Root Cause: Filters were evaluating locally recorded tick volume, or enforcing that *every* venue meet the volume floor. Because unconfigured or newly subscribed venues reported 0 local ticks, 100% of tickers were filtered out.
-  - Solution in `crates/arbitrager-desktop/src/strategy_filters.rs`:
+  - Solution in `crates/arbitrageur-desktop/src/strategy_filters.rs`:
     - Filter now queries real exchange 24h quote volume / turnover (Hyperliquid `24h_volume`, Lighter `volume_24h`, Vanta `marketSummary` `24h_amount`, Binance `quoteVolume`, OKX `volCcy24h`, Kraken `vol_quote`).
     - Implemented aggregated turnover check across reporting venues (`min_reported >= floor` and total reporting turnover threshold) with defensive fallback for unreporting venues so active liquidity isn't starved.
     - Updated Vanta client `fetch_volumes_24h` to correctly extract `marketSummary` quote turnover.
 - **Mid Price Filter Fix (3-Tier Price Resolution)**:
   - Root Cause: Background tickers that were not currently active in the UI's WebSocket orderbook stream had `mid_price == None` in the local `market_hub` cache. Naive evaluation treated `None` as 0.0, causing all assets to be hidden when `Auto Min Mid Price` was enabled.
-  - Solution: Implemented 3-tier price resolution in `crates/arbitrager-desktop/src/strategy_filters.rs` and `frontend/src/utils/tickerFilters.ts`:
+  - Solution: Implemented 3-tier price resolution in `crates/arbitrageur-desktop/src/strategy_filters.rs` and `frontend/src/utils/tickerFilters.ts`:
     1. **Tier 1 (Live Book)**: Orderbook mid-price from `market_hub`.
     2. **Tier 2 (Exchange Mark/Ticker)**: Reported 24h ticker mark or last traded price.
     3. **Tier 3 (Benchmark Catalog)**: Reference asset price from static catalog (`benchmark_base_price` in Rust, `getTickerBenchmarkPrice` in TS).
   - High-value assets ($10+ to $100k+, e.g. BTC, ETH, SOL) stay visible, while sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) are reliably filtered out when a floor is configured.
 - **Arithmetic Safety in Funding Carry**:
-  - In `crates/arbitrager-math/src/funding_carry.rs`: converted raw multiplications and divisions to `checked_mul` and `checked_div` with bounds protection, eliminating overflow risks during extreme funding volatility (>10,000% APR) or institutional trade sizes ($10M+).
+  - In `crates/arbitrageur-math/src/funding_carry.rs`: converted raw multiplications and divisions to `checked_mul` and `checked_div` with bounds protection, eliminating overflow risks during extreme funding volatility (>10,000% APR) or institutional trade sizes ($10M+).
 - **Verification**:
   - 299 desktop tests passed, 98 exchange tests passed, 74 math tests passed, 149 frontend tests passed, `npm run build` cleanly passed. Live dev server verified with running UI.
 
@@ -813,7 +813,7 @@ history (`git log --all` empty for each):
   asset-filter tabs, and simulator it describes were removed in §19 per
   operator request.
 - **§18 (Strategy Auto-Filters)** — paths incorrect: there is no
-  `crates/arbitrager-desktop/` crate and no
+  `crates/arbitrageur-desktop/` crate and no
   `frontend/src/utils/tickerFilters.ts`. The real implementation is
   `frontend/src-tauri/src/strategy_filters.rs` (volume/price filter logic
   present) with the benchmark catalog in `frontend/src/types/tickers.ts`
@@ -835,10 +835,10 @@ overhaul pass committed as `23d4aed`).
   1..=125 (sanity ceiling above all venue contract maxima of 50x);
   booking rule is now min(configured, cap), strategy default stays 5x.
   Doc comments updated; pinned tests rewritten (`lib.rs`,
-  `simulated.rs`). `cargo test -p arbitrager-exchanges`: 98/0.
+  `simulated.rs`). `cargo test -p arbitrageur-exchanges`: 98/0.
 - **Depth-aware funding sizing (gap closure)**: new
   `funding_entry_capacity` lockstep depth walk in
-  `arbitrager-math/src/funding_carry.rs` (+4 unit tests; math crate 78/0),
+  `arbitrageur-math/src/funding_carry.rs` (+4 unit tests; math crate 78/0),
   wired into `scan_funding_opportunities` via hub orderbooks (120s
   freshness). DTO gains `optimal_size_usd` (falls back to requested size)
   and `entry_spread_bps` (-1.0 = unmeasured). Frontend popup shows both;

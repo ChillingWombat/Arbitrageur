@@ -35,7 +35,7 @@ export interface VenueVolumesDto {
   volumes: Record<string, number>;
 }
 
-/** Backend-computed dislocation series (arbitrager-math) over persisted
+/** Backend-computed dislocation series (arbitrageur-math) over persisted
  * spread samples. Deviations are per-venue bps from the selected baseline;
  * null entries are genuine gaps, never interpolated. */
 export interface SignalSeriesDto {

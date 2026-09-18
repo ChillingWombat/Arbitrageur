@@ -25,7 +25,7 @@ import {
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
-import { ArbitragerLogo } from "./ArbitragerLogo";
+import { ArbitrageurLogo } from "./ArbitrageurLogo";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { VenueAccountsSection } from "./ExchangeAccounts";
 
@@ -210,7 +210,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [referralRobinhood, setReferralRobinhood] = useState("https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
   const [sponsorLink, setSponsorLink] = useState("https://buymeacoffee.com/dav1d1010");
   const [version, setVersion] = useState("v1.2.0");
-  const [gitRepo, setGitRepo] = useState("https://github.com/arbitrager/arbitrager");
+  const [gitRepo, setGitRepo] = useState("https://github.com/Dav1D1010/Arbitrageur");
 
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
@@ -458,7 +458,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setReferralRobinhood(s.referral_robinhood || "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
         setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
         setVersion(s.version || "v1.2.0");
-        setGitRepo(s.git_repo || "https://github.com/arbitrager/arbitrager");
+        setGitRepo(s.git_repo || "https://github.com/Dav1D1010/Arbitrageur");
 
         if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
           setLiveVenues(systemStatus.active_venues);
@@ -708,7 +708,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     setUpdateMsg(null);
     setTimeout(() => {
       setCheckingUpdate(false);
-      setUpdateMsg("System up to date. Arbitrager v1.2.0 is currently the latest stable release.");
+      setUpdateMsg("System up to date. Arbitrageur v1.2.0 is currently the latest stable release.");
     }, 1200);
   };
 
@@ -1379,13 +1379,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
               </h4>
               <p className="text-xs text-slate-600">
-                To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
+                To run Arbitrageur continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
               <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-xs overflow-x-auto select-text font-mono">
-                <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787</code>
+                <code>./target/release/arbitrageur serve --bind 0.0.0.0 --port 8787</code>
               </div>
               <p className="text-xs text-slate-500">
-                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-md">systemctl start arbitrager</code>) to auto-restart on server reboot.
+                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-md">systemctl start arbitrageur</code>) to auto-restart on server reboot.
               </p>
             </div>
           </div>
@@ -1400,11 +1400,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-surface-border pb-2.5">
                 <div className="flex items-center space-x-3">
                   <div className="w-10 h-10 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent">
-                    <ArbitragerLogo size={22} className="text-accent" />
+                    <ArbitrageurLogo size={22} className="text-accent" />
                   </div>
                   <div>
                     <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-                      About Arbitrager ({version})
+                      About Arbitrageur ({version})
                     </h3>
                   </div>
                 </div>

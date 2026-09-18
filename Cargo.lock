@@ -151,16 +151,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "arbitrager-app"
+name = "arbitrageur-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
- "arbitrager-exchanges",
- "arbitrager-execution",
- "arbitrager-math",
- "arbitrager-risk",
- "arbitrager-strategy",
+ "arbitrageur-core",
+ "arbitrageur-exchanges",
+ "arbitrageur-execution",
+ "arbitrageur-math",
+ "arbitrageur-risk",
+ "arbitrageur-strategy",
  "chrono",
  "clap",
  "config",
@@ -177,7 +177,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-core"
+name = "arbitrageur-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -195,17 +195,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-desktop"
+name = "arbitrageur-desktop"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
- "arbitrager-core",
- "arbitrager-exchanges",
- "arbitrager-execution",
- "arbitrager-math",
- "arbitrager-risk",
- "arbitrager-strategy",
+ "arbitrageur-core",
+ "arbitrageur-exchanges",
+ "arbitrageur-execution",
+ "arbitrageur-math",
+ "arbitrageur-risk",
+ "arbitrageur-strategy",
  "argon2",
  "async-trait",
  "chrono",
@@ -231,12 +231,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-exchanges"
+name = "arbitrageur-exchanges"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
- "arbitrager-math",
+ "arbitrageur-core",
+ "arbitrageur-math",
  "async-trait",
  "base64 0.22.1",
  "bs58",
@@ -265,13 +265,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-execution"
+name = "arbitrageur-execution"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
- "arbitrager-math",
- "arbitrager-risk",
+ "arbitrageur-core",
+ "arbitrageur-math",
+ "arbitrageur-risk",
  "async-trait",
  "chrono",
  "parking_lot",
@@ -286,11 +286,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-math"
+name = "arbitrageur-math"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
+ "arbitrageur-core",
  "chrono",
  "rand 0.8.8",
  "rust_decimal",
@@ -301,12 +301,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-risk"
+name = "arbitrageur-risk"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
- "arbitrager-math",
+ "arbitrageur-core",
+ "arbitrageur-math",
  "chrono",
  "dashmap",
  "parking_lot",
@@ -319,15 +319,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrager-strategy"
+name = "arbitrageur-strategy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arbitrager-core",
- "arbitrager-exchanges",
- "arbitrager-execution",
- "arbitrager-math",
- "arbitrager-risk",
+ "arbitrageur-core",
+ "arbitrageur-exchanges",
+ "arbitrageur-execution",
+ "arbitrageur-math",
+ "arbitrageur-risk",
  "chrono",
  "dashmap",
  "parking_lot",

@@ -165,7 +165,7 @@ impl SecureVault {
         } else {
             PathBuf::from(".")
         };
-        base.join(".arbitrager").join("vault.enc")
+        base.join(".arbitrageur").join("vault.enc")
     }
 
     pub fn is_initialized(&self) -> bool {
@@ -798,7 +798,7 @@ mod tests {
 
     fn temp_vault_path(tag: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "arbitrager_vault_test_{}_{}",
+            "arbitrageur_vault_test_{}_{}",
             tag,
             rand::random::<u64>()
         ));

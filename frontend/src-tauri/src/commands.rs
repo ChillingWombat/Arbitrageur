@@ -3,27 +3,27 @@ use crate::state::{
 };
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
-use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_core::quote::OrderBook;
-use arbitrager_core::types::{dec, Decimal, Side, VenueId};
-use arbitrager_execution::coordinator::ArbitrageExecutionResult;
-use arbitrager_execution::passive_unwind::{
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
+use arbitrageur_execution::coordinator::ArbitrageExecutionResult;
+use arbitrageur_execution::passive_unwind::{
     execute_passive_reduce, PassiveBookRefresh, PassiveOutcome, PassiveUnwindConfig,
 };
-use arbitrager_execution::smart_routing::SmartOrderRouter;
-use arbitrager_execution::virtual_ledger::StrategyMetrics;
-use arbitrager_math::calibration::WfoOptimizationResult;
-use arbitrager_math::autotune::{
+use arbitrageur_execution::smart_routing::SmartOrderRouter;
+use arbitrageur_execution::virtual_ledger::StrategyMetrics;
+use arbitrageur_math::calibration::WfoOptimizationResult;
+use arbitrageur_math::autotune::{
     TuneHistory, TuneParams, recommend,
 };
-use arbitrager_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
-use arbitrager_math::funding_carry::{evaluate_funding_carry, funding_entry_capacity};
-use arbitrager_math::optimal_thresholds::compute_bertram_thresholds;
-use arbitrager_math::ou_process::OuModelParams;
-use arbitrager_math::pair_monitor::build_pair_series;
-use arbitrager_math::triangular::{evaluate_triangular_cycle, TriLegSide};
+use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
+use arbitrageur_math::funding_carry::{evaluate_funding_carry, funding_entry_capacity};
+use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
+use arbitrageur_math::ou_process::OuModelParams;
+use arbitrageur_math::pair_monitor::build_pair_series;
+use arbitrageur_math::triangular::{evaluate_triangular_cycle, TriLegSide};
 
-use arbitrager_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
+use arbitrageur_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -522,28 +522,28 @@ fn route_execution_gates(
     let mut entry_sell = book_sell.clone();
     entry_sell.bids.retain(|l| l.price >= sell_limit);
 
-    let slippage_ok = arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+    let slippage_ok = arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
         &entry_buy,
         Side::Buy,
         qty,
         max_slippage_bps,
     )
     .is_ok()
-        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        && arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
             &entry_sell,
             Side::Sell,
             qty,
             max_slippage_bps,
         )
         .is_ok()
-        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        && arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
             book_buy,
             Side::Sell,
             qty,
             max_slippage_bps,
         )
         .is_ok()
-        && arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+        && arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
             book_sell,
             Side::Buy,
             qty,
@@ -1143,7 +1143,7 @@ pub async fn get_market_universe_impl(
                 .filter(|m| {
                     m.is_active
                         && m.symbol.market_type
-                            == arbitrager_core::market::MarketType::Perpetual
+                            == arbitrageur_core::market::MarketType::Perpetual
                 })
                 .map(|m| {
                     format!(
@@ -1721,7 +1721,7 @@ fn triangle_dust_qty() -> Decimal {
     dec!(0.000000001)
 }
 /// Leftover-sweep rule for close/unwind sizing (shared implementation:
-/// `arbitrager_strategy::pair_trim::sweep_close_qty`). When a close is
+/// `arbitrageur_strategy::pair_trim::sweep_close_qty`). When a close is
 /// requested for `requested` (e.g. one grid unit, or the paper position when
 /// it covers less than the ledger) but the attributed residual exceeds it by
 /// less than one full step, closing only `requested` would strand a sub-step
@@ -1739,7 +1739,7 @@ fn sweep_flatten_qty(residual: Decimal, capped: Decimal, step: Decimal) -> Decim
         return capped;
     }
     let s = to_f64(step).unwrap_or(0.0);
-    let swept = arbitrager_strategy::pair_trim::sweep_close_qty(r, q, s);
+    let swept = arbitrageur_strategy::pair_trim::sweep_close_qty(r, q, s);
     if swept >= r {
         residual
     } else {
@@ -2258,7 +2258,7 @@ pub async fn execute_triangle_arbitrage_impl(
     );
     let started = std::time::Instant::now();
 
-    let mut fills: Vec<(usize, arbitrager_core::order::OrderResponse)> = Vec::new();
+    let mut fills: Vec<(usize, arbitrageur_core::order::OrderResponse)> = Vec::new();
     let mut leg_error: Option<String> = None;
     for (idx, ((sym, order_side), qty_f)) in plan
         .leg_symbols
@@ -2282,7 +2282,7 @@ pub async fn execute_triangle_arbitrage_impl(
                 break;
             }
         };
-        let order = arbitrager_core::order::OrderRequest::new_market(
+        let order = arbitrageur_core::order::OrderRequest::new_market(
             paper.venue_id(),
             sym,
             *order_side,
@@ -2521,7 +2521,7 @@ async fn scan_funding_opportunities_for_symbol(
                     };
                     let long_book = book_of(&opp.long_venue)?;
                     let short_book = book_of(&opp.short_venue)?;
-                    let to_pair = |levels: &[arbitrager_core::quote::BookLevel]| {
+                    let to_pair = |levels: &[arbitrageur_core::quote::BookLevel]| {
                         levels
                             .iter()
                             .filter_map(|l| {
@@ -2875,7 +2875,7 @@ fn reconcile_signal_legs(
     signal_id: &str,
     fills: [(
         crate::state_store::LegSide,
-        &arbitrager_core::order::OrderResponse,
+        &arbitrageur_core::order::OrderResponse,
     ); 2],
 ) -> Result<crate::state_store::SignalStatus, String> {
     use crate::state_store::SignalStatus;
@@ -3187,7 +3187,7 @@ async fn execute_spatial_arbitrage_inner(
     let mut book_sell_exec = book_sell.clone();
     book_sell_exec.bids.retain(|l| l.price >= sell_limit);
 
-    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
         &book_buy_exec,
         Side::Buy,
         qty_dec,
@@ -3199,7 +3199,7 @@ async fn execute_spatial_arbitrage_inner(
             buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
-    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
         &book_sell_exec,
         Side::Sell,
         qty_dec,
@@ -3211,7 +3211,7 @@ async fn execute_spatial_arbitrage_inner(
             sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
-    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
         &book_buy,
         Side::Sell,
         qty_dec,
@@ -3223,7 +3223,7 @@ async fn execute_spatial_arbitrage_inner(
             buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
-    arbitrager_risk::safety_guards::verify_pre_execution_slippage(
+    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
         &book_sell,
         Side::Buy,
         qty_dec,
@@ -3420,8 +3420,8 @@ async fn execute_spatial_arbitrage_inner(
     }
 
     let (buy_exec, sell_exec): (
-        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
-        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+        Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+        Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     ) = if is_live {
         (buy_adapter.clone(), sell_adapter.clone())
     } else {
@@ -3566,7 +3566,7 @@ async fn execute_spatial_arbitrage_inner(
                 return Err("trimmed matched quantity is not positive".to_string());
             }
             open_qty = matched_f;
-            let describe_trim = |o: &Option<Box<arbitrager_core::order::OrderResponse>>| {
+            let describe_trim = |o: &Option<Box<arbitrageur_core::order::OrderResponse>>| {
                 o.as_ref().map_or_else(
                     || "no trim (leg equals matched quantity)".to_string(),
                     |r| format!("trimmed excess via order {}", r.order_id),
@@ -3764,7 +3764,7 @@ async fn execute_spatial_arbitrage_inner(
                     .circuit_breaker
                     .trip("Unresolved exposure after failed unwind");
             }
-            let describe = |f: &Option<arbitrager_core::order::OrderResponse>| {
+            let describe = |f: &Option<arbitrageur_core::order::OrderResponse>| {
                 f.as_ref()
                     .map(|r| format!("{:?} filled {}/{}", r.status, r.filled_qty, r.original_qty))
                     .unwrap_or_else(|| "no fill".to_string())
@@ -4407,7 +4407,7 @@ struct FlattenPaperRefresh<'a> {
     venue_label: String,
     venue_id: VenueId,
     symbol: String,
-    paper: Arc<arbitrager_exchanges::simulated::SimulatedExchange>,
+    paper: Arc<arbitrageur_exchanges::simulated::SimulatedExchange>,
 }
 
 #[async_trait::async_trait]
@@ -4515,7 +4515,7 @@ async fn flatten_leg_on_paper(
         Some("emergency_market") => None,
         Some("non_emergency_limit") => {
             Some(passive_cfg_for(state, strategy_id).unwrap_or_else(|| {
-                let mut def = arbitrager_execution::passive_unwind::PassiveUnwindConfig::default();
+                let mut def = arbitrageur_execution::passive_unwind::PassiveUnwindConfig::default();
                 def.enabled = true;
                 def
             }))
@@ -4567,7 +4567,7 @@ async fn flatten_leg_on_paper(
         return Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)));
     }
     let mut order =
-        arbitrager_core::order::OrderRequest::new_market(paper.venue_id(), symbol, side, qty);
+        arbitrageur_core::order::OrderRequest::new_market(paper.venue_id(), symbol, side, qty);
     order.reduce_only = true;
 
     let resp = paper.place_order(order).await.map_err(|e| e.to_string())?;
@@ -4613,7 +4613,7 @@ async fn flatten_leg(
         return Err("Invalid leg quantity".to_string());
     }
     let mut order =
-        arbitrager_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
+        arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
     order.reduce_only = true;
 
     let resp = adapter.place_order(order).await.map_err(|e| e.to_string())?;
@@ -4642,7 +4642,7 @@ fn close_flattened_spatial_lot(
     family: &[crate::state_store::SignalExecution],
 ) -> Option<(f64, f64)> {
     use crate::state_store::LegSide;
-    use arbitrager_execution::virtual_ledger::CycleStatus;
+    use arbitrageur_execution::virtual_ledger::CycleStatus;
 
     let venue_of = |side: LegSide| {
         sig.legs
@@ -4843,7 +4843,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         let mut undetermined = false;
         let mut seen: std::collections::HashSet<(String, &'static str)> =
             std::collections::HashSet::new();
-        let mut accounts: HashMap<&'static str, arbitrager_core::position::AccountSnapshot> =
+        let mut accounts: HashMap<&'static str, arbitrageur_core::position::AccountSnapshot> =
             HashMap::new();
         let mut unreadable: std::collections::HashSet<&'static str> =
             std::collections::HashSet::new();
@@ -5703,7 +5703,7 @@ pub async fn get_ticker_volumes(
 }
 
 // ---------------------------------------------------------------------------
-// Signal Trend — durable dislocation series computed by arbitrager-math
+// Signal Trend — durable dislocation series computed by arbitrageur-math
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5895,7 +5895,7 @@ fn compute_matrix_baselines(
     struct PairEval {
         buy: String,
         sell: String,
-        series: Vec<arbitrager_math::pair_monitor::PairObservation>,
+        series: Vec<arbitrageur_math::pair_monitor::PairObservation>,
         span_secs: u64,
         half_life_secs: Option<f64>,
         recommendation_secs: Option<u64>,
@@ -5909,7 +5909,7 @@ fn compute_matrix_baselines(
             }
             let a = &mids_by_venue[buy_v];
             let b = &mids_by_venue[sell_v];
-            let series = arbitrager_math::pair_monitor::build_pair_series(a, b, PAIR_ALIGN_GAP_MS);
+            let series = arbitrageur_math::pair_monitor::build_pair_series(a, b, PAIR_ALIGN_GAP_MS);
             let n = series.len();
             let span_ms = if n >= 2 {
                 series[n - 1].ts_ms - series[0].ts_ms
@@ -5971,7 +5971,7 @@ fn compute_matrix_baselines(
     let required_span_secs = BASELINE_SPAN_COVERAGE * effective_window_secs as f64;
     let mut pairs = Vec::with_capacity(evals.len());
     for e in &evals {
-        let windowed: Vec<&arbitrager_math::pair_monitor::PairObservation> = e
+        let windowed: Vec<&arbitrageur_math::pair_monitor::PairObservation> = e
             .series
             .iter()
             .filter(|o| o.ts_ms >= cutoff_ms)
@@ -6951,7 +6951,7 @@ pub(crate) fn resolve_effective_leverage(
 /// Position signature for the attribution cross-check: sorted
 /// `symbol:side:quantity` segments, empty when flat.
 pub(crate) fn position_signature(
-    positions: &[arbitrager_core::position::Position],
+    positions: &[arbitrageur_core::position::Position],
 ) -> String {
     let mut parts: Vec<String> = positions
         .iter()
@@ -7134,8 +7134,8 @@ fn map_autotune_report(
     buy_venue: Option<String>,
     sell_venue: Option<String>,
     pair_observations: usize,
-    coupling: arbitrager_math::seasonality::SessionCoupling,
-    rep: arbitrager_math::autotune::AutotuneReport,
+    coupling: arbitrageur_math::seasonality::SessionCoupling,
+    rep: arbitrageur_math::autotune::AutotuneReport,
 ) -> AutotuneRecommendationDto {
     AutotuneRecommendationDto {
         symbol: symbol.to_string(),
@@ -7150,8 +7150,8 @@ fn map_autotune_report(
                 current: r.current,
                 recommended: r.recommended,
                 status: match r.status {
-                    arbitrager_math::autotune::RowStatus::READY => "READY".to_string(),
-                    arbitrager_math::autotune::RowStatus::HELD => "HELD".to_string(),
+                    arbitrageur_math::autotune::RowStatus::READY => "READY".to_string(),
+                    arbitrageur_math::autotune::RowStatus::HELD => "HELD".to_string(),
                 },
                 fit_metric: r.fit_metric,
                 validated_metric: r.validated_metric,
@@ -7233,7 +7233,7 @@ pub async fn get_autotune_recommendation_impl(
     let store = state.state_store.clone();
     let sym_owned = symbol.to_string();
     let (best_pair, pair_observations): (
-        Option<(String, String, Vec<arbitrager_math::pair_monitor::PairObservation>)>,
+        Option<(String, String, Vec<arbitrageur_math::pair_monitor::PairObservation>)>,
         usize,
     ) = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
@@ -7255,7 +7255,7 @@ pub async fn get_autotune_recommendation_impl(
         }
         let mut venues: Vec<String> = mids_by_venue.keys().cloned().collect();
         venues.sort();
-        let mut best: Option<(String, String, Vec<arbitrager_math::pair_monitor::PairObservation>)> =
+        let mut best: Option<(String, String, Vec<arbitrageur_math::pair_monitor::PairObservation>)> =
             None;
         let mut total = 0usize;
         for buy_v in &venues {
@@ -7268,7 +7268,7 @@ pub async fn get_autotune_recommendation_impl(
                 else {
                     continue;
                 };
-                let series = arbitrager_math::pair_monitor::build_pair_series(
+                let series = arbitrageur_math::pair_monitor::build_pair_series(
                     a,
                     b,
                     PAIR_ALIGN_GAP_MS,
@@ -7302,7 +7302,7 @@ pub async fn get_autotune_recommendation_impl(
             current,
             defaults,
         });
-        let neutral = arbitrager_math::seasonality::SessionCoupling {
+        let neutral = arbitrageur_math::seasonality::SessionCoupling {
             tau_scale: 1.0,
             sigma_scale: 1.0,
         };
@@ -7316,7 +7316,7 @@ pub async fn get_autotune_recommendation_impl(
     } else {
         (Vec::new(), Vec::new())
     };
-    let seg_dt = |obs: &[arbitrager_math::pair_monitor::PairObservation]| -> f64 {
+    let seg_dt = |obs: &[arbitrageur_math::pair_monitor::PairObservation]| -> f64 {
         if obs.len() >= 2 {
             let span = (obs[obs.len() - 1].ts_ms - obs[0].ts_ms) as f64 / 1000.0;
             let dt = span / (obs.len() - 1) as f64;
@@ -7346,12 +7346,12 @@ pub async fn get_autotune_recommendation_impl(
         let hub = &state.market_data_hub;
         let stale = std::time::Duration::from_secs(300);
         let buy_book = hub.get_valid_orderbook(
-            &arbitrager_core::types::VenueId::from(buy_v.as_str()),
+            &arbitrageur_core::types::VenueId::from(buy_v.as_str()),
             symbol,
             Some(stale),
         );
         let sell_book = hub.get_valid_orderbook(
-            &arbitrager_core::types::VenueId::from(sell_v.as_str()),
+            &arbitrageur_core::types::VenueId::from(sell_v.as_str()),
             symbol,
             Some(stale),
         );
@@ -7396,14 +7396,14 @@ pub async fn get_autotune_recommendation_impl(
                     let volumes = cached_venue_volumes(state).await;
                     let tiers =
                         autotune_tiers_with_cap(&volumes, &buy_v, &sell_v, symbol, &base);
-                    let curve = arbitrager_math::pair_monitor::build_pwin_curve(
+                    let curve = arbitrageur_math::pair_monitor::build_pwin_curve(
                         &fit,
                         mu_f,
                         sig_f,
                         fee_sum.max(2.0),
                         3.0,
                     );
-                    let rep = arbitrager_math::pair_monitor::capacity_ladder(
+                    let rep = arbitrageur_math::pair_monitor::capacity_ladder(
                         &asks, &bids, mu_f, fee_sum, &tiers, &curve, 0.9,
                     );
                     (rep.optimal_size_usd, rep.breakeven_size_usd)
@@ -9139,7 +9139,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     let book = state
         .market_data_hub
         .get_valid_orderbook(
-            &arbitrager_core::types::VenueId(buy_venue.to_string()),
+            &arbitrageur_core::types::VenueId(buy_venue.to_string()),
             &sym,
             Some(std::time::Duration::from_secs(60)),
         )
@@ -9175,7 +9175,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         let friction_band = row
             .deviation_bps
             .zip(row.net_capture_bps)
-            .and_then(|(d, n)| arbitrager_strategy::convergence_auto::friction_band_bps(Some(d), Some(n)));
+            .and_then(|(d, n)| arbitrageur_strategy::convergence_auto::friction_band_bps(Some(d), Some(n)));
         let _ = bot.adopt_manual_position(
             state,
             &sym,
@@ -9278,7 +9278,7 @@ pub async fn check_spatial_convergence_impl(
     strategy_id: &str,
     state: &AppEngineState,
 ) -> Result<Vec<ConvergenceCheckDto>, String> {
-    use arbitrager_strategy::spatial_exit::{
+    use arbitrageur_strategy::spatial_exit::{
         evaluate_spatial_exit, SpatialExitConfig, SpatialExitVerdict,
     };
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
@@ -9425,7 +9425,7 @@ pub(crate) fn get_session_profile_impl(
     symbol: &str,
     state: &AppEngineState,
 ) -> Result<crate::monitor::SessionProfileDto, String> {
-    use arbitrager_math::session::{
+    use arbitrageur_math::session::{
         in_funding_mask, is_weekend, session_allow, session_of, us_cash_open,
     };
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -9454,7 +9454,7 @@ pub(crate) fn get_session_profile_impl(
     let scale = if rescaled {
         match (&promotion_row, &anchor_row) {
             (Some(_), Some(a)) => {
-                arbitrager_math::seasonality::rescale_factor(
+                arbitrageur_math::seasonality::rescale_factor(
                     a.forecast_rv_bps,
                     a.trailing_mean_rv_bps,
                 )
@@ -9547,7 +9547,7 @@ mod tests {
 
     fn test_state_with_vault(tag: &str) -> (AppEngineState, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "arbitrager_cmd_vault_{}_{}",
+            "arbitrageur_cmd_vault_{}_{}",
             tag,
             rand::random::<u64>()
         ));
@@ -9562,14 +9562,14 @@ mod tests {
         bid: Decimal,
         ask: Decimal,
     ) {
-        let mut book = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new(venue_id),
+        let mut book = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new(venue_id),
             symbol.to_string(),
         );
         book.bids
-            .push(arbitrager_core::quote::BookLevel::new(bid, dec!(10.0)));
+            .push(arbitrageur_core::quote::BookLevel::new(bid, dec!(10.0)));
         book.asks
-            .push(arbitrager_core::quote::BookLevel::new(ask, dec!(10.0)));
+            .push(arbitrageur_core::quote::BookLevel::new(ask, dec!(10.0)));
         book.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(book);
     }
@@ -9577,8 +9577,8 @@ mod tests {
     fn seed_test_funding(state: &AppEngineState, venue_id: &str, symbol: &str) {
         state
             .market_data_hub
-            .update_funding(arbitrager_core::quote::FundingRate {
-                venue: arbitrager_core::types::VenueId::new(venue_id),
+            .update_funding(arbitrageur_core::quote::FundingRate {
+                venue: arbitrageur_core::types::VenueId::new(venue_id),
                 symbol: symbol.to_string(),
                 rate: dec!(0.0001),
                 predicted_rate: None,
@@ -9939,8 +9939,8 @@ mod tests {
     #[tokio::test]
     async fn test_funding_opportunities_multi_symbol() {
         let state = setup_test_state_with_venues();
-        let r_hl = arbitrager_core::quote::FundingRate {
-            venue: arbitrager_core::types::VenueId::new("hyperliquid"),
+        let r_hl = arbitrageur_core::quote::FundingRate {
+            venue: arbitrageur_core::types::VenueId::new("hyperliquid"),
             symbol: "BTC-USDC".into(),
             rate: dec!(0.00015),
             predicted_rate: None,
@@ -9948,8 +9948,8 @@ mod tests {
             next_funding_time: Utc::now(),
             timestamp: Utc::now(),
         };
-        let r_lgt = arbitrager_core::quote::FundingRate {
-            venue: arbitrager_core::types::VenueId::new("lighter"),
+        let r_lgt = arbitrageur_core::quote::FundingRate {
+            venue: arbitrageur_core::types::VenueId::new("lighter"),
             symbol: "BTC-USDC".into(),
             rate: dec!(0.00005),
             predicted_rate: None,
@@ -10298,7 +10298,7 @@ mod tests {
     #[tokio::test]
     async fn test_retention_boot_loads_persisted_kv() {
         let dir = std::env::temp_dir().join(format!(
-            "arbitrager_retention_boot_{}",
+            "arbitrageur_retention_boot_{}",
             rand::random::<u64>()
         ));
         let path = dir.join("state.sqlite3");
@@ -11001,8 +11001,8 @@ mod tests {
     #[tokio::test]
     async fn test_multi_dex_ticker_spatial_and_funding() {
         let state = setup_test_state_with_venues();
-        let r_hl = arbitrager_core::quote::FundingRate {
-            venue: arbitrager_core::types::VenueId::new("hyperliquid"),
+        let r_hl = arbitrageur_core::quote::FundingRate {
+            venue: arbitrageur_core::types::VenueId::new("hyperliquid"),
             symbol: "AVAX-USDC".into(),
             rate: dec!(0.00020),
             predicted_rate: None,
@@ -11010,8 +11010,8 @@ mod tests {
             next_funding_time: Utc::now(),
             timestamp: Utc::now(),
         };
-        let r_lgt = arbitrager_core::quote::FundingRate {
-            venue: arbitrager_core::types::VenueId::new("lighter"),
+        let r_lgt = arbitrageur_core::quote::FundingRate {
+            venue: arbitrageur_core::types::VenueId::new("lighter"),
             symbol: "AVAX-USDC".into(),
             rate: dec!(0.00008),
             predicted_rate: None,
@@ -11306,33 +11306,33 @@ mod tests {
     async fn test_spatial_execution_uses_per_strategy_slippage_gate() {
         let state = setup_test_state_with_venues();
         // Qty 5 walks deep into a second ask level ~300 bps above top.
-        let mut book = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new("hyperliquid"),
+        let mut book = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        book.bids.push(arbitrager_core::quote::BookLevel::new(
+        book.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64100.0),
             dec!(50.0),
         ));
-        book.asks.push(arbitrager_core::quote::BookLevel::new(
+        book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64205.0),
             dec!(1.0),
         ));
-        book.asks.push(arbitrager_core::quote::BookLevel::new(
+        book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(66200.0),
             dec!(50.0),
         ));
         book.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(book);
-        let mut deep = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new("lighter"),
+        let mut deep = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new("lighter"),
             "BTC-USDC".to_string(),
         );
-        deep.bids.push(arbitrager_core::quote::BookLevel::new(
+        deep.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64360.0),
             dec!(50.0),
         ));
-        deep.asks.push(arbitrager_core::quote::BookLevel::new(
+        deep.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64365.0),
             dec!(50.0),
         ));
@@ -11393,15 +11393,15 @@ mod tests {
         let state = setup_test_state_with_venues();
 
         // Crossed book on the buy side (bid > ask)
-        let mut crossed = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new("hyperliquid"),
+        let mut crossed = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        crossed.bids.push(arbitrager_core::quote::BookLevel::new(
+        crossed.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64300.0),
             dec!(10.0),
         ));
-        crossed.asks.push(arbitrager_core::quote::BookLevel::new(
+        crossed.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64200.0),
             dec!(10.0),
         ));
@@ -11440,34 +11440,34 @@ mod tests {
         // cannot satisfy 11 * 3 = 33 required ratio; out-of-limit depth at
         // 64500 must not count toward the requirement
         {
-            let mut book = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            let mut book = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64100.0),
                 dec!(50.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64205.0),
                 dec!(11.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64500.0),
                 dec!(50.0),
             ));
             book.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(book);
 
-            let mut deep = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("lighter"),
+            let mut deep = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("lighter"),
                 "BTC-USDC".to_string(),
             );
-            deep.bids.push(arbitrager_core::quote::BookLevel::new(
+            deep.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64360.0),
                 dec!(50.0),
             ));
-            deep.asks.push(arbitrager_core::quote::BookLevel::new(
+            deep.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64365.0),
                 dec!(50.0),
             ));
@@ -11496,19 +11496,19 @@ mod tests {
 
         // Slippage: qty 5 walks deep into a second level 300+ bps above top
         {
-            let mut book = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            let mut book = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64100.0),
                 dec!(50.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64205.0),
                 dec!(1.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(66200.0),
                 dec!(50.0),
             ));
@@ -11606,13 +11606,13 @@ mod tests {
             "BTC-USDC".to_string(),
         );
         for (p, s) in bids {
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 Decimal::from_f64_retain(*p).unwrap(),
                 Decimal::from_f64_retain(*s).unwrap(),
             ));
         }
         for (p, s) in asks {
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 Decimal::from_f64_retain(*p).unwrap(),
                 Decimal::from_f64_retain(*s).unwrap(),
             ));
@@ -11788,15 +11788,15 @@ mod tests {
         // route is not costable and disappears from results entirely.
         seed_pair();
         {
-            let mut thin = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            let mut thin = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            thin.bids.push(arbitrager_core::quote::BookLevel::new(
+            thin.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64200.0),
                 dec!(0.1),
             ));
-            thin.asks.push(arbitrager_core::quote::BookLevel::new(
+            thin.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64205.0),
                 dec!(10.0),
             ));
@@ -11814,19 +11814,19 @@ mod tests {
         // the route visible while blocking execution.
         seed_pair();
         {
-            let mut book = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            let mut book = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64200.0),
                 dec!(0.4),
             ));
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(60000.0),
                 dec!(50.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64205.0),
                 dec!(10.0),
             ));
@@ -12059,7 +12059,7 @@ mod tests {
                     .push((s.ts_ms, s.mid));
             }
         }
-        let series = arbitrager_math::pair_monitor::build_pair_series(
+        let series = arbitrageur_math::pair_monitor::build_pair_series(
             &mids["hyperliquid"],
             &mids["lighter"],
             crate::monitor::PAIR_ALIGN_GAP_MS,
@@ -12173,23 +12173,23 @@ mod tests {
         // Drive the paper account into critical margin utilization directly:
         // open 1.5 BTC at 5x (IM 18000), then drop leverage to 1x so the
         // position's initial margin becomes 90000 against 100k equity (90%)
-        let mut big_book = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new("hyperliquid"),
+        let mut big_book = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        big_book.bids.push(arbitrager_core::quote::BookLevel::new(
+        big_book.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(59900.0),
             dec!(500.0),
         ));
-        big_book.asks.push(arbitrager_core::quote::BookLevel::new(
+        big_book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(60000.0),
             dec!(500.0),
         ));
         big_book.timestamp = Utc::now();
         hl_paper.replace_orderbook(big_book).expect("seed big book");
         let resp = hl_paper
-            .place_order(arbitrager_core::order::OrderRequest::new_ioc(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            .place_order(arbitrageur_core::order::OrderRequest::new_ioc(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC",
                 Side::Buy,
                 dec!(60000.0),
@@ -12197,7 +12197,7 @@ mod tests {
             ))
             .await
             .expect("direct paper order");
-        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Filled);
+        assert_eq!(resp.status, arbitrageur_core::types::OrderStatus::Filled);
         hl_paper
             .set_leverage("BTC-USDC", 1)
             .await
@@ -13713,34 +13713,34 @@ mod tests {
         // Unbounded slippage for 2.0 would pass (VWAP ~8 bps), but only 1.0
         // ask sits inside the 15 BPS IOC limit; the remainder is unreachable.
         {
-            let mut book = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("hyperliquid"),
+            let mut book = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("hyperliquid"),
                 "BTC-USDC".to_string(),
             );
-            book.bids.push(arbitrager_core::quote::BookLevel::new(
+            book.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64100.0),
                 dec!(50.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64205.0),
                 dec!(1.0),
             ));
-            book.asks.push(arbitrager_core::quote::BookLevel::new(
+            book.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64310.0),
                 dec!(50.0),
             ));
             book.timestamp = Utc::now();
             state.market_data_hub.update_orderbook(book);
 
-            let mut deep = arbitrager_core::quote::OrderBook::new(
-                arbitrager_core::types::VenueId::new("lighter"),
+            let mut deep = arbitrageur_core::quote::OrderBook::new(
+                arbitrageur_core::types::VenueId::new("lighter"),
                 "BTC-USDC".to_string(),
             );
-            deep.bids.push(arbitrager_core::quote::BookLevel::new(
+            deep.bids.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64360.0),
                 dec!(50.0),
             ));
-            deep.asks.push(arbitrager_core::quote::BookLevel::new(
+            deep.asks.push(arbitrageur_core::quote::BookLevel::new(
                 dec!(64365.0),
                 dec!(50.0),
             ));
@@ -14491,20 +14491,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_adapter_book_helper() {
-        let venue = arbitrager_core::types::VenueId::new("hyperliquid");
+        let venue = arbitrageur_core::types::VenueId::new("hyperliquid");
         let mut book = OrderBook::new(venue.clone(), "BTC-USDC".to_string());
-        book.bids.push(arbitrager_core::quote::BookLevel::new(
+        book.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64000.0),
             dec!(1.0),
         ));
-        book.asks.push(arbitrager_core::quote::BookLevel::new(
+        book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64001.0),
             dec!(1.0),
         ));
 
         assert!(validate_adapter_book(&book, &venue, "BTC-USDC").is_ok());
 
-        let other_venue = arbitrager_core::types::VenueId::new("lighter");
+        let other_venue = arbitrageur_core::types::VenueId::new("lighter");
         let err = validate_adapter_book(&book, &other_venue, "BTC-USDC").unwrap_err();
         assert!(err.contains("venue"), "unexpected err: {}", err);
 
@@ -14521,14 +14521,14 @@ mod tests {
     async fn test_read_only_paths_skip_malformed_cached_book() {
         let state = setup_test_state_with_venues();
         let mut crossed = OrderBook::new(
-            arbitrager_core::types::VenueId::new("hyperliquid"),
+            arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        crossed.bids.push(arbitrager_core::quote::BookLevel::new(
+        crossed.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(65000.0),
             dec!(10.0),
         ));
-        crossed.asks.push(arbitrager_core::quote::BookLevel::new(
+        crossed.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64000.0),
             dec!(10.0),
         ));
@@ -14613,18 +14613,18 @@ mod tests {
     async fn test_scan_is_executable_respects_bounded_depth() {
         let state = setup_test_state_with_venues();
         let mut thin = OrderBook::new(
-            arbitrager_core::types::VenueId::new("hyperliquid"),
+            arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
         );
-        thin.bids.push(arbitrager_core::quote::BookLevel::new(
+        thin.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64100.0),
             dec!(50.0),
         ));
-        thin.asks.push(arbitrager_core::quote::BookLevel::new(
+        thin.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64205.0),
             dec!(1.0),
         ));
-        thin.asks.push(arbitrager_core::quote::BookLevel::new(
+        thin.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64310.0),
             dec!(50.0),
         ));
@@ -14632,14 +14632,14 @@ mod tests {
         state.market_data_hub.update_orderbook(thin);
 
         let mut deep = OrderBook::new(
-            arbitrager_core::types::VenueId::new("lighter"),
+            arbitrageur_core::types::VenueId::new("lighter"),
             "BTC-USDC".to_string(),
         );
-        deep.bids.push(arbitrager_core::quote::BookLevel::new(
+        deep.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64360.0),
             dec!(50.0),
         ));
-        deep.asks.push(arbitrager_core::quote::BookLevel::new(
+        deep.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64365.0),
             dec!(50.0),
         ));
@@ -15232,14 +15232,14 @@ mod tests {
         ask: Decimal,
         ask_qty: Decimal,
     ) {
-        let mut book = arbitrager_core::quote::OrderBook::new(
-            arbitrager_core::types::VenueId::new(venue_id),
+        let mut book = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new(venue_id),
             symbol.to_string(),
         );
         book.bids
-            .push(arbitrager_core::quote::BookLevel::new(bid, bid_qty));
+            .push(arbitrageur_core::quote::BookLevel::new(bid, bid_qty));
         book.asks
-            .push(arbitrager_core::quote::BookLevel::new(ask, ask_qty));
+            .push(arbitrageur_core::quote::BookLevel::new(ask, ask_qty));
         book.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(book);
     }
@@ -15374,7 +15374,7 @@ mod tests {
             .filter(|l| {
                 l.strategy_id == "spatial_spread"
                     && l.symbol == "BTC-USDC"
-                    && l.status == arbitrager_execution::virtual_ledger::CycleStatus::Open
+                    && l.status == arbitrageur_execution::virtual_ledger::CycleStatus::Open
             })
             .collect();
         assert!(open_lots.is_empty(), "spatial lot must not stay Open");
@@ -15385,7 +15385,7 @@ mod tests {
             .expect("spatial lot exists");
         assert_eq!(
             lot.status,
-            arbitrager_execution::virtual_ledger::CycleStatus::StoppedOut
+            arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut
         );
         assert!(lot.realized_pnl_usd.is_some(), "realized PnL populated");
     }
@@ -15429,11 +15429,11 @@ mod tests {
         );
 
         let mut paper_book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
-        paper_book.bids.push(arbitrager_core::quote::BookLevel::new(
+        paper_book.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64200.0),
             dec!(10.0),
         ));
-        paper_book.asks.push(arbitrager_core::quote::BookLevel::new(
+        paper_book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64205.0),
             dec!(10.0),
         ));
@@ -15442,14 +15442,14 @@ mod tests {
             .replace_orderbook(paper_book)
             .expect("seed paper book");
 
-        let open = arbitrager_core::order::OrderRequest::new_market(
+        let open = arbitrageur_core::order::OrderRequest::new_market(
             state.ex_hl.venue_id(),
             "BTC-USDC",
             Side::Buy,
             dec!(0.2),
         );
         let resp = state.ex_hl.place_order(open).await.expect("open position");
-        assert_eq!(resp.status, arbitrager_core::types::OrderStatus::Filled);
+        assert_eq!(resp.status, arbitrageur_core::types::OrderStatus::Filled);
 
         for (id, strategy) in [("root-fut", "futures"), ("root-spot", "spot")] {
             state
@@ -15543,11 +15543,11 @@ mod tests {
             dec!(64205.0),
         );
         let mut paper_book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
-        paper_book.bids.push(arbitrager_core::quote::BookLevel::new(
+        paper_book.bids.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64200.0),
             dec!(10.0),
         ));
-        paper_book.asks.push(arbitrager_core::quote::BookLevel::new(
+        paper_book.asks.push(arbitrageur_core::quote::BookLevel::new(
             dec!(64205.0),
             dec!(10.0),
         ));
@@ -15555,7 +15555,7 @@ mod tests {
             .ex_hl
             .replace_orderbook(paper_book)
             .expect("seed paper book");
-        let open = arbitrager_core::order::OrderRequest::new_market(
+        let open = arbitrageur_core::order::OrderRequest::new_market(
             state.ex_hl.venue_id(),
             "BTC-USDC",
             Side::Buy,
@@ -15791,7 +15791,7 @@ mod tests {
                 .map(|s| (s.ts_ms, s.mid))
                 .collect();
             let series =
-                arbitrager_math::pair_monitor::build_pair_series(&ma, &mb, PAIR_ALIGN_GAP_MS);
+                arbitrageur_math::pair_monitor::build_pair_series(&ma, &mb, PAIR_ALIGN_GAP_MS);
             let n = series.len();
             let span_ms = series[n - 1].ts_ms - series[0].ts_ms;
             let dt = span_ms as f64 / 1000.0 / (n - 1) as f64;

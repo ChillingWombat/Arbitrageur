@@ -91,7 +91,7 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 
 ### Modern DEX Account Credentials & Copilot
 49. As a Decibel trader, I want Aptos Ed25519 accounts (`account_address` + `ed25519_private_key`) to be recognized by `has_credentials`, so that saved Decibel credentials display as configured rather than "no credential configured".
-    STATUS 2026-09-18 audit: NOT IMPLEMENTED — no `account_address`/`ed25519_private_key` handling exists in the tree (`DecibelAdapter` in `crates/arbitrager-exchanges/src/decibel.rs` keys on api_key/wallet_address/private_key; no `credentials.rs` file exists). The 2026-09-18 session-16 handoff entry claiming this fix is incorrect (see handoff errata).
+    STATUS 2026-09-18 audit: NOT IMPLEMENTED — no `account_address`/`ed25519_private_key` handling exists in the tree (`DecibelAdapter` in `crates/arbitrageur-exchanges/src/decibel.rs` keys on api_key/wallet_address/private_key; no `credentials.rs` file exists). The 2026-09-18 session-16 handoff entry claiming this fix is incorrect (see handoff errata).
 50. As an AI Copilot user, I want duplicate Gemini API entries removed from settings, so that AI assistant configuration is clean and unambiguous.
     STATUS 2026-09-18 audit: NOT APPLICABLE — no Copilot settings surface exists anywhere in this tree (no `CopilotSettingsModal.tsx`, zero `Copilot`/`Gemini` references in frontend or backend). The 2026-09-18 session-16 handoff entry appears to describe a different project (see handoff errata).
 
@@ -170,7 +170,7 @@ pub struct TickerStrategyConfigDto {
    - This ensures background tickers not currently polled in the hub orderbook cache are evaluated against their true market price rather than being blocked as missing data.
    - Setting `Auto Min Mid Price = 0.5` reliably filters sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) while keeping major assets (BTC, ETH, SOL) visible.
 3. **Safe Decimal Arithmetic**:
-   - `evaluate_funding_carry` in `arbitrager-math` utilizes `checked_mul` and `checked_div` for funding APR, APY, and daily income calculations, eliminating panic risks on extreme inputs or stress test values.
+   - `evaluate_funding_carry` in `arbitrageur-math` utilizes `checked_mul` and `checked_div` for funding APR, APY, and daily income calculations, eliminating panic risks on extreme inputs or stress test values.
 
 ---
 
@@ -194,7 +194,7 @@ pub struct TickerStrategyConfigDto {
 ---
 
 ## Out of Scope
-- Direct custody of funds: Arbitrager connects to smart contracts and exchange APIs via user-owned keys; it does not operate custodial wallets.
+- Direct custody of funds: Arbitrageur connects to smart contracts and exchange APIs via user-owned keys; it does not operate custodial wallets.
 - Centralized server syncing: All configurations, vaults, and execution logs remain purely local on the user's workstation.
 - Automated token approvals: ERC-20 approvals must be performed via standard wallet signatures prior to swap routing.
 

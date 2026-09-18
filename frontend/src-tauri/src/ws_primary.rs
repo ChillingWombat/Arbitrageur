@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_core::hub::MarketDataHub;
-use arbitrager_core::quote::OrderBook;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::hub::MarketDataHub;
+use arbitrageur_core::quote::OrderBook;
 use parking_lot::Mutex;
 
 struct FlightSlot {
@@ -113,11 +113,11 @@ pub async fn resolve_book_ws_first(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrager_core::market::MarketMetadata;
-    use arbitrager_core::order::{CancelRequest, OrderRequest, OrderResponse};
-    use arbitrager_core::position::AccountSnapshot;
-    use arbitrager_core::quote::{BookLevel, FundingRate, Ticker};
-    use arbitrager_core::types::{Decimal, VenueId};
+    use arbitrageur_core::market::MarketMetadata;
+    use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+    use arbitrageur_core::position::AccountSnapshot;
+    use arbitrageur_core::quote::{BookLevel, FundingRate, Ticker};
+    use arbitrageur_core::types::{Decimal, VenueId};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn fixture_book(venue: &VenueId, symbol: &str) -> OrderBook {

@@ -1,6 +1,6 @@
 # Exchange Integrations Guide
 
-This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrager** platform.
+This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrageur** platform.
 
 ---
 
@@ -120,7 +120,7 @@ Robinhood Web3 connects to the Robinhood EVM chain with multi-DEX router support
 
 - **Router Contract:** `0x89e5DB8B5aA49aA85AC63f691524311AEB649eba`
 - **Supported Chains:** Robinhood EVM, Arbitrum, Base, Monad.
-- **Role in Arbitrager:** Facilitates atomic spot purchases and token bridging into Lighter / PopDEX pools.
+- **Role in Arbitrageur:** Facilitates atomic spot purchases and token bridging into Lighter / PopDEX pools.
 
 ---
 

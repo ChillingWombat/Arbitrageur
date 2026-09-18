@@ -135,5 +135,5 @@ store failures never break ingestion. No new schema for samples.
 
 Land transport + recorder first (REST fallback keeps behavior identical on
 failure), then retention settings + enforcement, then this spec's
-verification gates: `cargo test -p arbitrager-desktop`, `cargo clippy
+verification gates: `cargo test -p arbitrageur-desktop`, `cargo clippy
 --workspace -- -D warnings`, `tsc --noEmit`, `npm test`.

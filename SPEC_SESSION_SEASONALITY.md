@@ -33,7 +33,7 @@ regime store exists (verified by seam survey).
 
 ## Solution
 
-### Session clock (`arbitrager-math`)
+### Session clock (`arbitrageur-math`)
 
 `session_of(ts_ms) -> SessionId` with the five regimes + `is_weekend` +
 `in_funding_mask(ts, venue_intervals)` + `us_cash_open(ts)` (Ondo gate,

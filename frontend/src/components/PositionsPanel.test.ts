@@ -92,7 +92,7 @@ test("position card has right-click context menu hint", () => {
 
 test("position card renders Reduce-Only badge when marked reduce-only", () => {
   const storage = new Map<string, string>();
-  storage.set("arbitrager:reduce_only_positions", JSON.stringify(["BTC-USDC"]));
+  storage.set("arbitrageur:reduce_only_positions", JSON.stringify(["BTC-USDC"]));
   const mockLocalStorage = {
     getItem: (key: string) => storage.get(key) ?? null,
     setItem: (key: string, val: string) => {

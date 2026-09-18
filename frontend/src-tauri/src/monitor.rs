@@ -21,16 +21,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arbitrager_core::exchange::ExchangeAdapter;
-use arbitrager_core::quote::OrderBook;
-use arbitrager_core::types::{dec, Decimal};
-use arbitrager_math::ou_process::OuModelParams;
-use arbitrager_math::pair_monitor::{
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::types::{dec, Decimal};
+use arbitrageur_math::ou_process::OuModelParams;
+use arbitrageur_math::pair_monitor::{
     above_threshold_ratio, build_pair_series, build_pwin_curve, capacity_ladder,
     effective_coverage, funding_carry_bps, p_win_at_deviation, reversion_stats,
     PairObservation, PAIR_BUCKET_MS,
 };
-use arbitrager_math::session::{
+use arbitrageur_math::session::{
     apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_ondo_venue,
     is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma,
     SessionId, FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
@@ -901,7 +901,7 @@ impl VenueLane {
     /// do not poll in lockstep; `symbol_interval` itself stays pure.
     fn due_symbols(&mut self, cfg: &MonitorConfigDto) -> Vec<String> {
         let interval =
-            arbitrager_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
+            arbitrageur_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
         let now = Instant::now();
         let n = self.symbols.len();
         let mut due = Vec::new();
@@ -1849,12 +1849,12 @@ impl SpreadMonitorEngine {
 
         // --- live books ------------------------------------------------
         let buy_book = state.market_data_hub.get_valid_orderbook(
-            &arbitrager_core::types::VenueId(buy_v.to_string()),
+            &arbitrageur_core::types::VenueId(buy_v.to_string()),
             symbol,
             Some(stale_ms),
         );
         let sell_book = state.market_data_hub.get_valid_orderbook(
-            &arbitrager_core::types::VenueId(sell_v.to_string()),
+            &arbitrageur_core::types::VenueId(sell_v.to_string()),
             symbol,
             Some(stale_ms),
         );
@@ -1958,7 +1958,7 @@ impl SpreadMonitorEngine {
         let pwin_curve = if let (Some(m), Some(s)) = (mu, sigma) {
             build_pwin_curve(&series, m, s, band_bps, PAIR_STOP_MULT)
         } else {
-            arbitrager_math::pair_monitor::PWinCurve {
+            arbitrageur_math::pair_monitor::PWinCurve {
                 points: Vec::new(),
                 episodes: 0,
             }
@@ -2334,7 +2334,7 @@ impl SpreadMonitorEngine {
 
 fn validate_monitor_book(
     book: &OrderBook,
-    expected_venue: &arbitrager_core::types::VenueId,
+    expected_venue: &arbitrageur_core::types::VenueId,
     expected_symbol: &str,
 ) -> Result<(), String> {
     if &book.venue != expected_venue {
@@ -2369,7 +2369,7 @@ fn book_sample(book: &OrderBook, venue: &str) -> Option<VenueSampleEntry> {
 /// show max |dev| >= friction_cover_mult * friction_bps — else the pair's
 /// motion is noise relative to costs and cannot qualify.
 fn variation_covers_friction(
-    series: &[arbitrager_math::pair_monitor::PairObservation],
+    series: &[arbitrageur_math::pair_monitor::PairObservation],
     mu: f64,
     window_secs: f64,
     cfg: &MonitorConfigDto,
@@ -2473,9 +2473,9 @@ fn execution_gate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrager_core::quote::{BookLevel, OrderBook};
-    use arbitrager_core::types::VenueId;
-    use arbitrager_math::pair_monitor::PairObservation;
+    use arbitrageur_core::quote::{BookLevel, OrderBook};
+    use arbitrageur_core::types::VenueId;
+    use arbitrageur_math::pair_monitor::PairObservation;
     use chrono::Utc;
     use rust_decimal_macros::dec;
 
@@ -2550,35 +2550,35 @@ mod tests {
         }
         async fn fetch_markets(
             &self,
-        ) -> anyhow::Result<Vec<arbitrager_core::market::MarketMetadata>> {
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
             Ok(Vec::new())
         }
         async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
             Ok(book("test", _s, 99.0, 101.0, 1))
         }
-        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrager_core::quote::Ticker> {
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
             anyhow::bail!("unused in tests")
         }
         async fn fetch_funding_rate(
             &self,
             _s: &str,
-        ) -> anyhow::Result<arbitrager_core::quote::FundingRate> {
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
             anyhow::bail!("unused in tests")
         }
         async fn fetch_account(
             &self,
-        ) -> anyhow::Result<arbitrager_core::position::AccountSnapshot> {
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
             anyhow::bail!("unused in tests")
         }
         async fn place_order(
             &self,
-            _o: arbitrager_core::order::OrderRequest,
-        ) -> anyhow::Result<arbitrager_core::order::OrderResponse> {
+            _o: arbitrageur_core::order::OrderRequest,
+        ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
             anyhow::bail!("unused in tests")
         }
         async fn cancel_order(
             &self,
-            _r: arbitrager_core::order::CancelRequest,
+            _r: arbitrageur_core::order::CancelRequest,
         ) -> anyhow::Result<()> {
             anyhow::bail!("unused in tests")
         }

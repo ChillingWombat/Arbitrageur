@@ -1,5 +1,5 @@
 [package]
-name = "arbitrager-desktop"
+name = "arbitrageur-desktop"
 version = "0.1.0"
 edition = "2021"
 authors = ["David"]
@@ -10,12 +10,12 @@ tauri-build = { version = "2.1", features = [] }
 
 [dependencies]
 tauri = { version = "2.1", features = [] }
-arbitrager-core = { path = "../../crates/arbitrager-core" }
-arbitrager-math = { path = "../../crates/arbitrager-math" }
-arbitrager-exchanges = { path = "../../crates/arbitrager-exchanges" }
-arbitrager-risk = { path = "../../crates/arbitrager-risk" }
-arbitrager-execution = { path = "../../crates/arbitrager-execution" }
-arbitrager-strategy = { path = "../../crates/arbitrager-strategy" }
+arbitrageur-core = { path = "../../crates/arbitrageur-core" }
+arbitrageur-math = { path = "../../crates/arbitrageur-math" }
+arbitrageur-exchanges = { path = "../../crates/arbitrageur-exchanges" }
+arbitrageur-risk = { path = "../../crates/arbitrageur-risk" }
+arbitrageur-execution = { path = "../../crates/arbitrageur-execution" }
+arbitrageur-strategy = { path = "../../crates/arbitrageur-strategy" }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }

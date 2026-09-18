@@ -1,6 +1,6 @@
 # Quantitative Finance and Mathematical Foundations of Arbitrage
 
-This research document details the rigorous mathematical, probabilistic, and microstructural foundations of the **Arbitrager** cross-market trading engine.
+This research document details the rigorous mathematical, probabilistic, and microstructural foundations of the **Arbitrageur** cross-market trading engine.
 
 ---
 

@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "crates/arbitrager-core",
-    "crates/arbitrager-math",
-    "crates/arbitrager-exchanges",
-    "crates/arbitrager-risk",
-    "crates/arbitrager-execution",
-    "crates/arbitrager-strategy",
-    "crates/arbitrager-app",
+    "crates/arbitrageur-core",
+    "crates/arbitrageur-math",
+    "crates/arbitrageur-exchanges",
+    "crates/arbitrageur-risk",
+    "crates/arbitrageur-execution",
+    "crates/arbitrageur-strategy",
+    "crates/arbitrageur-app",
     "frontend/src-tauri",
 ]
 resolver = "2"
@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["David"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/arbitrager/arbitrager"
+repository = "https://github.com/Dav1D1010/Arbitrageur"
 
 [workspace.dependencies]
 tokio = { version = "1.38", features = ["full"] }
@@ -55,9 +55,9 @@ base64 = "0.22"
 bs58 = "0.5"
 
 # Internal crates
-arbitrager-core = { path = "crates/arbitrager-core" }
-arbitrager-math = { path = "crates/arbitrager-math" }
-arbitrager-exchanges = { path = "crates/arbitrager-exchanges" }
-arbitrager-risk = { path = "crates/arbitrager-risk" }
-arbitrager-execution = { path = "crates/arbitrager-execution" }
-arbitrager-strategy = { path = "crates/arbitrager-strategy" }
+arbitrageur-core = { path = "crates/arbitrageur-core" }
+arbitrageur-math = { path = "crates/arbitrageur-math" }
+arbitrageur-exchanges = { path = "crates/arbitrageur-exchanges" }
+arbitrageur-risk = { path = "crates/arbitrageur-risk" }
+arbitrageur-execution = { path = "crates/arbitrageur-execution" }
+arbitrageur-strategy = { path = "crates/arbitrageur-strategy" }

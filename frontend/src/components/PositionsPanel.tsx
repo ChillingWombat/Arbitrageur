@@ -124,8 +124,8 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
     const handleReduceOnlyChanged = () => {
       setReduceOnlyVersion((v) => v + 1);
     };
-    window.addEventListener("arbitrager:reduce_only_changed", handleReduceOnlyChanged);
-    return () => window.removeEventListener("arbitrager:reduce_only_changed", handleReduceOnlyChanged);
+    window.addEventListener("arbitrageur:reduce_only_changed", handleReduceOnlyChanged);
+    return () => window.removeEventListener("arbitrageur:reduce_only_changed", handleReduceOnlyChanged);
   }, []);
 
   useEffect(() => {

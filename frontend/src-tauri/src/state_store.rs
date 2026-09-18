@@ -1322,7 +1322,7 @@ impl StateStore {
         } else {
             PathBuf::from(".")
         };
-        base.join(".arbitrager").join("state.sqlite3")
+        base.join(".arbitrageur").join("state.sqlite3")
     }
 
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -2503,10 +2503,10 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         to_ts_ms: i64,
         now_ms: i64,
     ) -> anyhow::Result<usize> {
-        use arbitrager_math::pair_monitor::{
+        use arbitrageur_math::pair_monitor::{
             build_pair_series, reversion_stats, PairObservation,
         };
-        use arbitrager_math::session::{
+        use arbitrageur_math::session::{
             hour_modulator, hour_of_day_utc, percentile_sorted, session_of, session_stats,
             winsorized_median, SessionId, SESSION_MIN_EPISODES,
         };
@@ -3823,7 +3823,7 @@ mod tests {
 
     fn temp_store_path(tag: &str) -> (PathBuf, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "arbitrager_state_store_test_{}_{}",
+            "arbitrageur_state_store_test_{}_{}",
             tag,
             rand::random::<u64>()
         ));

@@ -1,6 +1,6 @@
 # System Architecture & Modular Design
 
-The **Arbitrager** system is engineered in Rust with high-performance concurrency, zero-cost abstractions, and strict modular separation across multiple financial market domains.
+The **Arbitrageur** system is engineered in Rust with high-performance concurrency, zero-cost abstractions, and strict modular separation across multiple financial market domains.
 
 ---
 
@@ -8,14 +8,14 @@ The **Arbitrager** system is engineered in Rust with high-performance concurrenc
 
 ```
                                   +-----------------------+
-                                  |     arbitrager-app    |
+                                  |     arbitrageur-app    |
                                   |   (CLI, TUI, Daemon)  |
                                   +-----------+-----------+
                                               |
                      +------------------------+------------------------+
                      |                                                 |
          +-----------v------------+                       +------------v-----------+
-         |   arbitrager-strategy  |                       |    arbitrager-risk     |
+         |   arbitrageur-strategy  |                       |    arbitrageur-risk     |
          |  - Spatial Price Arb   |                       |  - Circuit Breaker     |
          |  - Funding Carry Arb   |<----------------------+  - Delta Guard         |
          |  - Stat-Arb Pairs (OU) |                       |  - Margin Monitor      |
@@ -23,14 +23,14 @@ The **Arbitrager** system is engineered in Rust with high-performance concurrenc
          +-----------+------------+                                    |
                      |                                                 |
          +-----------v------------+                                    |
-         |  arbitrager-execution  |<-----------------------------------+
+         |  arbitrageur-execution  |<-----------------------------------+
          |  - Atomic Coordinator  |
          |  - Emergency Unwind    |
          |  - Smart Order Router  |
          +-----------+------------+
                      |
          +-----------v------------+                       +------------------------+
-         |  arbitrager-exchanges  |                       |    arbitrager-math     |
+         |  arbitrageur-exchanges  |                       |    arbitrageur-math     |
          |  - Hyperliquid L1      |                       |  - Kalman Filter (2D)  |
          |  - Lighter (zk-DEX)    |                       |  - OU Process MLE      |
          |  - Vanta.exchange      |                       |  - Bertram Thresholds  |
@@ -42,7 +42,7 @@ The **Arbitrager** system is engineered in Rust with high-performance concurrenc
                      +------------------------+-----------------------+
                                               |
                                   +-----------v-----------+
-                                  |    arbitrager-core    |
+                                  |    arbitrageur-core    |
                                   | (Types, Domain, Order)|
                                   +-----------------------+
 ```
@@ -53,13 +53,13 @@ The **Arbitrager** system is engineered in Rust with high-performance concurrenc
 
 | Crate | Responsibility | Key Abstractions |
 |---|---|---|
-| `arbitrager-core` | Core domain types, precision decimal arithmetic, market specifications, and unified interfaces. | `OrderBook`, `Ticker`, `FundingRate`, `OrderRequest`, `Position`, `ExchangeAdapter` |
-| `arbitrager-math` | Pure quantitative finance algorithms, time series models, statistical arbitrage solvers. | `HedgeRatioKalmanFilter`, `OuModelParams`, `compute_bertram_thresholds`, `evaluate_funding_carry` |
-| `arbitrager-exchanges` | High-throughput asynchronous venue connectors with rate-limiting and session management. | `HyperliquidAdapter`, `LighterAdapter`, `VantaAdapter`, `RobinhoodAdapter`, `SimulatedExchange` |
-| `arbitrager-risk` | Real-time circuit breakers, liquidation buffers, and portfolio delta neutrality enforcement. | `CircuitBreaker`, `DeltaGuard`, `MarginMonitor` |
-| `arbitrager-execution` | Atomic multi-leg concurrent execution, smart routing, and automated rollback/unwind handlers. | `AtomicArbitrageCoordinator`, `EmergencyUnwindHandler`, `SmartOrderRouter` |
-| `arbitrager-strategy` | Autonomous trading strategies consuming normalized market events and generating actionable signals. | `SpatialPriceArbStrategy`, `FundingRateArbStrategy`, `StatArbPairsStrategy`, `ArbitrageEngine` |
-| `arbitrager-app` | Command-line interface, benchmarking suite, telemetry, and live interactive runners. | `Cli`, `run_monitor`, `run_simulate`, `run_funding_scan`, `run_benchmarks` |
+| `arbitrageur-core` | Core domain types, precision decimal arithmetic, market specifications, and unified interfaces. | `OrderBook`, `Ticker`, `FundingRate`, `OrderRequest`, `Position`, `ExchangeAdapter` |
+| `arbitrageur-math` | Pure quantitative finance algorithms, time series models, statistical arbitrage solvers. | `HedgeRatioKalmanFilter`, `OuModelParams`, `compute_bertram_thresholds`, `evaluate_funding_carry` |
+| `arbitrageur-exchanges` | High-throughput asynchronous venue connectors with rate-limiting and session management. | `HyperliquidAdapter`, `LighterAdapter`, `VantaAdapter`, `RobinhoodAdapter`, `SimulatedExchange` |
+| `arbitrageur-risk` | Real-time circuit breakers, liquidation buffers, and portfolio delta neutrality enforcement. | `CircuitBreaker`, `DeltaGuard`, `MarginMonitor` |
+| `arbitrageur-execution` | Atomic multi-leg concurrent execution, smart routing, and automated rollback/unwind handlers. | `AtomicArbitrageCoordinator`, `EmergencyUnwindHandler`, `SmartOrderRouter` |
+| `arbitrageur-strategy` | Autonomous trading strategies consuming normalized market events and generating actionable signals. | `SpatialPriceArbStrategy`, `FundingRateArbStrategy`, `StatArbPairsStrategy`, `ArbitrageEngine` |
+| `arbitrageur-app` | Command-line interface, benchmarking suite, telemetry, and live interactive runners. | `Cli`, `run_monitor`, `run_simulate`, `run_funding_scan`, `run_benchmarks` |
 
 ---
 

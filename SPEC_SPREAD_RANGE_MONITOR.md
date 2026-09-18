@@ -83,8 +83,8 @@ The trader needs a radar that continuously answers, for every directional
 | Existing piece | Role in this feature |
 |---|---|
 | `spread_samples` table `(symbol, venue_id, ts_ms, mid, best_bid, best_ask)` | Historical per-venue price series — the raw material for pair-spread history. Already pruned at 4M rows. |
-| `compute_deviation_series` (arbitrager-math) | Volume-weighted consensus/leader baseline machinery — reused for weight conventions. |
-| `OuModelParams::fit` (arbitrager-math) | AR(1) OLS fit → θ, μ, σ, half-life, stationary std, R² — powers win-probability and convergence estimates. |
+| `compute_deviation_series` (arbitrageur-math) | Volume-weighted consensus/leader baseline machinery — reused for weight conventions. |
+| `OuModelParams::fit` (arbitrageur-math) | AR(1) OLS fit → θ, μ, σ, half-life, stationary std, R² — powers win-probability and convergence estimates. |
 | `evaluate_spatial_spread` + `SmartOrderRouter` + `verify_pre_execution_slippage` | Current net-spread and depth/slippage feasibility math — reused for current spread and capacity. |
 | `cached_venue_volumes` (60s cache) | 24h notional per venue — volume weighting + participation cap. |
 | `venue_fee_bps` | Real per-venue fee table — friction input, never invented. |
@@ -406,7 +406,7 @@ unrankable.
 
 ## Testing Decisions
 
-- **Unit (arbitrager-math)**: pair-spread series builder, episode
+- **Unit (arbitrageur-math)**: pair-spread series builder, episode
   segmentation + hit-rate estimator, OU probability fallback, capacity math
   on synthetic books.
 - **Backend (commands/monitor)**: qualification transitions, null-when-

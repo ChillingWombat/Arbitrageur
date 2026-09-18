@@ -2,7 +2,7 @@
 //!
 //! Opt-in, paper-only consumer of the spread monitor's qualified-opportunity
 //! seam. One background task polls `qualified_opportunities()`, runs every
-//! candidate through the pure gate pipeline in `arbitrager_strategy`, sizes
+//! candidate through the pure gate pipeline in `arbitrageur_strategy`, sizes
 //! from the capacity ladder, and dispatches entries through the SAME guarded
 //! paper primitive as the manual row-Execute button
 //! (`execute_monitor_opportunity_impl`). Exits unwind through the existing
@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use arbitrager_strategy::convergence_auto::{
+use arbitrageur_strategy::convergence_auto::{
     evaluate_entry_gates, evaluate_exit, plan_entry, size_position, AutoExecConfig, BotMode,
     ConvergenceSignal, ExitEval, ExitTrigger, GateContext, LiveSpreadView,
 };
@@ -402,7 +402,7 @@ impl OpportunityExecutor {
             .filter(|b| b.is_finite() && *b >= 0.0)
             .unwrap_or(4.0);
 
-        let deadline_ms = arbitrager_strategy::convergence_auto::hold_deadline_ms(
+        let deadline_ms = arbitrageur_strategy::convergence_auto::hold_deadline_ms(
             now_ms,
             expected_converge_secs,
             &cfg,

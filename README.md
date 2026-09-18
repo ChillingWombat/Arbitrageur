@@ -1,4 +1,4 @@
-# ⚡ Arbitrager: Ultra-Fast Modular Cross-Market Arbitrage Engine
+# ⚡ Arbitrageur: Ultra-Fast Modular Cross-Market Arbitrage Engine
 
 [![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](#)
 [![Pixi](https://img.shields.io/badge/environment-Pixi-blue.svg)](#)
@@ -47,7 +47,7 @@ Nothing here is production-ready. Real-time WebSocket ingestion (Hyperliquid/Lig
 
 ## 📐 Mathematical & Quantitative Finance Core
 
-Built on rigorous academic quant algorithms implemented in pure Rust (`arbitrager-math`):
+Built on rigorous academic quant algorithms implemented in pure Rust (`arbitrageur-math`):
 - **Ornstein-Uhlenbeck (OU) Mean-Reversion Process:** Continuous SDE $dX_t = \theta (\mu - X_t) dt + \sigma dW_t$ with closed-form MLE parameter estimation and half-life calculation $t_{1/2} = \frac{\ln 2}{\theta}$.
 - **Bertram-Style Threshold Search:** Numerical search for trade entry and exit levels targeting improved expected return per unit time under transaction costs $c$ (inspired by Bertram 2010; not a closed-form analytic solver).
 - **2D Online Kalman Filter:** Recursively estimates dynamic hedge ratio $\beta_t$ and intercept $\alpha_t$ in $O(1)$ operations with zero allocation.
@@ -59,7 +59,7 @@ Built on rigorous academic quant algorithms implemented in pure Rust (`arbitrage
 ## 🏗 Modular Architecture
 
 ```
-Arbitrager/
+Arbitrageur/
 ├── pixi.toml                             # Pixi environment & task orchestration
 ├── Cargo.toml                            # Cargo workspace manifest
 ├── README.md                             # System documentation
@@ -70,13 +70,13 @@ Arbitrager/
 │   ├── 04_EXCHANGE_INTEGRATIONS_GUIDE.md # Hyperliquid, Lighter, Vanta, Robinhood, Polymarket
 │   └── 05_BUGS_SOLUTIONS_AND_RUNBOOK.md  # Failure modes, mitigation strategies & runbook
 └── crates/
-    ├── arbitrager-core/                  # Domain types, Decimal math, unified ExchangeAdapter trait
-    ├── arbitrager-math/                  # Kalman filter, OU MLE, Bertram thresholds, carry APY
-    ├── arbitrager-exchanges/             # Hyperliquid, Lighter, Vanta, Robinhood, Simulated
-    ├── arbitrager-risk/                  # CircuitBreaker, DeltaGuard, MarginMonitor
-    ├── arbitrager-execution/             # AtomicArbitrageCoordinator, EmergencyUnwindHandler
-    ├── arbitrager-strategy/              # SpatialPriceArb, FundingRateArb, StatArbPairs
-    └── arbitrager-app/                   # CLI binary with monitor, simulate, funding, bench commands
+    ├── arbitrageur-core/                  # Domain types, Decimal math, unified ExchangeAdapter trait
+    ├── arbitrageur-math/                  # Kalman filter, OU MLE, Bertram thresholds, carry APY
+    ├── arbitrageur-exchanges/             # Hyperliquid, Lighter, Vanta, Robinhood, Simulated
+    ├── arbitrageur-risk/                  # CircuitBreaker, DeltaGuard, MarginMonitor
+    ├── arbitrageur-execution/             # AtomicArbitrageCoordinator, EmergencyUnwindHandler
+    ├── arbitrageur-strategy/              # SpatialPriceArb, FundingRateArb, StatArbPairs
+    └── arbitrageur-app/                   # CLI binary with monitor, simulate, funding, bench commands
 ```
 
 ---
@@ -138,7 +138,7 @@ pixi run run-prediction
 
 ## 🖥️ Modern Desktop Frontend (Tauri v2 + TypeScript + React)
 
-Arbitrager includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
+Arbitrageur includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
 
 ### 🌟 Frontend Capabilities
 - **⚡ Spatial Matrix:** Read-only public L2 orderbooks from Hyperliquid and Lighter (the only admitted venues) with depth visualization, VWAP calculation, and one-click **paper** execution against the built-in simulator.

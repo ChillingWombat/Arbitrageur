@@ -44,7 +44,7 @@ The repository provides a single compiled Linux x86_64 ELF binary: `panda-arb-0.
 4. Opens delta-neutral positions: Short high-funding venue, Long low-funding venue.
 5. Monitors trade cooldowns (3600 seconds) to prevent over-trading in choppy funding regimes.
 
-### 3.2 Key Takeaways for Arbitrager
+### 3.2 Key Takeaways for Arbitrageur
 - Funding rate intervals must be explicitly normalized: Hyperliquid computes funding every 1 hour, whereas Backpack and traditional perpetuals compute funding over 8 hours.
 - Automatic depth verification must traverse orderbook asks/bids rather than trusting top-of-book quotes.
 
@@ -71,7 +71,7 @@ The repository provides a single compiled Linux x86_64 ELF binary: `panda-arb-0.
 ### 5.2 Pitfalls Identified in Reference
 - The reference bot ignores platform settlement fees and withdrawal fees.
 - Lacked orderbook depth verification: placed full trade sizes without computing price impact across orderbook levels.
-- **Arbitrager Improvement:** Added full fee subtraction, VWAP depth calculation, and automated emergency rollback if one leg rejects.
+- **Arbitrageur Improvement:** Added full fee subtraction, VWAP depth calculation, and automated emergency rollback if one leg rejects.
 
 ---
 
@@ -97,8 +97,8 @@ The repository provides a single compiled Linux x86_64 ELF binary: `panda-arb-0.
    - Solves for the optimal entry threshold $a$ and exit $m$ that maximizes trade frequency $\times$ return per trade.
 5. **Distance & Copula Approaches:** Minimum sum of squared differences (SSD) and Gumbel/Clayton copula dependence modeling.
 
-### 7.2 Integration into Arbitrager
-All academic algorithms were re-engineered in pure, idiomatic, zero-allocation Rust inside `arbitrager-math`, yielding nanosecond-scale execution speeds.
+### 7.2 Integration into Arbitrageur
+All academic algorithms were re-engineered in pure, idiomatic, zero-allocation Rust inside `arbitrageur-math`, yielding nanosecond-scale execution speeds.
 
 ---
 

@@ -22,9 +22,9 @@ fn main() {
     {
         // Native Wayland + GPU compositing is the fast path: scrolling
         // repaints on the GPU instead of the CPU. The legacy X11/software
-        // fallback stays one env var away (ARBITRAGER_X11=1) for drivers
+        // fallback stays one env var away (ARBITRAGEUR_X11=1) for drivers
         // where native compositing misbehaves.
-        if std::env::var_os("ARBITRAGER_X11").is_some() {
+        if std::env::var_os("ARBITRAGEUR_X11").is_some() {
             std::env::set_var("GDK_BACKEND", "x11");
             std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
             std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
@@ -169,5 +169,5 @@ fn main() {
             auto_exec::get_radar_bot_status,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Arbitrager Tauri desktop application");
+        .expect("error while running Arbitrageur Tauri desktop application");
 }

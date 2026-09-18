@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arbitrager_core::quote::OrderBook;
-use arbitrager_core::types::{Decimal, VenueId};
-use arbitrager_exchanges::ws::{
+use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::types::{Decimal, VenueId};
+use arbitrageur_exchanges::ws::{
     HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS, apply_lighter_delta, hyperliquid_subscribe_message,
     lighter_book_from_sides, lighter_default_market_symbol_map, lighter_delta_continuous,
     lighter_market_symbol_map, lighter_subscribe_message, lighter_ws_url,
@@ -80,7 +80,7 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
         }
         fail_streak = (fail_streak + 1).min(8);
         tokio::time::sleep(Duration::from_secs(
-            arbitrager_exchanges::ws::jittered_reconnect_backoff_secs(fail_streak),
+            arbitrageur_exchanges::ws::jittered_reconnect_backoff_secs(fail_streak),
         ))
         .await;
     }
@@ -427,15 +427,15 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arbitrager_core::types::dec;
+    use arbitrageur_core::types::dec;
 
     fn book(venue: &str, symbol: &str, bid: f64, ask: f64) -> OrderBook {
         let mut b = OrderBook::new(VenueId::new(venue), symbol.to_string());
-        b.bids.push(arbitrager_core::quote::BookLevel::new(
+        b.bids.push(arbitrageur_core::quote::BookLevel::new(
             Decimal::from_f64_retain(bid).unwrap_or(dec!(0)),
             dec!(1),
         ));
-        b.asks.push(arbitrager_core::quote::BookLevel::new(
+        b.asks.push(arbitrageur_core::quote::BookLevel::new(
             Decimal::from_f64_retain(ask).unwrap_or(dec!(0)),
             dec!(1),
         ));

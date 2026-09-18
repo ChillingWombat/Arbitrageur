@@ -43,7 +43,7 @@ export function scopeAndSortPositions(
   return sorted;
 }
 
-const REDUCE_ONLY_STORAGE_KEY = "arbitrager:reduce_only_positions";
+const REDUCE_ONLY_STORAGE_KEY = "arbitrageur:reduce_only_positions";
 
 export function getReduceOnlyPositions(): string[] {
   if (typeof window === "undefined" || !window.localStorage) return [];
@@ -70,7 +70,7 @@ export function setPositionReduceOnly(symbol: string, reduceOnly: boolean): void
       set.delete(symbol.toUpperCase());
     }
     window.localStorage.setItem(REDUCE_ONLY_STORAGE_KEY, JSON.stringify(Array.from(set)));
-    window.dispatchEvent(new Event("arbitrager:reduce_only_changed"));
+    window.dispatchEvent(new Event("arbitrageur:reduce_only_changed"));
   } catch {
     // ignore storage errors
   }

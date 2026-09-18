@@ -98,12 +98,12 @@ Tests must verify external behavioral contracts, state transitions, and safety b
   - Pause and continue engine state transitions preserving virtual positions (`pauseContinue.test.ts`).
   - Fail-closed ticker filtering based on enabled/connected venues (`tickers.test.ts`).
 - **Rust Backend Workspace Tests**: Cargo test suite covering:
-  - `arbitrager_core`: Orderbook VWAP, market data hub broadcast, liquidation distance.
-  - `arbitrager_exchanges`: Adapter depth consumption, rate limiting, credential validation.
-  - `arbitrager_execution`: Virtual ledger cycle netting, atomic execution dispatches.
-  - `arbitrager_math`: WFO estimator calibration (VWMA, EMA, SMMA, WMA, SMA), Kalman filter convergence.
-  - `arbitrager_risk`: DeltaGuard delta-neutrality enforcement, circuit breaker trip conditions.
-  - `arbitrager_desktop`: Tauri IPC command endpoints for status, settings, pause/continue, and risk killswitch.
+  - `arbitrageur_core`: Orderbook VWAP, market data hub broadcast, liquidation distance.
+  - `arbitrageur_exchanges`: Adapter depth consumption, rate limiting, credential validation.
+  - `arbitrageur_execution`: Virtual ledger cycle netting, atomic execution dispatches.
+  - `arbitrageur_math`: WFO estimator calibration (VWMA, EMA, SMMA, WMA, SMA), Kalman filter convergence.
+  - `arbitrageur_risk`: DeltaGuard delta-neutrality enforcement, circuit breaker trip conditions.
+  - `arbitrageur_desktop`: Tauri IPC command endpoints for status, settings, pause/continue, and risk killswitch.
 
 ## Out of Scope
 

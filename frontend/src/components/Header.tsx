@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { AlertTriangle, OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
-import { ArbitragerLogo } from "./ArbitragerLogo";
+import { ArbitrageurLogo } from "./ArbitrageurLogo";
 
 interface HeaderProps {
   status: SystemStatusDto | null;
@@ -47,14 +47,14 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="w-72 shrink-0 border-r border-surface-border flex items-center px-4 lg:px-5">
           <div
             className="flex items-center space-x-2.5 cursor-default group"
-            title={refreshing ? "ARBITRAGER — Syncing telemetry..." : "ARBITRAGER Quant Platform"}
+            title={refreshing ? "ARBITRAGEUR — Syncing telemetry..." : "ARBITRAGEUR Quant Platform"}
           >
             <div className="relative flex items-center justify-center">
-              <ArbitragerLogo className="w-5 h-5 text-accent shrink-0 drop-shadow-xs" />
+              <ArbitrageurLogo className="w-5 h-5 text-accent shrink-0 drop-shadow-xs" />
             </div>
             <div className="flex items-center">
               <span className="font-black tracking-tight text-sm font-sans text-slate-900">
-                ARBITRAGER
+                ARBITRAGEUR
               </span>
             </div>
           </div>

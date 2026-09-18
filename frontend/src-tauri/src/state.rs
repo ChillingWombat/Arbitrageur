@@ -1,29 +1,29 @@
 use crate::vault::ExchangeCredentials;
-use arbitrager_core::hub::MarketDataHub;
-use arbitrager_core::types::{dec, Decimal};
-use arbitrager_exchanges::arcus::ArcusAdapter;
-use arbitrager_exchanges::aster::AsterAdapter;
-use arbitrager_exchanges::binance::BinanceAdapter;
-use arbitrager_exchanges::coinbase::CoinbaseAdapter;
-use arbitrager_exchanges::decibel::DecibelAdapter;
-use arbitrager_exchanges::edgex::EdgeXAdapter;
-use arbitrager_exchanges::grvt::GrvtAdapter;
-use arbitrager_exchanges::hyperliquid::HyperliquidAdapter;
-use arbitrager_exchanges::kraken::KrakenAdapter;
-use arbitrager_exchanges::lighter::LighterAdapter;
-use arbitrager_exchanges::okx::OkxAdapter;
-use arbitrager_exchanges::ondoperps::OndoPerpsAdapter;
-use arbitrager_exchanges::popdex::PopDexAdapter;
-use arbitrager_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
-use arbitrager_exchanges::simulated::SimulatedExchange;
-use arbitrager_exchanges::vanta::VantaAdapter;
-use arbitrager_exchanges::variational::VariationalAdapter;
-use arbitrager_execution::coordinator::AtomicArbitrageCoordinator;
-use arbitrager_execution::passive_unwind::PassiveUnwindConfig;
-use arbitrager_execution::smart_routing::SmartOrderRouter;
-use arbitrager_math::kalman_filter::HedgeRatioKalmanFilter;
-use arbitrager_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
-use arbitrager_risk::delta_guard::DeltaGuard;
+use arbitrageur_core::hub::MarketDataHub;
+use arbitrageur_core::types::{dec, Decimal};
+use arbitrageur_exchanges::arcus::ArcusAdapter;
+use arbitrageur_exchanges::aster::AsterAdapter;
+use arbitrageur_exchanges::binance::BinanceAdapter;
+use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
+use arbitrageur_exchanges::decibel::DecibelAdapter;
+use arbitrageur_exchanges::edgex::EdgeXAdapter;
+use arbitrageur_exchanges::grvt::GrvtAdapter;
+use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
+use arbitrageur_exchanges::kraken::KrakenAdapter;
+use arbitrageur_exchanges::lighter::LighterAdapter;
+use arbitrageur_exchanges::okx::OkxAdapter;
+use arbitrageur_exchanges::ondoperps::OndoPerpsAdapter;
+use arbitrageur_exchanges::popdex::PopDexAdapter;
+use arbitrageur_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
+use arbitrageur_exchanges::simulated::SimulatedExchange;
+use arbitrageur_exchanges::vanta::VantaAdapter;
+use arbitrageur_exchanges::variational::VariationalAdapter;
+use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
+use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
+use arbitrageur_execution::smart_routing::SmartOrderRouter;
+use arbitrageur_math::kalman_filter::HedgeRatioKalmanFilter;
+use arbitrageur_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+use arbitrageur_risk::delta_guard::DeltaGuard;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -366,7 +366,7 @@ fn default_app_version() -> String {
     "v1.2.0".into()
 }
 fn default_git_repo() -> String {
-    "https://github.com/arbitrager/arbitrager".into()
+    "https://github.com/Dav1D1010/Arbitrageur".into()
 }
 fn default_true() -> bool {
     true
@@ -1020,7 +1020,7 @@ pub struct AppEngineState {
     pub strategy_params: RwLock<std::collections::HashMap<String, StrategyParamsDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
     pub state_store: Arc<crate::state_store::StateStore>,
-    pub virtual_ledger: RwLock<arbitrager_execution::virtual_ledger::VirtualStrategyLedger>,
+    pub virtual_ledger: RwLock<arbitrageur_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
@@ -1125,7 +1125,7 @@ impl AppEngineState {
     #[cfg(test)]
     pub fn new_inner_for_test(state_store: Arc<crate::state_store::StateStore>) -> Self {
         let dir = std::env::temp_dir().join(format!(
-            "arbitrager_retention_vault_{}",
+            "arbitrageur_retention_vault_{}",
             rand::random::<u64>()
         ));
         Self::new_inner(dir.join("vault.enc"), state_store)
@@ -1321,7 +1321,7 @@ impl AppEngineState {
         let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let virtual_ledger =
-            RwLock::new(arbitrager_execution::virtual_ledger::VirtualStrategyLedger::new());
+            RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());
         let strategy_params_map = load_strategy_params(&state_store);
 
         Self {
@@ -1591,12 +1591,12 @@ impl AppEngineState {
     ) -> Vec<(
         &'static str,
         &'static str,
-        Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+        Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     )> {
         let mut list: Vec<(
             &'static str,
             &'static str,
-            Arc<dyn arbitrager_core::exchange::ExchangeAdapter>,
+            Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
         )> = Vec::new();
         let s = self.settings.read();
         // A venue is on when its engine flag is set OR it owns an enabled
@@ -1704,7 +1704,7 @@ impl AppEngineState {
     pub fn get_adapter(
         &self,
         venue_id: &str,
-    ) -> Option<Arc<dyn arbitrager_core::exchange::ExchangeAdapter>> {
+    ) -> Option<Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>> {
         let canonical = canonical_venue_id(venue_id)?;
         self.get_venues()
             .into_iter()

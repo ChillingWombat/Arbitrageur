@@ -1,10 +1,10 @@
-use arbitrager_math::pair_monitor::build_pair_series;
-use arbitrager_math::seasonality::{
+use arbitrageur_math::pair_monitor::build_pair_series;
+use arbitrageur_math::seasonality::{
     coupling_inputs, decide_promotion, exclude_stress_days, fit_log_har, har_forecast_next,
     parse_stress_spans_json, rescale_factor, walk_forward_windows, PromotionStatus,
     SessionCoupling,
 };
-use arbitrager_math::session::{session_of, winsorized_median};
+use arbitrageur_math::session::{session_of, winsorized_median};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppEngineState;
@@ -151,7 +151,7 @@ fn run_one_symbol(
         return (false, PromotionStatus::Held);
     };
     let (kept_ts, kept_rv) = exclude_stress_days(&day_ts, &day_rv_vals, &stress);
-    if kept_rv.len() < arbitrager_math::seasonality::HAR_MIN_DAYS {
+    if kept_rv.len() < arbitrageur_math::seasonality::HAR_MIN_DAYS {
         return (false, PromotionStatus::Held);
     }
     let anchor_written = match fit_log_har(&kept_rv) {

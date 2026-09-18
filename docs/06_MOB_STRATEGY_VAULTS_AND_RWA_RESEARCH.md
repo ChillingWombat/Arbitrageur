@@ -1,6 +1,6 @@
 # Quantitative Research: MoB Strategy Vaults, RWA Equity Carry & Productive Hold
 
-This document captures the quantitative mechanics, architectural patterns, and risk-management specifications of the **MoB (Mobius)** cross-venue arbitrage and automated strategy vault platform, reverse-engineered and adapted for the **Arbitrager** high-frequency quantitative execution engine.
+This document captures the quantitative mechanics, architectural patterns, and risk-management specifications of the **MoB (Mobius)** cross-venue arbitrage and automated strategy vault platform, reverse-engineered and adapted for the **Arbitrageur** high-frequency quantitative execution engine.
 
 ---
 
@@ -70,7 +70,7 @@ $$T^* = \frac{c_{\text{taker}, 1} + c_{\text{taker}, 2} + \frac{S_1 + S_2}{2}}{\
 ### 2.3 Critical Operational Challenge: Margin Drift & Asymmetric Depletion
 Because the two legs are held on separate isolated exchanges, a strong directional trend will cause one leg to accrue unrealized profit ($+\text{uPnL}$) while the other leg incurs unrealized loss ($-\text{uPnL}$).
 - If price rallies strongly: The Short leg incurs loss and approaches its liquidation price, while the Long leg accumulates excess equity on the other exchange.
-- **Mitigation Strategy**: The Arbitrager engine tracks margin usage ratios:
+- **Mitigation Strategy**: The Arbitrageur engine tracks margin usage ratios:
   $$\text{MarginRatio}_v = \frac{\text{MaintenanceMargin}_v}{\text{Equity}_v}$$
   When $\text{MarginRatio}_v > \theta_{\text{rebalance}}$ (e.g. 70%), trigger an automated transfer or partial de-leveraging of both legs to reset margin buffers.
 
@@ -195,7 +195,7 @@ $$\frac{\Pi_{\text{total}}(t)}{V_0} = \frac{P_t - P_0}{P_0} + \text{LTV} \cdot \
 
 ---
 
-## 6. Implementation Roadmap for Arbitrager Engine
+## 6. Implementation Roadmap for Arbitrageur Engine
 
 ### Phase 1: Core Telemetry & Feeds (Complete / In Progress)
 - [x] Hyperliquid Perpetual L1 API and WebSocket connectors.
