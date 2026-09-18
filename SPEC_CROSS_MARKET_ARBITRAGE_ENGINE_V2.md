@@ -157,6 +157,16 @@ pub struct TickerStrategyConfigDto {
    - Clicking an opportunity highlights the card and sets it as the active selection for the interactive Amortization Simulator, dynamically projecting gross funding collected, trading fees, and net yield across 1, 14, 30, 60, and 90-day holding periods.
 4. **Strategy-Wide Bot Lifecycle**:
    - Automated funding carry trading runs via `useBotLifecycle({ strategyId: "funding" })` at the strategy level, evaluating the highest-yielding opportunity meeting the `minAprPct` hurdle.
+5. **Same-Exchange Spot/Perp Basis (Cash-and-Carry)**:
+   - The scan additionally emits per-venue `BASIS` opportunities (long spot + short perp on the SAME exchange) via `evaluate_spot_perp_basis`; reverse (long perp / short spot) needs borrow and is never emitted.
+   - Each basis opp carries signed live divergence `basis_bps = (perp - spot) / spot * 10000`, spot/perp reference mids, and the same depth-aware capacity walk (spot asks vs perp bids) and entry-cross friction as carry.
+   - Venues without spot books (Hyperliquid/Vanta refuse spot) fail closed — no fabricated basis. Gated by `funding_enable_basis` (default ON) + optional `funding_min_basis_bps` floor; the APR hurdle still applies downstream.
+6. **Informational Win Probability (Carry + Basis)**:
+   - `funding_win_probability` scores `coverage / (1 + coverage)` with `coverage = 24h carry / round-trip fee` (memoryless 24h-hold assumption: 4h breakeven ~0.86, 24h ~0.50, 72h ~0.25), lifted slightly by predicted-rate agreement and positive entry basis, clamped to [0.02, 0.98].
+   - Experimental heuristic, displayed with "—" fallback; NEVER gates ordering or executability (same contract as the spread monitor's empirical field). An empirical upgrade is unblocked by the funding history below.
+7. **Funding-Rate History Log (schema v18)**:
+   - `funding_rate_samples(venue_id, symbol, ts_ms[minute-bucketed], rate_8h, interval_hours)` records every scan's observed prints (REPLACE-idempotent); read via `funding_rate_series`, pruned by the shared retention pass. Training substrate for the deferred persistence / half-life estimator.
+8. **Scan Perf**: per-venue perp books are snapshot-parsed once per scan (O(V) hub clones) instead of per carry pair (O(V^2)).
 
 ### Strategy Auto-Filters & Price Resolution Architecture
 1. **Real Exchange 24h Volume Aggregation**:

@@ -985,6 +985,26 @@ PRAGMA user_version = 16;
 COMMIT;";
 
 /// v17 admits 'triangle' into the strategy_params CHECK constraint.
+/// v18 adds the funding-rate history log. Each scan records its observed
+/// per-venue perp prints (timestamp bucketed to the minute, so repeat scans
+/// within a minute REPLACE rather than duplicate). This is the training
+/// substrate the deferred funding-persistence / half-life estimator needs:
+/// until now funding lived only in a 120s hub cache. Pruned by the shared
+/// retention pass like spread/volume samples.
+const MIGRATION_V18_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE funding_rate_samples (
+    venue_id TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_id) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    rate_8h REAL NOT NULL CHECK(rate_8h IS NOT NULL),
+    interval_hours INTEGER NOT NULL CHECK(interval_hours >= 1),
+    PRIMARY KEY (venue_id, symbol, ts_ms)
+);
+CREATE INDEX ix_funding_rate_samples_symbol_ts ON funding_rate_samples(symbol, ts_ms);
+CREATE INDEX ix_funding_rate_samples_venue_symbol_ts ON funding_rate_samples(venue_id, symbol, ts_ms);
+PRAGMA user_version = 18;
+COMMIT;";
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1380,7 +1400,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 17 {
+        if version > 18 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1481,6 +1501,12 @@ impl StateStore {
         }
         if version <= 16 {
             if let Err(err) = conn.execute_batch(MIGRATION_V17_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 17 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V18_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -2983,6 +3009,86 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         )?)
     }
 
+    /// Record funding-rate prints observed by a scan. `samples` carries
+    /// `(venue_id, symbol, rate_8h_normalized, interval_hours)`; timestamps
+    /// are bucketed to the minute so repeat scans within a minute REPLACE
+    /// rather than duplicate (PK covers venue/symbol/minute). Fail-soft on
+    /// bad rows: they are skipped, never aborting the batch.
+    pub fn record_funding_rate_samples(
+        &self,
+        ts_ms: i64,
+        samples: &[(&str, &str, f64, i64)],
+    ) -> anyhow::Result<()> {
+        if ts_ms < 0 || samples.is_empty() {
+            return Ok(());
+        }
+        let bucketed = ts_ms / 60_000 * 60_000;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO funding_rate_samples
+                 (venue_id, symbol, ts_ms, rate_8h, interval_hours)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for (venue_raw, symbol_raw, rate_8h, interval_hours) in samples {
+            let Ok(venue) = normalize_venue(venue_raw) else {
+                continue;
+            };
+            let Ok(symbol) = normalize_symbol(symbol_raw) else {
+                continue;
+            };
+            if !rate_8h.is_finite() || *interval_hours < 1 {
+                continue;
+            }
+            stmt.execute(rusqlite::params![
+                venue,
+                symbol,
+                bucketed,
+                rate_8h,
+                interval_hours
+            ])?;
+        }
+        Ok(())
+    }
+
+    /// Ordered `(ts_ms, rate_8h, interval_hours)` history for one
+    /// venue+symbol window. Training substrate for funding-persistence /
+    /// half-life modeling; no modeling happens here.
+    pub fn funding_rate_series(
+        &self,
+        venue: &str,
+        symbol: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+    ) -> anyhow::Result<Vec<(i64, f64, i64)>> {
+        let venue = normalize_venue(venue)?;
+        let symbol = normalize_symbol(symbol)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT ts_ms, rate_8h, interval_hours FROM funding_rate_samples
+             WHERE venue_id = ?1 AND symbol = ?2
+               AND ts_ms >= ?3 AND ts_ms <= ?4
+             ORDER BY ts_ms ASC",
+        )?;
+        let rows = stmt.query_map(
+            rusqlite::params![venue, symbol, from_ts_ms, to_ts_ms],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?)),
+        )?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Bound the funding-rate log with the same day cutoff the retention
+    /// pass computes for spread/volume samples.
+    pub fn prune_funding_rate_samples(
+        &self,
+        retain_after_ts_ms: i64,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        Ok(conn.execute(
+            "DELETE FROM funding_rate_samples WHERE ts_ms < ?1",
+            [retain_after_ts_ms],
+        )?)
+    }
+
     pub fn delete_oldest_spread_samples(&self, limit: u64) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
         Ok(conn.execute(
@@ -3840,7 +3946,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 17);
+            assert_eq!(version, 18);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -3895,6 +4001,58 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_funding_rate_samples_roundtrip_and_minute_bucket() {
+        let store = StateStore::open_in_memory().unwrap();
+        // Two writes inside the same minute collapse to one row (REPLACE).
+        store
+            .record_funding_rate_samples(
+                1_700_000_000_012,
+                &[("lighter", "BTC-USDC", 0.0008, 8)],
+            )
+            .unwrap();
+        store
+            .record_funding_rate_samples(
+                1_700_000_000_045,
+                &[("lighter", "BTC-USDC", 0.0009, 8)],
+            )
+            .unwrap();
+        // A later minute appends.
+        store
+            .record_funding_rate_samples(
+                1_700_000_060_000,
+                &[("lighter", "BTC-USDC", 0.001, 8)],
+            )
+            .unwrap();
+        let series = store
+            .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(series.len(), 2, "got {series:?}");
+        assert_eq!(series[0].0, 1_700_000_000_012 / 60_000 * 60_000);
+        assert!((series[0].1 - 0.0009).abs() < 1e-12);
+        assert_eq!(series[0].2, 8);
+        // Bad rows never abort the batch.
+        store
+            .record_funding_rate_samples(
+                1_700_000_120_000,
+                &[("!!", "BTC-USDC", 0.001, 8), ("lighter", "BTC-USDC", f64::NAN, 8)],
+            )
+            .unwrap();
+        let after = store
+            .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(after.len(), 2);
+        // Retention prune keeps only the fresh minute bucket (1_700_000_040_000).
+        let removed = store
+            .prune_funding_rate_samples(1_700_000_040_000)
+            .unwrap();
+        assert_eq!(removed, 1);
+        let kept = store
+            .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+            .unwrap();
+        assert_eq!(kept.len(), 1);
     }
 
     #[test]
@@ -4589,7 +4747,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 17);
+            assert_eq!(version, 18);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -4890,11 +5048,11 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 17);
+        assert_eq!(v10, 18);
         let kept: i64 = conn
             .query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(kept, 1, "V7 rows must survive the V8..V16 migration");
+        assert_eq!(kept, 1, "V7 rows must survive the V8..V18 migration");
         let kept_signals: i64 = conn
             .query_row("SELECT COUNT(*) FROM monitor_signals", [], |r| r.get(0))
             .unwrap();
@@ -4912,6 +5070,7 @@ mod tests {
             "spatial_entry_baseline",
             "paper_equity_expectations",
             "account_equity_events",
+            "funding_rate_samples",
         ] {
             let found: i64 = conn
                 .query_row(

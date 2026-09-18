@@ -17,7 +17,10 @@ use arbitrageur_math::autotune::{
     TuneHistory, TuneParams, recommend,
 };
 use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
-use arbitrageur_math::funding_carry::{evaluate_funding_carry, evaluate_spot_perp_basis, funding_entry_capacity};
+use arbitrageur_math::funding_carry::{
+    evaluate_funding_carry, evaluate_spot_perp_basis, funding_entry_capacity,
+    funding_win_probability,
+};
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
 use arbitrageur_math::pair_monitor::build_pair_series;
@@ -163,6 +166,11 @@ pub struct FundingOpportunityDto {
     /// Perp reference price for basis opps. `None` for carry.
     #[serde(default)]
     pub perp_price: Option<f64>,
+    /// Informational win probability (experimental fee-coverage heuristic,
+    /// 0..1). `None` when the edge is unusable. Never gates ordering or
+    /// executability — same contract as the spread monitor's field.
+    #[serde(default)]
+    pub win_probability: Option<f64>,
 }
 
 fn default_funding_opp_kind() -> String {
@@ -1208,6 +1216,11 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
             // Same day cutoff bounds the margin-snapshot log behind the
             // 24h average-utilisation stat.
             let _ = state.state_store.prune_margin_snapshots(retain_after);
+            // Same day cutoff bounds the funding-rate history log (future
+            // persistence / half-life training substrate).
+            let _ = state
+                .state_store
+                .prune_funding_rate_samples(retain_after);
         }
     }
     if let Some(gb) = max_gb {
@@ -2502,10 +2515,68 @@ async fn scan_funding_opportunities_for_symbol(
         }
     }
 
+    // Persist observed prints (minute-bucketed REPLACE, idempotent) as the
+    // training substrate for funding-persistence / half-life modeling.
+    // Best-effort: a store hiccup must never fail a scan.
+    {
+        let now_ms = Utc::now().timestamp_millis();
+        let samples: Vec<(&str, &str, f64, i64)> = rates
+            .iter()
+            .filter_map(|(_, _, r)| {
+                let rate_f: f64 = r.rate.to_string().parse().ok()?;
+                let interval = f64::from(r.interval_hours.max(1));
+                let rate_8h = rate_f / interval * 8.0;
+                if !rate_8h.is_finite() {
+                    return None;
+                }
+                Some((
+                    r.venue.as_str(),
+                    r.symbol.as_str(),
+                    rate_8h,
+                    i64::from(r.interval_hours.max(1)),
+                ))
+            })
+            .collect();
+        let _ = state
+            .state_store
+            .record_funding_rate_samples(now_ms, &samples);
+    }
+
     // Cross-exchange carry needs >= 2 funding prints; same-exchange basis
     // needs only one venue with funding + both books, so no early return here.
     let mut opps = Vec::new();
     let fee_total = dec!(3.5); // 3.5 bps round trip
+
+    // Perf: snapshot + parse each venue's perp book ONCE per scan. The pair
+    // loop below used to hub-clone and re-parse both books per pair (O(V^2)
+    // clones); the capacity walk now reads this map (O(V) clones).
+    let parse_levels = |levels: &[arbitrageur_core::quote::BookLevel]| {
+        levels
+            .iter()
+            .filter_map(|l| {
+                let px = l.price.to_string().parse::<f64>().ok()?;
+                let q = l.size.to_string().parse::<f64>().ok()?;
+                (px.is_finite() && q.is_finite()).then_some((px, q))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut perp_books: std::collections::HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)> =
+        std::collections::HashMap::new();
+    for (vid, _, _) in &rates {
+        if perp_books.contains_key(*vid) {
+            continue;
+        }
+        if let Some(book) = state.market_data_hub.get_valid_orderbook(
+            &VenueId::from(*vid),
+            symbol,
+            Some(std::time::Duration::from_secs(120)),
+        ) {
+            perp_books.insert(
+                vid.to_string(),
+                (parse_levels(&book.asks), parse_levels(&book.bids)),
+            );
+        }
+    }
 
     for i in 0..rates.len() {
         for j in (i + 1)..rates.len() {
@@ -2528,29 +2599,16 @@ async fn scan_funding_opportunities_for_symbol(
                     if !(size_f.is_finite() && size_f > 0.0) {
                         return None;
                     }
+                    // Long leg lifts asks, short leg hits bids (pre-parsed).
                     let book_of = |name: &str| {
                         let vid = vid_for(name)?;
-                        state.market_data_hub.get_valid_orderbook(
-                            &VenueId::from(vid),
-                            symbol,
-                            Some(std::time::Duration::from_secs(120)),
-                        )
+                        perp_books.get(vid)
                     };
-                    let long_book = book_of(&opp.long_venue)?;
-                    let short_book = book_of(&opp.short_venue)?;
-                    let to_pair = |levels: &[arbitrageur_core::quote::BookLevel]| {
-                        levels
-                            .iter()
-                            .filter_map(|l| {
-                                let px = l.price.to_string().parse::<f64>().ok()?;
-                                let q = l.size.to_string().parse::<f64>().ok()?;
-                                (px.is_finite() && q.is_finite()).then_some((px, q))
-                            })
-                            .collect::<Vec<_>>()
-                    };
+                    let (long_asks, _) = book_of(&opp.long_venue)?;
+                    let (_, short_bids) = book_of(&opp.short_venue)?;
                     let rep = funding_entry_capacity(
-                        &to_pair(&long_book.asks),
-                        &to_pair(&short_book.bids),
+                        long_asks,
+                        short_bids,
                         &[size_f * 0.5, size_f, size_f * 2.0],
                     );
                     let optimal = rep.optimal_size_usd?;
@@ -2602,6 +2660,42 @@ async fn scan_funding_opportunities_for_symbol(
                     basis_bps: None,
                     spot_price: None,
                     perp_price: None,
+                    // Informational only: the edge direction (which leg is
+                    // short) is set by current hourly rates; agreement holds
+                    // when both venues' PREDICTED hourly rates point the same
+                    // way. Absent predictions -> None (no adjustment).
+                    win_probability: {
+                        let hourly = |rate: Decimal, interval: u32| {
+                            rate / Decimal::from(interval.max(1))
+                        };
+                        let agrees = match (
+                            r_a.predicted_rate.clone(),
+                            r_b.predicted_rate.clone(),
+                        ) {
+                            (Some(pa), Some(pb)) => {
+                                let pa_h = hourly(pa, r_a.interval_hours);
+                                let pb_h = hourly(pb, r_b.interval_hours);
+                                Some(
+                                    if hourly(
+                                        r_a.rate.clone(),
+                                        r_a.interval_hours,
+                                    ) >= hourly(r_b.rate.clone(), r_b.interval_hours)
+                                    {
+                                        pa_h >= pb_h
+                                    } else {
+                                        pb_h >= pa_h
+                                    },
+                                )
+                            }
+                            _ => None,
+                        };
+                        funding_win_probability(
+                            opp.net_rate_8h,
+                            opp.round_trip_fee_bps,
+                            None,
+                            agrees,
+                        )
+                    },
                 });
             }
         }
@@ -2813,6 +2907,19 @@ async fn scan_funding_opportunities_for_symbol(
                         } else {
                             None
                         },
+                        // Informational only: positive entry basis is an
+                        // expected exit tailwind (convergence), and a
+                        // positive predicted perp rate confirms the carry.
+                        win_probability: funding_win_probability(
+                            eval.carry.net_rate_8h.clone(),
+                            eval.carry.round_trip_fee_bps.clone(),
+                            if eval.basis_bps > dec!(0) {
+                                Some(eval.basis_bps.clone())
+                            } else {
+                                None
+                            },
+                            funding_rate.predicted_rate.clone().map(|pr| pr > dec!(0)),
+                        ),
                     });
                 }
             }
@@ -10246,6 +10353,9 @@ mod tests {
         assert!(b.spot_price.expect("spot") > 0.0);
         assert!(b.perp_price.expect("perp") > 0.0);
         assert!(b.net_apr_pct > 0.0);
+        // Informational win probability: fee-coverage heuristic must score.
+        let w = b.win_probability.expect("win_probability");
+        assert!((0.02..=0.98).contains(&w), "win prob out of bounds: {w}");
         // Depth: 10-unit books at ~$60k hold the $25k tier twice over.
         assert!(b.optimal_size_usd > 0.0);
     }

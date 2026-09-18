@@ -393,6 +393,8 @@ export interface FundingOpportunityDto {
   spot_price?: number;
   /** Perp reference price. Only for basis opps. */
   perp_price?: number;
+  /** Informational win probability 0..1 (experimental fee-coverage heuristic). Absent = unusable edge. Never gates execution. */
+  win_probability?: number;
 }
 
 export interface PredictionOpportunityDto {

@@ -104,6 +104,11 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
               <CarryDetailField label="APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
               <CarryDetailField
+                label="Win probability"
+                value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
+                title="Experimental fee-coverage heuristic over a 24h hold (informational only — never gates entries)"
+              />
+              <CarryDetailField
                 label="Type"
                 value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
                 title="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding"
@@ -369,6 +374,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           <span className="font-semibold text-slate-900 tabular-nums">{opp.basis_bps >= 0 ? "+" : ""}{opp.basis_bps.toFixed(1)} bps</span>
                         </div>
                       )}
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-500">Win:</span>
+                        <span className="font-semibold text-slate-900 tabular-nums" title="Experimental fee-coverage heuristic — informational only">{opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}</span>
+                      </div>
                     </div>
 
                     <div className="grid grid-cols-2 gap-1.5 font-sans text-[10px]">

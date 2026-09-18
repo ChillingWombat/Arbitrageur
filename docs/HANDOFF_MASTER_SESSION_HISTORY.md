@@ -896,3 +896,33 @@ overhaul pass committed as `23d4aed`).
 - SettingRow + Trading-Mode balance rows rearranged: input adjacent to the
   setting name on top, description divided below (three zones).
 - Stop All icon–text gap tightened; telemetry KPI strip is 6 even columns.
+
+## 25. Session Handoff — 2026-09-19 (Funding Basis Trades + Win Prob + Rate History)
+
+- **Same-exchange spot/perp basis capture** (`665ed0c` precursor, extended here):
+  `evaluate_spot_perp_basis` (math) returns signed `basis_bps` + spot/perp
+  refs with the carry leg; scanner emits per-venue `BASIS` opps (long spot /
+  short perp only — reverse needs borrow, never emitted) with the same
+  depth-aware capacity walk (spot asks vs perp bids) and entry-cross friction
+  as carry. Venues without spot books fail closed. Configurator:
+  `funding_enable_basis` (default ON) + `funding_min_basis_bps` floor.
+  UI: BASIS badge + basis row on cards, type/basis/leg prices in modal.
+- **Win probability for carry + basis** (user-requested gap closure):
+  `funding_win_probability` = coverage/(1+coverage) over a 24h hold
+  (4h be ~0.86 / 24h ~0.50 / 72h ~0.25), +predicted-agreement lift,
+  +positive-basis buffer, clamped [0.02, 0.98]. Informational only — never
+  gates ordering/execution (spread-monitor contract). Shown on cards + modal
+  with "—" fallback.
+- **Funding-rate history (schema v18)**: new `funding_rate_samples` table
+  (minute-bucketed REPLACE, idempotent), recorded on every scan,
+  `funding_rate_series` reader, shared-retention prune. Unblocks the
+  deferred persistence/half-life estimator (funding previously lived only
+  in the 120s hub cache).
+- **Perf**: perp books snapshot-parsed once per scan (O(V) hub clones, was
+  O(V^2) per-pair clones). Math clippy clean.
+- **Verification**: math 86+/0 (8 new), desktop funding 8/0 (2 new scan
+  tests incl. switch-off), store roundtrip/bucket/prune test, tsc clean,
+  frontend suite green (150/5/4/3 per shard, 0 fail).
+- **Still deferred**: empirical half-life/persistence modeling on the new
+  history (needs days of accumulation); native order execution (disabled
+  backend-wide, fail-closed); Current-Position trend graphs package.

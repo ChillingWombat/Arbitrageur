@@ -220,6 +220,72 @@ pub fn evaluate_spot_perp_carry(
     .map(|b| b.carry)
 }
 
+/// Informational win probability for a funding-carry / basis opportunity.
+///
+/// Heuristic, NOT a calibrated forecast: under a memoryless assumption the
+/// edge survives each hour with equal odds, so the chance it persists past
+/// fee breakeven over a standard 24h hold is `coverage / (1 + coverage)`
+/// where `coverage = 24h carry / round-trip fee = 24 / break_even_hours`.
+/// A 4h breakeven scores ~0.86, 24h scores 0.50, 72h scores ~0.25.
+///
+/// Adjustments (small, documented):
+/// - `predicted_agrees = Some(true)` (venue predicted rates confirm the edge
+///   direction): lift `p += (1 - p) * 0.10`. `Some(false)`: `p *= 0.90`.
+/// - `basis_buffer_bps = Some(b)` with `b > 0` (long-spot/short-perp basis
+///   expected to converge at exit): `p += (1 - p) * min(b, 50) / 500`.
+///
+/// Returns `None` when the edge is non-positive or inputs are unusable.
+/// Clamped to `[0.02, 0.98]` — never 0/1: this is guidance, not certainty.
+/// Informational only: must never gate ordering or executability (same
+/// contract as the spread monitor's `win_probability`).
+pub fn funding_win_probability(
+    net_rate_8h: Decimal,
+    round_trip_fee_bps: Decimal,
+    basis_buffer_bps: Option<Decimal>,
+    predicted_agrees: Option<bool>,
+) -> Option<f64> {
+    if net_rate_8h <= dec!(0) || round_trip_fee_bps < dec!(0) {
+        return None;
+    }
+    let rate_f: f64 = net_rate_8h.to_string().parse().ok()?;
+    let fee_f: f64 = round_trip_fee_bps.to_string().parse().ok()?;
+    if !rate_f.is_finite() || !fee_f.is_finite() || rate_f <= 0.0 || fee_f < 0.0 {
+        return None;
+    }
+    // 3 funding periods/day; fee_ratio is dimensionless.
+    let daily_carry = 3.0 * rate_f;
+    let fee_ratio = fee_f / 10_000.0;
+    if daily_carry <= 0.0 {
+        return None;
+    }
+    // Zero-fee edge: carry is pure profit if it persists at all.
+    let mut p = if fee_ratio <= 0.0 {
+        0.95
+    } else {
+        let coverage = daily_carry / fee_ratio;
+        if !coverage.is_finite() || coverage <= 0.0 {
+            return None;
+        }
+        coverage / (1.0 + coverage)
+    };
+    match predicted_agrees {
+        Some(true) => p += (1.0 - p) * 0.10,
+        Some(false) => p *= 0.90,
+        None => {}
+    }
+    if let Some(buffer) = basis_buffer_bps {
+        if let Ok(buffer_f) = buffer.to_string().parse::<f64>() {
+            if buffer_f.is_finite() && buffer_f > 0.0 {
+                p += (1.0 - p) * (buffer_f.min(50.0) / 500.0);
+            }
+        }
+    }
+    if !p.is_finite() {
+        return None;
+    }
+    Some(p.clamp(0.02, 0.98))
+}
+
 /// One rung of the funding entry-capacity walk.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FundingCapacityTier {
@@ -416,6 +482,43 @@ mod spot_perp_basis_tests {
             evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
                 .expect("new");
         assert_eq!(via_legacy, via_new.carry);
+    }
+}
+
+#[cfg(test)]
+mod funding_win_probability_tests {
+    use super::*;
+
+    #[test]
+    fn breakeven_anchors_match_documented_scale() {
+        // fee 7.2bps, rate 0.00024/8h -> breakeven exactly 24h ->
+        // coverage 1.0 -> P = 0.50.
+        let p = funding_win_probability(dec!(0.00024), dec!(7.2), None, None).expect("p");
+        assert!((p - 0.50).abs() < 0.02, "unexpected {p}");
+        // Faster breakeven -> higher P; slower -> lower P (monotonic).
+        let fast = funding_win_probability(dec!(0.001), dec!(7.2), None, None).expect("fast");
+        let slow = funding_win_probability(dec!(0.000024), dec!(7.2), None, None).expect("slow");
+        assert!(fast > p && p > slow, "fast={fast} p={p} slow={slow}");
+    }
+
+    #[test]
+    fn adjustments_lift_or_trim() {
+        let base = funding_win_probability(dec!(0.0001), dec!(7.2), None, None).expect("base");
+        let agree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(true)).expect("agree");
+        let disagree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(false)).expect("disagree");
+        let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None).expect("buffered");
+        assert!(agree > base && base > disagree, "agree={agree} base={base} disagree={disagree}");
+        assert!(buffered > base, "buffered={buffered} base={base}");
+    }
+
+    #[test]
+    fn degenerate_inputs_are_none_and_bounds_hold() {
+        assert_eq!(funding_win_probability(dec!(0), dec!(7.2), None, None), None);
+        assert_eq!(funding_win_probability(dec!(-0.0001), dec!(7.2), None, None), None);
+        // Extremes never reach 0/1.
+        let huge = funding_win_probability(dec!(0.01), dec!(0.1), Some(dec!(1000)), Some(true)).expect("huge");
+        let tiny = funding_win_probability(dec!(0.0000001), dec!(100.0), None, Some(false)).expect("tiny");
+        assert!(huge <= 0.98 && tiny >= 0.02, "huge={huge} tiny={tiny}");
     }
 }
 
