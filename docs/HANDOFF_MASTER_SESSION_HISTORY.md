@@ -1052,3 +1052,24 @@ overhaul pass committed as `23d4aed`).
   is the handoff update. tsc clean; commit + push authorized and done.
 - **Still deferred**: live fee-schedule IPC (static research table for now);
   empirical funding half-life; native execution disabled backend-wide.
+
+## 31. Session Handoff — 2026-09-19 (Display-filters-out-of-configurators audit)
+
+- **Rule applied**: settings that ONLY change what a gadget shows live on the
+  gadget window, never in a strategy Configurator. Audited every configurator:
+  Spread Radar (`OpportunityRadar.tsx` ConfigPanel), all `TickerConfigModal`
+  strategy tabs (futures/triangle, funding carry, spot spatial, triangle cycle,
+  prediction parity), plus Funding/Spot/Triangle/Matrix gadget strips.
+- **Moved**: Spread Radar "Min expected profit (bps)" monitor floor — backend
+  (`monitor.rs`) only clamps it, sole consumer was the frontend table filter,
+  and the gadget strip already owned an equivalent Min Exp control. Removed
+  the Configurator card, the `cfg` table floor, and the ribbon pill; gadget
+  Min Exp display filter now defaults to 0 (preserves the old positive-only
+  default view). Entry hurdle (`botDraft.minExpectedProfitBps`) untouched.
+- **Kept deliberately (engine, not display)**: `min_win_probability` (gates
+  backend Qualified status + capacity breakeven), persistence/coverage floors,
+  friction cover, capacity tiers (drive optimal/breakeven sizes), all entry
+  hurdles, visibility auto-hide filters (exclude tickers from scanners, not
+  just views), routing, risk/limits. `min_win_probability` tooltip corrected
+  to state its engine role and point table filtering at the gadget.
+- **Verification**: tsc clean, full frontend suite green (all shards 0 fail).

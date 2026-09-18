@@ -132,7 +132,7 @@ type SectionIcon = React.ComponentType<{ className?: string }>;
 const MONITOR_SECTIONS: { id: string; label: string; tooltip: string; icon: SectionIcon }[] = [
   { id: "monitor", label: "Monitor", tooltip: "Master enable switch plus background refresh cadences for the watchlist and history.", icon: Activity },
   { id: "qualification", label: "Qualification window", tooltip: "Configure how much spread history qualifies a pair: auto from mean-reversion half-life or an explicit manual window.", icon: Clock },
-  { id: "signal", label: "Signal thresholds", tooltip: "Configure the edge, capacity, and win-probability floors a deviation must clear to surface.", icon: TrendingUp },
+  { id: "signal", label: "Signal thresholds", tooltip: "Engine gates for qualification (edge, capacity, win-probability, persistence, coverage) plus bot entry hurdles. Table display filters live on the gadget strip, not here.", icon: TrendingUp },
   { id: "execution", label: "Execution", tooltip: "Configure Single Way versus Two Way execution, auto-entry arming, and the transaction reserve haircut.", icon: Layers },
   { id: "risk", label: "Risk & Limits", tooltip: "Position caps, per-venue and per-symbol notional limits, cooldowns, and stop/unwind guardrails shared by auto and manual entries.", icon: ShieldCheck },
 ];
@@ -461,7 +461,7 @@ const ConfigPanel: React.FC<{
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Min win probability
-                      <InfoTooltip text="Minimum empirical convergence probability a pair must show to surface in the table." />
+                      <InfoTooltip text="Engine gate — backend marks pairs Qualified only above this and sizes capacity off it. To only change what the table shows, use the gadget's Min Win display filter instead." />
                     </span>
                   </label>
                   <input
@@ -506,21 +506,6 @@ const ConfigPanel: React.FC<{
                     max={1}
                     value={draft.minCoverage}
                     onChange={(e) => set("minCoverage", Math.min(1, Math.max(0, num(e.target.value, 0.5))))}
-                  />
-                </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      Min expected profit (bps)
-                      <InfoTooltip text="Radar table floor — rows show only when expected profit exceeds this (0 = positive-only; negative shows all)." />
-                    </span>
-                  </label>
-                  <input
-                    className={INPUT_INLINE_CLS}
-                    type="number"
-                    step={0.5}
-                    value={draft.minExpectedProfitBps}
-                    onChange={(e) => set("minExpectedProfitBps", num(e.target.value, 0))}
                   />
                 </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
@@ -1012,7 +997,7 @@ const OpportunityRadarInner: React.FC = () => {
   const [showConfig, setShowConfig] = useState(false);
   const [search, setSearch] = useState("");
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
-  const [minExpBps, setMinExpBps] = useState("");
+  const [minExpBps, setMinExpBps] = useState("0"); // default mirrors the old positive-only table floor
   const [minPWin, setMinPWin] = useState("");
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
@@ -1130,9 +1115,12 @@ const OpportunityRadarInner: React.FC = () => {
   );
 
   const rows = useMemo(() => {
+    // NOTE (display-vs-engine split): this table is filtered ONLY by the gadget
+    // strip controls below (search / venues / Min Exp / Min Win). The old
+    // persisted `minExpectedProfitBps` table floor was removed from the
+    // Configurator because it never reached the engine — backend only clamps
+    // it — so it was a display filter in disguise. One owner, one place.
     let out = snap?.rows ?? [];
-    const floor = cfg?.minExpectedProfitBps ?? 0;
-    out = out.filter((r) => (r.expectedProfitBps ?? -Infinity) > floor);
     const q = search.trim().toUpperCase();
     if (q) out = out.filter((r) => r.symbol.includes(q));
     if (venueFilters.length)
@@ -1146,7 +1134,7 @@ const OpportunityRadarInner: React.FC = () => {
     if (Number.isFinite(mp) && minPWin !== "")
       out = out.filter((r) => (r.pWin ?? -Infinity) >= mp / 100);
     return out;
-  }, [snap, search, venueFilters, minExpBps, minPWin, cfg]);
+  }, [snap, search, venueFilters, minExpBps, minPWin]);
 
   const key = useCallback((r: MonitorRowDto) => `${r.symbol}:${r.buyVenue}:${r.sellVenue}`, []);
 
@@ -1231,14 +1219,6 @@ const OpportunityRadarInner: React.FC = () => {
               {cfg ? `${(cfg.minWinProbability * 100).toFixed(0)}` : "—"}
             </span>
             <span className="text-slate-400">%</span>
-          </div>
-          <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
-            title="Radar table expected-profit floor — edit via Configurator"
-          >
-            <span className="text-slate-400">Min Exp</span>
-            <span className="font-bold text-slate-900">{cfg?.minExpectedProfitBps ?? "—"}</span>
-            <span className="text-slate-400">BPS</span>
           </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
