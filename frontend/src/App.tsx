@@ -857,6 +857,7 @@ export const App: React.FC = () => {
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
+              openPositions={openPositions}
             />
           )}
 

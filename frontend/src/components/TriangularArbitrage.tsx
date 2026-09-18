@@ -168,7 +168,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   const activeOpp = selectedOpp || opportunities[0] || null;
 
   return (
-    <div className="w-full p-4 space-y-4 overflow-y-auto h-full select-none pb-24 font-mono">
+    <div className="w-full p-4 pr-5 space-y-4 overflow-y-auto h-full select-none pb-24 font-mono">
       {/* 1. Strategy Ribbon — read-only params left, configurator + toggle right */}
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">

@@ -315,7 +315,7 @@ const ConfigPanel: React.FC<{
           </div>
 
           {/* Right Main Content Area */}
-          <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-surface">
+          <div className="flex-1 overflow-y-auto p-4 pr-5 space-y-4 bg-surface">
             {activeSection === "monitor" && (
               <div className="space-y-3">
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>

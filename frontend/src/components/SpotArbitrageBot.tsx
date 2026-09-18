@@ -150,7 +150,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   const totalSpotPnl = spotLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto p-4 space-y-4">
+    <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto p-4 pr-5 space-y-4">
       {/* Strategy Ribbon — dedicated zone: parameters left, configurator + toggle right */}
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">

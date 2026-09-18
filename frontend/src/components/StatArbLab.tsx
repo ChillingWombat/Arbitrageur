@@ -124,7 +124,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
   const latest = history[history.length - 1];
 
   return (
-    <div className="p-4 space-y-4 overflow-y-auto h-full">
+    <div className="p-4 pr-5 space-y-4 overflow-y-auto h-full">
       {errorMsg && (
         <div className="bg-loss-dim border border-loss-border text-loss px-4 py-3 rounded-lg text-xs font-mono flex items-center justify-between">
           <div className="flex items-center space-x-2">

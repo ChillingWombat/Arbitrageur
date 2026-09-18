@@ -24,7 +24,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
   const margin = riskData.margin_health;
 
   return (
-    <div className="p-4 space-y-4 overflow-y-auto h-full">
+    <div className="p-4 pr-5 space-y-4 overflow-y-auto h-full">
       {/* Top Banner */}
       <div className="bg-surface p-4 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-4 shadow-card">
         <div>

@@ -176,7 +176,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   // (types/tickers) — keyed by the persisted ids: futures/funding/spot/etc.
 
   return (
-    <div className="w-full p-4 space-y-4 overflow-y-auto h-full select-none pb-24">
+    <div className="w-full p-4 pr-5 space-y-4 overflow-y-auto h-full select-none pb-24">
       {/* 1. Header Control Bar */}
       <div className="bg-surface p-4 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-3 shadow-card">
         <div>

@@ -64,7 +64,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   }, [bot.entriesAllowed, executingId, opportunities, isPaused]);
 
   return (
-    <div className="p-4 space-y-4 overflow-y-auto h-full">
+    <div className="p-4 pr-5 space-y-4 overflow-y-auto h-full">
       {/* Strategy Ribbon — venue params left, search + toggle right */}
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">

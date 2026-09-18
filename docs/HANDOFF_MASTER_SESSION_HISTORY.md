@@ -945,3 +945,30 @@ overhaul pass committed as `23d4aed`).
 - **Verification**: math 90/0 (+4), desktop funding 8/0, tsc clean.
 - **Next**: empirical funding-persistence / half-life model on the growing
   history; Current-Position trend graphs; native execution stays disabled.
+
+## 27. Session Handoff — 2026-09-19 (Current Position Gadget + Full Chat Audit)
+
+- **Current Position gadget (msg33.5, re-asked msg40)**: third dock tab in the
+  funding monitor, LEFT of Execution History: lists strategy-"funding" open
+  positions from `get_open_positions` (wired via App fan-out), click opens a
+  popup with legs/notional/fees/unrealized/signals/opened + hand-rolled SVG
+  net-PnL trend (solid realized entry-at-fees → now; dashed illustrative
+  24h projection ONLY when backend supplies expectedNetUsd — nothing
+  fabricated). Empty state explains native execution is disabled.
+  Marginal-PnL / funding-diff / spread graphs (msg33.6) still need position
+  telemetry that does not exist yet — deferred honestly, not faked.
+- **msg33.3 closes**: popup APY → "Compounded APY"; "Trade size" removed in
+  favour of "Opportunity capacity" (was "Executable size"); Max Entry
+  Spread stays the adjustable capacity gate (default 50bps — the asked
+  5bps top-slippage rule differs; flagged, not silently swapped).
+- **msg26 closes**: +pr-5 breathing room between gadgets and the page
+  scrollbar on all strategy-page scroll roots.
+- **Full chat audit** (both threads, 56 user messages) verified against code:
+  full table in the session reply; open items are msg33.4/33.6 (need
+  telemetry + accumulated history), msg22 holding-days field (needs the
+  convergence estimator), msg18 paper/live selector (kept deliberately —
+  bot controls are lifecycle, not mode), About card (kept deliberately —
+  version info), plus two obsolete items (Solve-Optimal button and 15m
+  preset no longer exist after redesigns).
+- **Verification**: tsc clean, frontend 11 shards green, desktop suite
+  re-run on commit.
