@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
-  Bot,
+  ShieldCheck,
   Check,
   Search,
   SlidersHorizontal,
@@ -133,12 +133,11 @@ const MONITOR_SECTIONS: { id: string; label: string; tooltip: string; icon: Sect
   { id: "monitor", label: "Monitor", tooltip: "Master enable switch plus background refresh cadences for the watchlist and history.", icon: Activity },
   { id: "qualification", label: "Qualification window", tooltip: "Configure how much spread history qualifies a pair: auto from mean-reversion half-life or an explicit manual window.", icon: Clock },
   { id: "signal", label: "Signal thresholds", tooltip: "Configure the edge, capacity, and win-probability floors a deviation must clear to surface.", icon: TrendingUp },
-  { id: "execution", label: "Execution", tooltip: "Configure one-way versus two-way execution and the transaction reserve haircut.", icon: Layers },
-  { id: "bot", label: "Auto-Bot", tooltip: "Autonomous convergence bot mode, entry guardrails, notional caps, and risk stop multipliers.", icon: Bot },
+  { id: "execution", label: "Execution", tooltip: "Configure Single Way versus Two Way execution, auto-entry arming, and the transaction reserve haircut.", icon: Layers },
+  { id: "risk", label: "Risk & Limits", tooltip: "Position caps, per-venue and per-symbol notional limits, cooldowns, and stop/unwind guardrails shared by auto and manual entries.", icon: ShieldCheck },
 ];
 
-const BOT_NUM_FIELDS: { key: keyof RadarBotConfigDto; label: string; tooltip: string; step?: string }[] = [
-  { key: "minExpectedProfitBps", label: "Min expected profit (bps)", tooltip: "Entry hurdle on probability-weighted expected profit after friction." },
+const RISK_NUM_FIELDS: { key: keyof RadarBotConfigDto; label: string; tooltip: string; step?: string }[] = [
   { key: "maxConcurrentPositions", label: "Max concurrent positions", tooltip: "Cap on simultaneously managed convergence positions.", step: "1" },
   { key: "maxNotionalPerPositionUsd", label: "Max $ per position", tooltip: "Per-entry notional cap in USD." },
   { key: "maxNotionalPerVenueUsd", label: "Max $ per venue", tooltip: "Open bot notional cap summed per venue leg in USD." },
@@ -223,7 +222,9 @@ const ConfigPanel: React.FC<{
       maxSymbolIntervalSecs: d.maxSymbolIntervalSecs,
       minSymbolIntervalSecs: d.minSymbolIntervalSecs,
     }));
-    setBotDraft(defaultRadarBotConfig());
+    // Bot mode is driven from the main-page lifecycle buttons — Reset Defaults
+    // must not silently flip it.
+    setBotDraft((d) => ({ ...defaultRadarBotConfig(), mode: d.mode }));
   };
 
   const handleSave = async () => {
@@ -259,7 +260,7 @@ const ConfigPanel: React.FC<{
               <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
                 Spread Radar Configurator
               </h2>
-              <p className="text-[11px] font-sans text-slate-500">Monitor thresholds, probability gates, and execution mode</p>
+              <p className="text-[11px] font-sans text-slate-500">Monitor thresholds, probability gates, execution and risk limits</p>
             </div>
           </div>
           <div className="flex items-center space-x-3">
@@ -522,6 +523,38 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minExpectedProfitBps", num(e.target.value, 0))}
                   />
                 </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Entry min win probability (%)
+                      <InfoTooltip text="Bot entry conviction floor — entries demand higher P_win than the monitor display threshold above. Applies to auto entries and manual monitor-table entries alike." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={50}
+                    max={99.9}
+                    step="0.1"
+                    value={(botDraft.minPWin * 100).toFixed(1)}
+                    onChange={(e) => setBot("minPWin", num(e.target.value, 93) / 100)}
+                  />
+                </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Entry min expected profit (bps)
+                      <InfoTooltip text="Bot entry hurdle on probability-weighted expected profit after friction — stricter than the monitor display floor above." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.5}
+                    value={Number(botDraft.minExpectedProfitBps)}
+                    onChange={(e) => setBot("minExpectedProfitBps", num(e.target.value, 0))}
+                  />
+                </div>
               </div>
             )}
 
@@ -531,7 +564,7 @@ const ConfigPanel: React.FC<{
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Execution
-                      <InfoTooltip text="One-way opens the spread only; two-way also prices the closing leg into expected profit." />
+                      <InfoTooltip text="Single Way opens the spread only; Two Way also prices the closing leg into expected profit." />
                     </span>
                   </label>
                   <select
@@ -539,9 +572,18 @@ const ConfigPanel: React.FC<{
                     value={draft.executionMode}
                     onChange={(e) => set("executionMode", e.target.value as "one_way" | "two_way")}
                   >
-                    <option value="one_way">One-way (open)</option>
-                    <option value="two_way">Two-way (+close)</option>
+                    <option value="one_way">Single Way (open)</option>
+                    <option value="two_way">Two Way (+close)</option>
                   </select>
+                </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Arm auto entries
+                      <InfoTooltip text="Master opt-in for automatic entries on filtered signals — auto entries fire only when armed AND the main-page bot is Started. Manual monitor-table entries always place through the bot with automatic exits. Ships off." />
+                    </span>
+                  </label>
+                  <SwitchToggle size="sm" checked={botDraft.enabled} onChange={(v) => setBot("enabled", v)} />
                 </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
@@ -563,51 +605,9 @@ const ConfigPanel: React.FC<{
               </div>
             )}
 
-            {activeSection === "bot" && (
+            {activeSection === "risk" && (
               <div className="space-y-3">
-                <div className={CARD_CLS}>
-                  <label className={`${LABEL_CLS} justify-between`}>
-                    <span className="flex items-center">
-                      Mode
-                      <InfoTooltip text="auto trades entries+exits; paused/reduce_only run exits only; off is fully inert. Arming requires enabled + auto." />
-                    </span>
-                    <select
-                      className="px-2.5 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-bold font-mono shadow-2xs"
-                      value={botDraft.mode}
-                      onChange={(e) => setBot("mode", e.target.value as RadarBotConfigDto["mode"])}
-                    >
-                      <option value="off">off</option>
-                      <option value="auto">auto</option>
-                      <option value="paused">paused</option>
-                      <option value="reduce_only">reduce_only</option>
-                    </select>
-                  </label>
-                  <label className={`${LABEL_CLS} justify-between mt-2 pt-2 border-t border-surface-border/60`}>
-                    <span className="flex items-center">
-                      Arm auto entries
-                      <InfoTooltip text="Master opt-in. Entries fire only when armed AND mode is auto. Ships off." />
-                    </span>
-                    <SwitchToggle size="sm" checked={botDraft.enabled} onChange={(v) => setBot("enabled", v)} />
-                  </label>
-                </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      Min win probability (%)
-                      <InfoTooltip text="Entry conviction floor — demand higher P_win than the monitor display threshold." />
-                    </span>
-                  </label>
-                  <input
-                    className={INPUT_INLINE_CLS}
-                    type="number"
-                    min={50}
-                    max={99.9}
-                    step="0.1"
-                    value={(botDraft.minPWin * 100).toFixed(1)}
-                    onChange={(e) => setBot("minPWin", num(e.target.value, 93) / 100)}
-                  />
-                </div>
-                {BOT_NUM_FIELDS.map((f) => (
+                {RISK_NUM_FIELDS.map((f) => (
                   <div className={`${CARD_CLS} flex items-center justify-between gap-3`} key={f.key}>
                     <label className={`${LABEL_CLS} flex-1`}>
                       <span className="flex items-center">
@@ -637,7 +637,7 @@ const ConfigPanel: React.FC<{
           <button
             type="button"
             onClick={handleResetDefaults}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-md border border-surface-border transition cursor-pointer"
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-lg border border-surface-border transition cursor-pointer"
             title="Reset to default monitor parameters"
           >
             <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -652,7 +652,7 @@ const ConfigPanel: React.FC<{
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-md font-medium transition cursor-pointer"
+              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer"
             >
               Cancel
             </button>
@@ -660,7 +660,7 @@ const ConfigPanel: React.FC<{
               type="button"
               onClick={handleSave}
               disabled={saving}
-              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-md font-semibold transition shadow-2xs cursor-pointer ${
+              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
                 saveSuccess
                   ? "bg-profit text-white border border-profit-border"
                   : "bg-accent hover:bg-blue-600 text-white"
@@ -683,73 +683,221 @@ const ConfigPanel: React.FC<{
 };
 
 /* ------------------------------------------------------------------ */
-/* Capacity ladder expansion                                           */
+/* Signal detail popup (capacity ladder + full signal fields)            */
 /* ------------------------------------------------------------------ */
 
-const LadderRow: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => (
-  <tr className="bg-surface-raised/70">
-    <td colSpan={17} className="px-6 py-2">
-      <div className="flex items-end gap-3">
-        {row.capacityLadder.length === 0 && (
-          <span className="text-slate-400">no depth data</span>
-        )}
-        {row.capacityLadder.map((t) => {
-          const h = Math.max(
-            8,
-            Math.min(48, ((t.expectedNetBps ?? 0) / 15) * 48 + 8),
-          );
-          const good = (t.expectedNetBps ?? -1) > 0;
-          return (
-            <div key={t.sizeUsd} className="flex flex-col items-center gap-1">
-              <div
-                className={`w-10 rounded-sm ${good ? "bg-accent/70" : "bg-slate-300"}`}
-                style={{ height: `${h}px` }}
-                title={`net ${fmtBps(t.netBps)}bp · E ${fmtBps(t.expectedNetBps)}bp · p ${fmtPct(t.marginalPWin)}`}
-              />
-              <span className="text-xs text-slate-500">{fmtUsd(t.sizeUsd)}</span>
-              <span className={`text-xs ${good ? "text-accent" : "text-slate-400"}`}>
-                {t.filledUsd < t.sizeUsd - 0.5
-                  ? `${fmtUsd(t.filledUsd)} fill`
-                  : fmtBps(t.expectedNetBps)}
+const CapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => (
+  <div className="flex items-end gap-3">
+    {row.capacityLadder.length === 0 && (
+      <span className="text-slate-400">no depth data</span>
+    )}
+    {row.capacityLadder.map((t) => {
+      const h = Math.max(
+        8,
+        Math.min(48, ((t.expectedNetBps ?? 0) / 15) * 48 + 8),
+      );
+      const good = (t.expectedNetBps ?? -1) > 0;
+      return (
+        <div key={t.sizeUsd} className="flex flex-col items-center gap-1">
+          <div
+            className={`w-10 rounded-lg ${good ? "bg-accent/70" : "bg-slate-300"}`}
+            style={{ height: `${h}px` }}
+            title={`net ${fmtBps(t.netBps)}bp · E ${fmtBps(t.expectedNetBps)}bp · p ${fmtPct(t.marginalPWin)}`}
+          />
+          <span className="text-xs text-slate-500">{fmtUsd(t.sizeUsd)}</span>
+          <span className={`text-xs ${good ? "text-accent" : "text-slate-400"}`}>
+            {t.filledUsd < t.sizeUsd - 0.5
+              ? `${fmtUsd(t.filledUsd)} fill`
+              : fmtBps(t.expectedNetBps)}
+          </span>
+        </div>
+      );
+    })}
+    <div className="ml-4 text-xs text-slate-500 leading-4">
+      <div>
+        optimal <span className="text-slate-700 font-semibold">{fmtUsd(row.optimalSizeUsd)}</span>
+      </div>
+      <div>
+        breakeven <span className="text-slate-700 font-semibold">{fmtUsd(row.breakevenSizeUsd)}</span>
+      </div>
+    </div>
+  </div>
+));
+
+const DetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
+  label,
+  value,
+  title,
+}) => (
+  <div className="space-y-0.5" title={title}>
+    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
+    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
+  </div>
+);
+
+interface SignalDetailModalProps {
+  row: MonitorRowDto;
+  held: boolean;
+  sizeValue: number | undefined;
+  executing: boolean;
+  onSizeChange: (rowKey: string, value: number) => void;
+  onExecute: (row: MonitorRowDto) => void;
+  onClose: () => void;
+}
+
+const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
+  ({ row: r, held, sizeValue, executing, onSizeChange, onExecute, onClose }) => {
+    const rowKey = `${r.symbol}:${r.buyVenue}:${r.sellVenue}`;
+    const live = isLiveCapableRoute(r.buyVenue, r.sellVenue);
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onClose();
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [onClose]);
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="bg-surface border border-surface-border rounded-2xl w-[720px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm font-bold font-sans text-slate-900">{r.symbol}</span>
+              <span className="text-xs font-sans text-slate-500">
+                {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→{VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
+              </span>
+              {held && (
+                <span
+                  className="px-1.5 py-0.5 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-sans font-bold"
+                  title="Bot-managed convergence position open on this pair"
+                >
+                  bot
+                </span>
+              )}
+              <span
+                className={`px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold ${
+                  live
+                    ? "border-profit-border bg-profit-dim text-profit"
+                    : "border-surface-border bg-surface-raised text-slate-500"
+                }`}
+                title={live ? "Both venues support live API execution" : "Route involves a read-only venue — paper execution only"}
+              >
+                {live ? "LIVE" : "PAPER"}
+              </span>
+              <span
+                className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
+                title={
+                  r.status === "collecting"
+                    ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
+                    : r.blockReason ?? r.status
+                }
+              >
+                {r.status}
+                {r.status === "collecting" && ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
               </span>
             </div>
-          );
-        })}
-        <div className="ml-4 text-xs text-slate-500 leading-4">
-          <div>
-            optimal <span className="text-slate-700 font-semibold">{fmtUsd(row.optimalSizeUsd)}</span>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              title="Close details (ESC)"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <div>
-            breakeven <span className="text-slate-700 font-semibold">{fmtUsd(row.breakevenSizeUsd)}</span>
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+              <DetailField label="Expected profit" value={fmtBpsU(r.expectedProfitBps)} />
+              <DetailField label="Net capture" value={fmtBpsU(r.netCaptureBps)} />
+              <DetailField label="Baseline" value={fmtBpsU(r.baselineBps)} />
+              <DetailField label="Deviation" value={fmtBpsU(r.deviationBps)} />
+              <DetailField label="Win probability" value={fmtPct(r.pWin)} />
+              <DetailField
+                label="Persistence"
+                value={fmtPct(r.thresholdRatio)}
+                title="Fraction of in-window buckets at/above entry (persistence gate)"
+              />
+              <DetailField
+                label="Coverage"
+                value={fmtPct(r.coverage)}
+                title="Fraction of expected window buckets with both venues observed (coverage gate)"
+              />
+              <DetailField label="Exp profit $" value={fmtUsd(r.expectedProfitUsd)} />
+              <DetailField label="Optimal size" value={fmtUsd(r.optimalSizeUsd)} />
+              <DetailField label="Breakeven size" value={fmtUsd(r.breakevenSizeUsd)} />
+              <DetailField
+                label="Signal age"
+                value={fmtDur(r.signalAgeSecs)}
+                title={`first seen ${fmtTs(r.firstSeenMs)}`}
+              />
+              <DetailField label="Time to converge" value={fmtDur(r.expectedConvergeSecs)} />
+            </div>
+
+            {r.blockReason && (
+              <div className="p-3 bg-warn-dim border border-warn-border rounded-lg text-xs font-sans text-warn">
+                {r.blockReason}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
+                Capacity ladder
+              </div>
+              <CapacityLadder row={r} />
+            </div>
+          </div>
+
+          <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
+            <input
+              className="w-28 bg-surface border border-surface-border rounded-lg px-2 py-1.5 text-right text-xs text-slate-800 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all shadow-2xs font-sans tabular-nums"
+              type="number"
+              min={0}
+              placeholder={fmtUsd(r.optimalSizeUsd ?? 1000)}
+              value={sizeValue ?? ""}
+              onChange={(e) => onSizeChange(rowKey, Number(e.target.value))}
+            />
+            <button
+              className="btn-primary px-4 py-1.5 text-xs rounded-lg shadow-2xs cursor-pointer"
+              disabled={!r.executable || executing}
+              title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
+              onClick={() => onExecute(r)}
+            >
+              {executing ? "…" : "Exec"}
+            </button>
           </div>
         </div>
       </div>
-    </td>
-  </tr>
-));
+    );
+  },
+);
 
 interface RadarRowProps {
   row: MonitorRowDto;
   rowKey: string;
-  open: boolean;
   held: boolean;
   sizeValue: number | undefined;
   executing: boolean;
-  onToggle: (rowKey: string) => void;
+  onOpenDetail: (rowKey: string) => void;
   onSizeChange: (rowKey: string, value: number) => void;
   onExecute: (row: MonitorRowDto) => void;
 }
 
 const RadarRow: React.FC<RadarRowProps> = React.memo(
-  ({ row: r, rowKey: k, open, held, sizeValue, executing, onToggle, onSizeChange, onExecute }) => {
+  ({ row: r, rowKey: k, held, sizeValue, executing, onOpenDetail, onSizeChange, onExecute }) => {
     return (
       <React.Fragment>
         <tr
           className="border-b border-surface-border/60 hover:bg-blue-50/25 transition-colors cursor-pointer"
-          onClick={() => onToggle(k)}
+          onClick={() => onOpenDetail(k)}
+          title="Open signal details"
         >
           <td className="px-2 py-2 text-slate-400">
-            {open ? <ChevronDown size={12} className="text-accent" /> : <ChevronRight size={12} />}
+            <ChevronRight size={12} />
           </td>
           <td className="px-2 py-2 font-bold font-sans text-xs text-slate-900">
             {r.symbol}
@@ -846,7 +994,6 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             </div>
           </td>
         </tr>
-        {open && <LadderRow row={r} />}
       </React.Fragment>
     );
   },
@@ -879,7 +1026,7 @@ const OpportunityRadarInner: React.FC = () => {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [detailKey, setDetailKey] = useState<string | null>(null);
   const [executing, setExecuting] = useState<string | null>(null);
   const [execError, setExecError] = useState<string | null>(null);
   const [execSuccess, setExecSuccess] = useState<string | null>(null);
@@ -1032,13 +1179,12 @@ const OpportunityRadarInner: React.FC = () => {
     [key, sizeUsd],
   );
 
-  const handleToggleRow = useCallback((k: string) => {
-    setExpanded((s) => {
-      const n = new Set(s);
-      if (n.has(k)) n.delete(k);
-      else n.add(k);
-      return n;
-    });
+  const handleOpenDetail = useCallback((k: string) => {
+    setDetailKey(k);
+  }, []);
+
+  const handleCloseDetail = useCallback(() => {
+    setDetailKey(null);
   }, []);
 
   const handleSizeChange = useCallback((k: string, value: number) => {
@@ -1070,15 +1216,15 @@ const OpportunityRadarInner: React.FC = () => {
             Strategy Parameters
           </span>
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
-            title="Qualification window mode — edit via Configure Strategy"
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
+            title="Qualification window mode — edit via Configurator"
           >
             <span className="text-slate-400">Qualification</span>
             <span className="font-bold text-slate-900">{cfg?.qualificationMode ?? "—"}</span>
           </div>
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
-            title="Minimum convergence probability floor — edit via Configure Strategy"
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
+            title="Minimum convergence probability floor — edit via Configurator"
           >
             <span className="text-slate-400">Min Win</span>
             <span className="font-bold text-slate-900">
@@ -1087,20 +1233,20 @@ const OpportunityRadarInner: React.FC = () => {
             <span className="text-slate-400">%</span>
           </div>
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
-            title="Radar table expected-profit floor — edit via Configure Strategy"
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
+            title="Radar table expected-profit floor — edit via Configurator"
           >
             <span className="text-slate-400">Min Exp</span>
             <span className="font-bold text-slate-900">{cfg?.minExpectedProfitBps ?? "—"}</span>
             <span className="text-slate-400">BPS</span>
           </div>
           <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md"
-            title="Execution mode — edit via Configure Strategy"
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
+            title="Execution mode — edit via Configurator"
           >
             <span className="text-slate-400">Execution</span>
             <span className="font-bold text-slate-900">
-              {cfg ? (cfg.executionMode === "two_way" ? "two-way" : "one-way") : "—"}
+              {cfg ? (cfg.executionMode === "two_way" ? "Two Way" : "Single Way") : "—"}
             </span>
           </div>
         </div>
@@ -1125,11 +1271,11 @@ const OpportunityRadarInner: React.FC = () => {
           <button
             type="button"
             onClick={() => setShowConfig(true)}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
             title="Configure Spread Radar monitor parameters"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-            <span>Configure Strategy</span>
+            <span>Configurator</span>
           </button>
 
           <BotLifecycleControls
@@ -1338,11 +1484,10 @@ const OpportunityRadarInner: React.FC = () => {
                   key={k}
                   row={r}
                   rowKey={k}
-                  open={expanded.has(k)}
                   held={isRowHeld(r, heldSet)}
                   sizeValue={sizeUsd[k]}
                   executing={executing === k}
-                  onToggle={handleToggleRow}
+                  onOpenDetail={handleOpenDetail}
                   onSizeChange={handleSizeChange}
                   onExecute={handleExecute}
                 />
@@ -1352,6 +1497,22 @@ const OpportunityRadarInner: React.FC = () => {
         </table>
       </div>
       </div>
+      {(() => {
+        const detailRow = detailKey != null ? rows.find((r) => key(r) === detailKey) ?? null : null;
+        if (!detailRow) return null;
+        const k = key(detailRow);
+        return (
+          <SignalDetailModal
+            row={detailRow}
+            held={isRowHeld(detailRow, heldSet)}
+            sizeValue={sizeUsd[k]}
+            executing={executing === k}
+            onSizeChange={handleSizeChange}
+            onExecute={handleExecute}
+            onClose={handleCloseDetail}
+          />
+        );
+      })()}
     </div>
   );
 };

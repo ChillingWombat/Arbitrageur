@@ -117,7 +117,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
             title={b.title}
             disabled={!b.enabled}
             onClick={b.onClick}
-            className={`flex items-center space-x-1 px-2.5 py-1 rounded-md border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+            className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
               b.enabled ? b.activeClass : "text-slate-400 border-surface-border bg-surface-raised/40"
             }`}
           >

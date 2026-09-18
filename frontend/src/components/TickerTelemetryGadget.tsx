@@ -6,7 +6,6 @@ import { formatCurrencyPnl } from "../types/tickers";
 interface TickerTelemetryGadgetProps {
   symbol: string;
   logs: ExecutionLogEntry[];
-  routeHurdleBps?: number | null;
   gridCurrentUnits?: number;
   gridMaxUnits?: number;
 }
@@ -14,7 +13,6 @@ interface TickerTelemetryGadgetProps {
 export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
   symbol,
   logs,
-  routeHurdleBps = null,
   gridCurrentUnits = 0,
   gridMaxUnits = 0,
 }) => {
@@ -68,21 +66,21 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
       {/* Ticker KPI Summary Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3 text-xs font-mono">
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Total Trades</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Total Cycles</div>
           <div className="text-sm font-bold text-slate-900 tabular-nums mt-1">
-            {metrics.total} <span className="text-xs font-normal text-slate-500">({metrics.filled} filled)</span>
+            {metrics.total} <span className="text-xs font-normal text-slate-500">({metrics.filled} closed)</span>
           </div>
         </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Realized Net PnL</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Total Net Profit</div>
           <div className={`text-sm font-bold tabular-nums mt-1 ${metrics.netPnl >= 0 ? "text-profit" : "text-loss"}`}>
             {formatCurrencyPnl(metrics.netPnl)}
           </div>
         </div>
 
-        <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Win / Fill Rate</div>
+        <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs" title="Rate of successful cycles — entered and exited after reaching target">
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Success Rate</div>
           <div className="text-sm font-bold text-slate-900 tabular-nums mt-1">{metrics.winRate.toFixed(1)}%</div>
         </div>
 
@@ -93,29 +91,17 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
           </div>
         </div>
 
-        <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Signal Baseline Mean</div>
-          <div className="text-sm font-bold text-slate-700 tabular-nums mt-1">
-            {metrics.avgBaseline > 0 ? `${metrics.avgBaseline.toFixed(1)} BPS` : "—"}
-          </div>
-        </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Spread Dislocation Δ</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Current Dislocation</div>
           <div className={`text-sm font-bold tabular-nums mt-1 ${metrics.avgDislocation >= 0 ? "text-profit" : "text-slate-700"}`}>
             {metrics.avgDislocation !== 0 ? `+${metrics.avgDislocation.toFixed(1)} BPS` : "—"}
           </div>
         </div>
 
-        <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Hurdle</div>
-          <div className="text-sm font-bold text-slate-900 tabular-nums mt-1">
-            {routeHurdleBps != null ? `${routeHurdleBps.toFixed(1)} BPS` : "—"}
-          </div>
-        </div>
 
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
-          <div className="text-xs text-slate-500 tracking-wider font-semibold">Grid Status</div>
+          <div className="text-xs text-slate-500 tracking-wider font-semibold">Grid Step</div>
           <div className="text-sm font-bold text-slate-900 tabular-nums mt-1">
             {gridCurrentUnits}/{gridMaxUnits} steps
           </div>

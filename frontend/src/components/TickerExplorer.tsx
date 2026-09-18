@@ -489,12 +489,6 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
     <div className="w-full h-full bg-surface border border-surface-border rounded-lg shadow-2xs flex flex-col select-none overflow-hidden">
       {/* Top Header & Search */}
       <div className="p-3 border-b border-surface-border space-y-2.5">
-        <div className="flex items-center justify-between">
-          <div className="text-[13px] font-mono font-bold tracking-wider text-slate-900 flex items-center space-x-1.5">
-            <span>Tickers</span>
-          </div>
-        </div>
-
         {/* Search Bar & Sort Configuration Button */}
         <div className="flex items-center space-x-1.5 relative">
           <div className="relative flex-1">
@@ -712,7 +706,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                 <button
                   type="button"
                   onClick={onOpenSettings}
-                  className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-md font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
+                  className="mt-2 inline-flex items-center space-x-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded-lg font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
                 >
                   <Settings className="w-3.5 h-3.5" />
                   <span>Open System Setting</span>
@@ -746,7 +740,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
         <div
           ref={contextMenuRef}
           role="menu"
-          className="fixed w-52 bg-surface border border-surface-border rounded-md shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100"
+          className="fixed w-52 bg-surface border border-surface-border rounded-lg shadow-lg p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100"
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -758,7 +752,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               key={id}
               role="menuitem"
               onClick={() => handleSelectContextItem(id)}
-              className="w-full flex items-center space-x-2 px-2.5 py-1.5 text-left transition rounded-sm text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+              className="w-full flex items-center space-x-2 px-2.5 py-1.5 text-left transition rounded-lg text-slate-700 hover:bg-surface-raised hover:text-slate-900"
             >
               <Icon className="w-3.5 h-3.5 text-slate-600" />
               <span>{label}</span>

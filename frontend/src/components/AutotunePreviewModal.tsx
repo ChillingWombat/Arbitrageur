@@ -40,7 +40,7 @@ function formatValue(param: string, v: number | null): string {
 
 /** Manual-transcription text: READY rows only, `param=value` per line. */
 export function buildAutotuneCopyText(rec: AutotuneRecommendationDto): string {
-  const lines = [`# Auto-tune ${rec.symbol} (recommend-only — transcribe manually)`];
+  const lines = [`# AutoTune ${rec.symbol} (recommend-only — transcribe manually)`];
   for (const row of rec.rows) {
     if (row.status === "READY" && row.recommended != null) {
       lines.push(`${row.param}=${row.recommended}`);
@@ -137,7 +137,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
-                Auto-tune Preview · {symbol}
+                AutoTune Preview · {symbol}
               </h2>
               <p className="text-[11px] font-sans text-slate-500">
                 One-click apply writes READY rows only — HELD rows are never applied
@@ -163,7 +163,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
 
         <div className="flex-1 overflow-y-auto p-4 font-mono">
           {loading && <p className="text-xs text-slate-500">Computing walk-forward recommendation…</p>}
-          {error && <p className="text-xs text-loss">Auto-tune failed: {error}</p>}
+          {error && <p className="text-xs text-loss">AutoTune failed: {error}</p>}
           {applyError && <p className="text-xs text-loss">Apply failed: {applyError}</p>}
           {applyResult && (
             <p className="text-xs text-profit font-semibold">
@@ -249,7 +249,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
             type="button"
             onClick={handleCopy}
             disabled={!recommendation || loading}
-            className="flex items-center space-x-1.5 px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-md font-medium transition cursor-pointer disabled:opacity-50"
+            className="flex items-center space-x-1.5 px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer disabled:opacity-50"
             title="Copy READY values as param=value lines for manual transcription"
           >
             {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
@@ -259,7 +259,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
             type="button"
             onClick={handleApply}
             disabled={selectedReady.length === 0 || applying || loading}
-            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-md font-semibold transition cursor-pointer disabled:opacity-50"
+            className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold transition cursor-pointer disabled:opacity-50"
             title="Write selected READY rows through saveStrategyParams/saveTickerStrategyConfig with an audit line"
           >
             {applying ? "Applying…" : `Apply selected (${selectedReady.length})`}
@@ -267,7 +267,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="px-4 py-1.5 bg-accent hover:bg-blue-600 text-white rounded-md font-semibold transition cursor-pointer"
+            className="px-4 py-1.5 bg-accent hover:bg-blue-600 text-white rounded-lg font-semibold transition cursor-pointer"
           >
             Close
           </button>

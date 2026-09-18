@@ -68,7 +68,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           title="Start the bot — monitor, enter, and automatically rebalance on convergence"
           disabled={controlsOff || armed}
           onClick={() => onMode("auto")}
-          className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+          className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-sans font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
             armed
               ? "bg-profit text-white shadow-xs font-bold"
               : "text-profit hover:bg-profit-dim border border-transparent hover:border-profit-border"
@@ -83,7 +83,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           title="Pause new entries; open positions remain managed until target convergence"
           disabled={controlsOff || cfg?.mode === "paused"}
           onClick={() => onMode("paused")}
-          className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
+          className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
             cfg?.mode === "paused"
               ? "bg-accent text-white shadow-xs font-bold"
               : "text-slate-700 hover:bg-slate-200/50"
@@ -98,7 +98,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           title="Emergency exit — stop bot and immediately flatten this strategy's positions to delta-neutral"
           disabled={!flattenArmed}
           onClick={handleStop}
-          className="flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed text-loss hover:bg-loss-dim border border-transparent hover:border-loss-border bg-loss-dim/40 shadow-xs active:scale-[0.98]"
+          className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed text-loss hover:bg-loss-dim border border-transparent hover:border-loss-border bg-loss-dim/40 shadow-xs active:scale-[0.98]"
         >
           <OctagonX className="w-3 h-3" />
           <span>{flattening ? "Stopping…" : "Stop"}</span>

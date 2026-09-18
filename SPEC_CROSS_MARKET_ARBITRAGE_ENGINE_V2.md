@@ -40,7 +40,8 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 11. As an operator, I want to see the current accumulated grid units versus the maximum allowable units, so that I can prevent overexposure.
 12. As a capital allocator, I want to see the effective safe leverage and required USD margin per unit, so that I know the portfolio's margin efficiency and liquidation buffer.
 13. As an automated trader, I want an Auto Bot toggle switch in the ribbon, so that I can activate and deactivate automated scanning and execution for that ticker.
-14. As an operator, I want a "Configure Strategy" button in the ribbon, so that I can open the quantitative parameter modal with a single click.
+14. As an operator, I want a "Configurator" button in the ribbon, so that I can open the quantitative parameter modal with a single click.
+    (2026-09-18: renamed from "Configure Strategy"; all seven strategy ribbons use "Configurator" with an icon–text gap.)
 
 ### Sliding Window & Strategy Configuration
 15. As a trader, I want to configure the rolling sliding window duration (10s, 30s, 1m, 5m, 15m) inside the strategy configurator, so that each trading pair can use its optimal time baseline.
@@ -90,7 +91,9 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 
 ### Modern DEX Account Credentials & Copilot
 49. As a Decibel trader, I want Aptos Ed25519 accounts (`account_address` + `ed25519_private_key`) to be recognized by `has_credentials`, so that saved Decibel credentials display as configured rather than "no credential configured".
+    STATUS 2026-09-18 audit: NOT IMPLEMENTED — no `account_address`/`ed25519_private_key` handling exists in the tree (`DecibelAdapter` in `crates/arbitrager-exchanges/src/decibel.rs` keys on api_key/wallet_address/private_key; no `credentials.rs` file exists). The 2026-09-18 session-16 handoff entry claiming this fix is incorrect (see handoff errata).
 50. As an AI Copilot user, I want duplicate Gemini API entries removed from settings, so that AI assistant configuration is clean and unambiguous.
+    STATUS 2026-09-18 audit: NOT APPLICABLE — no Copilot settings surface exists anywhere in this tree (no `CopilotSettingsModal.tsx`, zero `Copilot`/`Gemini` references in frontend or backend). The 2026-09-18 session-16 handoff entry appears to describe a different project (see handoff errata).
 
 ---
 

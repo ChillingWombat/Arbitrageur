@@ -67,22 +67,22 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           </span>
           {tickerLogs.length > 0 ? (
             tickerLogs[0].is_live ? (
-              <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
+              <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
                 Live Trading
               </span>
             ) : (
-              <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
+              <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
                 Paper Trading
               </span>
             )
           ) : (
             logs.length > 0 && (
               logs[0].is_live ? (
-                <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
+                <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
                   Live Trading
                 </span>
               ) : (
-                <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
+                <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
                   Paper Trading
                 </span>
               )
@@ -106,7 +106,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <div className="flex items-center bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px] font-mono">
             <button
               onClick={() => setFilterStatus("ALL")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
                 filterStatus === "ALL" ? "bg-accent text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
@@ -114,7 +114,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
             </button>
             <button
               onClick={() => setFilterStatus("FILLED")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
                 filterStatus === "FILLED" ? "bg-profit text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >
@@ -122,7 +122,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
             </button>
             <button
               onClick={() => setFilterStatus("FAILED")}
-              className={`px-2.5 py-1 rounded-md transition cursor-pointer ${
+              className={`px-2.5 py-1 rounded-lg transition cursor-pointer ${
                 filterStatus === "FAILED" ? "bg-loss text-white shadow-xs font-medium" : "text-slate-500 hover:text-slate-900"
               }`}
             >

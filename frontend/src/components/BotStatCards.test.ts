@@ -58,7 +58,7 @@ test("unattributed profit renders as a dash with the reason, never zero", () => 
   const html = renderToStaticMarkup(
     React.createElement(BotStatCards, { stats: computeBotCycleStats([closed("a")]) }),
   );
-  assert.match(html, /Bot Net Profit/);
+  assert.match(html, /Total Net Profit/);
   assert.match(html, /—/);
   assert.doesNotMatch(html, /\$0\.00/);
   assert.ok(

@@ -1,5 +1,4 @@
-@import '@fontsource-variable/roboto';
-@import '@fontsource-variable/roboto-mono';
+@import '@fontsource-variable/inter';
 
 @tailwind base;
 @tailwind components;
@@ -34,7 +33,7 @@
   body {
     background-color: #f4f5f8;
     color: #141923;
-    font-family: 'Roboto Variable', 'Roboto', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-family: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-variant-numeric: tabular-nums;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -43,10 +42,50 @@
     -webkit-user-select: none;
   }
 
-  /* Tailwind preflight hardcodes these to ui-monospace — pin them to Roboto Mono. */
+  /* All type uses Inter — numeric contexts add tabular-nums for alignment. */
   code, kbd, pre, samp {
-    font-family: 'Roboto Mono Variable', 'Roboto Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-family: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Refined native selects — single-select dropdowns system-wide */
+  select {
+    font-family: 'Inter Variable', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    color: #1e293b;
+    background-color: #ffffff;
+    border: 1px solid #e5e8ed;
+    border-radius: 8px;
+    padding: 6px 28px 6px 10px;
+    appearance: none;
+    cursor: pointer;
+    box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.03);
+    transition: border-color 150ms, background-color 150ms, box-shadow 150ms;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    min-height: 30px;
+  }
+  select:hover {
+    border-color: #cbd5e1;
+    background-color: #f8fafc;
+  }
+  select:focus {
+    outline: none;
+    border-color: #1677ff;
+    box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.15);
+    background-color: #ffffff;
+  }
+  select:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  option {
+    font-family: 'Inter Variable', 'Inter', sans-serif;
+    font-size: 12px;
+    color: #1e293b;
+    background: #ffffff;
   }
 
   /* Hide native number-input spinner buttons everywhere — steppers are
@@ -71,7 +110,7 @@
   }
   ::-webkit-scrollbar-thumb {
     background: #cbd5e1;
-    border-radius: 3px;
+    border-radius: 6px;
   }
   ::-webkit-scrollbar-thumb:hover {
     background: #94a3b8;
@@ -81,22 +120,22 @@
 @layer components {
   /* High-end institutional button tokens */
   .btn-primary {
-    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-white bg-primary hover:bg-primary-hover active:scale-[0.98] rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-white bg-primary hover:bg-primary-hover active:scale-[0.98] rounded-lg px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
   .btn-secondary {
-    @apply inline-flex items-center justify-center font-sans font-medium text-xs text-slate-700 bg-surface hover:bg-slate-50 active:scale-[0.98] border border-surface-border hover:border-slate-300 rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-medium text-xs text-slate-700 bg-surface hover:bg-slate-50 active:scale-[0.98] border border-surface-border hover:border-slate-300 rounded-lg px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
   .btn-danger {
-    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-white bg-loss hover:bg-red-700 active:scale-[0.98] rounded-md px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-white bg-loss hover:bg-red-700 active:scale-[0.98] rounded-lg px-3 py-1.5 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
   .btn-danger-subtle {
-    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-rose-700 bg-rose-50 hover:bg-rose-100 active:scale-[0.98] border border-rose-200 hover:border-rose-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-rose-700 bg-rose-50 hover:bg-rose-100 active:scale-[0.98] border border-rose-200 hover:border-rose-300 rounded-lg px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
   .btn-warning-subtle {
-    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 active:scale-[0.98] border border-amber-200 hover:border-amber-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-amber-700 bg-amber-50 hover:bg-amber-100 active:scale-[0.98] border border-amber-200 hover:border-amber-300 rounded-lg px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
   .btn-success-subtle {
-    @apply inline-flex items-center justify-center font-sans font-semibold text-xs text-emerald-700 bg-emerald-50 hover:bg-emerald-100 active:scale-[0.98] border border-emerald-200 hover:border-emerald-300 rounded-md px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-emerald-700 bg-emerald-50 hover:bg-emerald-100 active:scale-[0.98] border border-emerald-200 hover:border-emerald-300 rounded-lg px-2.5 py-1 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
 
   /* Standardized inputs */
@@ -116,10 +155,10 @@
 
   /* Standardized Strategy Ribbon & Parameter Pills */
   .ribbon-container {
-    @apply shrink-0 px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs select-none;
+    @apply shrink-0 px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs select-none;
   }
   .ribbon-pill {
-    @apply flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono;
+    @apply flex items-center gap-2 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-sans;
   }
 
   /* Standardized Modals */
@@ -130,20 +169,71 @@
     @apply bg-surface border border-surface-border rounded-2xl shadow-2xl overflow-hidden;
   }
 
+  /* Refined Dropdown Selectors — single + multi (Comment 7 system-wide) */
+  /* Trigger: L2 rounded-lg, Inter semibold, consistent hover/focus/open states */
+  .dropdown-trigger {
+    @apply flex items-center gap-2 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 font-sans text-xs font-semibold text-slate-800 shadow-2xs transition-all duration-150 cursor-pointer hover:border-slate-300 hover:bg-slate-50 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15;
+  }
+  .dropdown-trigger[data-open="true"] {
+    @apply border-primary ring-2 ring-primary/15 bg-surface;
+  }
+  .dropdown-chevron {
+    @apply w-3.5 h-3.5 text-slate-400 transition-transform duration-150 shrink-0;
+  }
+  .dropdown-menu {
+    @apply absolute z-30 min-w-[180px] bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 font-sans text-xs;
+  }
+  .dropdown-header {
+    @apply px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-surface-border/60;
+  }
+  .dropdown-item {
+    @apply w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left rounded-lg text-slate-700 transition cursor-pointer hover:bg-surface-raised hover:text-slate-900;
+  }
+  .dropdown-item-selected {
+    @apply bg-accent/10 text-accent font-semibold hover:bg-accent/10 hover:text-accent;
+  }
+  .dropdown-check {
+    @apply w-3.5 h-3.5 text-accent shrink-0;
+  }
+  .dropdown-divider {
+    @apply border-t border-surface-border/60 my-1 -mx-1;
+  }
+
+  /* Native <select> — same refined language as custom triggers */
+  select.dropdown-select {
+    @apply dropdown-trigger appearance-none pr-8 bg-no-repeat;
+    background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 8px center;
+  }
+  select.dropdown-select:hover {
+    @apply border-slate-300 bg-slate-50;
+  }
+
   /* Semantic Status Badges */
   .badge-status-profit {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-profit-dim text-profit border border-profit-border shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-profit-dim text-profit border border-profit-border shadow-2xs;
   }
   .badge-status-loss {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-loss-dim text-loss border border-loss-border shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-loss-dim text-loss border border-loss-border shadow-2xs;
   }
   .badge-status-warn {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-warn-dim text-warn border border-warn-border shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-warn-dim text-warn border border-warn-border shadow-2xs;
   }
   .badge-status-info {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-mono font-bold bg-accent-dim text-accent border border-accent-line/60 shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-accent-dim text-accent border border-accent-line/60 shadow-2xs;
   }
 }
+
+/* Design System — Radius Levels (consistent by layer):
+     L1 tiny tags/badges: rounded-md (6px)
+     L2 buttons/inputs/pills/controls: rounded-lg (8px)
+     L3 cards/panels/ribbons/inner containers: rounded-xl (12px)
+     L4 modals/large sheets: rounded-2xl (16px)
+     Pill shape (fully rounded) is reserved for status pills only: rounded-full.
+     Typography: all type uses Inter Variable. Headings/panel titles use
+     font-sans semibold with tracking-tight/wider by level; numeric values
+     add tabular-nums for alignment. font-mono resolves to Inter (see
+     tailwind.config) so legacy classes stay in-family. */
 
 /* Minimalist utility classes - glows replaced by subtle clean accents */
 .glow-cyan,

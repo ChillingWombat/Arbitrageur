@@ -238,7 +238,7 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
       autoMinVolumeUsd: null,
       autoMinPriceUsd: null,
       autoMinEventVolumeUsd: null,
-      fundingTradeSizeUsd: 25000,
+      fundingTradeSizeUsd: 2000,
       fundingMinAprPct: 8.0,
       fundingHoldingDays: 14,
       futuresMaxSlippageBps: 15.0,
@@ -275,7 +275,7 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
     autoMinVolumeUsd: optThreshold(p.autoMinVolumeUsd ?? p.auto_min_volume_usd),
     autoMinPriceUsd: optThreshold(p.autoMinPriceUsd ?? p.auto_min_price_usd),
     autoMinEventVolumeUsd: optThreshold(p.autoMinEventVolumeUsd ?? p.auto_min_event_volume_usd),
-    fundingTradeSizeUsd: num(p.fundingTradeSizeUsd ?? p.funding_trade_size_usd, 25000),
+    fundingTradeSizeUsd: num(p.fundingTradeSizeUsd ?? p.funding_trade_size_usd, 2000),
     fundingMinAprPct: num(p.fundingMinAprPct ?? p.funding_min_apr_pct, 8.0),
     fundingHoldingDays: num(p.fundingHoldingDays ?? p.funding_holding_days, 14),
     futuresMaxSlippageBps: num(p.futuresMaxSlippageBps ?? p.futures_max_slippage_bps, 15.0),
@@ -503,7 +503,7 @@ export const api = {
 
   async scanFundingOpportunities(
     symbolOrSymbols?: string | string[],
-    tradeSizeUsd: number = 25000
+    tradeSizeUsd: number = 2000
   ): Promise<FundingOpportunityDto[]> {
     if (Array.isArray(symbolOrSymbols)) {
       return invokeDesktop("scan_funding_opportunities", {

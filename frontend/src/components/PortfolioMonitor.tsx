@@ -126,7 +126,6 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   );
 
   const isTripped = status?.circuit_breaker_tripped ?? riskData?.is_halted ?? false;
-  const isPaused = status?.is_paused ?? false;
   const margin = riskData?.margin_health;
 
   // Strategies with recorded metrics drive the monitor selector options
@@ -184,17 +183,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           <div className="flex items-center space-x-2">
             <Activity className="w-4 h-4 text-accent" />
             <h1 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">Portfolio Monitor</h1>
-            <span
-              className={`px-2.5 py-0.5 rounded-full text-xs font-mono font-bold ${
-                isTripped
-                  ? "bg-loss-dim text-loss border border-loss-border"
-                  : isPaused
-                  ? "bg-warn-dim text-warn border border-warn-border"
-                  : "bg-profit-dim text-profit border border-profit-border"
-              }`}
-            >
-              {isTripped ? "Circuit Breaker: Tripped" : isPaused ? "Trading: Paused" : "System Risk: Normal"}
-            </span>
+
           </div>
         </div>
 
@@ -301,9 +290,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 Aggregates all open legs across venues to enforce delta-neutrality ($200 USD strict unhedged tolerance).
               </p>
             </div>
-            <span className="px-2.5 py-0.5 rounded-full text-xs font-mono font-bold bg-profit-dim text-profit border border-profit-border">
-              Guard Active
-            </span>
+
           </div>
 
           <div className="overflow-x-auto">
@@ -374,7 +361,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           </h2>
 
           <div className="space-y-3 font-mono text-xs">
-            <div className="p-3 bg-surface-raised rounded-md border border-surface-border space-y-2">
+            <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
               <div className="flex justify-between items-center gap-2">
                 <span className="text-slate-500 whitespace-nowrap">Margin Utilization:</span>
                 <span className="font-bold text-slate-900 whitespace-nowrap">{margin ? `${margin.margin_ratio_pct.toFixed(1)}%` : "—"}</span>
@@ -387,7 +374,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               </div>
             </div>
 
-            <div className="p-3 bg-surface-raised rounded-md border border-surface-border space-y-2">
+            <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
               <div className="flex justify-between items-center gap-2">
                 <span className="text-slate-500 whitespace-nowrap">Distance to Liquidation:</span>
                 <span className="font-bold text-profit whitespace-nowrap">{margin ? `+${margin.liquidation_distance_pct.toFixed(1)}% safe` : "—"}</span>
@@ -400,7 +387,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               </div>
             </div>
 
-            <div className="p-3 bg-surface-raised rounded-md border border-surface-border space-y-2">
+            <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
               <div className="flex justify-between items-center gap-2">
                 <span className="text-slate-500 whitespace-nowrap">Consecutive Error Buffer:</span>
                 <span className="font-bold text-slate-900">{riskData?.consecutive_failures ?? 0} / {riskData?.max_failures_allowed ?? 3}</span>

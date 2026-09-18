@@ -409,7 +409,7 @@ function TickerLogMonitorInner({
                 key={lvl}
                 type="button"
                 onClick={() => setLevelFilter(lvl)}
-                className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
                   levelFilter === lvl
                     ? "bg-accent text-white shadow-xs font-semibold"
                     : "text-slate-500 hover:text-slate-900"
@@ -516,7 +516,7 @@ function TickerLogMonitorInner({
               type="checkbox"
               checked={autoScroll}
               onChange={(e) => setAutoScroll(e.target.checked)}
-              className="rounded-sm border-surface-border text-accent focus:ring-accent"
+              className="rounded-lg border-surface-border text-accent focus:ring-accent"
             />
             <span className="text-xs">Follow Live Stream</span>
           </label>

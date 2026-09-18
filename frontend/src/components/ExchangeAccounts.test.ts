@@ -16,8 +16,10 @@ test("VenueBalancePanel renders Paper badge and description when is_live is fals
   };
 
   const html = renderToStaticMarkup(React.createElement(VenueBalancePanel, { bal: paperBal }));
-  assert.match(html, />Paper</);
-  assert.match(html, /Simulated account balance/);
+  assert.match(html, /Total Equity/);
+  assert.match(html, /\$50,000\.00/);
+  assert.doesNotMatch(html, />Paper</);
+  assert.doesNotMatch(html, /Simulated account balance/);
   assert.doesNotMatch(html, />Live</);
 });
 
@@ -32,8 +34,10 @@ test("VenueBalancePanel renders Live badge and description when is_live is true"
   };
 
   const html = renderToStaticMarkup(React.createElement(VenueBalancePanel, { bal: liveBal }));
-  assert.match(html, />Live</);
-  assert.match(html, /Real exchange balance/);
+  assert.match(html, /Total Equity/);
+  assert.match(html, /\$125,000\.00/);
+  assert.doesNotMatch(html, />Live</);
+  assert.doesNotMatch(html, /Real exchange balance/);
   assert.doesNotMatch(html, />Paper</);
 });
 
@@ -66,9 +70,12 @@ test("VenueBalancePanel renders error alert when status is ERROR", () => {
   assert.match(html, /API rate limit exceeded on exchange/);
 });
 
-test("VenueBalancePanel renders secondary account guidance when bal is null and isDefault is false", () => {
+test("VenueBalancePanel renders N/A metrics with no guidance rows when bal is null", () => {
   const html = renderToStaticMarkup(React.createElement(VenueBalancePanel, { bal: null, isDefault: false }));
-  assert.match(html, /Secondary account — set as default to connect live streaming and balance monitoring/);
+  assert.match(html, /Total Equity/);
+  assert.match(html, /N\/A/);
+  assert.doesNotMatch(html, /Secondary account/);
+  assert.doesNotMatch(html, /Rate budget/);
 });
 
 function makeMockAccount(overrides: Partial<AccountDto> = {}): AccountDto {
@@ -152,8 +159,10 @@ test("AccountCard renders VenueBalancePanel when account.enabled is true", () =>
   );
 
   assert.doesNotMatch(html, /Account is disabled/);
-  assert.match(html, />Live</);
+  assert.match(html, /Total Equity/);
   assert.match(html, /\$3\.21/);
+  assert.doesNotMatch(html, />Live</);
+  assert.doesNotMatch(html, />Paper</);
 });
 
 

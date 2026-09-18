@@ -27,7 +27,7 @@ export const BotStatCards: React.FC<{ stats: BotCycleStats | null }> = ({ stats 
   return (
     <div className="grid grid-cols-3 gap-3.5 shrink-0">
       <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
-        <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Bot Net Profit</span>
+        <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Total Net Profit</span>
         <div
           className={`text-xl font-bold font-mono tracking-tight tabular-nums ${unknown || stats?.netProfitUsd == null ? "text-slate-400" : stats.netProfitUsd >= 0 ? "text-profit" : "text-loss"}`}
           title={profitTitle}
@@ -46,7 +46,6 @@ export const BotStatCards: React.FC<{ stats: BotCycleStats | null }> = ({ stats 
         >
           {unknown ? "—" : (stats?.completedCycles ?? 0)}
         </div>
-        <div className="text-xs font-sans text-slate-400">entered → closed</div>
       </div>
       <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
         <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Open Cycles</span>
@@ -56,7 +55,6 @@ export const BotStatCards: React.FC<{ stats: BotCycleStats | null }> = ({ stats 
         >
           {unknown ? "—" : (stats?.openCycles ?? 0)}
         </div>
-        <div className="text-xs font-sans text-slate-400">entered, open</div>
       </div>
     </div>
   );

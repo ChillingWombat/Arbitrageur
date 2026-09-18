@@ -195,7 +195,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
 
           <div
             className="ribbon-pill"
-            title="Execution slippage tolerance — edit via Configure Strategy"
+            title="Execution slippage tolerance — edit via Configurator"
           >
             <span className="text-slate-400">Max Slippage</span>
             <span className="font-bold text-slate-900 tabular-nums">{maxSlippageBps}</span>
@@ -213,11 +213,11 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.("BTC-USDC", "triangle")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
             title="Configure Triangle strategy parameters (applies to all 3-leg cycles)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-            <span>Configure Strategy</span>
+            <span>Configurator</span>
           </button>
 
           <BotLifecycleControls
@@ -260,7 +260,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 {/* Leg 1 */}
                 <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-sm font-bold">Leg 1</span>
+                    <span className="px-2 py-0.5 bg-blue-100 text-blue-800 rounded-md font-bold">Leg 1</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg1.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg1.symbol}</div>
@@ -277,7 +277,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                 {/* Leg 2 */}
                 <div className="p-3 bg-surface-raised rounded-lg border border-surface-border space-y-2">
                   <div className="flex justify-between items-center text-xs">
-                    <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-sm font-bold">Leg 2</span>
+                    <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-md font-bold">Leg 2</span>
                     <span className="font-bold text-slate-800">{activeOpp.leg2.action}</span>
                   </div>
                   <div className="text-sm font-bold text-slate-900">{activeOpp.leg2.symbol}</div>
@@ -334,20 +334,12 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
 
         {/* Right 1 Col: Execution Bot Settings & 1-Click Action */}
         <div className="bg-surface p-4 rounded-xl border border-surface-border shadow-card space-y-3">
-          <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-            <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-2">
+          <div className="flex items-center border-b border-surface-border pb-2.5">
+            <h2 className="text-[13px] font-bold font-sans tracking-wider text-slate-900 flex items-center gap-2">
               <SlidersHorizontal className="w-4 h-4 text-accent" />
               <span>Cycle Guardrails</span>
             </h2>
-            {onOpenConfig && (
-              <button
-                type="button"
-                onClick={() => onOpenConfig("triangle")}
-                className="text-xs text-accent hover:underline font-mono cursor-pointer"
-              >
-                Configure
-              </button>
-            )}
+
           </div>
 
           <div className="space-y-3 text-xs font-sans">
@@ -417,12 +409,12 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           </h2>
           <div className="flex items-center space-x-3">
             {/* Asset Filters */}
-            <div className="flex items-center bg-surface-raised p-1 rounded-md border border-surface-border space-x-1">
+            <div className="flex items-center bg-surface-raised p-1 rounded-lg border border-surface-border space-x-1">
               {assets.map((asset) => (
                 <button
                   key={asset}
                   onClick={() => setSelectedAsset(asset)}
-                  className={`px-2.5 py-1 rounded-sm text-[11px] font-mono font-medium transition cursor-pointer ${
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium transition cursor-pointer ${
                     selectedAsset === asset
                       ? "bg-accent text-white shadow-2xs"
                       : "text-slate-600 hover:text-slate-900"
@@ -480,7 +472,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                       </td>
                       <td className="py-3 px-3">
                         <span
-                          className={`px-2 py-0.5 rounded-sm text-xs font-bold ${
+                          className={`px-2 py-0.5 rounded-md text-xs font-bold ${
                             opp.is_executable
                               ? "bg-profit-dim text-profit border border-profit-border"
                               : "bg-surface-raised text-slate-400 border border-surface-border"
@@ -497,7 +489,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                             handleDeployCycle();
                           }}
                           disabled={isPaused}
-                          className="px-3 py-1.5 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-md text-xs font-medium transition cursor-pointer"
+                          className="px-3 py-1.5 bg-accent hover:bg-primary-hover disabled:opacity-50 text-white rounded-lg text-xs font-medium transition cursor-pointer"
                         >
                           Fill Cycle
                         </button>

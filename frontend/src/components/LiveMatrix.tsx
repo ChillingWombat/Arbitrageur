@@ -112,7 +112,7 @@ const MatrixCellView: React.FC<MatrixCellViewProps> = React.memo(({ cell, isSele
           )}
         </div>
         <div
-          className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-sm text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
+          className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
         >
           {cell.baselineReady === false || cell.sampleCount === 0 ? (
             <span>Δ —</span>
@@ -179,14 +179,14 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
           <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
           {isLive ? (
             <span
-              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
+              className="ml-1.5 px-1.5 py-0.5 rounded-md border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
               title="Both venues support live API execution"
             >
               LIVE
             </span>
           ) : (
             <span
-              className="ml-1.5 px-1.5 py-0.5 rounded-xs border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
+              className="ml-1.5 px-1.5 py-0.5 rounded-md border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
               title="Route contains read-only venue(s) — paper execution only"
             >
               PAPER
@@ -211,7 +211,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
             onClick={() => onExecute(opp)}
             disabled={disabled}
             title={title}
-            className={`px-3 py-1.5 rounded-md text-xs font-mono font-medium transition shadow-2xs ${
+            className={`px-3 py-1.5 rounded-lg text-xs font-mono font-medium transition shadow-2xs ${
               isExec && !blocked && entriesOpen
                 ? "bg-accent hover:bg-accent-hover text-white cursor-pointer"
                 : "bg-surface-raised text-slate-400 cursor-not-allowed border border-surface-border"
@@ -654,22 +654,9 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
     return asks.length > 0 ? Math.min(...asks) : 0;
   }, [orderbooks]);
 
-  const routeHurdleBps = useMemo<number | null>(() => {
-    if (selectedCell?.costReady && selectedCell.requiredGrossBps != null) {
-      return selectedCell.requiredGrossBps;
-    }
-    let min: number | null = null;
-    for (const row of venueMatrix.grid) {
-      for (const cell of row) {
-        if (cell.isDiagonal || !cell.costReady || cell.requiredGrossBps == null) continue;
-        if (min === null || cell.requiredGrossBps < min) min = cell.requiredGrossBps;
-      }
-    }
-    return min;
-  }, [selectedCell, venueMatrix.grid]);
 
-  const [bottomTab, setBottomTab] = useState<"opportunities" | "history" | "logs">("opportunities");
-  const [stageTab, setStageTab] = useState<"matrix" | "quotes">("matrix");
+  const [bottomTab, setBottomTab] = useState<"history" | "logs">("history");
+  const [stageTab, setStageTab] = useState<"matrix" | "quotes" | "opportunities">("matrix");
 
   const tickerLogsCount = useMemo(() => {
     const symKey = sym.toUpperCase();
@@ -719,7 +706,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
             <>
               <div
                 className="ribbon-pill"
-                title="Target profit locked in per round-trip after fees and friction — edit via Configure Strategy"
+                title="Target profit locked in per round-trip after fees and friction — edit via Configurator"
               >
                 <span className="text-slate-400">Target</span>
                 <span className="font-bold text-slate-900">{currentStrategyConfig.targetProfitBps.toFixed(1)}</span>
@@ -745,11 +732,11 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           <button
             type="button"
             onClick={handleOpenConfig}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
             title="Configure Single Spread strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-            <span>Configure Strategy</span>
+            <span>Configurator</span>
           </button>
 
           <BotLifecycleControls
@@ -775,13 +762,12 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
         {tickerExplorer && (
               <div className="w-64 shrink-0 min-h-0">{tickerExplorer}</div>
         )}
-        <div className="flex-1 min-w-0 overflow-y-auto space-y-4">
+        <div className="flex-1 min-w-0 overflow-y-auto space-y-4 pr-4">
           {/* Execution Telemetry — post-trade diagnosis for the selected
               ticker, directly beneath the Strategy Parameters ribbon. */}
           <TickerTelemetryGadget
             symbol={sym}
             logs={executionLogs || []}
-            routeHurdleBps={routeHurdleBps}
             gridCurrentUnits={currentStrategyConfig.currentAccumulatedUnits}
             gridMaxUnits={currentStrategyConfig.maxAccumulatedUnits}
           />
@@ -795,15 +781,15 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
             />
           </div>
 
-          {/* 3. Main Stage: Dislocation Matrix + Venue Quotes — one tabbed gadget */}
+          {/* 3. Main Stage: Dislocation Matrix + Venue Quotes + Ranked Opportunities — one tabbed gadget */}
           <div className="bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
             {/* Tab switcher — same chrome as the bottom dock */}
             <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-              <div className="flex items-stretch divide-x divide-surface-border">
+              <div className="grid grid-cols-3 flex-1 divide-x divide-surface-border">
                 <button
                   type="button"
                   onClick={() => setStageTab("matrix")}
-                  className={`relative h-9 flex items-center space-x-2 px-4 text-[11px] font-mono transition select-none group cursor-pointer ${
+                  className={`relative h-9 flex items-center justify-center space-x-2 px-4 text-[11px] font-mono transition select-none group cursor-pointer ${
                     stageTab === "matrix"
                       ? "text-accent font-bold bg-surface"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -823,7 +809,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 <button
                   type="button"
                   onClick={() => setStageTab("quotes")}
-                  className={`relative h-9 flex items-center space-x-2 px-4 text-[11px] font-mono transition select-none group cursor-pointer ${
+                  className={`relative h-9 flex items-center justify-center space-x-2 px-4 text-[11px] font-mono transition select-none group cursor-pointer ${
                     stageTab === "quotes"
                       ? "text-accent font-bold bg-surface"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -835,16 +821,37 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                     }`}
                   />
                   <span>Venue Quotes</span>
-                  <span
-                    className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
-                      stageTab === "quotes"
-                        ? "bg-accent text-white shadow-2xs"
-                        : "bg-accent-dim text-accent border border-accent-line/60"
-                    }`}
-                  >
+                  {orderbooks.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
                     {orderbooks.length}
                   </span>
+                  )}
                   {stageTab === "quotes" && (
+                    <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setStageTab("opportunities")}
+                  className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none group cursor-pointer ${
+                    stageTab === "opportunities"
+                      ? "text-accent font-bold bg-surface"
+                      : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+                  }`}
+                >
+                  <Zap
+                    className={`w-3 h-3 transition shrink-0 ${
+                      stageTab === "opportunities" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                    }`}
+                  />
+                  <span>Ranked Opportunities</span>
+                  {profitableOpportunities.length > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+                    {profitableOpportunities.length}
+                  </span>
+                  )}
+                  {stageTab === "opportunities" && (
                     <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
                   )}
                 </button>
@@ -855,7 +862,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               {stageTab === "matrix" ? (
                 <>
           {/* Matrix Table */}
-          <div className="overflow-auto max-h-[320px] rounded-md border border-surface-border">
+          <div className="overflow-auto max-h-[320px] rounded-lg border border-surface-border">
             {venueMatrix.grid.length < 2 ? (
               symbol === null ? (
                 <EmptyState
@@ -936,11 +943,11 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               )}
           </div>
                 </>
-              ) : (
+              ) : stageTab === "quotes" ? (
                 <>
 
             {/* Consolidated Level 2 Table */}
-            <div className="overflow-x-auto rounded-md border border-surface-border">
+            <div className="overflow-x-auto rounded-lg border border-surface-border">
               <table className="w-full text-left font-mono text-xs">
                 <thead className="bg-surface-raised text-xs text-slate-500 tracking-wider border-b border-surface-border">
                   <tr>
@@ -983,7 +990,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_bid)}</span>
                             {isBestBid && (
-                              <span className="px-1 py-0.2 rounded-sm text-xs font-bold bg-profit-dim text-profit border border-profit-border">
+                              <span className="px-1 py-0.2 rounded-lg text-xs font-bold bg-profit-dim text-profit border border-profit-border">
                                 Best
                               </span>
                             )}
@@ -993,7 +1000,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_ask)}</span>
                             {isBestAsk && (
-                              <span className="px-1 py-0.2 rounded-sm text-xs font-bold bg-loss-dim text-loss border border-loss-border">
+                              <span className="px-1 py-0.2 rounded-lg text-xs font-bold bg-loss-dim text-loss border border-loss-border">
                                 Best
                               </span>
                             )}
@@ -1013,44 +1020,60 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               </table>
             </div>
                 </>
+              ) : (
+                <>
+                  {profitableOpportunities.length === 0 ? (
+                    <div className="border border-dashed border-surface-border rounded-lg">
+                      <EmptyState
+                        plain
+                        title="No Profitable Opportunity"
+                        hint="No routes with positive net spread — only profitable opportunities are listed."
+                      />
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto max-h-64 overflow-y-auto rounded-lg border border-surface-border">
+                      <table className="w-full text-left text-xs font-sans">
+                        <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-slate-500 text-xs tracking-wider">
+                          <tr>
+                            <th className="py-2 px-3">Route (Buy / Sell)</th>
+                            <th className="py-2 px-3">Buy Price</th>
+                            <th className="py-2 px-3">Sell Price</th>
+                            <th className="py-2 px-3">Gross Spread</th>
+                            <th className="py-2 px-3">Fees</th>
+                            <th className="py-2 px-3">Net Spread</th>
+                            <th className="py-2 px-3">Win %</th>
+                            <th className="py-2 px-3">Est. Profit</th>
+                            <th className="py-2 px-3 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-surface-border">
+                          {profitableOpportunities.map((opp) => (
+                            <OpportunityRowView
+                              key={opp.id}
+                              opp={opp}
+                              minBps={minBps}
+                              blocked={positionState?.blocked ?? false}
+                              blockingIds={blockingIds}
+                              botPhase={bot.phase}
+                              loading={loading}
+                              symbolLabel={symbol}
+                              onExecute={handleExecuteOpp}
+                            />
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           </div>
 
-      {/* 4. Bottom Docked Tabbed Panel: Ranked Opportunities vs Execution History vs Log Monitor */}
+      {/* 4. Bottom Docked Tabbed Panel: Execution History vs Log Monitor */}
       <div className="bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
         {/* Tab Switcher with dividers — three equal tabs */}
         <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-3 flex-1 divide-x divide-surface-border">
-            <button
-              type="button"
-              onClick={() => setBottomTab("opportunities")}
-              className={`relative h-9 flex items-center justify-center space-x-2 px-4 text-[11px] font-mono transition select-none group cursor-pointer ${
-                bottomTab === "opportunities"
-                  ? "text-accent font-bold bg-surface"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-              }`}
-            >
-              <Zap
-                className={`w-3 h-3 transition shrink-0 ${
-                  bottomTab === "opportunities" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
-                }`}
-              />
-              <span>Ranked Opportunities</span>
-              <span
-                className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
-                  bottomTab === "opportunities"
-                    ? "bg-accent text-white shadow-2xs"
-                    : "bg-accent-dim text-accent border border-accent-line/60"
-                }`}
-              >
-                {profitableOpportunities.length}
-              </span>
-              {bottomTab === "opportunities" && (
-                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-              )}
-            </button>
-
+          <div className="grid grid-cols-2 flex-1 divide-x divide-surface-border">
             <button
               type="button"
               onClick={() => setBottomTab("history")}
@@ -1066,15 +1089,11 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 }`}
               />
               <span>Execution History</span>
-              <span
-                className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
-                  bottomTab === "history"
-                    ? "bg-accent text-white shadow-2xs"
-                    : "bg-slate-200/80 text-slate-600"
-                }`}
-              >
+              {(executionLogs?.length || 0) > 0 && (
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
                 {executionLogs?.length || 0}
               </span>
+              )}
               {bottomTab === "history" && (
                 <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
               )}
@@ -1095,15 +1114,11 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 }`}
               />
               <span>Log Monitor</span>
-              <span
-                className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
-                  bottomTab === "logs"
-                    ? "bg-accent text-white shadow-2xs"
-                    : "bg-slate-200/80 text-slate-600"
-                }`}
-              >
+              {tickerLogsCount > 0 && (
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
                 {tickerLogsCount}
               </span>
+              )}
               {bottomTab === "logs" && (
                 <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
               )}
@@ -1113,50 +1128,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
 
         {/* Tab Content */}
         <div className="p-3.5">
-          {bottomTab === "opportunities" ? (
-            profitableOpportunities.length === 0 ? (
-              <div className="border border-dashed border-surface-border rounded-md">
-                <EmptyState
-                  plain
-                  title="No Profitable Opportunity"
-                  hint="No routes with positive net spread — only profitable opportunities are listed."
-                />
-              </div>
-            ) : (
-              <div className="overflow-x-auto max-h-64 overflow-y-auto">
-                <table className="w-full text-left text-xs font-mono">
-                  <thead className="sticky top-0 bg-surface-raised border-b border-surface-border text-slate-500 text-xs tracking-wider">
-                    <tr>
-                      <th className="py-2 px-3">Route (Buy / Sell)</th>
-                      <th className="py-2 px-3">Buy Price</th>
-                      <th className="py-2 px-3">Sell Price</th>
-                      <th className="py-2 px-3">Gross Spread</th>
-                      <th className="py-2 px-3">Fees</th>
-                      <th className="py-2 px-3">Net Spread</th>
-                      <th className="py-2 px-3">Win %</th>
-                      <th className="py-2 px-3">Est. Profit</th>
-                      <th className="py-2 px-3 text-right">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-surface-border">
-                    {profitableOpportunities.map((opp) => (
-                      <OpportunityRowView
-                        key={opp.id}
-                        opp={opp}
-                        minBps={minBps}
-                        blocked={positionState?.blocked ?? false}
-                        blockingIds={blockingIds}
-                        botPhase={bot.phase}
-                        loading={loading}
-                        symbolLabel={symbol}
-                        onExecute={handleExecuteOpp}
-                      />
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : bottomTab === "history" ? (
+          {bottomTab === "history" ? (
             <div className="max-h-96 overflow-y-auto">
               <TickerTransactionHistory
                 symbol={sym}

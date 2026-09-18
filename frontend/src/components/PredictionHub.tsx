@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Filter } from "lucide-react";
+import { Filter, SlidersHorizontal } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
-import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
@@ -13,6 +12,7 @@ interface PredictionHubProps {
   loading?: boolean;
   isPaused?: boolean;
   hasApiConnectivity?: boolean;
+  onOpenConfig?: (symbol: string, strategy?: string) => void;
 }
 
 export const PredictionHub: React.FC<PredictionHubProps> = ({
@@ -21,6 +21,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   onExecutePrediction,
   isPaused = false,
   hasApiConnectivity = false,
+  onOpenConfig,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [executingId, setExecutingId] = useState<string | null>(null);
@@ -70,26 +71,6 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
-          {(["polymarket", "kalshi"] as const).map((vid) => {
-            const meta = EXCHANGES_ALPHABETICAL.find((e) => e.id === vid);
-            return (
-              <div
-                key={vid}
-                className="ribbon-pill"
-                title={`${meta?.name ?? vid} taker fee`}
-              >
-                <span className="text-slate-400">{meta?.name ?? vid} Fee</span>
-                <span className="font-bold text-slate-900 tabular-nums">{((meta?.feeBps ?? 0) / 100).toFixed(2)}%</span>
-              </div>
-            );
-          })}
-          <div
-            className="ribbon-pill"
-            title="Conditional payout for identical settlement terms"
-          >
-            <span className="text-slate-400">Payout</span>
-            <span className="font-bold text-profit tabular-nums">$1.00</span>
-          </div>
           <div
             className="ribbon-pill"
             title="Minimum net profit required for auto-execution"
@@ -114,7 +95,16 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center space-x-3 shrink-0">
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => onOpenConfig?.("PREDICTION", "prediction")}
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
+            title="Configure Prediction Market strategy parameters"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <span>Configurator</span>
+          </button>
           {/* Filter Search */}
           <form onSubmit={handleSearch} className="flex items-center space-x-2">
             <div className="relative">
@@ -167,7 +157,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             >
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="px-2.5 py-0.5 rounded-sm font-mono text-xs font-semibold bg-accent-dim text-accent border border-accent-line">
+                  <span className="px-2.5 py-0.5 rounded-md font-mono text-xs font-semibold bg-accent-dim text-accent border border-accent-line">
                     {opp.market_title}
                   </span>
                   <span className="font-mono text-xs font-bold text-profit tabular-nums">
@@ -179,7 +169,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                 <div className="bg-surface-raised border border-surface-border rounded-lg p-3 space-y-2.5 my-3 font-mono text-xs">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
-                      <span className="px-1.5 py-0.5 rounded-sm bg-profit-dim text-profit border border-profit-border font-semibold text-xs">
+                      <span className="px-1.5 py-0.5 rounded-md bg-profit-dim text-profit border border-profit-border font-semibold text-xs">
                         Buy Yes
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_yes_venue}</span>
@@ -189,7 +179,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
 
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
-                      <span className="px-1.5 py-0.5 rounded-sm bg-loss-dim text-loss border border-loss-border font-semibold text-xs">
+                      <span className="px-1.5 py-0.5 rounded-md bg-loss-dim text-loss border border-loss-border font-semibold text-xs">
                         Buy No
                       </span>
                       <span className="text-slate-900 font-medium">{opp.buy_no_venue}</span>
@@ -237,7 +227,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                 </div>
 
                 {lastExecuted === opp.id ? (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-sm bg-profit-dim text-profit text-xs font-semibold">
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-profit-dim text-profit text-xs font-semibold">
                     Executed
                   </span>
                 ) : (

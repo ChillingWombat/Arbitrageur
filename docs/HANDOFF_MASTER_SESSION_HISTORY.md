@@ -734,3 +734,88 @@ rebuild desktop binary before relaunching.
 ---
 *Security Notice: All API keys, secrets, private keys, and passwords are strictly excluded. The credential vault is encrypted with Argon2id + AES-256-GCM and `keychain.toml` is permanently ignored.*
 
+
+## 19. Session Handoff — 2026-09-18 (Frontend UI Overhaul Pass)
+
+Multi-round operator markup session (browser comments on `http://localhost:1420/`).
+All items below verified in-tree; `tsc` clean, full frontend suite green
+(196 tests, 0 fail), dev server `HTTP:200`.
+
+- **Ribbon canon**: all seven "Configure Strategy" buttons renamed to
+  **Configurator** with icon–text gap (`FundingRadar`, `LiveMatrix`,
+  `OpportunityRadar`, `SpotArbitrageBot`, `TickerStrategyBar`,
+  `TriangularArbitrage`, `PredictionHub` — the last gained a new
+  Configurator backed by a minimal `prediction` tab in `TickerConfigModal`).
+  Removed pills: Monitored-scope, Polymarket/Kalshi Fee, Payout. Removed
+  duplicate triangle `Configure` (merged into top Configurator).
+- **Settings modal**: removed the four tab subheaders, the header subtitle,
+  history-days/storage annotations, the Trading-Mode unlock nag (vault
+  auto-opens at startup in `App.tsx`), and fixed Orderbook warm-up copy
+  (cached warm-up shortens the window, never skips it).
+- **Labels**: Real Trading → Live Trading; Auto-tune → AutoTune (component
+  tests updated); SOLO $5 → $1; Bot Net Profit → Total Net Profit;
+  Realized Net PnL → Total Net Profit; Win/Fill → Success Rate;
+  Total Trades → Total Cycles; Grid Status → Steps → Grid Step;
+  Spread Dislocation Δ → Current Dislocation; Solve Optimal → Optimize;
+  Single/Two Way radar labels; `OFF`/`ON` uppercase discipline.
+- **Removed**: ASIA session badge, Tickers gadget header, cycle
+  annotations, Live-Sorted annotation, System Risk + Guard Active badges,
+  account-card rate-budget and Live/Paper explainer rows (metrics kept),
+  vault-stored description line, exchange-list latency/balance placeholders
+  (fields now hide when empty).
+- **Exchange panel**: footer summary row deleted; header is now
+  `Exchanges (configured/total)`; selected tab uses light-blue selection
+  style; Set As Default moved beside the alias field with a Default Account
+  tag; Save Account refreshes balances + live venues (no overall Save needed).
+- **Radar**: Auto-Bot configurator section dissolved into Signal thresholds
+  (entry gates), Execution (Arm switch) and new Risk & Limits; Mode selector
+  deleted (main-page lifecycle buttons own the mode; Reset preserves it).
+  Monitor rows open a signal-detail popup (capacity ladder included).
+- **Funding**: manual holding horizon deleted (pill + config field); simulator
+  deleted; section is now a fixed-height **Opportunity Scanner** (compact
+  5-column cards, click for detail popup with auto-hold projections).
+  Trade-size default 25000 → 2000; carry execution caps at
+  min(size, long-venue funds, short-venue funds).
+- **Leverage rule**: inputs uncapped; `computeSafeLeverage` is now
+  min(strategy default 5x, account max) with venue maxima reference-only.
+  Paper-engine `1..=5` caps in `simulated.rs` intentionally untouched
+  (tested risk bounds — needs an upper-bound decision).
+- **Bugfixes found en route**: stale `animate-in` utilities in a CSS
+  `@apply` (broke Vite build — removed); hardcoded Roboto chart fonts +
+  uninstalled roboto packages (all-Inter verified, zero references);
+  Single Spread scroller right gap (`pr-4`); 6 stale component-test
+  assertions updated to the new UI.
+- **Verified-but-absent (reported, not built)**: funding scan sizes flat
+  (`recommended_size_usd = trade_size_usd`, static 3.5bps fee —
+  `funding_carry.rs`, `commands.rs:2480`); spread scan already folds in
+  conservative funding carry (`pair_monitor.rs:543`). Depth-aware funding
+  sizing + live entry-spread in the funding fee term proposed as backend work.
+- **Open items**: (a) button symmetric-padding direction question asked,
+  unanswered; (b) paper-engine leverage upper bound; (c) funding
+  depth-sizing + cross-term backend work; (d) funding-convergence
+  half-life estimator (currently fee-break-even-derived auto hold).
+
+## 20. Errata Audit — 2026-09-18 (verified against tree + git history)
+
+Corrections to earlier handoff entries. Phantom paths never existed in git
+history (`git log --all` empty for each):
+
+- **§16 (Decibel Credentials & Copilot De-duplication)** — INCORRECT as
+  written: `frontend/src-tauri/src/credentials.rs`,
+  `CopilotSettingsModal.tsx`, and `test_has_credentials_decibel` do not
+  exist and never did; zero `Copilot`/`Gemini` references anywhere in the
+  tree. Credential presence is evaluated per-adapter (e.g.
+  `DecibelAdapter::has_live_credentials` on api_key/wallet_address).
+  SPEC stories #49/#50 annotated accordingly (#49 open, #50 not applicable).
+- **§17 (Funding Monitor)** — partially incorrect: no `FundingRadar.test.tsx`
+  and no Vitest suite ever existed (frontend tests run under `node:test`;
+  27 test files). Feature description was accurate for its time; the pills,
+  asset-filter tabs, and simulator it describes were removed in §19 per
+  operator request.
+- **§18 (Strategy Auto-Filters)** — paths incorrect: there is no
+  `crates/arbitrager-desktop/` crate and no
+  `frontend/src/utils/tickerFilters.ts`. The real implementation is
+  `frontend/src-tauri/src/strategy_filters.rs` (volume/price filter logic
+  present) with the benchmark catalog in `frontend/src/types/tickers.ts`
+  and `commands.rs:6627`. Behavior claims left standing; historic test-count
+  figures not re-verified.

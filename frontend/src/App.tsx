@@ -154,13 +154,12 @@ export const App: React.FC = () => {
   // defaults apply until a saved record exists.
   const fundingParamsDto = strategyParams.get("funding");
   const spotParamsDto = strategyParams.get("spot");
-  const fundingTradeSize = fundingParamsDto?.fundingTradeSizeUsd ?? 25000;
+  const fundingTradeSize = fundingParamsDto?.fundingTradeSizeUsd ?? 2000;
   const fundingParams = useMemo(
     () => ({
       minAprPct: fundingParamsDto?.fundingMinAprPct ?? 8.0,
-      holdingDays: fundingParamsDto?.fundingHoldingDays ?? 14,
     }),
-    [fundingParamsDto?.fundingMinAprPct, fundingParamsDto?.fundingHoldingDays],
+    [fundingParamsDto?.fundingMinAprPct],
   );
   const spotParams = useMemo(
     () => ({
@@ -592,7 +591,23 @@ export const App: React.FC = () => {
 
   const handleExecuteCarry = useCallback(
     async (opp: FundingOpportunityDto) => {
-      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, opp.trade_size_usd);
+      // Never deploy more than either leg's venue can fund — cap the
+      // configured trade size at the lower of the two venue balances.
+      let size = opp.trade_size_usd;
+      try {
+        const balances = await api.getVenueBalances().catch(() => []);
+        const fundsFor = (venue: string): number | null => {
+          const b = balances.find((x) => x.venue.toLowerCase() === venue.toLowerCase());
+          const avail = b != null && b.available_margin_usd > 0 ? b.available_margin_usd : b?.equity_usd ?? null;
+          return avail != null && avail > 0 ? avail : null;
+        };
+        for (const leg of [fundsFor(opp.long_venue), fundsFor(opp.short_venue)]) {
+          if (leg != null && leg < size) size = leg;
+        }
+      } catch {
+        /* balance lookup failed — fall back to the configured trade size */
+      }
+      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, size);
       await refreshAllData();
     },
     [refreshAllData],
@@ -820,7 +835,6 @@ export const App: React.FC = () => {
               symbol={selectedSymbol}
               tradeSize={fundingTradeSize}
               minAprPct={fundingParams.minAprPct}
-              holdingDays={fundingParams.holdingDays}
               onExecuteCarry={handleExecuteCarry}
               loading={refreshing}
               executionLogs={executionLogs}
@@ -860,6 +874,7 @@ export const App: React.FC = () => {
               loading={refreshing}
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
+              onOpenConfig={handleOpenTickerConfig}
             />
           )}
 

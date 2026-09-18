@@ -123,7 +123,7 @@ export const Navigation: React.FC<NavigationProps> = ({
 
             {/* Institutional active bottom underline bar with rounded top caps */}
             {isActive && (
-              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent rounded-t-sm" />
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent rounded-t-md" />
             )}
           </button>
         );

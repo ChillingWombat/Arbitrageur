@@ -318,15 +318,18 @@ export function deriveStepSizing(
 }
 
 /**
- * Automatically computes the safe effective leverage ratio across venues when entering an arbitrage position.
- * Takes the minimum allowable leverage among participating venues and ensures safe liquidation buffers.
+ * Effective leverage for an arbitrage position: min(strategy target, account
+ * max). The strategy target defaults to 5x; an empty account max means
+ * unlimited. No upper cap and no venue component — venue contract maxima are
+ * reported for reference only (see maxVenueLeverage / venueLeverages).
  */
 export function computeSafeLeverage(
   symbol: string,
   venues: string[],
   basePrice: number,
   unitSize: number,
-  userTargetLeverage?: number
+  userTargetLeverage?: number,
+  accountMaxLeverage?: number | null
 ): LeverageComputationResult {
   const activeVenues = venues.length > 0 ? venues : ["hyperliquid", "lighter"];
   const venueLeverages: Record<string, number> = {};
@@ -342,10 +345,13 @@ export function computeSafeLeverage(
     }
   }
 
-  // Safe effective leverage is min of all venue max leverages and user target leverage (defaulting to 5x when available)
-  const defaultTarget = Math.min(minVenueLeverage, 5);
-  const target = userTargetLeverage && userTargetLeverage > 0 ? userTargetLeverage : defaultTarget;
-  const effectiveLeverage = Math.max(1, Math.min(minVenueLeverage, target));
+  // Effective leverage is min(strategy target, account max). Strategy target
+  // defaults to 5x; empty account max means unlimited. No cap, no venue term.
+  const target = userTargetLeverage && userTargetLeverage > 0 ? userTargetLeverage : 5;
+  const effectiveLeverage = Math.max(
+    1,
+    accountMaxLeverage != null && accountMaxLeverage > 0 ? Math.min(target, accountMaxLeverage) : target,
+  );
 
   // Compute notional and margin requirements
   const notionalUsd = Math.round(basePrice * unitSize * 100) / 100;

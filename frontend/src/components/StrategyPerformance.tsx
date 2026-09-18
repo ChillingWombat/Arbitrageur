@@ -205,21 +205,21 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
               </div>
 
               <div className="grid grid-cols-4 gap-2 pt-1 border-t border-surface-border/60 text-center font-mono tabular-nums">
-                <div className="p-1.5 rounded-md bg-surface-raised/60">
+                <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-slate-400 block">Win Rate</span>
                   <span className="text-xs font-bold text-slate-900">{s.win_rate_pct.toFixed(1)}%</span>
                 </div>
-                <div className="p-1.5 rounded-md bg-surface-raised/60">
+                <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-slate-400 block">Net PnL</span>
                   <span className={`text-xs font-bold ${s.total_pnl_usd >= 0 ? "text-profit" : "text-loss"}`}>
                     +${s.total_pnl_usd.toFixed(1)}
                   </span>
                 </div>
-                <div className="p-1.5 rounded-md bg-surface-raised/60">
+                <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-slate-400 block">Avg / Trade</span>
                   <span className="text-xs font-bold text-accent">+{s.avg_pnl_bps.toFixed(1)} BPS</span>
                 </div>
-                <div className="p-1.5 rounded-md bg-surface-raised/60">
+                <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-slate-400 block">Sharpe</span>
                   <span className="text-xs font-bold text-slate-900">{s.sharpe_ratio.toFixed(2)}</span>
                 </div>

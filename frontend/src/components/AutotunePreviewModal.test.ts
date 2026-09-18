@@ -62,7 +62,7 @@ test("preview renders banner, rows, and Copy values + Close only", () => {
       onClose: () => {},
     }),
   );
-  assert.match(html, /Auto-tune Preview/);
+  assert.match(html, /AutoTune Preview/);
   assert.match(html, /READY 1\/2/);
   assert.match(html, /STABLE/);
   assert.match(html, /12\.34 bps/);
@@ -111,7 +111,7 @@ test("preview shows loading and error states", () => {
       onClose: () => {},
     }),
   );
-  assert.match(failed, /Auto-tune failed: boom/);
+  assert.match(failed, /AutoTune failed: boom/);
 });
 
 test("copy text covers READY rows only", () => {

@@ -87,7 +87,7 @@ export const InfoTooltip: React.FC<InfoTooltipProps> = ({
           <span
             ref={tipRef}
             style={coords ? { top: coords.top, left: coords.left } : { top: -9999, left: -9999 }}
-            className="fixed z-[100] w-64 max-w-xs p-2.5 bg-accent-dim/95 text-slate-700 text-xs font-sans font-normal normal-case tracking-normal whitespace-pre-line rounded-md shadow-xl border border-accent-line pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs"
+            className="fixed z-[100] w-64 max-w-xs p-2.5 bg-accent-dim/95 text-slate-700 text-xs font-sans font-normal normal-case tracking-normal whitespace-pre-line rounded-lg shadow-xl border border-accent-line pointer-events-none text-left leading-relaxed animate-in fade-in zoom-in-95 duration-150 backdrop-blur-xs"
           >
             {text}
             {coords && (

@@ -3,9 +3,8 @@ import { Activity } from "lucide-react";
 import type { SignalSeriesDto } from "../types";
 import { api } from "../services/api";
 import { formatDuration } from "../services/matrixQuant";
-import { sessionOf, sessionSegments, SESSION_BAND_COLOR } from "../services/session.ts";
+import { sessionSegments, SESSION_BAND_COLOR } from "../services/session.ts";
 import { InfoTooltip } from "./InfoTooltip";
-import { SessionBadge } from "./SessionBadge";
 import { EmptyState } from "./EmptyState";
 
 interface SignalTrendGadgetProps {
@@ -81,7 +80,7 @@ function SignalTrendGadgetInner({
 
   const windowOptions = useMemo(() => {
     const opts = [{ s: botWindowSec, label: fmtWindow(botWindowSec) }];
-    for (const s of [300, 900, 3600, 14400, 86400, 259200, 604800]) {
+    for (const s of [300, 1800, 3600, 14400, 86400, 259200, 604800]) {
       if (!opts.some((o) => o.s === s)) opts.push({ s, label: fmtWindow(s) });
     }
     opts.sort((a, b) => a.s - b.s);
@@ -323,7 +322,6 @@ function SignalTrendGadgetInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [hasSeries, t0, t1],
   );
-  const currentSession = sessionOf(Date.now());
 
   return (
     <div className="space-y-3 font-mono text-xs select-none">
@@ -340,12 +338,8 @@ function SignalTrendGadgetInner({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Current UTC session regime */}
-          <span title="Current UTC trading session regime">
-            <SessionBadge sessionId={currentSession} />
-          </span>
           {/* Baseline selector */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px]">
             {(["consensus", "leader"] as const).map((m) => (
               <button
                 key={m}
@@ -367,7 +361,7 @@ function SignalTrendGadgetInner({
             ))}
           </div>
           {/* Window selector — default mirrors the bot's trailing window */}
-          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-md border border-surface-border text-[11px]">
+          <div className="flex items-center space-x-1 bg-surface-raised p-0.5 rounded-lg border border-surface-border text-[11px]">
             {windowOptions.map((w) => (
               <button
                 key={w.s}
@@ -498,7 +492,7 @@ function SignalTrendGadgetInner({
                     textAnchor="end"
                     className="fill-slate-400"
                     fontSize="9"
-                    fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
+                    fontFamily="'Inter Variable', 'Inter', sans-serif"
                   >
                     {isZero ? "0" : fmtBps(dev)}
                   </text>
@@ -588,7 +582,7 @@ function SignalTrendGadgetInner({
                     textAnchor={f === 0 ? "start" : f === 1 ? "end" : "middle"}
                     className="fill-slate-400"
                     fontSize="9"
-                    fontFamily="'Roboto Mono Variable', 'Roboto Mono', monospace"
+                    fontFamily="'Inter Variable', 'Inter', sans-serif"
                   >
                     {fmtTick(t, spanMs)}
                   </text>

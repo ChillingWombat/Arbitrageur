@@ -1,8 +1,7 @@
-import React, { useState, useMemo, useEffect, useRef } from "react";
-import { SlidersHorizontal } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import { SlidersHorizontal, X } from "lucide-react";
 import type { FundingOpportunityDto, ExecutionLogEntry } from "../types";
 import type { PerpTicker } from "../types/tickers";
-import { formatCurrencyPnl } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
@@ -15,7 +14,6 @@ interface FundingRadarProps {
   symbol?: string | null;
   tradeSize: number;
   minAprPct?: number;
-  holdingDays?: number;
   onExecuteCarry?: (opp: FundingOpportunityDto) => Promise<void>;
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
@@ -24,81 +22,150 @@ interface FundingRadarProps {
   hasApiConnectivity?: boolean;
 }
 
+const CarryDetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
+  label,
+  value,
+  title,
+}) => (
+  <div className="space-y-0.5" title={title}>
+    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
+    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
+  </div>
+);
+
+interface CarryDetailModalProps {
+  opp: FundingOpportunityDto;
+  rank: number;
+  executing: boolean;
+  executed: boolean;
+  onExecute: (opp: FundingOpportunityDto) => void;
+  onClose: () => void;
+}
+
+const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
+  ({ opp, rank, executing, executed, onExecute, onClose }) => {
+    const autoH =
+      Number.isFinite(opp.break_even_hours) && opp.break_even_hours > 0
+        ? Math.max(0.1, Math.round((opp.break_even_hours / 24) * 10) / 10)
+        : null;
+    const size = opp.trade_size_usd;
+    const gross =
+      autoH != null ? (size * (opp.net_rate_8h_pct / 100) * 3 * autoH) : null;
+    const fees = size * (opp.round_trip_fee_bps / 10000);
+    const net = gross != null ? gross - fees : null;
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onClose();
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [onClose]);
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="bg-surface border border-surface-border rounded-2xl w-[680px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold bg-accent-dim text-accent border border-accent-line">
+                Rank #{rank}
+              </span>
+              <span className="text-sm font-bold font-sans text-slate-900">{opp.symbol}</span>
+              <span className="text-xs font-sans text-slate-500">
+                {opp.long_venue} / {opp.short_venue}
+              </span>
+              <span className="text-xs font-sans font-bold text-accent tabular-nums">
+                {opp.net_apy_pct.toFixed(2)}% APY
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              title="Close details (ESC)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+              <CarryDetailField label="Long leg" value={opp.long_venue} />
+              <CarryDetailField label="Short leg" value={opp.short_venue} />
+              <CarryDetailField
+                label="Net 8h rate"
+                value={`+${opp.net_rate_8h_pct.toFixed(4)}%`}
+              />
+              <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
+              <CarryDetailField label="APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
+              <CarryDetailField label="Trade size" value={`$${size.toLocaleString()}`} />
+              <CarryDetailField label="Fee breakeven" value={`${opp.break_even_hours.toFixed(1)} hrs`} />
+              <CarryDetailField label="Daily income" value={`+$${opp.estimated_daily_income_usd.toFixed(2)}`} />
+              <CarryDetailField
+                label="Round-trip fees"
+                value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)`}
+              />
+              <CarryDetailField
+                label="Auto hold"
+                value={autoH != null ? `${autoH} days` : "—"}
+                title="Derived from this opportunity's fee break-even — not set manually"
+              />
+              <CarryDetailField
+                label="Projected net carry"
+                value={
+                  net != null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"
+                }
+                title="Projected carry over the auto hold at the current 8h rate, net of round-trip fees"
+              />
+            </div>
+          </div>
+
+          <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
+            {executed ? (
+              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-profit-dim text-profit text-xs font-semibold">
+                Carry Active
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onExecute(opp)}
+                disabled={executing}
+                className="btn-primary !text-xs !py-1.5 !px-4 font-sans cursor-pointer"
+              >
+                <span>{executing ? "Opening..." : "Open Carry"}</span>
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  },
+);
+
 export const FundingRadar: React.FC<FundingRadarProps> = ({
   opportunities,
-  availableTickers,
+  availableTickers: _availableTickers,
   symbol,
   tradeSize,
   minAprPct = 8.0,
-  holdingDays = 14,
   onExecuteCarry,
-  executionLogs = [],
+  executionLogs: _executionLogs = [],
   onOpenConfig,
   isPaused = false,
   hasApiConnectivity = false,
 }) => {
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
-  const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
-  const [selectedOppId, setSelectedOppId] = useState<string | null>(null);
+  const [detailOppId, setDetailOppId] = useState<string | null>(null);
 
   // Bot lifecycle is strategy-wide for Funding Rate carry, not locked to a single ticker
   const bot = useBotLifecycle({ strategyId: "funding" });
   const lastAutoCarryExecRef = useRef<number>(0);
 
-  // Derive strategy-wide execution stats from execution logs
-  const strategyStats = useMemo(() => {
-    let count = 0;
-    let pnl = 0;
 
-    for (const log of executionLogs) {
-      const isFunding =
-        log.strategy_id === "funding" ||
-        log.trade_type?.toLowerCase().includes("funding");
-      if (isFunding) {
-        count += 1;
-        pnl += log.net_profit || 0;
-      }
-    }
-    return { count, pnl: Math.round(pnl * 100) / 100 };
-  }, [executionLogs]);
-
-  const monitoredCount = useMemo(() => {
-    if (availableTickers && availableTickers.length > 0) {
-      return availableTickers.length;
-    }
-    const distinct = new Set(opportunities.map((o) => o.symbol));
-    return distinct.size;
-  }, [availableTickers, opportunities]);
-
-  const assetBase = (sym: string) => sym.split(/[-_/]/)[0]?.toUpperCase() ?? sym;
-
-  const availableAssets = useMemo(() => {
-    const set = new Set<string>();
-    for (const o of opportunities) {
-      set.add(assetBase(o.symbol));
-    }
-    if (availableTickers) {
-      for (const t of availableTickers) {
-        set.add(assetBase(t.symbol));
-      }
-    }
-    return ["ALL", ...Array.from(set).sort()];
-  }, [opportunities, availableTickers]);
-
-  const filteredOpportunities = useMemo(() => {
-    if (selectedAsset === "ALL") return opportunities;
-    return opportunities.filter((o) => assetBase(o.symbol) === selectedAsset);
-  }, [opportunities, selectedAsset]);
-
-  // Selected or top opportunity for the amortization simulator
-  const activeSimOpp = useMemo(() => {
-    if (selectedOppId) {
-      const found = opportunities.find((o) => o.id === selectedOppId);
-      if (found) return found;
-    }
-    return filteredOpportunities[0] ?? opportunities[0] ?? null;
-  }, [selectedOppId, opportunities, filteredOpportunities]);
 
   const handleExecute = async (opp: FundingOpportunityDto) => {
     if (!onExecuteCarry) return;
@@ -136,36 +203,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Parameters
           </span>
-          {/* Strategy-wide monitored scope + telemetry */}
-          <div
-            className="ribbon-pill font-bold text-slate-900"
-            title="Monitoring all shared non-hidden tickers across active venues"
-          >
-            <span className="text-slate-400 font-normal">Monitored</span>
-            <span>All Non-Hidden ({monitoredCount} Tickers)</span>
-            <span
-              className="text-xs px-1.5 py-0.2 rounded-sm bg-surface border border-surface-border font-medium text-slate-700 tabular-nums"
-              title={`${strategyStats.count} strategy executions`}
-            >
-              {strategyStats.count} tx{strategyStats.count === 1 ? "" : "s"}
-            </span>
-            <span
-              className={`text-xs px-1.5 py-0.2 rounded-sm font-semibold tabular-nums ${
-                strategyStats.pnl > 0
-                  ? "text-profit bg-profit-dim border border-profit-border"
-                  : strategyStats.pnl < 0
-                  ? "text-loss bg-loss-dim border border-loss-border"
-                  : "text-slate-500 bg-surface border border-surface-border"
-              }`}
-              title={`Strategy Net PnL: ${formatCurrencyPnl(strategyStats.pnl)}`}
-            >
-              {formatCurrencyPnl(strategyStats.pnl)}
-            </span>
-          </div>
-
           <div
             className="ribbon-pill"
-            title="Notional per leg — edit via Configure Strategy"
+            title="Notional per leg — edit via Configurator"
           >
             <span className="text-slate-400">Trade Size</span>
             <span className="font-bold text-slate-900 tabular-nums">{tradeSize.toLocaleString()}</span>
@@ -174,21 +214,13 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
           <div
             className="ribbon-pill"
-            title="Ignore opportunities below this net APR — edit via Configure Strategy"
+            title="Ignore opportunities below this net APR — edit via Configurator"
           >
             <span className="text-slate-400">Min APR</span>
             <span className="font-bold text-slate-900 tabular-nums">{minAprPct}</span>
             <span className="text-slate-400">%</span>
           </div>
 
-          <div
-            className="ribbon-pill"
-            title="Projected carry amortization duration — edit via Configure Strategy"
-          >
-            <span className="text-slate-400">Horizon</span>
-            <span className="font-bold text-slate-900 tabular-nums">{holdingDays}</span>
-            <span className="text-slate-400">Days</span>
-          </div>
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
@@ -196,11 +228,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.(symbol || "BTC-USDC", "funding")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
             title="Configure Funding Rate strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-            <span>Configure Strategy</span>
+            <span>Configurator</span>
           </button>
 
           {/* Auto Carry Bot Switch */}
@@ -221,118 +253,75 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         </div>
       </div>
 
-      {/* Evaluated Carry Opportunities Table */}
-      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
-          <div className="flex items-center space-x-2">
-            <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-              Ranked Delta-Neutral Carry Opportunities
-            </h3>
-            <span className="text-xs font-mono text-slate-400">
-              ({filteredOpportunities.length} of {opportunities.length} live)
-            </span>
-          </div>
-
-          {/* In-tab asset filter tabs */}
-          {availableAssets.length > 2 && (
-            <div className="flex flex-wrap items-center gap-1.5">
-              {availableAssets.map((asset) => (
-                <button
-                  key={asset}
-                  type="button"
-                  onClick={() => setSelectedAsset(asset)}
-                  className={`px-2 py-0.5 rounded text-xs font-mono font-semibold transition cursor-pointer ${
-                    selectedAsset === asset
-                      ? "bg-accent text-white shadow-2xs"
-                      : "bg-surface-raised hover:bg-slate-200 text-slate-600 border border-surface-border"
-                  }`}
-                >
-                  {asset}
-                </button>
-              ))}
-            </div>
-          )}
+      {/* Opportunity Scanner — fixed window, 5x3 compact cards, click for details */}
+      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card h-[640px] flex flex-col">
+        <div className="flex items-center justify-between gap-3 mb-3 shrink-0">
+          <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
+            Opportunity Scanner
+          </h3>
         </div>
 
-        {filteredOpportunities.length === 0 ? (
+        {opportunities.length === 0 ? (
           <div className="border border-dashed border-surface-border rounded-xl">
-            <EmptyState plain title={opportunities.length === 0 ? "No Opportunity Detected" : `No Opportunities for ${selectedAsset}`} />
+            <EmptyState plain title="No Opportunity Detected" />
           </div>
         ) : (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {filteredOpportunities.map((opp, idx) => {
-              const isSelectedForSim = activeSimOpp?.id === opp.id;
-              return (
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
+              {opportunities.map((opp, idx) => (
                 <div
                   key={opp.id}
-                  onClick={() => setSelectedOppId(opp.id)}
-                  className={`bg-surface border ${
-                    isSelectedForSim
-                      ? "border-accent ring-1 ring-accent/30 shadow-md"
-                      : "border-surface-border hover:border-slate-300 shadow-card"
-                  } rounded-xl p-4 flex flex-col justify-between space-y-3 transition cursor-pointer`}
-                  title="Click to inspect in the Amortization Simulator below"
+                  onClick={() => setDetailOppId(opp.id)}
+                  className="bg-surface border border-surface-border hover:border-accent-line rounded-xl p-2.5 flex flex-col justify-between gap-2 transition cursor-pointer shadow-card"
+                  title="Click for opportunity details"
                 >
-                  <div>
-                    {/* Badge, Ticker & Rank */}
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center space-x-2">
-                        <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-semibold bg-accent-dim text-accent border border-accent-line">
-                          Rank #{idx + 1}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-1.5">
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-semibold bg-accent-dim text-accent border border-accent-line shrink-0">
+                          #{idx + 1}
                         </span>
-                        <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-bold bg-slate-100 text-slate-800 border border-slate-200">
+                        <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-bold bg-slate-100 text-slate-800 border border-slate-200 truncate">
                           {opp.symbol}
                         </span>
                       </div>
-                      <span className="text-xs font-mono font-bold text-accent tabular-nums">
-                        {opp.net_apy_pct.toFixed(2)}% APY
+                      <span className="text-[10px] font-sans font-bold text-accent tabular-nums shrink-0">
+                        {opp.net_apy_pct.toFixed(1)}%
                       </span>
                     </div>
 
-                    {/* Pair Route */}
-                    <div className="p-3 bg-surface-raised rounded-lg border border-surface-border mb-3 font-mono text-xs space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-500">Long Leg:</span>
-                        <span className="font-semibold text-slate-900">{opp.long_venue}</span>
+                    <div className="px-2 py-1.5 bg-surface-raised rounded-lg border border-surface-border font-sans text-[10px] space-y-1">
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-500">Long:</span>
+                        <span className="font-semibold text-slate-900 truncate">{opp.long_venue}</span>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-slate-500">Short Leg:</span>
-                        <span className="font-semibold text-slate-900">{opp.short_venue}</span>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-500">Short:</span>
+                        <span className="font-semibold text-slate-900 truncate">{opp.short_venue}</span>
                       </div>
                       <div className="pt-1 border-t border-surface-border flex items-center justify-between text-profit">
-                        <span>Net 8h Rate:</span>
-                        <span className="font-bold tabular-nums">+{opp.net_rate_8h_pct.toFixed(4)}%</span>
+                        <span>8h:</span>
+                        <span className="font-bold tabular-nums">+{opp.net_rate_8h_pct.toFixed(3)}%</span>
                       </div>
                     </div>
 
-                    {/* Key Metrics */}
-                    <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-                      <div className="p-2.5 bg-surface-raised rounded-lg border border-surface-border">
-                        <div className="text-xs text-slate-500">
-                          Fee Breakeven
-                        </div>
-                        <div className="font-semibold text-slate-900 mt-0.5 tabular-nums">{opp.break_even_hours.toFixed(1)} hrs</div>
+                    <div className="grid grid-cols-2 gap-1.5 font-sans text-[10px]">
+                      <div className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border">
+                        <div className="text-slate-500">Breakeven</div>
+                        <div className="font-semibold text-slate-900 tabular-nums">{opp.break_even_hours.toFixed(1)}h</div>
                       </div>
-
-                      <div className="p-2.5 bg-surface-raised rounded-lg border border-surface-border">
-                        <div className="text-xs text-slate-500">
-                          Daily Income
-                        </div>
-                        <div className="font-semibold text-profit mt-0.5 tabular-nums">+${opp.estimated_daily_income_usd.toFixed(2)}</div>
+                      <div className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border">
+                        <div className="text-slate-500">Daily</div>
+                        <div className="font-semibold text-profit tabular-nums">+${opp.estimated_daily_income_usd.toFixed(0)}</div>
                       </div>
                     </div>
                   </div>
 
-                  {/* Return Projection & Action Button */}
-                  <div className="pt-3 border-t border-surface-border flex items-center justify-between text-xs font-mono">
-                    <div>
-                      <span className="text-slate-500">Annualized APR: </span>
-                      <span className="font-semibold text-slate-800 tabular-nums">{opp.net_apr_pct.toFixed(2)}%</span>
-                    </div>
-
+                  <div className="pt-2 border-t border-surface-border flex items-center justify-between font-sans text-[10px]">
+                    <span className="font-semibold text-slate-800 tabular-nums">{opp.net_apr_pct.toFixed(1)}% APR</span>
                     {lastExecuted === opp.id ? (
-                      <span className="inline-flex items-center px-2 py-0.5 rounded-sm bg-profit-dim text-profit text-xs font-semibold">
-                        Carry Active
+                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-profit-dim text-profit text-[10px] font-semibold">
+                        Active
                       </span>
                     ) : (
                       <button
@@ -341,109 +330,34 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           handleExecute(opp);
                         }}
                         disabled={executingId === opp.id}
-                        className="btn-primary !text-xs !py-1.5 !px-3 font-mono flex items-center cursor-pointer"
+                        className="btn-primary !text-[10px] !py-1 !px-2 font-sans cursor-pointer"
                       >
                         <span>{executingId === opp.id ? "Opening..." : "Open Carry"}</span>
                       </button>
                     )}
                   </div>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
         )}
       </div>
+      {(() => {
+        const detailOpp =
+          detailOppId != null ? opportunities.find((o) => o.id === detailOppId) ?? null : null;
+        if (!detailOpp) return null;
+        return (
+          <CarryDetailModal
+            opp={detailOpp}
+            rank={opportunities.findIndex((o) => o.id === detailOpp.id) + 1}
+            executing={executingId === detailOpp.id}
+            executed={lastExecuted === detailOpp.id}
+            onExecute={handleExecute}
+            onClose={() => setDetailOppId(null)}
+          />
+        );
+      })()}
 
-      {/* Interactive Holding Duration Yield Simulator */}
-      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card">
-        <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
-          <div className="flex items-center space-x-2">
-            <span>Carry Yield Amortization Simulator</span>
-            {activeSimOpp && (
-              <span className="px-2 py-0.5 rounded-sm text-xs font-mono font-bold bg-slate-100 text-slate-800 border border-slate-200">
-                {activeSimOpp.symbol} ({activeSimOpp.long_venue} / {activeSimOpp.short_venue})
-              </span>
-            )}
-          </div>
-          <span className="text-accent font-semibold font-mono text-xs tabular-nums">{holdingDays} Days Target</span>
-        </h3>
-
-        <div className="space-y-4">
-          <div title="Holding horizon — edit via Configure Strategy">
-            <div className="relative w-full h-2 bg-slate-200 rounded-md">
-              <div
-                className="absolute left-0 top-0 h-2 bg-accent/60 rounded-md"
-                style={{ width: `${Math.min(100, (holdingDays / 90) * 100)}%` }}
-              />
-              <div
-                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 bg-accent rounded-full border-2 border-white shadow-2xs"
-                style={{ left: `${Math.min(100, (holdingDays / 90) * 100)}%` }}
-              />
-            </div>
-            <div className="flex justify-between text-xs font-mono text-slate-400 mt-1">
-              <span>1 Day</span>
-              <span>14 Days</span>
-              <span>30 Days</span>
-              <span>60 Days</span>
-              <span>90 Days</span>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 pt-2">
-            {(() => {
-              // Projections use the active simulated opportunity's actual net rate and round-trip fees
-              const best = activeSimOpp;
-              const gross = best ? tradeSize * (best.net_rate_8h_pct / 100) * 3 * holdingDays : null;
-              const fees = best ? tradeSize * (best.round_trip_fee_bps / 10000) : null;
-              const net = gross !== null && fees !== null ? gross - fees : null;
-              return (
-                <>
-                  <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-xs">
-                    <div className="text-xs font-mono text-slate-500">Deployed Capital</div>
-                    <div className="text-lg font-bold font-mono text-slate-900 mt-1 tabular-nums">
-                      ${tradeSize.toLocaleString()}
-                    </div>
-                  </div>
-
-                  <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-xs">
-                    <div className="text-xs font-mono text-slate-500">Gross Funding Collected</div>
-                    <div className="text-lg font-bold font-mono text-profit mt-1 tabular-nums">
-                      {gross !== null ? `+$${gross.toFixed(2)}` : "—"}
-                    </div>
-                    {best && (
-                      <div className="text-xs font-mono text-slate-400 mt-0.5 tabular-nums">
-                        @ +{best.net_rate_8h_pct.toFixed(4)}%/8h ({best.long_venue}/{best.short_venue})
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-xs">
-                    <div className="text-xs font-mono text-slate-500">Roundtrip Trading Fees</div>
-                    <div className="text-lg font-bold font-mono text-loss mt-1 tabular-nums">
-                      {fees !== null ? `-$${fees.toFixed(2)}` : "—"}
-                    </div>
-                    {best && (
-                      <div className="text-xs font-mono text-slate-400 mt-0.5 tabular-nums">
-                        {best.round_trip_fee_bps.toFixed(1)} bps round-trip
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="p-4 bg-surface-raised rounded-xl border border-surface-border shadow-xs">
-                    <div className="text-xs font-mono text-slate-500">Projected Net Carry</div>
-                    <div className={`text-lg font-bold font-mono mt-1 tabular-nums ${net !== null && net >= 0 ? "text-profit" : "text-loss"}`}>
-                      {net !== null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"}
-                    </div>
-                    {!best && (
-                      <div className="text-xs font-mono text-slate-400 mt-0.5">No Live Carry Opportunity</div>
-                    )}
-                  </div>
-                </>
-              );
-            })()}
-          </div>
-        </div>
-      </div>
     </div>
   );
 };

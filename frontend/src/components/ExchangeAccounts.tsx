@@ -316,7 +316,7 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               placeholder={placeholder}
               onChange={(e) => setValue(f.key, e.target.value)}
               autoComplete="off"
-              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
+              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
             />
             {f.secret && (
               <button
@@ -341,7 +341,7 @@ const CredentialGrid: React.FC<CredGridProps> = ({
 );
 
 /* ------------------------------------------------------------------ */
-/* Venue balance & rate budget panel                                   */
+/* Venue balance panel (metrics only)                                  */
 /* ------------------------------------------------------------------ */
 
 /** Venue margin/metrics block rendered inside each account card. `bal` is null when no balance data exists (no API credentials / never synced) — values render as N/A rather than fabricated zeros. */
@@ -350,8 +350,7 @@ export const VenueBalancePanel: React.FC<{
   lane?: VenueLaneStatusDto | null;
   accountTier?: string;
   isDefault?: boolean;
-}> = ({ bal, lane, accountTier, isDefault }) => {
-  const displayTier = accountTier || lane?.accountTier || "standard";
+}> = ({ bal }) => {
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
@@ -412,51 +411,6 @@ export const VenueBalancePanel: React.FC<{
         </div>
       </div>
 
-      <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5 flex-wrap gap-y-1">
-        {lane ? (
-          <>
-            <span
-              className={`px-1.5 py-0.5 rounded-sm border font-bold tracking-wider ${
-                lane.backingOff
-                  ? "bg-loss-dim border-loss-border text-loss"
-                  : "bg-surface-raised border-surface-border text-slate-600"
-              }`}
-              title="Read requests used in the last minute vs the venue's per-minute budget"
-            >
-              {lane.usedLastMin}/{lane.readBudgetPerMin.toFixed(0)}/min{lane.backingOff ? " backoff" : ""}
-            </span>
-            <span>
-              Rate budget · tier {displayTier} · refresh {lane.refreshIntervalSecs.toFixed(0)}s · {lane.symbols} symbols
-            </span>
-          </>
-        ) : (
-          <span>No monitor lane — venue is not streaming market data.</span>
-        )}
-      </div>
-
-      <div className="text-xs font-mono text-slate-400 flex items-center space-x-1.5">
-        {bal ? (
-          bal.is_live ? (
-            <>
-              <span className="px-1.5 py-0.5 rounded-sm bg-emerald-100 border border-emerald-200 font-bold tracking-wider text-emerald-800">
-                Live
-              </span>
-              <span>Real exchange balance — live account equity and available margin from connected exchange API.</span>
-            </>
-          ) : (
-            <>
-              <span className="px-1.5 py-0.5 rounded-sm bg-slate-100 border border-slate-200 font-bold tracking-wider text-slate-600">
-                Paper
-              </span>
-              <span>Simulated account balance — virtual funds from the paper-trading engine, not your real exchange balance.</span>
-            </>
-          )
-        ) : isDefault === false ? (
-          <span>Secondary account — set as default to connect live streaming and balance monitoring.</span>
-        ) : (
-          <span>No account balance available for this account.</span>
-        )}
-      </div>
 
       {bal?.status === "NO_CREDENTIALS" && (
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 flex items-start space-x-2">
@@ -500,13 +454,13 @@ export interface AccountCardProps {
 }
 
 /** Parse the card's max-leverage text: "" = unlimited (null); otherwise an
- *  integer 1..=5. Throws a user-facing error for anything else. */
+ *  integer >= 1. No upper cap — effective leverage is min(strategy, account). */
 function parseMaxLeverage(raw: string): number | null {
   const t = raw.trim();
   if (t === "") return null;
   const n = Number(t);
-  if (!Number.isInteger(n) || n < 1 || n > 5) {
-    throw new Error("Max leverage must be empty (unlimited) or an integer 1..=5");
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error("Max leverage must be empty (unlimited) or an integer of at least 1");
   }
   return n;
 }
@@ -704,7 +658,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
 
   return (
     <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-      {/* Card header: title + inline label + default badge + delete, default, toggle */}
+      {/* Card header: title + inline label + default state + delete, toggle */}
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div className="flex items-center space-x-2 min-w-0 flex-1">
           <h3 className="text-[13px] font-mono font-bold text-slate-900 shrink-0">
@@ -720,12 +674,22 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             }}
             placeholder={`${venueDisplay(account.venue)} Account ${ordinal}`}
             title="Account label used in strategy routing"
-            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          {account.isDefault && (
+          {account.isDefault ? (
             <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
-              Default
+              Default Account
             </span>
+          ) : (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void handleSetDefault()}
+              className="px-3 py-1 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+              title="Set this account as the venue default"
+            >
+              Set As Default
+            </button>
           )}
         </div>
         <div className="flex items-center space-x-3 shrink-0">
@@ -738,21 +702,12 @@ export const AccountCard: React.FC<AccountCardProps> = ({
           >
             <Trash2 className="w-3.5 h-3.5" />
           </button>
-          <button
-            type="button"
-            disabled={busy || account.isDefault}
-            onClick={() => void handleSetDefault()}
-            className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
-            title={account.isDefault ? "This account is the venue default" : "Set this account as the venue default"}
-          >
-            Set As Default
-          </button>
           <ToggleSwitch
             size="sm"
             checked={account.enabled}
             onChange={() => void handleToggleEnabled()}
             disabled={busy}
-            label={account.enabled ? "Enabled" : "Off"}
+            label={account.enabled ? "Enabled" : "OFF"}
           />
         </div>
       </div>
@@ -790,7 +745,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
               value={tier}
               disabled={busy}
               onChange={(e) => setTier(e.target.value)}
-              className="w-full max-w-56 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+              className="w-full max-w-56 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
             >
               <option value="standard">Standard — 60 req/min per IP</option>
               <option value="plus">Plus — high read limit, +0.5 bps fees</option>
@@ -801,22 +756,17 @@ export const AccountCard: React.FC<AccountCardProps> = ({
         )}
         <div className="text-xs font-mono flex items-center justify-between gap-3">
           <label className="text-slate-600 flex-1">
-            Max Leverage{" "}
-            <span className="text-slate-400">
-              (empty = unlimited · effective is min(strategy, account, venue), capped at 5x)
-            </span>
-            :
+            Max Leverage:
           </label>
           <input
             type="number"
             step="1"
             min="1"
-            max="5"
             value={maxLeverage}
             disabled={busy}
             placeholder="Unlimited"
             onChange={(e) => setMaxLeverage(e.target.value)}
-            className="w-28 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-28 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
           />
         </div>
         <CredentialGrid
@@ -837,14 +787,14 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             {account.credentialsConfigured === null
               ? "Unlock the vault to manage credentials"
               : account.credentialsConfigured
-              ? "Credentials stored in encrypted vault"
+              ? null
               : "No credentials stored for this account"}
           </div>
           <button
             type="button"
             disabled={busy || locked || !dirty}
             onClick={() => void handleSave()}
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
             {saved && !dirty ? <CheckCircle2 className="w-3 h-3" /> : null}
             <span>{busy ? "Saving..." : saved && !dirty ? "Saved" : "Save Account"}</span>
@@ -958,7 +908,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               if (e.key === "Enter") void handleCreate();
             }}
             autoFocus={nextOrdinal > 1}
-            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {!hasDefault && (
             <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
@@ -972,7 +922,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               type="button"
               onClick={onCancel}
               disabled={busy}
-              className="px-2.5 py-1 rounded-md border border-surface-border text-xs font-mono text-slate-500 hover:text-slate-800 transition cursor-pointer"
+              className="px-2.5 py-1 rounded-lg border border-surface-border text-xs font-mono text-slate-500 hover:text-slate-800 transition cursor-pointer"
             >
               Cancel
             </button>
@@ -982,7 +932,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               size="sm"
               checked={fallbackEnabled ?? true}
               onChange={(en) => onFallbackChange(en)}
-              label={(fallbackEnabled ?? true) ? "Enabled" : "Off"}
+              label={(fallbackEnabled ?? true) ? "Enabled" : "OFF"}
             />
           )}
         </div>
@@ -1016,7 +966,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
             type="button"
             disabled={busy}
             onClick={() => void handleCreate()}
-            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
           >
             <span>{busy ? "Saving..." : "Save Account"}</span>
           </button>
@@ -1246,7 +1196,7 @@ export const AccountLabelControl: React.FC<{
         if (e.key === "Enter") account && saveLabel((e.target as HTMLInputElement).value);
         if (e.key === "Escape") setEditing(null);
       }}
-      className="w-40 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+      className="w-40 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
     />
   );
 };
@@ -1294,7 +1244,7 @@ export const VenueDefaultControl: React.FC<{
           })
           .finally(() => setBusy(false));
       }}
-      className="px-3 py-1 rounded-md border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+      className="px-3 py-1 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
       title={
         !account
           ? "No account configured for this venue"
@@ -1409,7 +1359,7 @@ export const VenueAccountToggle: React.FC<{
       size="sm"
       checked={enabled}
       disabled={busy || locked}
-      label={enabled ? "Enabled" : "Off"}
+      label={enabled ? "Enabled" : "OFF"}
       onChange={() => {
         const next = !enabled;
         persistVenueFlag(venue, next); // keep the venue flag in step
@@ -1614,7 +1564,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
         <button
           type="button"
           onClick={() => setAdding((v) => !v)}
-          className="px-2 py-1 rounded-md border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+          className="px-2 py-1 rounded-lg border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
         >
           <Plus className="w-3 h-3" />
           <span>Add Route</span>
@@ -1650,7 +1600,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               checked={r.enabled}
               disabled={busy}
               onChange={() => void handleToggle(r)}
-              label={r.enabled ? "On" : "Off"}
+              label={r.enabled ? "ON" : "OFF"}
             />
             <button
               type="button"
@@ -1700,7 +1650,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
             disabled={busy}
             placeholder="Route label (optional)"
             onChange={(e) => setRouteLabel(e.target.value)}
-            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-md text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {error && (
             <div className="text-xs font-mono text-loss flex items-center gap-1">
@@ -1721,7 +1671,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               type="button"
               disabled={busy || !acctA || !acctB}
               onClick={() => void handleAdd()}
-              className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-md transition disabled:opacity-40 cursor-pointer"
+              className="px-3 py-1.5 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition disabled:opacity-40 cursor-pointer"
             >
               {busy ? "Adding..." : "Add Route"}
             </button>

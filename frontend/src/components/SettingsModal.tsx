@@ -53,7 +53,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
                 System Setting
               </h2>
-              <p className="text-[11px] font-sans text-slate-500">Global engine parameters, venue keys, and risk thresholds</p>
+
             </div>
           </div>
 

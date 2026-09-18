@@ -160,7 +160,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           {/* Trade Size */}
           <div
             className="ribbon-pill"
-            title="Capital deployed per flash cycle — edit via Configure Strategy"
+            title="Capital deployed per flash cycle — edit via Configurator"
           >
             <span className="text-slate-400">Trade Size</span>
             <span className="font-bold text-slate-900 tabular-nums">{tradeSizeUsd.toLocaleString()}</span>
@@ -170,7 +170,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           {/* Minimum Net Spread required to fire */}
           <div
             className="ribbon-pill"
-            title="Net spread required to auto-execute — edit via Configure Strategy"
+            title="Net spread required to auto-execute — edit via Configurator"
           >
             <span className="text-slate-400">Min Net</span>
             <span className="font-bold text-slate-900 tabular-nums">{minNetSpreadBps}</span>
@@ -180,7 +180,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           {/* Max Slippage */}
           <div
             className="ribbon-pill"
-            title="Orderbook tolerance limit — edit via Configure Strategy"
+            title="Orderbook tolerance limit — edit via Configurator"
           >
             <span className="text-slate-400">Max Slippage</span>
             <span className="font-bold text-slate-900 tabular-nums">{maxSlippageBps}</span>
@@ -192,11 +192,11 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
           <button
             type="button"
             onClick={() => onOpenConfig?.(selectedOpp?.symbol || "BTC-USDC", "spot")}
-            className="btn-secondary !text-xs !py-1.5 !px-3 font-mono cursor-pointer"
+            className="btn-secondary !text-xs !py-1.5 !px-3 font-sans cursor-pointer gap-2"
             title="Configure Spatial strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-            <span>Configure Strategy</span>
+            <span>Configurator</span>
           </button>
 
           <BotLifecycleControls
@@ -265,31 +265,27 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 <button
                   type="button"
                   onClick={() => setShowAssetMenu((v) => !v)}
-                  className="flex items-center gap-1.5 bg-surface-raised border border-surface-border rounded-lg px-2.5 py-1.5 font-mono text-xs transition cursor-pointer hover:border-slate-300"
+                  className="dropdown-trigger" data-open={showAssetMenu}
                   title="Display filter — shows only opportunities on the selected assets"
                 >
                   <span className="font-bold text-slate-900">
                     {assetFilters.length === 0 ? "All" : assetFilters.join("+")}
                   </span>
                   <ChevronDown
-                    className={`w-3 h-3 text-slate-400 transition-transform ${showAssetMenu ? "rotate-180" : ""}`}
+                    className={`dropdown-chevron ${showAssetMenu ? "rotate-180" : ""}`}
                   />
                 </button>
                 {showAssetMenu && (
-                  <div className="absolute left-0 top-full mt-1.5 w-48 bg-surface border border-surface-border rounded-xl shadow-elevated p-1 z-30 font-mono text-xs animate-in fade-in zoom-in-95 duration-100">
+                  <div className="dropdown-menu left-0 top-full mt-1.5 w-48">
                     <button
                       type="button"
                       onClick={() => setAssetFilters([])}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-md ${
-                        assetFilters.length === 0
-                          ? "bg-accent/10 text-accent font-semibold"
-                          : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                      }`}
+                      className={`dropdown-item ${assetFilters.length === 0 ? "dropdown-item-selected" : ""}`}
                     >
                       <span>All</span>
-                      {assetFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
+                      {assetFilters.length === 0 && <Check className="dropdown-check" />}
                     </button>
-                    <div className="border-t border-surface-border/60 my-1 -mx-1" />
+                    <div className="dropdown-divider" />
                     {assets.map((a) => {
                       const on = assetFilters.includes(a);
                       return (
@@ -301,14 +297,10 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                               prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a],
                             )
                           }
-                          className={`w-full flex items-center justify-between px-2.5 py-1.5 text-left transition rounded-md ${
-                            on
-                              ? "bg-accent/10 text-accent font-semibold"
-                              : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                          }`}
+                          className={`dropdown-item ${on ? "dropdown-item-selected" : ""}`}
                         >
                           <span>{a}</span>
-                          {on && <Check className="w-3.5 h-3.5" />}
+                          {on && <Check className="dropdown-check" />}
                         </button>
                       );
                     })}
@@ -316,9 +308,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 )}
               </div>
             </div>
-            <div className="text-xs font-mono text-slate-400">
-              Live Sorted By Net Spread BPS
-            </div>
+
           </div>
 
           {/* Table */}
@@ -376,7 +366,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                         </td>
                         <td className="py-3 px-4 text-right">
                           <span
-                            className={`px-2 py-0.5 rounded-sm font-bold tabular-nums ${
+                            className={`px-2 py-0.5 rounded-md font-bold tabular-nums ${
                               isProfitable
                                 ? "bg-profit-dim text-profit border border-profit-border"
                                 : "bg-surface-raised text-slate-600 border border-surface-border"
@@ -394,7 +384,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                               e.stopPropagation();
                               handleSelectOpp(opp);
                             }}
-                            className={`px-3 py-1.5 rounded-md text-xs font-medium transition cursor-pointer ${
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer ${
                               isSelected
                                 ? "btn-primary !py-1 !px-2.5 !text-xs"
                                 : "bg-surface-raised border border-surface-border text-slate-700 hover:border-accent hover:text-accent"
@@ -448,14 +438,14 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 </div>
 
                 {/* Trade Size Controls */}
-                <div title="Edit via Configure Strategy">
+                <div title="Edit via Configurator">
                   <div className="flex items-center justify-between text-xs font-mono text-slate-700 mb-1.5">
                     <span>Trade Size ($ USD):</span>
                     <span className="font-bold text-slate-900 tabular-nums">${tradeSizeUsd.toLocaleString()}</span>
                   </div>
-                  <div className="relative w-full h-2 bg-slate-200 rounded-md">
+                  <div className="relative w-full h-2 bg-slate-200 rounded-full">
                     <div
-                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-md"
+                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-full"
                       style={{ width: `${Math.min(100, (tradeSizeUsd / 10000) * 100)}%` }}
                     />
                     <div
@@ -466,14 +456,14 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 </div>
 
                 {/* Max Slippage */}
-                <div title="Edit via Configure Strategy">
+                <div title="Edit via Configurator">
                   <div className="flex items-center justify-between text-xs font-mono text-slate-700 mb-1">
                     <span>Max Allowed Slippage:</span>
                     <span className="font-bold text-slate-900 tabular-nums">{maxSlippageBps.toFixed(1)} BPS</span>
                   </div>
-                  <div className="relative w-full h-2 bg-slate-200 rounded-md">
+                  <div className="relative w-full h-2 bg-slate-200 rounded-full">
                     <div
-                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-md"
+                      className="absolute left-0 top-0 h-2 bg-accent/60 rounded-full"
                       style={{ width: `${Math.min(100, (maxSlippageBps / 15) * 100)}%` }}
                     />
                     <div

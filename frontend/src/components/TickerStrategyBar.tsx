@@ -57,42 +57,42 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           </div>
 
           <span
-            className="bg-accent-dim text-accent px-2.5 py-1 rounded-md border border-accent-line/60 font-semibold tabular-nums"
+            className="bg-accent-dim text-accent px-2.5 py-1 rounded-lg border border-accent-line/60 font-semibold tabular-nums"
             title="Target profit locked in per round-trip after fees and friction"
           >
             TP {config.targetProfitBps.toFixed(1)} bps
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border tabular-nums"
             title={`Nominal Hurdle: ${nominalHurdleBps.toFixed(1)} bps (${avgFeeBps.toFixed(1)} fee + ${avgSpreadBps.toFixed(1)} friction + ${config.targetProfitBps.toFixed(1)} tp)`}
           >
             Hurdle <strong className="text-slate-900 font-semibold">{nominalHurdleBps.toFixed(1)} bps</strong>
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border tabular-nums"
             title="Historical sliding window percentile trigger"
           >
             Window P{config.windowPercentile}%
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border"
             title="Execution Mode"
           >
             {config.executionMode === "DOUBLE_WAY" ? "Double-Way (Expand & Converge)" : "Single-Way (Divergence)"}
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border tabular-nums"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border tabular-nums"
             title="Grid unit sizing and current accumulated units"
           >
             Grid <strong className="text-slate-900">{config.currentAccumulatedUnits}/{config.maxAccumulatedUnits}u</strong> ({config.unitSize} {ticker.base})
           </span>
 
           <span
-            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-md border border-surface-border flex items-center space-x-1.5 tabular-nums"
+            className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border flex items-center space-x-1.5 tabular-nums"
             title={`Effective Safe Leverage: ${safeLeverage.effectiveLeverage}x | Margin: $${safeLeverage.totalMarginRequiredUsd.toFixed(2)} USD/unit | Buffer: ${safeLeverage.liquidationBufferPct.toFixed(1)}%`}
           >
             <ShieldCheck className="w-3.5 h-3.5 text-profit" />
@@ -106,11 +106,11 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
         <button
           type="button"
           onClick={handleOpenModal}
-          className="btn-secondary flex items-center space-x-1.5 text-xs font-mono"
+          className="btn-secondary flex items-center gap-2 text-xs font-sans"
           title="Configure Single Spread strategy parameters (applies to all tickers)"
         >
           <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
-          <span>Configure Strategy</span>
+          <span>Configurator</span>
         </button>
       </div>
 

@@ -174,16 +174,16 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               <span className="text-xs text-slate-500">Input Mode:</span>
               <button
                 onClick={() => setIsManual(false)}
-                className={`px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
-                  !isManual ? "bg-accent text-white shadow-xs" : "text-slate-500 hover:text-slate-900"
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                  !isManual ? "bg-accent text-white border-accent shadow-xs" : "text-slate-500 hover:text-slate-900 border-surface-border bg-surface hover:border-slate-300"
                 }`}
               >
                 Live Quotes
               </button>
               <button
                 onClick={() => setIsManual(true)}
-                className={`px-2.5 py-1 rounded-md text-xs font-semibold transition cursor-pointer ${
-                  isManual ? "bg-accent text-white shadow-xs" : "text-slate-500 hover:text-slate-900"
+                className={`px-2.5 py-1 rounded-lg text-xs font-semibold transition cursor-pointer border ${
+                  isManual ? "bg-accent text-white border-accent shadow-xs" : "text-slate-500 hover:text-slate-900 border-surface-border bg-surface hover:border-slate-300"
                 }`}
               >
                 Manual Prices
@@ -247,7 +247,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           </div>
 
           {/* Interactive SVG Sparkline Chart */}
-          <div className="bg-surface-raised border border-surface-border rounded-md p-4 font-mono text-xs shadow-2xs">
+          <div className="bg-surface-raised border border-surface-border rounded-lg p-4 font-mono text-xs shadow-2xs">
             <div className="flex justify-between text-xs text-slate-500 mb-2">
               <span>Residual Z-Score Spread Walk (Last 25 Cycles)</span>
               <span className="text-accent font-medium">Entry Threshold: +/- 2.0 Z</span>
@@ -290,10 +290,10 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           </div>
 
           {/* Signal Output */}
-          <div className="p-3 rounded-md bg-surface-raised border border-surface-border flex items-center justify-between text-xs font-mono shadow-2xs">
+          <div className="p-3 rounded-lg bg-surface-raised border border-surface-border flex items-center justify-between text-xs font-mono shadow-2xs">
             <span className="text-slate-500">Current Arbitrage Signal:</span>
             <span
-              className={`font-semibold px-2 py-0.5 rounded-sm text-xs ${
+              className={`font-semibold px-2 py-0.5 rounded-md text-xs ${
                 latest?.signal === "ENTRY_LONG_SPREAD"
                   ? "bg-profit-dim text-profit border border-profit-border"
                   : latest?.signal === "ENTRY_SHORT_SPREAD"
@@ -322,7 +322,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               onClick={handleSolveBertram}
               className="btn-primary !text-xs !py-1.5 !px-3 font-mono"
             >
-              Solve Optimal
+              Optimize
             </button>
           </div>
 
@@ -405,7 +405,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
             <div className="border border-dashed border-surface-border rounded-lg">
               <EmptyState
                 plain
-                title='Click "Solve Optimal" to calculate Bertram-style threshold levels.'
+                title='Click "Optimize" to calculate Bertram-style threshold levels.'
               />
             </div>
           )}

@@ -42,19 +42,19 @@ export default {
         xs: "2px"
       },
       fontFamily: {
+        // All type uses Inter Variable — mono resolves to Inter so numeric
+        // contexts stay in-family with tabular-nums for alignment.
         mono: [
-          '"Roboto Mono Variable"',
-          '"Roboto Mono"',
-          "ui-monospace",
-          "SFMono-Regular",
-          "Menlo",
-          "Monaco",
-          "Consolas",
-          "monospace"
+          '"Inter Variable"',
+          '"Inter"',
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "Segoe UI",
+          "sans-serif"
         ],
         sans: [
-          '"Roboto Variable"',
-          '"Roboto"',
+          '"Inter Variable"',
+          '"Inter"',
           "-apple-system",
           "BlinkMacSystemFont",
           "Segoe UI",

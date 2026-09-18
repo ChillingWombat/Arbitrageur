@@ -31,16 +31,23 @@ test("getMinCompatibleSize works for ETH across venues", () => {
   assert.ok(res.recommendedUnitSize >= res.minCompatibleSize);
 });
 
-test("computeSafeLeverage calculates minimum allowable leverage and margin", () => {
-  // HL has 50x, LGT has 20x, RH has 10x
+test("computeSafeLeverage uses strategy target with no cap and no venue term", () => {
+  // HL has 50x, LGT has 20x, RH has 10x — venue maxima are reference only.
   const res = computeSafeLeverage("BTC-USDC", ["Hyperliquid", "Lighter", "Robinhood"], 64200, 0.1, 15);
-  // Minimum venue leverage is 10x from Robinhood. Target was 15x, so effective is min(10, 15) = 10x.
-  assert.equal(res.effectiveLeverage, 10);
+  // No cap, no venue term: effective is the 15x strategy target.
+  assert.equal(res.effectiveLeverage, 15);
   assert.equal(res.maxVenueLeverage, 10);
   assert.equal(res.notionalUsd, 6420);
-  assert.equal(res.marginPerLegUsd, 642);
-  assert.equal(res.totalMarginRequiredUsd, 1284);
-  assert.ok(res.liquidationBufferPct >= 8.0 && res.liquidationBufferPct <= 10.0);
+  assert.equal(res.marginPerLegUsd, 428);
+  assert.equal(res.totalMarginRequiredUsd, 856);
+  assert.ok(res.liquidationBufferPct >= 5.0 && res.liquidationBufferPct <= 7.0);
+});
+
+test("computeSafeLeverage takes min(strategy, account)", () => {
+  const res = computeSafeLeverage("BTC-USDC", ["Hyperliquid", "Lighter"], 64200, 0.05, 15, 3);
+  assert.equal(res.effectiveLeverage, 3);
+  const unlimited = computeSafeLeverage("BTC-USDC", ["Hyperliquid", "Lighter"], 64200, 0.05, 15, null);
+  assert.equal(unlimited.effectiveLeverage, 15);
 });
 
 test("computeSafeLeverage respects user lower leverage target", () => {

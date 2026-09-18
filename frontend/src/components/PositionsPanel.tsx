@@ -205,7 +205,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             <button
               type="button"
               onClick={() => setScope("all")}
-              className={`flex-1 px-2.5 py-1 rounded-md transition cursor-pointer text-xs ${
+              className={`flex-1 px-2.5 py-1 rounded-lg transition cursor-pointer text-xs ${
                 scope === "all"
                   ? "bg-accent text-white shadow-2xs font-semibold"
                   : "text-slate-500 hover:text-slate-900 font-medium"
@@ -218,7 +218,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               type="button"
               onClick={() => currentStrategyId && setScope("current")}
               disabled={!currentStrategyId}
-              className={`flex-1 px-2.5 py-1 rounded-md transition truncate text-xs ${
+              className={`flex-1 px-2.5 py-1 rounded-lg transition truncate text-xs ${
                 scope === "current"
                   ? "bg-accent text-white shadow-2xs font-semibold"
                   : "text-slate-500 hover:text-slate-900 font-medium"

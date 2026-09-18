@@ -14,6 +14,7 @@ import {
   Scale,
   Wind,
   Repeat,
+  Target,
 } from "lucide-react";
 import type {
   TickerStrategyConfigDto,
@@ -81,7 +82,7 @@ interface SectionDef {
 }
 
 /** Settings sections per strategy — the left panel navigates these, not strategies. */
-const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle", SectionDef[]> = {
+const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "prediction", SectionDef[]> = {
   futures: [
     { id: "hurdle", label: "Signal Trigger", tooltip: "Configure target profit, historical baseline window, percentile trigger, and execution behavior.", icon: TrendingUp },
     { id: "sizing", label: "Execution & Sizing", tooltip: "Configure notional per leg, grid capacity, accumulated units, and cross-venue lot compatibility.", icon: Layers },
@@ -91,7 +92,7 @@ const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle", Sec
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
   funding: [
-    { id: "carry", label: "Carry Parameters", tooltip: "Configure funding-carry trade size, minimum net APR, and projected holding horizon.", icon: Coins },
+    { id: "carry", label: "Carry Parameters", tooltip: "Configure funding-carry trade size and minimum net APR.", icon: Coins },
     { id: "execution", label: "Execution & Slippage", tooltip: "Configure orderbook slippage tolerance, maximum entry spread, and auto-exit threshold.", icon: Activity },
     { id: "risk", label: "Risk & Rebalance", tooltip: "Configure liquidation-distance trim, drift auto-rebalance, and rotation hurdle threshold.", icon: Scale },
     { id: "unwind", label: "Passive Unwind", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
@@ -108,6 +109,11 @@ const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle", Sec
     { id: "cycle", label: "Cycle Parameters", tooltip: "Configure synthetic 3-legged arbitrage trade size and minimum net profit hurdle.", icon: Repeat },
     { id: "guardrails", label: "Cycle Guardrails", tooltip: "Configure per-leg slippage tolerance and execution constraints for triangular cycles.", icon: ShieldCheck },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic hide filters (minimum volume/price) plus manual hide list for triangular cycle assets.", icon: EyeOff },
+    { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
+  ],
+  prediction: [
+    { id: "parity", label: "Parity Parameters", tooltip: "Minimum net profit threshold and disabled scaffold gates for prediction parity.", icon: Target },
+    { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
 };
@@ -199,7 +205,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   onSaveConfig,
 }) => {
   // Strategy scope is fixed by the page that opened the modal
-  const [activeStrategyTab, setActiveStrategyTab] = useState<"futures" | "funding" | "spot" | "triangle">("futures");
+  const [activeStrategyTab, setActiveStrategyTab] = useState<"futures" | "funding" | "spot" | "triangle" | "prediction">("futures");
   const [activeSection, setActiveSection] = useState<string>(
     STRATEGY_SECTIONS.futures[0].id,
   );
@@ -211,8 +217,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       initialStrategy === "funding" ||
       initialStrategy === "spot" ||
       initialStrategy === "futures" ||
-      initialStrategy === "triangle"
-        ? (initialStrategy as "futures" | "funding" | "spot" | "triangle")
+      initialStrategy === "triangle" ||
+      initialStrategy === "prediction"
+        ? (initialStrategy as "futures" | "funding" | "spot" | "triangle" | "prediction")
         : "futures";
     setActiveStrategyTab(s);
     setActiveSection((STRATEGY_SECTIONS[s] ?? STRATEGY_SECTIONS.futures)[0].id);
@@ -256,7 +263,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const [userTargetLeverage, setUserTargetLeverage] = useState<number>(5);
 
   // Form State for Funding Carry Strategy
-  const [fundingTradeSizeUsd, setFundingTradeSizeUsd] = useState<number>(25000);
+  const [fundingTradeSizeUsd, setFundingTradeSizeUsd] = useState<number>(2000);
   const [fundingMinAprPct, setFundingMinAprPct] = useState<number>(8.0);
   const [fundingHoldingDays, setFundingHoldingDays] = useState<number>(14);
   const [fundingMaxSlippageBps, setFundingMaxSlippageBps] = useState<number>(15.0);
@@ -348,7 +355,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         setMaxStepUsd(Number(p.maxStepUsd ?? 2500));
         setMaxTickerEquityPct(Number(p.maxTickerEquityPct ?? 20));
         setUserTargetLeverage(Number(p.userTargetLeverage ?? 5));
-        setFundingTradeSizeUsd(Number(p.fundingTradeSizeUsd ?? 25000));
+        setFundingTradeSizeUsd(Number(p.fundingTradeSizeUsd ?? 2000));
         setFundingMinAprPct(Number(p.fundingMinAprPct ?? 8.0));
         setFundingHoldingDays(Number(p.fundingHoldingDays ?? 14));
         setFundingMaxSlippageBps(Number(p.fundingMaxSlippageBps ?? 15.0));
@@ -495,9 +502,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const autotuneDisabledReason: string | null = !baselineSnapshot
     ? "Collecting baseline history…"
     : baselineSnapshot.max_history_span_secs < 86_400
-      ? "Auto-tune needs 24h+ of spread history"
+      ? "AutoTune needs 24h+ of spread history"
       : baselineSnapshot.qualifying_pair_count === 0
-        ? "No qualifying venue pairs — auto-tune unavailable"
+        ? "No qualifying venue pairs — autoTune unavailable"
         : null;
 
   const handleOpenAutotune = () => {
@@ -530,7 +537,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setAutoMinVolumeUsd("");
     setAutoMinPriceUsd("");
     setAutoMinEventVolumeUsd(null);
-    setFundingTradeSizeUsd(25000);
+    setFundingTradeSizeUsd(2000);
     setFundingMinAprPct(8.0);
     setFundingHoldingDays(14);
     setFundingMaxSlippageBps(15.0);
@@ -593,7 +600,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         step="0.5"
         min="0"
         max="100"
-        placeholder="Off"
+        placeholder="OFF"
       />
     </SettingRow>
   );
@@ -607,7 +614,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="text-xs font-semibold font-sans text-slate-800">Passive Limit Unwind</span>
-              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. Off = market exits as today." />
+              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. OFF = market exits as today." />
             </div>
             <p className="text-[11px] font-sans text-slate-400 font-normal mt-0.5 leading-normal">
               Paper-only · timeout-bound · market fallback · off = market exit
@@ -615,7 +622,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           </div>
           <SwitchToggle
             size="sm"
-            label={value.enabled ? "On" : "Off"}
+            label={value.enabled ? "ON" : "OFF"}
             checked={value.enabled}
             onChange={(on) => set({ enabled: on })}
           />
@@ -738,7 +745,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           unit="USD"
           step="1000"
           min="0"
-          placeholder="Off"
+          placeholder="OFF"
         />
       </SettingRow>
 
@@ -753,7 +760,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           unit="USD"
           step="0.01"
           min="0"
-          placeholder="Off"
+          placeholder="OFF"
         />
       </SettingRow>
 
@@ -787,7 +794,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 type="button"
                 onClick={() => void handleUnexempt(base)}
                 title={`Un-hide ${base}`}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-surface-border bg-surface-raised text-xs font-mono font-semibold text-slate-700 hover:text-accent hover:border-accent/40 transition cursor-pointer"
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-surface-border bg-surface-raised text-xs font-mono font-semibold text-slate-700 hover:text-accent hover:border-accent/40 transition cursor-pointer"
               >
                 <span>{base}</span>
                 <span className="text-slate-400 hover:text-loss text-xs">×</span>
@@ -814,7 +821,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           title={autotuneDisabledReason ?? "Walk-forward recommend-only preview (70/30 split, validated per parameter)"}
           className="px-3 py-1.5 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-slate-400 shadow-2xs"
         >
-          Auto-tune
+          AutoTune
         </button>
       </div>
 
@@ -915,7 +922,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <button
             type="button"
             onClick={() => setExecutionMode("SINGLE_WAY")}
-            className={`w-full py-2 px-3 rounded-md font-sans text-xs font-semibold transition cursor-pointer ${
+            className={`w-full py-2 px-3 rounded-lg font-sans text-xs font-semibold transition cursor-pointer ${
               executionMode === "SINGLE_WAY"
                 ? "bg-accent text-white shadow-2xs"
                 : "text-slate-600 hover:text-slate-900"
@@ -927,7 +934,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <button
             type="button"
             onClick={() => setExecutionMode("DOUBLE_WAY")}
-            className={`w-full py-2 px-3 rounded-md font-sans text-xs font-semibold transition cursor-pointer ${
+            className={`w-full py-2 px-3 rounded-lg font-sans text-xs font-semibold transition cursor-pointer ${
               executionMode === "DOUBLE_WAY"
                 ? "bg-accent text-white shadow-2xs"
                 : "text-slate-600 hover:text-slate-900"
@@ -1004,16 +1011,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Target Leverage"
-        description="Requested leverage across venues (capped at safe venue maximum)"
-        tooltip="Requested leverage tier for opening perpetual positions across paired venues."
+        description="Requested strategy leverage, default 5x (effective is min(strategy, account))"
+        tooltip="Requested leverage tier for opening perpetual positions. Effective leverage is min(strategy target, account max)."
       >
         <NumberInput
           value={userTargetLeverage}
-          onChange={(v) => setUserTargetLeverage(Math.max(1, Math.min(5, parseInt(v, 10) || 5)))}
+          onChange={(v) => setUserTargetLeverage(Math.max(1, parseInt(v, 10) || 5))}
           unit="x"
           step="1"
           min="1"
-          max="5"
         />
       </SettingRow>
 
@@ -1042,7 +1048,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Carry Parameters</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Position sizing, target return hurdle, and horizon</p>
+        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Position sizing and target return hurdle</p>
       </div>
 
       <SettingRow
@@ -1073,20 +1079,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         />
       </SettingRow>
 
-      <SettingRow
-        label="Holding Horizon"
-        description="Projected carry amortization duration before re-evaluating"
-        tooltip="Expected holding period in days used to amortize entry/exit fee friction against accrued funding payouts."
-      >
-        <NumberInput
-          value={fundingHoldingDays}
-          onChange={(v) => setFundingHoldingDays(Math.max(1, parseInt(v, 10) || 14))}
-          unit="days"
-          step="1"
-          min="1"
-          max="365"
-        />
-      </SettingRow>
     </div>
   );
 
@@ -1138,7 +1130,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           step="0.5"
           min="0"
           max="100"
-          placeholder="Off"
+          placeholder="OFF"
         />
       </SettingRow>
     </div>
@@ -1161,7 +1153,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       >
         <SwitchToggle
           size="sm"
-          label={fundingAutoRebalance ? "On" : "Off"}
+          label={fundingAutoRebalance ? "ON" : "OFF"}
           checked={fundingAutoRebalance}
           onChange={setFundingAutoRebalance}
         />
@@ -1178,7 +1170,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           unit="bps"
           step="1"
           min="0"
-          placeholder="Off"
+          placeholder="OFF"
         />
       </SettingRow>
     </div>
@@ -1252,6 +1244,30 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   );
 
   /** Triangle Cycle Parameters Section */
+  const renderPredictionParitySection = () => (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between pb-1 border-b border-surface-border/60">
+        <div>
+          <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Parity Thresholds</h3>
+          <p className="text-[11px] font-sans text-slate-400 mt-0.5">Minimum net profit and disabled scaffold gates</p>
+        </div>
+      </div>
+
+      <SettingRow
+        label="Min Net Profit"
+        description="Minimum net profit required to auto-execute a parity pair"
+        tooltip="Prediction parity auto-executes only when net profit reaches this threshold."
+      >
+        <span className="font-sans font-bold text-slate-900 tabular-nums text-xs">1.0 ¢</span>
+      </SettingRow>
+
+      <div className="p-3.5 bg-surface-raised border border-surface-border rounded-lg space-y-2 text-xs font-sans text-slate-500 leading-relaxed">
+        <p><strong className="text-slate-700">Min Vol</strong> — defined but disabled: no venue volume data (prediction adapters are scaffolds).</p>
+        <p><strong className="text-slate-700">Max Slip</strong> — defined but disabled: no execution path (prediction adapters are scaffolds).</p>
+      </div>
+    </div>
+  );
+
   const renderTriangleCycleSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
@@ -1558,6 +1574,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                     {activeSection === "guardrails" && renderTriangleGuardrailsSection()}
                   </>
                 )}
+
+                {/* Prediction Market Parity */}
+                {activeStrategyTab === "prediction" && (
+                  <>
+                    {activeSection === "parity" && renderPredictionParitySection()}
+                  </>
+                )}
               </>
             )}
           </div>
@@ -1568,7 +1591,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <button
             type="button"
             onClick={handleResetDefaults}
-            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-md border border-surface-border transition cursor-pointer font-medium"
+            className="flex items-center space-x-1.5 px-3 py-1.5 bg-surface hover:bg-surface-raised text-slate-600 hover:text-slate-900 rounded-lg border border-surface-border transition cursor-pointer font-medium"
             title="Reset to default quantitative parameters"
           >
             <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -1584,7 +1607,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-md font-medium transition cursor-pointer"
+              className="px-4 py-1.5 bg-surface hover:bg-surface-raised text-slate-700 border border-surface-border rounded-lg font-medium transition cursor-pointer"
             >
               Cancel
             </button>
@@ -1593,7 +1616,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               type="button"
               onClick={handleSave}
               disabled={isSaving}
-              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-md font-semibold transition shadow-2xs cursor-pointer ${
+              className={`flex items-center space-x-1.5 px-4 py-1.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
                 saveSuccess
                   ? "bg-profit text-white border border-profit-border"
                   : "bg-accent hover:bg-blue-600 text-white"

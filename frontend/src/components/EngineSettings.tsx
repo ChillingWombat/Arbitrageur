@@ -342,7 +342,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     );
   };
 
-  const streamingCount = liveVenues.filter((v) => v.status === "READ_ONLY").length;
 
   const latencyClass = (ms: number): string =>
     ms < 100 ? "text-profit font-semibold" : ms < 300 ? "text-warn font-semibold" : "text-loss font-semibold";
@@ -668,12 +667,21 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     }
   };
 
-  /** Reloads account lists and venue credential-presence after any account-level mutation (toggle, default, credential delete). */
+  /** Reloads everything an account-level save affects so the card's own
+   *  Save Account button is sufficient — no overall Save Configuration needed:
+   *  account lists, venue credential-presence, balances, and live statuses. */
   const handleAccountsChanged = () => {
     setAccountsEpoch((e) => e + 1);
     void api
       .getEngineSettings()
       .then((s) => setConfiguredVenues(s.configured_venues || []))
+      .catch(() => undefined);
+    void loadVenueBalances();
+    void api
+      .getSystemStatus()
+      .then((sys) => {
+        if (sys?.active_venues) setLiveVenues(sys.active_venues);
+      })
       .catch(() => undefined);
   };
 
@@ -795,15 +803,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               }`}
             />
             <span>Exchanges</span>
-            <span
-              className={`px-1.5 py-0.2 rounded-sm text-[11px] font-bold font-mono min-w-[16px] text-center leading-tight transition ${
-                activeTab === "exchanges"
-                  ? "bg-accent text-white shadow-2xs"
-                  : "bg-accent-dim text-accent border border-accent-line/60"
-              }`}
-            >
+            {activeVenuesCount > 0 && (
+            <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
               {activeVenuesCount}
             </span>
+            )}
             {activeTab === "exchanges" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
@@ -857,7 +861,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <button
               type="button"
               onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
-              className="px-2.5 py-1 rounded-md border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+              className="px-2.5 py-1 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
               title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
             >
               {isVaultLocked ? (
@@ -879,7 +883,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
-                className="px-2.5 py-1 rounded-md border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+                className="px-2.5 py-1 rounded-lg border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
                 title="Permanently remove the stored HSM token from the vault"
               >
                 <Trash2 className="w-3.5 h-3.5 text-loss" />
@@ -892,31 +896,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       {/* Main Content Form Area */}
       <div className="flex-1 flex flex-col min-w-0 h-full overflow-hidden bg-surface">
         <form onSubmit={handleSave} className="flex flex-col h-full min-h-0">
-          {/* Active Tab Subheader */}
-          <div className="px-6 py-3 border-b border-surface-border bg-surface shrink-0 flex items-center justify-between">
-            <div>
-              <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 flex items-center space-x-1.5">
-                <span>
-                  {activeTab === "execution" && "Execution Modes & Safety Guardrails"}
-                  {activeTab === "exchanges" && "Exchange Accounts, API Credentials & Margins"}
-                  {activeTab === "network" && "Network Ports & HSM Signer Configuration"}
-                  {activeTab === "about" && "About Arbitrager & Release Information"}
-                </span>
-                <InfoTooltip
-                  text={
-                    activeTab === "execution"
-                      ? "Calibrate the minimum depth ratio and paper/live trading modes. Slippage tolerances live in each strategy's configurator."
-                      : activeTab === "exchanges"
-                      ? "Manage per-exchange accounts: credentials in the encrypted vault, enable switches, and default selection."
-                      : activeTab === "network"
-                      ? "Manage local daemon RPC/WS ports and remote Hardware Security Module tokens."
-                      : "Version status, open-source repository, sponsorship, and compliance notices."
-                  }
-                />
-              </h3>
-            </div>
-          </div>
-
 
           {activeTab === "exchanges" ? (
             <div className="relative flex-1 flex flex-row min-h-0 overflow-hidden">
@@ -924,7 +903,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
                 <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center justify-between shrink-0">
                   <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
-                    Exchanges ({EXCHANGES_ALPHABETICAL.length})
+                    Exchanges ({configuredCount}/{EXCHANGES_ALPHABETICAL.length})
                   </span>
                   <button
                     type="button"
@@ -941,7 +920,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     }}
                     disabled={pinging}
                     title="Measure HTTP round-trip to all enabled venue API endpoints now"
-                    className="px-2 py-1 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-md text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
+                    className="px-2 py-1 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
                   >
                     <RefreshCw className={`w-3 h-3 ${pinging ? "animate-spin" : ""}`} />
                     <span>Ping</span>
@@ -960,11 +939,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     const vStatus = getVenueStatus(ex.id);
                     const isStreaming = vStatus === "READ_ONLY";
                     const noAdapter = vStatus === "UNSUPPORTED";
-                    const statusLabel = !isEnabled
-                      ? "Off"
-                      : latency != null
-                      ? `${latency} ms`
-                      : "No response";
+                    const showLatency = isEnabled && latency != null;
+                    const showBalance = bal != null;
                     return (
                       <button
                         key={ex.id}
@@ -972,7 +948,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                         onClick={() => setSelectedExchange(ex.id)}
                         className={`w-full text-left p-2.5 rounded-lg text-xs font-mono transition flex items-center justify-between group cursor-pointer border ${
                           isSelected
-                            ? "bg-accent text-white border-accent shadow-2xs"
+                            ? "bg-accent-dim text-accent border-accent-line shadow-2xs"
                             : "bg-surface hover:bg-slate-100/80 text-slate-700 border-surface-border/60 hover:border-surface-border"
                         }`}
                       >
@@ -980,11 +956,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                           <div className="flex items-center space-x-2">
                             <span
                               className={`w-2 h-2 rounded-full shrink-0 ${
-                                isSelected
-                                  ? isStreaming || noAdapter
-                                    ? "bg-white ring-2 ring-white/30"
-                                    : "bg-white/40"
-                                  : isStreaming
+                                isStreaming
                                   ? "bg-emerald-500"
                                   : noAdapter
                                   ? "bg-amber-400"
@@ -1000,70 +972,52 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                                   : undefined
                               }
                             />
-                            <span className={`font-semibold truncate ${isSelected ? "text-white font-bold" : "text-slate-900"}`}>
+                            <span className={`font-semibold truncate ${isSelected ? "text-accent font-bold" : "text-slate-900"}`}>
                               {ex.name}
                             </span>
                           </div>
                         </div>
+                        {(showLatency || showBalance) && (
                         <div className="text-right shrink-0">
+                          {showLatency && (
                           <span
                             className={`text-[11px] font-mono block font-semibold ${
-                              isSelected
-                                ? "text-blue-100"
-                                : noAdapter
+                              noAdapter
                                 ? "text-warn"
-                                : statusLabel === "Off" || statusLabel === "No response"
-                                ? "text-slate-400"
-                                : latency != null
-                                ? latencyClass(latency)
-                                : "text-slate-400"
+                                : latencyClass(latency as number)
                             }`}
                             title={
-                              !isEnabled
-                                ? "Not enabled"
-                                : isStreaming
-                                ? latency != null
-                                  ? `Market data active · measured API round-trip: ${latency} ms`
-                                  : "Market data active"
+                              isStreaming
+                                ? `Market data active · measured API round-trip: ${latency} ms`
                                 : noAdapter
-                                ? latency != null
-                                  ? `API reachable (${latency} ms), but market quotes are not integrated`
-                                  : "Market quotes are not integrated and the API probe returned no response"
+                                ? `API reachable (${latency} ms), but market quotes are not integrated`
                                 : undefined
                             }
                           >
-                            {statusLabel}
+                            {`${latency} ms`}
                           </span>
+                          )}
+                          {showBalance && bal && (
                           <span
-                            className={`text-[11px] font-mono block font-bold ${isSelected ? "text-white" : "text-slate-800"}`}
+                            className="text-[11px] font-mono block font-bold text-slate-800"
                             title={
-                              bal
-                                ? bal.is_live
-                                  ? "Real exchange equity"
-                                  : "Simulated paper equity, not live exchange equity"
-                                : "No account balance for this venue"
+                              bal.is_live
+                                ? "Real exchange equity"
+                                : "Simulated paper equity, not live exchange equity"
                             }
                           >
-                            {bal
-                              ? bal.is_live
-                                ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                                : `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                              : isEnabled
-                              ? "No balance"
-                              : "Off"}
+                            {bal.is_live
+                              ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+                              : `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
                           </span>
+                          )}
                         </div>
+                        )}
                       </button>
                     );
                   })}
                 </div>
 
-                {/* Left Panel Summary */}
-                <div className="p-3 border-t border-surface-border bg-slate-100/60 text-xs font-mono text-slate-500 flex items-center justify-between shrink-0">
-                  <span>Streaming: <strong className="text-profit font-bold">{streamingCount}</strong></span>
-                  <span>Active: <strong className="text-slate-800 font-bold">{activeVenuesCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
-                  <span>Configured: <strong className="text-slate-800 font-bold">{configuredCount}</strong>/{EXCHANGES_ALPHABETICAL.length}</span>
-                </div>
               </div>
 
               {/* Right Content Pane: Single Selected Exchange */}
@@ -1122,7 +1076,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <div className="space-y-2">
                   <div className="flex items-center space-x-2">
                     <span className="text-xs font-bold font-mono text-slate-900">1. Kraken Spot Trading API</span>
-                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm bg-slate-200 text-slate-700">api.kraken.com</span>
+                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-md bg-slate-200 text-slate-700">api.kraken.com</span>
                   </div>
                   <VenueAccountsSection
                     venue="kraken_spot"
@@ -1140,7 +1094,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <div className="space-y-2">
                   <div className="flex items-center space-x-2">
                     <span className="text-xs font-bold font-mono text-slate-900">2. Kraken Futures Trading API</span>
-                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-sm bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
+                    <span className="text-xs font-mono px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-700 border border-indigo-200">futures.kraken.com</span>
                   </div>
                   <VenueAccountsSection
                     venue="kraken_futures"
@@ -1201,7 +1155,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nReal Trading submits signed orders to your connected exchange accounts on supported API venues. Live execution requires an unlocked credential vault and at least two live-ready venues."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading submits signed orders to your connected exchange accounts on supported API venues. Live execution requires an unlocked credential vault and at least two live-ready venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1235,7 +1189,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                         ? "Vault is locked. Click to enter password and unlock the vault."
                         : liveReadyVenues.length < 2
                         ? `Requires at least 2 live-ready venues (currently ${liveReadyVenues.length}: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Configure and enable API keys in the Exchanges tab.`
-                        : "Switch to Real Trading"
+                        : "Switch to Live Trading"
                     }
                     onClick={() => {
                       if (!vaultStatus?.is_unlocked && api.isTauri) {
@@ -1265,7 +1219,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       className="text-loss focus:ring-loss"
                     />
                     <span className="font-semibold text-slate-800 flex items-center gap-1.5">
-                      Real Trading
+                      Live Trading
                       {tradingMode === "real" && (
                         <span className="text-[10px] bg-loss text-white font-mono px-1.5 py-0.5 rounded font-bold uppercase tracking-wider animate-pulse">
                           LIVE
@@ -1275,24 +1229,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </label>
                 </div>
 
-                {!canSwitchToLive && (
-                  <p className="text-[11px] text-warn font-mono mt-0.5">
-                    {!vaultStatus?.is_unlocked ? (
-                      <span className="flex items-center space-x-1.5">
-                        <span>🔒 Real trading locked: Unlock secure credential vault to enable live orders.</span>
-                        <button
-                          type="button"
-                          onClick={() => setShowVaultModal(true)}
-                          className="underline hover:text-accent font-bold cursor-pointer"
-                        >
-                          Unlock Now
-                        </button>
-                      </span>
-                    ) : (
-                      `⚠️ Real trading requires at least 2 live-ready venues with API keys enabled (${liveReadyVenues.length}/2 ready: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}).`
-                    )}
-                  </p>
-                )}
+
               </div>
 
               <div className="pt-3 border-t border-surface-border flex items-center justify-between gap-3">
@@ -1311,7 +1248,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={paperStartingBalance}
                   onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
-                  className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
             </div>
@@ -1322,8 +1259,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
                 <p className="text-xs text-slate-500">
                   {fastWarmupEnabled
-                    ? "Fast Warm-Up: Persists sliding window orderbook quotes across app restarts for zero-lag instant signal readiness."
-                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires 30-60s warm-up window)."}
+                    ? "Cached Warm-Up: Reuses persisted orderbook quotes to shorten the warm-up window when appropriate — warm-up still runs, just faster."
+                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires the full warm-up window)."}
                 </p>
               </div>
               <ToggleSwitch
@@ -1348,9 +1285,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <label className="text-slate-600 block font-mono text-xs">
                       Max history days
                     </label>
-                    <p className="text-xs text-slate-400 leading-snug mt-0.5">
-                      {maxHistoryDays.trim() === "" ? "No limit — oldest data accumulates." : "Samples older than this are pruned hourly."}
-                    </p>
+
                   </div>
                   <input
                     type="number"
@@ -1360,7 +1295,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     value={maxHistoryDays}
                     placeholder="No limit"
                     onChange={(e) => setMaxHistoryDays(e.target.value)}
-                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                   />
                 </div>
                 <div className="flex items-center justify-between gap-3">
@@ -1368,9 +1303,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <label className="text-slate-600 block font-mono text-xs">
                       Max storage GB
                     </label>
-                    <p className="text-xs text-slate-400 leading-snug mt-0.5">
-                      {maxStorageGb.trim() === "" ? "No limit — oldest data accumulates." : "Oldest samples are evicted hourly until under budget."}
-                    </p>
+
                   </div>
                   <input
                     type="number"
@@ -1380,7 +1313,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     value={maxStorageGb}
                     placeholder="No limit"
                     onChange={(e) => setMaxStorageGb(e.target.value)}
-                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                   />
                 </div>
               </div>
@@ -1412,7 +1345,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={engineRpcPort}
                   onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
-                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -1423,7 +1356,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   disabled={loading}
                   value={engineWsPort}
                   onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
-                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                 />
               </div>
 
@@ -1435,7 +1368,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   value={bindAddress}
                   placeholder="127.0.0.1 or 0.0.0.0"
                   onChange={(e) => setBindAddress(e.target.value)}
-                  className="w-32 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-md text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
+                  className="w-32 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
                 />
               </div>
             </div>
@@ -1448,11 +1381,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <p className="text-xs text-slate-600">
                 To run Arbitrager continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
               </p>
-              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-md text-xs overflow-x-auto select-text font-mono">
+              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-xs overflow-x-auto select-text font-mono">
                 <code>./target/release/arbitrager serve --bind 0.0.0.0 --port 8787</code>
               </div>
               <p className="text-xs text-slate-500">
-                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-sm">systemctl start arbitrager</code>) to auto-restart on server reboot.
+                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-md">systemctl start arbitrager</code>) to auto-restart on server reboot.
               </p>
             </div>
           </div>
@@ -1481,7 +1414,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-md text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
+                    className="px-3.5 py-1.5 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
@@ -1527,7 +1460,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   rel="noopener noreferrer"
                   className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-lg transition shadow-2xs flex items-center space-x-2 shrink-0"
                 >
-                  <span>Buy me a SOLO ($5)</span>
+                  <span>Buy me a SOLO ($1)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
@@ -1556,7 +1489,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       <div className="p-4 border-t border-surface-border bg-slate-50/80 shrink-0 flex items-center justify-between">
         {/* Relocated Trading Mode Indicator on bottom-left */}
         <div
-          className="px-2.5 py-1.5 rounded-md border border-surface-border bg-surface text-slate-700 text-xs font-mono flex items-center space-x-1.5 shadow-2xs"
+          className="px-2.5 py-1.5 rounded-lg border border-surface-border bg-surface text-slate-700 text-xs font-mono flex items-center space-x-1.5 shadow-2xs"
           title={`Execution mode: ${tradingMode.toUpperCase()}`}
         >
           <span className="text-slate-400 font-normal">Mode:</span>
@@ -1568,7 +1501,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-md transition shadow-2xs cursor-pointer"
+              className="px-4 py-2 bg-surface-raised hover:bg-slate-200 text-slate-700 border border-surface-border font-medium text-xs font-mono rounded-lg transition shadow-2xs cursor-pointer"
             >
               Cancel
             </button>
@@ -1576,7 +1509,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-md transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
+            className="px-5 py-2 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
           >
             {saving ? (
               <span>Saving...</span>
