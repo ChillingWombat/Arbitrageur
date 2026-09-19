@@ -1032,20 +1032,41 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     Exchanges ({configuredCount}/{EXCHANGES_ALPHABETICAL.length})
                   </span>
                   <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => setExchangeFilter(exchangeFilter === "all" ? "favorites" : "all")}
-                      aria-pressed={exchangeFilter === "favorites"}
-                      title={exchangeFilter === "all" ? "Showing all exchanges — click to show favorites only" : `Showing favorites only (${favoriteExchanges.length} starred) — click to show all`}
-                      className={`h-7 px-2 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer flex items-center gap-1.5 ${
-                        exchangeFilter === "favorites"
-                          ? "bg-accent-dim text-accent border-accent-line/60"
-                          : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
-                      }`}
+                    <div
+                      role="group"
+                      aria-label="Exchange list filter"
+                      title="Switch between all exchanges and favorites only"
+                      className="h-7 flex items-stretch rounded-lg border border-surface-border bg-surface overflow-hidden"
                     >
-                      <Star className={`w-3.5 h-3.5 ${exchangeFilter === "favorites" ? "fill-amber-500 text-amber-500" : ""}`} />
-                      <span>{exchangeFilter === "favorites" ? (favoriteExchanges.length > 0 ? favoriteExchanges.length : "Favorites") : "All"}</span>
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => setExchangeFilter("all")}
+                        aria-pressed={exchangeFilter === "all"}
+                        title="Show all exchanges"
+                        className={`px-2 flex items-center gap-1.5 text-[11px] font-mono font-bold transition cursor-pointer ${
+                          exchangeFilter === "all"
+                            ? "bg-accent text-white"
+                            : "text-slate-500 hover:text-slate-800 hover:bg-slate-100/70"
+                        }`}
+                      >
+                        <Star className="w-3.5 h-3.5" />
+                        <span>All</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setExchangeFilter("favorites")}
+                        aria-pressed={exchangeFilter === "favorites"}
+                        title={`Favorites only (${favoriteExchanges.length} starred)`}
+                        className={`px-2 flex items-center gap-1.5 text-[11px] font-mono font-bold border-l border-surface-border transition cursor-pointer ${
+                          exchangeFilter === "favorites"
+                            ? "bg-accent text-white"
+                            : "text-slate-500 hover:text-slate-800 hover:bg-slate-100/70"
+                        }`}
+                      >
+                        <Star className={`w-3.5 h-3.5 ${exchangeFilter === "favorites" ? "fill-current" : ""}`} />
+                        <span>{favoriteExchanges.length > 0 ? favoriteExchanges.length : "Fav"}</span>
+                      </button>
+                    </div>
                     <button
                       type="button"
                       onClick={async () => {
