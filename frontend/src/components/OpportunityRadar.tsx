@@ -969,7 +969,7 @@ const OpportunityRadarInner: React.FC = () => {
   const [search, setSearch] = useState("");
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
   const [minExpBps, setMinExpBps] = useState("0"); // default mirrors the old positive-only table floor
-  const [minPWin, setMinPWin] = useState("93"); // default mirrors the bot entry floor (minPWin 0.93)
+  const [minPWin, setMinPWin] = useState("95"); // default mirrors the monitor ready floor (minWinProbability 0.95)
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
 
