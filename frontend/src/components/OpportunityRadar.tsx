@@ -506,23 +506,6 @@ const ConfigPanel: React.FC<{
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
-                      Entry min win probability (%)
-                      <InfoTooltip text="Bot entry conviction floor — entries demand higher P_win than the monitor display threshold above. Applies to auto entries and manual monitor-table entries alike." />
-                    </span>
-                  </label>
-                  <input
-                    className={INPUT_INLINE_CLS}
-                    type="number"
-                    min={50}
-                    max={99.9}
-                    step="0.1"
-                    value={(botDraft.minPWin * 100).toFixed(1)}
-                    onChange={(e) => setBot("minPWin", num(e.target.value, 93) / 100)}
-                  />
-                </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
                       Entry min expected profit (bps)
                       <InfoTooltip text="Bot entry hurdle on probability-weighted expected profit after friction — stricter than the monitor display floor above." />
                     </span>
@@ -993,7 +976,7 @@ const OpportunityRadarInner: React.FC = () => {
   const [search, setSearch] = useState("");
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
   const [minExpBps, setMinExpBps] = useState("0"); // default mirrors the old positive-only table floor
-  const [minPWin, setMinPWin] = useState("");
+  const [minPWin, setMinPWin] = useState("93"); // default mirrors the bot entry floor (minPWin 0.93)
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
 
