@@ -73,7 +73,7 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 35. As an institutional trader, I want a strict fail-closed guarantee where no synthetic orderbooks or prices are fabricated, so that paper trading executes solely against authentic exchange depth.
 36. As an API user, I want unconfigured exchanges to cleanly report disconnected status, so that the strategy engine does not calculate phantom arbitrage opportunities.
 37. As a multi-exchange arbitrageur, I want support for Hyperliquid, Lighter, Vanta (Orderly), Robinhood Arbitrum, Arcus, PopDEX, Polymarket, and Kalshi, so that I can execute across all major venues.
-38. As an operator, I want local untracked credentials (e.g. in `keychain.toml`) to load seamlessly without ever being tracked in version control, so that private keys remain private.
+38. As an operator, I want local untracked credentials (kept at `~/.config/arbitrageur/keychain.toml`, mode 0600 on a native filesystem — never on the shared NTFS mount where chmod is a no-op) to load seamlessly without ever being tracked in version control, so that private keys remain private.
 
 ### Multi-Ticker Funding Rate Arbitrage Monitor
 39. As a quantitative carry trader, I want the Funding Rate tab to continuously monitor and rank delta-neutral carry opportunities across all shared, non-hidden tickers simultaneously, rather than being locked to the single spread strategy's active ticker.
@@ -139,6 +139,13 @@ pub struct TickerStrategyConfigDto {
     pub sliding_window: String,
 }
 ```
+
+### Security Hardening (2026-09-19 audit mitigations)
+1. **Field-scoped credential reveal**: the account card never pulls the whole secret bundle into the renderer. `get_account_credential_field` returns one whitelisted field per explicit eye-icon reveal (vault-gated, fail-closed); revealed values are dropped on save, lock, or account switch, with presence-flag placeholders (`hasApiKey`, `hasApiSecret`, …) covering the rest.
+2. **Zeroizing secret storage**: every venue adapter holds API keys, secrets, passphrases, and private keys in `RwLock<Option<Zeroizing<String>>>` (wiped on drop); only unavoidable transient copies at signing/header boundaries remain, each marked in-source.
+3. **Plaintext key hygiene**: no live keys under the repo tree; local test keys live only at `~/.config/arbitrageur/keychain.toml` (0600). Import into the vault UI, then shred the file and rotate exposed API keys.
+4. **Headless bind guard**: the placeholder daemon refuses non-loopback binds unless `ARBITRAGEUR_ALLOW_LAN=1` is explicitly set.
+5. **Display-vs-engine split**: settings that only change what a gadget shows (e.g. the Spread Radar table's Min Exp floor) live on the gadget filter strip, never in a strategy Configurator. Engine gates (qualification floors, entry hurdles, scan-universe visibility filters, routing, risk/limits) stay in the Configurator.
 
 ### Vault Security & Lifecycle State Machine
 1. **Initial / Locked State**: `vaultStatus.is_unlocked == false`. The exchange credentials panel renders a full-height overlay with CSS `backdrop-blur-xs` and a centered white unlock card.

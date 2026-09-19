@@ -1098,3 +1098,16 @@ overhaul pass committed as `23d4aed`).
   redacted Debug, no secret logging, npm audit 0, single author).
 - **Verification**: exchanges 111/0, desktop credential test (extended with
   field-reveal asserts) ok, tsc clean, frontend all shards 0 fail.
+
+## 33. Session Handoff — 2026-09-19 (Push + spec/handoff refresh)
+
+- **Pushed**: `9d09d2c` (rebalance estimator), `2611dce` (configurator
+  display-filter move), `45f2c96` (security mitigations) — `main` in sync,
+  working tree clean.
+- **SPEC refresh**: keychain story points at `~/.config/arbitrageur/keychain.toml`
+  (0600, native fs); new "Security Hardening" section records field-scoped
+  reveal, zeroizing adapter storage, key hygiene, bind guard, and the
+  display-vs-engine configurator rule. (The SPEC never enumerated Spread
+  Radar threshold fields, so no field list went stale there.)
+- **Standing user actions** (unchanged): import test keys into the vault,
+  shred the relocated keychain file, rotate the two exposed Lighter API keys.
