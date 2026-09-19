@@ -302,6 +302,65 @@ through only after metadata confirms they name a tradable contract.
 
 ---
 
+## 10. Long-tail perp venues (`extended_venues.rs`, researched 2026-09-19)
+
+One shared paper read-only adapter serves 23 long-tail perp venues through a
+per-venue spec table (public REST only, no auth; account / order / leverage
+paths fail closed; `supports_live_execution = false`). The user asked for two
+things per venue: (a) a working market-data adapter, and (b) a custody
+verdict — "can they take my money away if they shutdown, skip town, or go
+bankrupt". The table below is (b); the adapter status column is (a).
+
+**Custody reading guide.** LOW = self-custody onchain settlement (user keeps
+keys; the operator cannot move collateral — but frontend/API outages can still
+strand positions in volatility, and contract bugs are a separate risk).
+MEDIUM = hybrid (offchain matching, onchain settlement — the operator runs the
+book but cannot sign for your collateral). CAUTION = trade paper-only until the
+named issue resolves.
+
+| Venue | Venue id | Custody | Can they take funds? | Adapter status |
+|---|---|---|---|---|
+| dYdX Chain | `dydx` | LOW (L1, self-custody) | No — onchain positions, user keys | Admitted (curl-verified: markets + book) |
+| Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | Admitted (curl-verified: markets + book) |
+| GMX V2 | `gmx` | LOW (GLV vaults, self-custody) | No — vault shares, user keys; prices-only feed (no orderbook by design) | Admitted (curl-verified tickers; excluded from spread pairs) |
+| Aevo | `aevo` | LOW–MED (offchain book, onchain settlement) | Cannot move collateral without user signatures | Admitted (curl-verified: markets + book) |
+| ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
+| Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
+| Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
+| StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Admitted (doc-shaped; harness sweep pending) |
+| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Admitted (doc-shaped; harness sweep pending) |
+| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Modeled, not admitted (sweep pending) |
+| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
+| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Modeled, not admitted (sweep pending) |
+| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
+| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Modeled, not admitted (sweep pending) |
+| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Modeled, not admitted |
+| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Modeled, not admitted (sweep pending) |
+| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Modeled, not admitted |
+| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Modeled, not admitted |
+| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
+| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
+| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
+| Astros | `astros` | LOW (onchain settlement) | No — user keeps keys (docs claim) | Modeled, not admitted (sweep pending) |
+| Gate DEX | `gatedex` | MEDIUM (hybrid, CEX-affiliated) | CEX-affiliate risk — size accordingly | Modeled, not admitted (sweep pending) |
+
+**Deliberately not venues.** Orderly "Derivatives" is the same Orderly rails
+as Vanta — a second Orderly venue would double-count one orderbook, so use the
+Vanta venue. RISEx has no live mainnet (nothing to integrate) — skipped, will
+revisit after launch.
+
+**Verification.** dYdX (`indexer.dydx.trade/v4/perpetualMarkets` +
+`/v4/orderbooks/perpetualMarket/BTC-USD`), Paradex (`api.prod.paradex.trade`
+`/v1/markets` + `/v1/orderbook/BTC-USD-PERP`), Aevo (`api.aevo.xyz/markets` +
+`/orderbook`), and GMX (`arbitrum-api.gmxinfra.io/prices/tickers`) returned
+live payloads in this sandbox. The rest are shaped from public docs; each
+parser fails closed per entry (bad shapes skip entries, and empty books never
+masquerade as quotes), so a wrong doc guess degrades to venue errors, never
+bad data. Admit the remainder one by one after a harness sweep from full
+egress confirms markets + book + funding shapes.
+
+---
+
 ## 6. Transfer Rails & Rebalance Friction (researched 2026-09-19)
 
 | Venue | Deposit rails | Withdraw rails | Withdraw fee | Deposit fee | Direct venue→venue? | Confidence |

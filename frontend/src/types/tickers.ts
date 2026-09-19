@@ -103,6 +103,29 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   coinbase: "CB",
   decibel: "DCB",
   variational: "VAR",
+  dydx: "DYDX",
+  paradex: "PRDX",
+  gmx: "GMX",
+  apex: "APEX",
+  extended: "EXT",
+  derive: "DRV",
+  standx: "STX",
+  helix: "HLX",
+  aevo: "AEVO",
+  vest: "VEST",
+  antarctic: "ANTC",
+  evedex: "EVE",
+  bulk: "BULK",
+  qfex: "QFEX",
+  ostium: "OST",
+  sodex: "SODX",
+  alphax: "ALX",
+  pacifica: "PCF",
+  nado: "NADO",
+  iotrader: "IOT",
+  niza: "NIZA",
+  astros: "ASTR",
+  gatedex: "GDEX",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -122,6 +145,29 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   CB: "coinbase",
   DCB: "decibel",
   VAR: "variational",
+  DYDX: "dydx",
+  PRDX: "paradex",
+  GMX: "gmx",
+  APEX: "apex",
+  EXT: "extended",
+  DRV: "derive",
+  STX: "standx",
+  HLX: "helix",
+  AEVO: "aevo",
+  VEST: "vest",
+  ANTC: "antarctic",
+  EVE: "evedex",
+  BULK: "bulk",
+  QFEX: "qfex",
+  OST: "ostium",
+  SODX: "sodex",
+  ALX: "alphax",
+  PCF: "pacifica",
+  NADO: "nado",
+  IOT: "iotrader",
+  NIZA: "niza",
+  ASTR: "astros",
+  GDEX: "gatedex",
 };
 
 /**
@@ -159,6 +205,29 @@ export interface VenueSettingsFilter {
   coinbase_enabled?: boolean;
   decibel_enabled?: boolean;
   variational_enabled?: boolean;
+  dydx_enabled?: boolean;
+  paradex_enabled?: boolean;
+  gmx_enabled?: boolean;
+  apex_enabled?: boolean;
+  extended_enabled?: boolean;
+  derive_enabled?: boolean;
+  standx_enabled?: boolean;
+  helix_enabled?: boolean;
+  aevo_enabled?: boolean;
+  vest_enabled?: boolean;
+  antarctic_enabled?: boolean;
+  evedex_enabled?: boolean;
+  bulk_enabled?: boolean;
+  qfex_enabled?: boolean;
+  ostium_enabled?: boolean;
+  sodex_enabled?: boolean;
+  alphax_enabled?: boolean;
+  pacifica_enabled?: boolean;
+  nado_enabled?: boolean;
+  iotrader_enabled?: boolean;
+  niza_enabled?: boolean;
+  astros_enabled?: boolean;
+  gatedex_enabled?: boolean;
   polymarket_enabled?: boolean;
   polymarket_api_key?: string;
   polymarket_secret?: string;
@@ -232,6 +301,16 @@ export function getEnabledConnectedVenueCodes(
   if (settings.decibel_enabled === true) {
     active.add("DCB");
   }
+  // Long-tail perp venues: admitted set only (paper read-only, flag-gated).
+  if (settings.dydx_enabled === true) active.add("DYDX");
+  if (settings.paradex_enabled === true) active.add("PRDX");
+  if (settings.gmx_enabled === true) active.add("GMX");
+  if (settings.apex_enabled === true) active.add("APEX");
+  if (settings.extended_enabled === true) active.add("EXT");
+  if (settings.derive_enabled === true) active.add("DRV");
+  if (settings.standx_enabled === true) active.add("STX");
+  if (settings.helix_enabled === true) active.add("HLX");
+  if (settings.aevo_enabled === true) active.add("AEVO");
 
   return active;
 }

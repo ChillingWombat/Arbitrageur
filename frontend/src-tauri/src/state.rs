@@ -6,6 +6,7 @@ use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
+use arbitrageur_exchanges::extended_venues::ExtendedVenueAdapter;
 use arbitrageur_exchanges::edgex::EdgeXAdapter;
 use arbitrageur_exchanges::grvt::GrvtAdapter;
 use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
@@ -494,6 +495,55 @@ pub struct EngineSettingsDto {
     pub variational_enabled: bool,
     #[serde(default)]
     pub coinbase_enabled: bool,
+    // Long-tail perp venues (extended_venues.rs, paper read-only).
+    // All default off; only ADMITTED_EXTENDED_VENUE_IDS are admitted by
+    // get_venues until a harness sweep confirms each payload shape.
+    #[serde(default)]
+    pub dydx_enabled: bool,
+    #[serde(default)]
+    pub paradex_enabled: bool,
+    #[serde(default)]
+    pub gmx_enabled: bool,
+    #[serde(default)]
+    pub apex_enabled: bool,
+    #[serde(default)]
+    pub extended_enabled: bool,
+    #[serde(default)]
+    pub derive_enabled: bool,
+    #[serde(default)]
+    pub standx_enabled: bool,
+    #[serde(default)]
+    pub helix_enabled: bool,
+    #[serde(default)]
+    pub aevo_enabled: bool,
+    #[serde(default)]
+    pub vest_enabled: bool,
+    #[serde(default)]
+    pub antarctic_enabled: bool,
+    #[serde(default)]
+    pub evedex_enabled: bool,
+    #[serde(default)]
+    pub bulk_enabled: bool,
+    #[serde(default)]
+    pub qfex_enabled: bool,
+    #[serde(default)]
+    pub ostium_enabled: bool,
+    #[serde(default)]
+    pub sodex_enabled: bool,
+    #[serde(default)]
+    pub alphax_enabled: bool,
+    #[serde(default)]
+    pub pacifica_enabled: bool,
+    #[serde(default)]
+    pub nado_enabled: bool,
+    #[serde(default)]
+    pub iotrader_enabled: bool,
+    #[serde(default)]
+    pub niza_enabled: bool,
+    #[serde(default)]
+    pub astros_enabled: bool,
+    #[serde(default)]
+    pub gatedex_enabled: bool,
 
     // Kraken Spot & Futures
     #[serde(default)]
@@ -639,6 +689,29 @@ impl Default for EngineSettingsDto {
             edgex_enabled: false,
             variational_enabled: false,
             coinbase_enabled: false,
+            dydx_enabled: false,
+            paradex_enabled: false,
+            gmx_enabled: false,
+            apex_enabled: false,
+            extended_enabled: false,
+            derive_enabled: false,
+            standx_enabled: false,
+            helix_enabled: false,
+            aevo_enabled: false,
+            vest_enabled: false,
+            antarctic_enabled: false,
+            evedex_enabled: false,
+            bulk_enabled: false,
+            qfex_enabled: false,
+            ostium_enabled: false,
+            sodex_enabled: false,
+            alphax_enabled: false,
+            pacifica_enabled: false,
+            nado_enabled: false,
+            iotrader_enabled: false,
+            niza_enabled: false,
+            astros_enabled: false,
+            gatedex_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
             kraken_futures_enabled: false,
@@ -1017,6 +1090,30 @@ pub struct AppEngineState {
     pub live_kraken: Arc<KrakenAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
     pub live_variational: Arc<VariationalAdapter>,
+    // Long-tail perp venues (one shared adapter type, per-venue specs).
+    pub live_dydx: Arc<ExtendedVenueAdapter>,
+    pub live_paradex: Arc<ExtendedVenueAdapter>,
+    pub live_gmx: Arc<ExtendedVenueAdapter>,
+    pub live_apex: Arc<ExtendedVenueAdapter>,
+    pub live_extended: Arc<ExtendedVenueAdapter>,
+    pub live_derive: Arc<ExtendedVenueAdapter>,
+    pub live_standx: Arc<ExtendedVenueAdapter>,
+    pub live_helix: Arc<ExtendedVenueAdapter>,
+    pub live_aevo: Arc<ExtendedVenueAdapter>,
+    pub live_vest: Arc<ExtendedVenueAdapter>,
+    pub live_antarctic: Arc<ExtendedVenueAdapter>,
+    pub live_evedex: Arc<ExtendedVenueAdapter>,
+    pub live_bulk: Arc<ExtendedVenueAdapter>,
+    pub live_qfex: Arc<ExtendedVenueAdapter>,
+    pub live_ostium: Arc<ExtendedVenueAdapter>,
+    pub live_sodex: Arc<ExtendedVenueAdapter>,
+    pub live_alphax: Arc<ExtendedVenueAdapter>,
+    pub live_pacifica: Arc<ExtendedVenueAdapter>,
+    pub live_nado: Arc<ExtendedVenueAdapter>,
+    pub live_iotrader: Arc<ExtendedVenueAdapter>,
+    pub live_niza: Arc<ExtendedVenueAdapter>,
+    pub live_astros: Arc<ExtendedVenueAdapter>,
+    pub live_gatedex: Arc<ExtendedVenueAdapter>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -1100,6 +1197,29 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
         "variational" | "var" | "variational (omni-perp)" => Some("variational"),
+        "dydx" | "dydx chain" | "dydx v4" => Some("dydx"),
+        "paradex" | "paradex (starknet)" => Some("paradex"),
+        "gmx" | "gmx v2" | "gmx perps" => Some("gmx"),
+        "apex" | "apex omni" => Some("apex"),
+        "extended" | "extended exchange" => Some("extended"),
+        "derive" | "derive (perps)" => Some("derive"),
+        "standx" | "stand x" => Some("standx"),
+        "helix" | "helix (injective)" => Some("helix"),
+        "aevo" | "aevo (perps)" => Some("aevo"),
+        "vest" | "vest exchange" => Some("vest"),
+        "antarctic" => Some("antarctic"),
+        "evedex" | "evedex (perps)" => Some("evedex"),
+        "bulk" | "bulk exchange" => Some("bulk"),
+        "qfex" => Some("qfex"),
+        "ostium" => Some("ostium"),
+        "sodex" | "sodex (futures)" => Some("sodex"),
+        "alphax" | "alphax (futures)" => Some("alphax"),
+        "pacifica" => Some("pacifica"),
+        "nado" => Some("nado"),
+        "iotrader" | "io trader" => Some("iotrader"),
+        "niza" | "niza.fun" | "niza (futures)" => Some("niza"),
+        "astros" => Some("astros"),
+        "gatedex" | "gate dex" => Some("gatedex"),
         _ => None,
     }
 }
@@ -1298,6 +1418,30 @@ impl AppEngineState {
         let live_kraken = Arc::new(KrakenAdapter::new(None, None, None, None));
         let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
         let live_variational = Arc::new(VariationalAdapter::new(None, None, None));
+        // Long-tail perp venues: public REST only, no credentials.
+        let live_dydx = Arc::new(ExtendedVenueAdapter::dydx(None));
+        let live_paradex = Arc::new(ExtendedVenueAdapter::paradex(None));
+        let live_gmx = Arc::new(ExtendedVenueAdapter::gmx(None));
+        let live_apex = Arc::new(ExtendedVenueAdapter::apex(None));
+        let live_extended = Arc::new(ExtendedVenueAdapter::extended(None));
+        let live_derive = Arc::new(ExtendedVenueAdapter::derive(None));
+        let live_standx = Arc::new(ExtendedVenueAdapter::standx(None));
+        let live_helix = Arc::new(ExtendedVenueAdapter::helix(None));
+        let live_aevo = Arc::new(ExtendedVenueAdapter::aevo(None));
+        let live_vest = Arc::new(ExtendedVenueAdapter::vest(None));
+        let live_antarctic = Arc::new(ExtendedVenueAdapter::antarctic(None));
+        let live_evedex = Arc::new(ExtendedVenueAdapter::evedex(None));
+        let live_bulk = Arc::new(ExtendedVenueAdapter::bulk(None));
+        let live_qfex = Arc::new(ExtendedVenueAdapter::qfex(None));
+        let live_ostium = Arc::new(ExtendedVenueAdapter::ostium(None));
+        let live_sodex = Arc::new(ExtendedVenueAdapter::sodex(None));
+        let live_alphax = Arc::new(ExtendedVenueAdapter::alphax(None));
+        let live_pacifica = Arc::new(ExtendedVenueAdapter::pacifica(None));
+        let live_nado = Arc::new(ExtendedVenueAdapter::nado(None));
+        let live_iotrader = Arc::new(ExtendedVenueAdapter::iotrader(None));
+        let live_niza = Arc::new(ExtendedVenueAdapter::niza(None));
+        let live_astros = Arc::new(ExtendedVenueAdapter::astros(None));
+        let live_gatedex = Arc::new(ExtendedVenueAdapter::gatedex(None));
         let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
         let market_data_hub = MarketDataHub::new(1024, 400);
@@ -1375,6 +1519,29 @@ impl AppEngineState {
             live_kraken,
             live_decibel,
             live_variational,
+            live_dydx,
+            live_paradex,
+            live_gmx,
+            live_apex,
+            live_extended,
+            live_derive,
+            live_standx,
+            live_helix,
+            live_aevo,
+            live_vest,
+            live_antarctic,
+            live_evedex,
+            live_bulk,
+            live_qfex,
+            live_ostium,
+            live_sodex,
+            live_alphax,
+            live_pacifica,
+            live_nado,
+            live_iotrader,
+            live_niza,
+            live_astros,
+            live_gatedex,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1768,6 +1935,39 @@ impl AppEngineState {
                 "Variational",
                 self.live_variational.clone(),
             ));
+        }
+        // Long-tail perp venues (extended_venues.rs, paper read-only, no
+        // credentials). Only the harness-verified / doc-confident set is
+        // admitted; the rest stay modeled-but-not-admitted (PopDEX
+        // precedent) until a sweep confirms their payload shapes. GMX V2 is
+        // prices-only (GLV AMM has no orderbook) and is excluded from
+        // spread-monitor venue pairs downstream.
+        if s.dydx_enabled || account_enabled("dydx") {
+            list.push(("dydx", "dYdX Chain", self.live_dydx.clone()));
+        }
+        if s.paradex_enabled || account_enabled("paradex") {
+            list.push(("paradex", "Paradex", self.live_paradex.clone()));
+        }
+        if s.gmx_enabled || account_enabled("gmx") {
+            list.push(("gmx", "GMX V2", self.live_gmx.clone()));
+        }
+        if s.apex_enabled || account_enabled("apex") {
+            list.push(("apex", "ApeX Omni", self.live_apex.clone()));
+        }
+        if s.extended_enabled || account_enabled("extended") {
+            list.push(("extended", "Extended", self.live_extended.clone()));
+        }
+        if s.derive_enabled || account_enabled("derive") {
+            list.push(("derive", "Derive", self.live_derive.clone()));
+        }
+        if s.standx_enabled || account_enabled("standx") {
+            list.push(("standx", "StandX", self.live_standx.clone()));
+        }
+        if s.helix_enabled || account_enabled("helix") {
+            list.push(("helix", "Helix", self.live_helix.clone()));
+        }
+        if s.aevo_enabled || account_enabled("aevo") {
+            list.push(("aevo", "Aevo", self.live_aevo.clone()));
         }
         list
     }

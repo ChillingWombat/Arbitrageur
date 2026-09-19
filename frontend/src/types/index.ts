@@ -554,6 +554,30 @@ export interface EngineSettingsDto {
   edgex_enabled?: boolean;
   variational_enabled?: boolean;
   coinbase_enabled?: boolean;
+  // Long-tail perp venues (extended_venues.rs, paper read-only, keyless).
+  dydx_enabled?: boolean;
+  paradex_enabled?: boolean;
+  gmx_enabled?: boolean;
+  apex_enabled?: boolean;
+  extended_enabled?: boolean;
+  derive_enabled?: boolean;
+  standx_enabled?: boolean;
+  helix_enabled?: boolean;
+  aevo_enabled?: boolean;
+  vest_enabled?: boolean;
+  antarctic_enabled?: boolean;
+  evedex_enabled?: boolean;
+  bulk_enabled?: boolean;
+  qfex_enabled?: boolean;
+  ostium_enabled?: boolean;
+  sodex_enabled?: boolean;
+  alphax_enabled?: boolean;
+  pacifica_enabled?: boolean;
+  nado_enabled?: boolean;
+  iotrader_enabled?: boolean;
+  niza_enabled?: boolean;
+  astros_enabled?: boolean;
+  gatedex_enabled?: boolean;
 
   // Kraken Spot & Futures
   kraken_spot_api_key?: string;

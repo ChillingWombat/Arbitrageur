@@ -14,6 +14,7 @@ import {
   Info,
   Trash2,
   ShieldAlert,
+  Star,
 } from "lucide-react";
 import { api } from "../services/api";
 import {
@@ -32,26 +33,60 @@ import { VenueAccountsSection } from "./ExchangeAccounts";
 
 export type SettingsTab = "execution" | "exchanges" | "network" | "about";
 export type ExchangeId =
+  | "aevo"
+  | "alphax"
+  | "antarctic"
+  | "apex"
   | "arcus"
   | "aster"
+  | "astros"
   | "binance"
+  | "bulk"
   | "coinbase"
   | "decibel"
+  | "derive"
+  | "dydx"
   | "edgex"
+  | "evedex"
+  | "extended"
+  | "gatedex"
+  | "gmx"
   | "grvt"
+  | "helix"
   | "hyperliquid"
   | "ibkr"
   | "ig"
+  | "iotrader"
   | "kalshi"
   | "kraken"
   | "lighter"
+  | "nado"
+  | "niza"
   | "okx"
   | "ondoperps"
+  | "ostium"
+  | "pacifica"
+  | "paradex"
   | "polymarket"
   | "popdex"
+  | "qfex"
   | "robinhood"
+  | "sodex"
+  | "standx"
   | "vanta"
-  | "variational";
+  | "variational"
+  | "vest";
+
+// Long-tail perp venues served by the shared paper read-only adapter
+// (backend `extended_venues.rs`). Keyed map keeps 23 toggles in one state
+// object instead of 23 useState hooks; new venues only touch this list,
+// the flag helpers below, and the load/save mappings.
+export const EXTENDED_VENUE_IDS: ExchangeId[] = [
+  "aevo", "alphax", "antarctic", "apex", "astros", "bulk", "derive",
+  "dydx", "evedex", "extended", "gatedex", "gmx", "helix", "iotrader",
+  "nado", "niza", "ostium", "pacifica", "paradex", "qfex", "sodex",
+  "standx", "vest",
+];
 
 export interface ExchangeMetadata {
   id: ExchangeId;
@@ -61,26 +96,49 @@ export interface ExchangeMetadata {
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
+  { id: "aevo", name: "Aevo", type: "Perp DEX", feeBps: 3.0 },
+  { id: "alphax", name: "AlphaX", type: "Perp DEX", feeBps: 3.0 },
+  { id: "antarctic", name: "Antarctic", type: "Perp DEX", feeBps: 3.0 },
+  { id: "apex", name: "ApeX Omni", type: "Perp DEX", feeBps: 2.0 },
   { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
   { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 },
+  { id: "astros", name: "Astros", type: "Perp DEX", feeBps: 3.0 },
   { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
+  { id: "bulk", name: "BULK", type: "Perp DEX", feeBps: 3.0 },
   { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
+  { id: "derive", name: "Derive", type: "Perp DEX", feeBps: 2.0 },
+  { id: "dydx", name: "dYdX Chain", type: "L1 Perp DEX", feeBps: 2.0 },
   { id: "edgex", name: "edgeX", type: "StarkEx Perp DEX", feeBps: 4.5 },
+  { id: "evedex", name: "EVEDEX", type: "Perp DEX", feeBps: 3.0 },
+  { id: "extended", name: "Extended", type: "Perp DEX", feeBps: 2.0 },
+  { id: "gatedex", name: "Gate DEX", type: "Perp DEX", feeBps: 3.0 },
+  { id: "gmx", name: "GMX V2", type: "GLV AMM Perps", feeBps: 5.0 },
   { id: "grvt", name: "GRVT", type: "Perp DEX", feeBps: 2.0 },
+  { id: "helix", name: "Helix", type: "Cosmos Perp DEX", feeBps: 2.0 },
   { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
   { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 },
   { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 },
+  { id: "iotrader", name: "IO Trader", type: "Perp DEX", feeBps: 3.0 },
   { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
   { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
   { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
+  { id: "nado", name: "Nado", type: "Perp DEX", feeBps: 3.0 },
+  { id: "niza", name: "Niza", type: "Perp DEX", feeBps: 3.0 },
   { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "ondoperps", name: "Ondo Perps", type: "Equity + Crypto Perps", feeBps: 3.5 },
+  { id: "ostium", name: "Ostium", type: "Oracle Perp DEX", feeBps: 3.0 },
+  { id: "pacifica", name: "Pacifica", type: "Perp DEX", feeBps: 2.0 },
+  { id: "paradex", name: "Paradex", type: "Starknet Perp DEX", feeBps: 2.0 },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
   { id: "popdex", name: "PopDEX", type: "Arbitrage Protocol", feeBps: 2.0 },
+  { id: "qfex", name: "QFEX", type: "Perp DEX", feeBps: 4.0 },
   { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
+  { id: "sodex", name: "SoDEX", type: "Perp DEX", feeBps: 3.0 },
+  { id: "standx", name: "StandX", type: "Perp DEX", feeBps: 3.0 },
   { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
   { id: "variational", name: "Variational", type: "Perp DEX (Read-Only)", feeBps: 0.0 },
+  { id: "vest", name: "Vest", type: "Perp DEX", feeBps: 3.0 },
 ];
 
 interface EngineSettingsProps {
@@ -176,6 +234,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [igEnabled, setIgEnabled] = useState(false);
   const [okxEnabled, setOkxEnabled] = useState(false);
   const [variationalEnabled, setVariationalEnabled] = useState(false);
+  // Long-tail perp venues: one toggle map instead of 23 useStates.
+  const [extEnabled, setExtEnabled] = useState<Record<string, boolean>>({});
+  const setExtVenueEnabled = (id: string, enabled: boolean) =>
+    setExtEnabled((prev) => (prev[id] === enabled ? prev : { ...prev, [id]: enabled }));
   const [arcusApiKey, setArcusApiKey] = useState("");
   const [arcusSecret, setArcusSecret] = useState("");
   const [arcusUrl, setArcusUrl] = useState("https://api.arcus.exchange");
@@ -215,6 +277,40 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>("arcus");
+  // Favorite exchanges: a pure UI preference (localStorage, per machine) —
+  // starring never touches strategy state. The selector filter below narrows
+  // the tab list to favorites for operators who only use a few venues.
+  const FAVORITE_KEY = "arbitrageur.favoriteExchanges.v1";
+  const [favoriteExchanges, setFavoriteExchanges] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(FAVORITE_KEY);
+      const arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr.filter((v) => typeof v === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+  const [exchangeFilter, setExchangeFilter] = useState<"all" | "favorites">("all");
+  const toggleFavorite = (id: string) =>
+    setFavoriteExchanges((prev) => {
+      const next = prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id];
+      try {
+        localStorage.setItem(FAVORITE_KEY, JSON.stringify(next));
+      } catch {
+        /* private-mode storage — favorites simply don't persist */
+      }
+      return next;
+    });
+  const visibleExchanges = EXCHANGES_ALPHABETICAL.filter(
+    (ex) => exchangeFilter === "all" || favoriteExchanges.includes(ex.id),
+  );
+  // Keep the selection visible: if the active tab is filtered out, fall back
+  // to the first visible exchange (or keep it when the filter empties).
+  useEffect(() => {
+    if (!visibleExchanges.some((ex) => ex.id === selectedExchange) && visibleExchanges.length > 0) {
+      setSelectedExchange(visibleExchanges[0].id);
+    }
+  }, [exchangeFilter, favoriteExchanges]); // eslint-disable-line react-hooks/exhaustive-deps
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -250,6 +346,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
 
   const venueFlagEnabled = (id: ExchangeId): boolean => {
+    if ((EXTENDED_VENUE_IDS as string[]).includes(id)) return extEnabled[id] ?? false;
     switch (id) {
       case "arcus": return arcusEnabled;
       case "aster": return asterEnabled;
@@ -276,6 +373,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   };
 
   const setVenueFlagEnabled = (id: ExchangeId, enabled: boolean) => {
+    if ((EXTENDED_VENUE_IDS as string[]).includes(id)) {
+      setExtVenueEnabled(id, enabled);
+      return;
+    }
     switch (id) {
       case "arcus": setArcusEnabled(enabled); break;
       case "aster": setAsterEnabled(enabled); break;
@@ -437,6 +538,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setGrvtEnabled(s.grvt_enabled ?? false);
         setOndoperpsEnabled(s.ondoperps_enabled ?? false);
         setVariationalEnabled(s.variational_enabled ?? false);
+        // Long-tail venues: backend fields are `<id>_enabled`.
+        setExtEnabled(Object.fromEntries(
+          EXTENDED_VENUE_IDS.map((id) => [id, (s as unknown as Record<string, unknown>)[`${id}_enabled`] === true]),
+        ));
         setCoinbaseEnabled(s.coinbase_enabled ?? false);
 
         setArcusApiKey(s.arcus_api_key || "");
@@ -554,6 +659,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         grvt_enabled: grvtEnabled,
         ondoperps_enabled: ondoperpsEnabled,
         variational_enabled: variationalEnabled,
+        ...Object.fromEntries(
+          EXTENDED_VENUE_IDS.map((id) => [`${id}_enabled`, extEnabled[id] ?? false]),
+        ),
         coinbase_enabled: coinbaseEnabled,
         arcus_api_key: arcusApiKey.trim(),
         arcus_secret: arcusSecret.trim(),
@@ -739,11 +847,22 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "kalshi":
         return isExchangeEnabled("kalshi") && (configured("kalshi") || Boolean(kalshiApiKeyId || kalshiPrivateKey) || hasConfiguredAccount("kalshi"));
       default:
-        return false;
+        // Keyless public venues (incl. all extended venues): the enable
+        // toggle plus any account/configured record is the configuration.
+        return isExchangeEnabled(venue as ExchangeId) && (configured(venue) || hasConfiguredAccount(venue));
     }
   };
 
   const configuredCount = [
+    isVenueConfigured("dydx"),
+    isVenueConfigured("paradex"),
+    isVenueConfigured("gmx"),
+    isVenueConfigured("apex"),
+    isVenueConfigured("extended"),
+    isVenueConfigured("derive"),
+    isVenueConfigured("standx"),
+    isVenueConfigured("helix"),
+    isVenueConfigured("aevo"),
     isVenueConfigured("hyperliquid"),
     isVenueConfigured("lighter"),
     isVenueConfigured("vanta"),
@@ -897,6 +1016,32 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
                     Exchanges ({configuredCount}/{EXCHANGES_ALPHABETICAL.length})
                   </span>
+                  <div className="flex gap-1" title="Show all exchanges or favorites only">
+                    <button
+                      type="button"
+                      onClick={() => setExchangeFilter("all")}
+                      className={`px-2 py-1 rounded-md text-[10px] font-mono font-bold border transition cursor-pointer ${
+                        exchangeFilter === "all"
+                          ? "bg-accent-dim text-accent border-accent-line/60"
+                          : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
+                      }`}
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setExchangeFilter("favorites")}
+                      className={`px-2 py-1 rounded-md text-[10px] font-mono font-bold border transition cursor-pointer flex items-center gap-1 ${
+                        exchangeFilter === "favorites"
+                          ? "bg-accent-dim text-accent border-accent-line/60"
+                          : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
+                      }`}
+                      title={`Favorites only (${favoriteExchanges.length} starred)`}
+                    >
+                      <Star className="w-3 h-3" />
+                      <span>{favoriteExchanges.length > 0 ? favoriteExchanges.length : ""}</span>
+                    </button>
+                  </div>
                   <button
                     type="button"
                     onClick={async () => {
@@ -920,7 +1065,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 space-y-1">
-                  {EXCHANGES_ALPHABETICAL.map((ex) => {
+                  {visibleExchanges.length === 0 && (
+                    <div className="px-3 py-6 text-center text-[11px] font-mono text-slate-400">
+                      No favorites yet — star an exchange to pin it here.
+                    </div>
+                  )}
+                  {visibleExchanges.map((ex) => {
                     const isSelected = selectedExchange === ex.id;
                     const isEnabled = isExchangeEnabled(ex.id);
                     const bal = getVenueBalance(ex.id);
@@ -966,6 +1116,22 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                             />
                             <span className={`font-semibold truncate ${isSelected ? "text-accent font-bold" : "text-slate-900"}`}>
                               {ex.name}
+                            </span>
+                            <span
+                              role="checkbox"
+                              aria-checked={favoriteExchanges.includes(ex.id)}
+                              title={favoriteExchanges.includes(ex.id) ? "Remove from favorites" : "Add to favorites"}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleFavorite(ex.id);
+                              }}
+                              className={`shrink-0 cursor-pointer transition ${
+                                favoriteExchanges.includes(ex.id)
+                                  ? "text-amber-500"
+                                  : "text-slate-300 opacity-0 group-hover:opacity-100 hover:text-amber-400"
+                              }`}
+                            >
+                              <Star className={`w-3.5 h-3.5 ${favoriteExchanges.includes(ex.id) ? "fill-amber-500" : ""}`} />
                             </span>
                           </div>
                         </div>

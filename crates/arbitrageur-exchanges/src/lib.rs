@@ -19,6 +19,7 @@ pub mod decibel;
 pub mod variational;
 pub mod prediction;
 pub mod simulated;
+pub mod extended_venues;
 
 pub use rate_limiter::*;
 pub use wallet::*;
@@ -41,6 +42,7 @@ pub use decibel::*;
 pub use variational::*;
 pub use prediction::*;
 pub use simulated::*;
+pub use extended_venues::*;
 
 #[cfg(test)]
 mod tests {
