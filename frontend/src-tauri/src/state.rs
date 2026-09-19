@@ -1595,6 +1595,34 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
+            let _ = self.live_popdex.update_credentials(None, None, None, None, None);
+            let _ = self.live_variational.update_credentials(None, None);
+            let _ = self.live_edgex.update_credentials(None, None);
+            let _ = self.live_grvt.update_credentials(None, None);
+            let _ = self.live_ondoperps.update_credentials(None, None);
+            for a in [
+                &self.live_dydx, &self.live_paradex, &self.live_gmx, &self.live_apex,
+                &self.live_extended, &self.live_derive, &self.live_standx, &self.live_helix,
+                &self.live_aevo, &self.live_vest, &self.live_antarctic, &self.live_evedex,
+                &self.live_bulk, &self.live_qfex, &self.live_ostium, &self.live_sodex,
+                &self.live_alphax, &self.live_pacifica, &self.live_nado, &self.live_iotrader,
+                &self.live_niza, &self.live_astros, &self.live_gatedex,
+            ] {
+                let _ = a.update_credentials(None, None);
+            }
+            let _ = self.live_edgex.update_credentials(None, None);
+            let _ = self.live_grvt.update_credentials(None, None);
+            let _ = self.live_ondoperps.update_credentials(None, None);
+            for a in [
+                &self.live_dydx, &self.live_paradex, &self.live_gmx, &self.live_apex,
+                &self.live_extended, &self.live_derive, &self.live_standx, &self.live_helix,
+                &self.live_aevo, &self.live_vest, &self.live_antarctic, &self.live_evedex,
+                &self.live_bulk, &self.live_qfex, &self.live_ostium, &self.live_sodex,
+                &self.live_alphax, &self.live_pacifica, &self.live_nado, &self.live_iotrader,
+                &self.live_niza, &self.live_astros, &self.live_gatedex,
+            ] {
+                let _ = a.update_credentials(None, None);
+            }
             return;
         }
 
@@ -1796,6 +1824,75 @@ impl AppEngineState {
                 variational_pk,
             ) {
                 tracing::warn!("Variational credential sync refused: {e}");
+            }
+
+            // Wallet-direct preparation for venues with no API trading yet
+            // (edgeX, GRVT, Ondo Perps + all 23 long-tail perp venues):
+            // optional EVM wallet from the vault, parsed into a zeroizing
+            // signer. Execution stays fail-closed until each venue's
+            // signing flow is implemented and audited.
+            let mut edgex_wallet = None;
+            let mut edgex_pk = None;
+            if let Some(cred) = get_active_cred(&["edgex", "edge_x"]) {
+                edgex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                edgex_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_edgex.update_credentials(edgex_wallet, edgex_pk) {
+                tracing::warn!("edgeX credential sync refused: {e}");
+            }
+            let mut grvt_wallet = None;
+            let mut grvt_pk = None;
+            if let Some(cred) = get_active_cred(&["grvt"]) {
+                grvt_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                grvt_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_grvt.update_credentials(grvt_wallet, grvt_pk) {
+                tracing::warn!("GRVT credential sync refused: {e}");
+            }
+            let mut ondo_wallet = None;
+            let mut ondo_pk = None;
+            if let Some(cred) = get_active_cred(&["ondoperps", "ondo", "ondo_perps"]) {
+                ondo_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                ondo_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_ondoperps.update_credentials(ondo_wallet, ondo_pk) {
+                tracing::warn!("Ondo Perps credential sync refused: {e}");
+            }
+            let extended_adapters: [(&[&str], &std::sync::Arc<arbitrageur_exchanges::extended_venues::ExtendedVenueAdapter>); 23] = [
+                (&["dydx"], &self.live_dydx),
+                (&["paradex"], &self.live_paradex),
+                (&["gmx"], &self.live_gmx),
+                (&["apex"], &self.live_apex),
+                (&["extended"], &self.live_extended),
+                (&["derive"], &self.live_derive),
+                (&["standx"], &self.live_standx),
+                (&["helix"], &self.live_helix),
+                (&["aevo"], &self.live_aevo),
+                (&["vest"], &self.live_vest),
+                (&["antarctic"], &self.live_antarctic),
+                (&["evedex"], &self.live_evedex),
+                (&["bulk"], &self.live_bulk),
+                (&["qfex"], &self.live_qfex),
+                (&["ostium"], &self.live_ostium),
+                (&["sodex"], &self.live_sodex),
+                (&["alphax"], &self.live_alphax),
+                (&["pacifica"], &self.live_pacifica),
+                (&["nado"], &self.live_nado),
+                (&["iotrader"], &self.live_iotrader),
+                (&["niza"], &self.live_niza),
+                (&["astros"], &self.live_astros),
+                (&["gatedex"], &self.live_gatedex),
+            ];
+            for (aliases, adapter) in extended_adapters {
+                let mut wallet = None;
+                let mut pk = None;
+                if let Some(cred) = get_active_cred(aliases) {
+                    wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                    pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+                }
+                if let Err(e) = adapter.update_credentials(wallet, pk) {
+                    tracing::warn!("{} credential sync refused: {e}", aliases[0]);
+                }
             }
         } else {
             self.live_aster.update_credentials(None, None);

@@ -39,6 +39,18 @@ interface CredFieldSpec {
   hint?: string;
 }
 
+/**
+ * Wallet-direct preparation fields for every venue with no API trading yet
+ * (edgeX, GRVT, Ondo Perps + all long-tail perp venues). Both optional, so
+ * the enable switch is never blocked — market data stays public read-only
+ * and live execution stays disabled until each venue's signing flow is
+ * implemented and audited. Keys are vault-encrypted and never leave host.
+ */
+const WALLET_DIRECT_FIELDS: CredFieldSpec[] = [
+  { key: "walletAddress", label: "Wallet Address", placeholder: "0x...", optional: true, hint: "Optional. Your EVM wallet address for future wallet-direct signing. Leave blank to track read-only." },
+  { key: "privateKey", label: "Wallet Private Key (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. EVM key for future wallet-direct signing. Vault-encrypted, never leaves this host. Execution stays off until the signing flow is audited." },
+];
+
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Arcus: Ed25519 keypair generated + registered via the exchange (docs.arcus.xyz)
   arcus: [
@@ -157,38 +169,40 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "V1 API Key", secret: true, optional: true },
     { key: "apiSecret", label: "V1 API Secret", secret: true, optional: true },
   ],
-  // edgeX / GRVT / Ondo Perps: public read-only feeds need no credentials —
-  // an empty field list still allows a label-only enabled account profile,
-  // which is the venue's on/off switch. No trading credentials exist yet.
-  edgex: [],
-  grvt: [],
-  ondoperps: [],
+  // edgeX / GRVT / Ondo Perps: public read-only feeds need no API credentials.
+  // Wallet-direct preparation (optional EVM key, vault-encrypted) is offered
+  // since these venues expose no API-key trading; execution stays off until
+  // each venue's signing flow is implemented and audited.
+  edgex: WALLET_DIRECT_FIELDS,
+  grvt: WALLET_DIRECT_FIELDS,
+  ondoperps: WALLET_DIRECT_FIELDS,
   // Long-tail perp venues (extended_venues.rs): public read-only feeds need
-  // no credentials — same label-only account profile pattern. Live trading
-  // credentials do not exist for these venues (paper read-only).
-  dydx: [],
-  paradex: [],
-  gmx: [],
-  apex: [],
-  extended: [],
-  derive: [],
-  standx: [],
-  helix: [],
-  aevo: [],
-  vest: [],
-  antarctic: [],
-  evedex: [],
-  bulk: [],
-  qfex: [],
-  ostium: [],
-  sodex: [],
-  alphax: [],
-  pacifica: [],
-  nado: [],
-  iotrader: [],
-  niza: [],
-  astros: [],
-  gatedex: [],
+  // no API credentials. Same wallet-direct preparation pattern as above —
+  // optional EVM key, vault-encrypted; paper read-only until each venue's
+  // signing flow is implemented and audited.
+  dydx: WALLET_DIRECT_FIELDS,
+  paradex: WALLET_DIRECT_FIELDS,
+  gmx: WALLET_DIRECT_FIELDS,
+  apex: WALLET_DIRECT_FIELDS,
+  extended: WALLET_DIRECT_FIELDS,
+  derive: WALLET_DIRECT_FIELDS,
+  standx: WALLET_DIRECT_FIELDS,
+  helix: WALLET_DIRECT_FIELDS,
+  aevo: WALLET_DIRECT_FIELDS,
+  vest: WALLET_DIRECT_FIELDS,
+  antarctic: WALLET_DIRECT_FIELDS,
+  evedex: WALLET_DIRECT_FIELDS,
+  bulk: WALLET_DIRECT_FIELDS,
+  qfex: WALLET_DIRECT_FIELDS,
+  ostium: WALLET_DIRECT_FIELDS,
+  sodex: WALLET_DIRECT_FIELDS,
+  alphax: WALLET_DIRECT_FIELDS,
+  pacifica: WALLET_DIRECT_FIELDS,
+  nado: WALLET_DIRECT_FIELDS,
+  iotrader: WALLET_DIRECT_FIELDS,
+  niza: WALLET_DIRECT_FIELDS,
+  astros: WALLET_DIRECT_FIELDS,
+  gatedex: WALLET_DIRECT_FIELDS,
   // Variational Omni: market data is public (no credentials needed).
   // There is no API-token trading — orders are RFQ quotes settled on-chain
   // on Arbitrum, signed by a locally-held EVM key (vault-encrypted, never

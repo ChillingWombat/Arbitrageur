@@ -9,6 +9,8 @@ use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use crate::wallet::{wallet_execution_unavailable, EvmWalletSigner};
+use parking_lot::RwLock;
 
 /// edgeX (StarkEx perp DEX) connector.
 ///
@@ -39,6 +41,8 @@ pub struct EdgeXAdapter {
     client: Client,
     base_url: String,
     rate_limiter: AccountRequestCoordinator,
+    wallet_address: RwLock<Option<String>>,
+    wallet: RwLock<Option<EvmWalletSigner>>,
 }
 
 /// Venue-valid depth levels for `getDepth` (docs + live probe).
@@ -256,7 +260,52 @@ impl EdgeXAdapter {
             client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 5000, 1000, 30000),
+            wallet_address: RwLock::new(None),
+            wallet: RwLock::new(None),
         }
+    }
+
+    /// Bind (or clear) the locally-held EVM wallet used for future
+    /// wallet-direct signing. The hex key is parsed into a zeroizing signer
+    /// immediately; the raw string is never retained. An invalid key fails
+    /// the whole update so a half-bound state is impossible. Execution stays
+    /// fail-closed until this venue's signing flow is implemented and
+    /// audited — binding a key only prepares the vault.
+    pub fn update_credentials(
+        &self,
+        wallet_address: Option<String>,
+        private_key_hex: Option<String>,
+    ) -> anyhow::Result<()> {
+        let addr = wallet_address
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty());
+        match private_key_hex
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+        {
+            Some(hex_key) => {
+                let signer = EvmWalletSigner::from_hex(&hex_key)?;
+                if let Some(a) = addr.as_deref() {
+                    if !a.eq_ignore_ascii_case(&signer.address_hex()) {
+                        anyhow::bail!("edgeX wallet address does not match the supplied private key");
+                    }
+                }
+                *self.wallet.write() = Some(signer);
+                *self.wallet_address.write() = addr;
+                Ok(())
+            }
+            None => {
+                *self.wallet.write() = None;
+                *self.wallet_address.write() = addr;
+                Ok(())
+            }
+        }
+    }
+
+    /// Currently bound wallet address, if any (preparation only — execution
+    /// stays disabled until the signing flow is audited).
+    pub fn wallet_address_hex(&self) -> Option<String> {
+        self.wallet_address.read().clone()
     }
 
     #[allow(dead_code)]
@@ -505,11 +554,11 @@ impl ExchangeAdapter for EdgeXAdapter {
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+        anyhow::bail!(wallet_execution_unavailable(self.name(), "its StarkEx settlement layer", "wallet-signed order flow"))
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+        anyhow::bail!(wallet_execution_unavailable(self.name(), "its StarkEx settlement layer", "wallet-signed order flow"))
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
@@ -751,5 +800,40 @@ mod tests {
                 .is_err()
         );
         assert!(adapter.set_leverage("BTC", 5).await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod wallet_direct_tests {
+    use super::*;
+
+    #[test]
+    fn wallet_binding_prepares_without_enabling_execution() {
+        let a = EdgeXAdapter::new(None);
+        // Empty binding clears without error.
+        assert!(a.update_credentials(None, None).is_ok());
+        assert_eq!(a.wallet_address_hex(), None);
+        // Mismatched address fails the whole update (no half-bound state).
+        assert!(a
+            .update_credentials(
+                Some("0x0000000000000000000000000000000000000001".to_string()),
+                Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            )
+            .is_err());
+        assert_eq!(a.wallet_address_hex(), None);
+        // Scalar-1 test vector binds; address must match the derived key.
+        assert!(a
+            .update_credentials(
+                Some("0x7E5F4552091a69125d5dfcb7b8c2659029395bdf".to_string()),
+                Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            )
+            .is_ok());
+        assert_eq!(
+            a.wallet_address_hex(),
+            Some("0x7E5F4552091a69125d5dfcb7b8c2659029395bdf".to_string())
+        );
+        // Binding a key never enables live execution — the signing flow
+        // stays fail-closed until implemented and audited.
+        assert!(!a.supports_live_execution());
     }
 }

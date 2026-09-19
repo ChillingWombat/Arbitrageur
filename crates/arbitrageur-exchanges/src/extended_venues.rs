@@ -70,6 +70,8 @@ use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 
 use crate::rate_limiter::AccountRequestCoordinator;
+use crate::wallet::{wallet_execution_unavailable, EvmWalletSigner};
+use parking_lot::RwLock;
 
 // ---------------------------------------------------------------------------
 // Shared parsing helpers (fail-closed per entry, never abort listings)
@@ -451,6 +453,8 @@ pub struct ExtendedVenueAdapter {
     client: Client,
     base_url: String,
     rate_limiter: AccountRequestCoordinator,
+    wallet_address: RwLock<Option<String>>,
+    wallet: RwLock<Option<EvmWalletSigner>>,
 }
 
 impl ExtendedVenueAdapter {
@@ -483,6 +487,8 @@ impl ExtendedVenueAdapter {
             base_url: base_url.unwrap_or_else(|| spec.base_url.to_string()),
             client,
             rate_limiter: AccountRequestCoordinator::new(spec.id, 100, 2000, 500, 10000),
+            wallet_address: RwLock::new(None),
+            wallet: RwLock::new(None),
         })
     }
 
@@ -515,6 +521,49 @@ impl ExtendedVenueAdapter {
     pub fn niza(base_url: Option<String>) -> Self { Self::for_venue("niza", base_url).expect("niza spec") }
     pub fn astros(base_url: Option<String>) -> Self { Self::for_venue("astros", base_url).expect("astros spec") }
     pub fn gatedex(base_url: Option<String>) -> Self { Self::for_venue("gatedex", base_url).expect("gatedex spec") }
+
+    /// Bind (or clear) the locally-held EVM wallet used for future
+    /// wallet-direct signing. The hex key is parsed into a zeroizing signer
+    /// immediately; the raw string is never retained. An invalid key fails
+    /// the whole update so a half-bound state is impossible. Execution stays
+    /// fail-closed until this venue's signing flow is implemented and
+    /// audited — binding a key only prepares the vault.
+    pub fn update_credentials(
+        &self,
+        wallet_address: Option<String>,
+        private_key_hex: Option<String>,
+    ) -> anyhow::Result<()> {
+        let addr = wallet_address
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty());
+        match private_key_hex
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+        {
+            Some(hex_key) => {
+                let signer = EvmWalletSigner::from_hex(&hex_key)?;
+                if let Some(a) = addr.as_deref() {
+                    if !a.eq_ignore_ascii_case(&signer.address_hex()) {
+                        anyhow::bail!("wallet address does not match the supplied private key");
+                    }
+                }
+                *self.wallet.write() = Some(signer);
+                *self.wallet_address.write() = addr;
+                Ok(())
+            }
+            None => {
+                *self.wallet.write() = None;
+                *self.wallet_address.write() = addr;
+                Ok(())
+            }
+        }
+    }
+
+    /// Currently bound wallet address, if any (preparation only — execution
+    /// stays disabled until the signing flow is audited).
+    pub fn wallet_address_hex(&self) -> Option<String> {
+        self.wallet_address.read().clone()
+    }
 
     /// GET `path` against the venue base, fail-closed on transport, status,
     /// and content-type errors (edge-challenge HTML must never parse as a
@@ -1476,14 +1525,11 @@ impl ExchangeAdapter for ExtendedVenueAdapter {
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!(
-            "Live order execution is not implemented for {}; refusing to fabricate a fill",
-            self.name
-        )
+        anyhow::bail!(wallet_execution_unavailable(self.name(), "its settlement chain", "wallet-signed order flow"))
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name)
+        anyhow::bail!(wallet_execution_unavailable(self.name(), "its settlement chain", "wallet-signed order flow"))
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
@@ -1782,5 +1828,40 @@ mod tests {
         // GMX has no book by construction.
         let gmx = ExtendedVenueAdapter::gmx(None);
         assert!(gmx.fetch_orderbook("BTC").await.is_err());
+    }
+}
+
+#[cfg(test)]
+mod wallet_direct_tests {
+    use super::*;
+
+    #[test]
+    fn wallet_binding_prepares_without_enabling_execution() {
+        let a = ExtendedVenueAdapter::dydx(None);
+        // Empty binding clears without error.
+        assert!(a.update_credentials(None, None).is_ok());
+        assert_eq!(a.wallet_address_hex(), None);
+        // Mismatched address fails the whole update (no half-bound state).
+        assert!(a
+            .update_credentials(
+                Some("0x0000000000000000000000000000000000000001".to_string()),
+                Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            )
+            .is_err());
+        assert_eq!(a.wallet_address_hex(), None);
+        // Scalar-1 test vector binds; address must match the derived key.
+        assert!(a
+            .update_credentials(
+                Some("0x7E5F4552091a69125d5dfcb7b8c2659029395bdf".to_string()),
+                Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            )
+            .is_ok());
+        assert_eq!(
+            a.wallet_address_hex(),
+            Some("0x7E5F4552091a69125d5dfcb7b8c2659029395bdf".to_string())
+        );
+        // Binding a key never enables live execution — the signing flow
+        // stays fail-closed until implemented and audited.
+        assert!(!a.supports_live_execution());
     }
 }
