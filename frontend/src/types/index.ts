@@ -1057,11 +1057,11 @@ export interface ConvergenceCheckDto {
 // ---------------------------------------------------------------------------
 
 export type MonitorRowStatus =
-  | "collecting"
-  | "watching"
-  | "signaled"
-  | "qualified"
-  | "stale";
+  | "preparing"
+  | "tracking"
+  | "triggered"
+  | "ready"
+  | "no-data";
 
 export interface CapacityTierDto {
   sizeUsd: number;

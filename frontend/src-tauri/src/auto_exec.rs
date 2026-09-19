@@ -1,7 +1,7 @@
 //! OpportunityExecutor — autonomous convergence bot engine (GitHub issue #5).
 //!
-//! Opt-in, paper-only consumer of the spread monitor's qualified-opportunity
-//! seam. One background task polls `qualified_opportunities()`, runs every
+//! Opt-in, paper-only consumer of the spread monitor's ready-opportunity
+//! seam. One background task polls `ready_opportunities()`, runs every
 //! candidate through the pure gate pipeline in `arbitrageur_strategy`, sizes
 //! from the capacity ladder, and dispatches entries through the SAME guarded
 //! paper primitive as the manual row-Execute button
@@ -760,7 +760,7 @@ impl OpportunityExecutor {
                     deviation_bps: r.deviation_bps,
                 });
                 let watched = live.as_ref().is_some_and(|l| {
-                    l.status != "stale" && l.deviation_bps.is_some_and(|d| d.is_finite())
+                    l.status != "no-data" && l.deviation_bps.is_some_and(|d| d.is_finite())
                 });
                 if watched {
                     pos.unwatched_since_ms = None;
@@ -796,8 +796,8 @@ impl OpportunityExecutor {
         // (paused, reduce-only, disabled flag) skips entries silently —
         // denial audits would otherwise spam while disarmed.
         if cfg.enabled && snapshot_present {
-            let qualified = eng.qualified_opportunities();
-            for row in qualified {
+            let ready = eng.ready_opportunities();
+            for row in ready {
                 let signal = Self::signal_of(&row);
                 let key = PairKey::new(&signal.symbol, &signal.buy_venue, &signal.sell_venue);
                 if self.open.lock().contains_key(&key) {
@@ -1141,12 +1141,12 @@ mod tests {
         }
     }
 
-    fn qualified_row(symbol: &str, buy: &str, sell: &str) -> MonitorRowDto {
+    fn ready_row(symbol: &str, buy: &str, sell: &str) -> MonitorRowDto {
         MonitorRowDto {
             symbol: symbol.to_string(),
             buy_venue: buy.to_string(),
             sell_venue: sell.to_string(),
-            status: "qualified".to_string(),
+            status: "ready".to_string(),
             current_edge_bps: Some(12.0),
             baseline_bps: Some(2.0),
             deviation_bps: Some(10.0),
@@ -1251,8 +1251,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn entry_on_qualified_opens_position_and_audits() {
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+    async fn entry_on_ready_opens_position_and_audits() {
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 1);
@@ -1270,7 +1270,7 @@ mod tests {
 
     #[tokio::test]
     async fn second_tick_does_not_double_enter() {
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         bot.tick_once(&state, &dispatch).await;
@@ -1281,7 +1281,7 @@ mod tests {
     #[tokio::test]
     async fn skip_reasons_cover_every_gate() {
         // Disabled config: no entries, no audits (fully inert).
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         OpportunityExecutor::save_config(
             &state,
             &RadarBotConfigDto::from_policy(&AutoExecConfig::default(), BotMode::Off),
@@ -1293,7 +1293,7 @@ mod tests {
         assert!(bot_events(&state, "bot_skip").is_empty());
 
         // Live mode hard-blocks.
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         *state.is_live_mode.write() = true;
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
@@ -1304,7 +1304,7 @@ mod tests {
             .contains("paper-only")));
 
         // Engine pause blocks.
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         *state.is_paused.write() = true;
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
@@ -1312,7 +1312,7 @@ mod tests {
 
         // Low P_win skips with the floor reason.
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.p_win = Some(0.5);
             r
         }]);
@@ -1326,7 +1326,7 @@ mod tests {
 
         // Funding unknown never trades.
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.funding_unknown = true;
             r
         }]);
@@ -1335,14 +1335,14 @@ mod tests {
         assert_eq!(dispatch.enter_calls(), 0);
 
         // Blocking ledger signal collides.
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         record_radar_ledger(&state, "sig-block-1", "BTC", "hyperliquid", "lighter", SignalStatus::InFlight);
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
 
         // Concurrent-position cap reached.
-        let (state, bot) = harness(vec![qualified_row("ETH", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("ETH", "hyperliquid", "lighter")]);
         let mut tight = armed_config();
         tight.max_concurrent_positions = 1;
         OpportunityExecutor::save_config(&state, &tight).expect("save tight");
@@ -1364,7 +1364,7 @@ mod tests {
         assert_eq!(dispatch.enter_calls(), 0);
 
         // Entry-dispatch failure becomes an audited skip, not a position.
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         let dispatch = MockDispatch {
             enter_results: StdMutex::new(vec![Err("simulated reject".to_string())]),
             exit_results: StdMutex::new(vec![]),
@@ -1383,7 +1383,7 @@ mod tests {
     async fn exit_on_convergence_stop_and_timeout() {
         // Convergence: live dev inside the friction band.
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.deviation_bps = Some(1.0);
             r
         }]);
@@ -1410,7 +1410,7 @@ mod tests {
 
         // Stop: live dev past 1.5x entry.
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.deviation_bps = Some(16.0);
             r
         }]);
@@ -1437,7 +1437,7 @@ mod tests {
             .contains("stopped"));
 
         // Timeout: mid-band dev, deadline in the past.
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         bot.open.lock().insert(
             PairKey::new("BTC", "hyperliquid", "lighter"),
             TrackedPosition {
@@ -1462,7 +1462,7 @@ mod tests {
 
         // Failed exit keeps the position and surfaces the error.
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.deviation_bps = Some(1.0);
             r
         }]);
@@ -1540,7 +1540,7 @@ mod tests {
 
     #[tokio::test]
     async fn cooldown_blocks_immediate_reentry() {
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         bot.cooldowns.lock().insert(
             PairKey::new("BTC", "hyperliquid", "lighter"),
             Utc::now().timestamp_millis(),
@@ -1559,7 +1559,7 @@ mod tests {
         let mut dto = armed_config();
         dto.mode = "paused".to_string();
         let (state, bot) = harness(vec![{
-            let mut r = qualified_row("BTC", "hyperliquid", "lighter");
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.deviation_bps = Some(1.0);
             r
         }]);
@@ -1581,8 +1581,8 @@ mod tests {
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.exit_calls(), 1);
-        // Fresh qualified pair in the same tick must NOT enter while paused.
-        let (state2, bot2) = harness(vec![qualified_row("ETH", "hyperliquid", "lighter")]);
+        // Fresh ready pair in the same tick must NOT enter while paused.
+        let (state2, bot2) = harness(vec![ready_row("ETH", "hyperliquid", "lighter")]);
         OpportunityExecutor::save_config(&state2, &dto).expect("save paused");
         let dispatch2 = MockDispatch::ok();
         bot2.tick_once(&state2, &dispatch2).await;
@@ -1642,7 +1642,7 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_config_fails_closed_to_inert() {
-        let (state, bot) = harness(vec![qualified_row("BTC", "hyperliquid", "lighter")]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         state
             .state_store
             .save_radar_bot_config_json("{\"enabled\":true,\"mode\":\"auto\"}")
@@ -1663,9 +1663,9 @@ mod tests {
     #[tokio::test]
     async fn audit_trail_covers_enter_skip_exit_with_belief() {
         let (state, bot) = harness(vec![
-            qualified_row("BTC", "hyperliquid", "lighter"),
+            ready_row("BTC", "hyperliquid", "lighter"),
             {
-                let mut r = qualified_row("ETH", "hyperliquid", "lighter");
+                let mut r = ready_row("ETH", "hyperliquid", "lighter");
                 r.p_win = Some(0.5);
                 r
             },
@@ -1742,7 +1742,7 @@ mod tests {
 
         // Inject a snapshot where spread has converged to the dynamic baseline (deviation 0.5 bps <= friction band 4.0 bps)
         let engine = state.monitor.lock().clone().unwrap();
-        let mut row = qualified_row("BTC", "hyperliquid", "lighter");
+        let mut row = ready_row("BTC", "hyperliquid", "lighter");
         row.deviation_bps = Some(0.5);
         row.status = "neutral".to_string();
         engine.inject_snapshot(MonitorSnapshotDto {

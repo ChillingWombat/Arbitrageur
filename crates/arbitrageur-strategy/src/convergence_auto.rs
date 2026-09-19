@@ -29,7 +29,7 @@ pub struct ConvergenceSignal {
     pub symbol: String,
     pub buy_venue: String,
     pub sell_venue: String,
-    /// Monitor lifecycle status: only "qualified" is tradable.
+    /// Monitor lifecycle status: only "ready" is tradable.
     pub status: String,
     /// The monitor's own execute gate (paper path, books, session, …).
     pub executable: bool,
@@ -351,9 +351,9 @@ pub fn evaluate_entry_gates(
     if !ctx.snapshot_present {
         return deny("monitor snapshot unavailable");
     }
-    // Single consumption seam: only qualified + executable rows.
-    if signal.status != "qualified" || !signal.executable {
-        return deny("signal not qualified");
+    // Single consumption seam: only ready + executable rows.
+    if signal.status != "ready" || !signal.executable {
+        return deny("signal not ready");
     }
     match signal.p_win {
         Some(p) if p.is_finite() && p >= cfg.min_p_win => {}
@@ -516,7 +516,7 @@ pub fn plan_entry(
 /// Live spread observed for an open position's pair on this tick.
 #[derive(Debug, Clone)]
 pub struct LiveSpreadView {
-    /// Monitor lifecycle status of the pair ("qualified", "stale", …).
+    /// Monitor lifecycle status of the pair ("ready", "no-data", …).
     pub status: String,
     pub deviation_bps: Option<f64>,
 }
@@ -586,8 +586,8 @@ pub fn evaluate_exit(
     let Some(row) = live else {
         return stale_exit("pair no longer tracked");
     };
-    if row.status == "stale" {
-        return stale_exit("pair stale");
+    if row.status == "no-data" {
+        return stale_exit("pair has no data");
     }
     let Some(dev) = row.deviation_bps.filter(|d| d.is_finite()) else {
         return stale_exit("live deviation unknown");
@@ -622,8 +622,8 @@ pub fn evaluate_exit(
 mod tests {
     use super::*;
 
-    fn qualified() -> ConvergenceSignal {
-        let mut s = ConvergenceSignal::new("BTC", "hyperliquid", "lighter", "qualified", true);
+    fn ready_signal() -> ConvergenceSignal {
+        let mut s = ConvergenceSignal::new("BTC", "hyperliquid", "lighter", "ready", true);
         s.current_edge_bps = Some(12.0);
         s.baseline_bps = Some(2.0);
         s.deviation_bps = Some(10.0);
@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn entry_on_qualified_row_is_allowed() {
-        let s = qualified();
+        let s = ready_signal();
         let (cfg, ctx) = open_ctx(1000.0);
         let d = evaluate_entry_gates(&s, &cfg, &ctx);
         assert!(d.allow, "expected allow, got {}", d.reason);
@@ -656,7 +656,7 @@ mod tests {
 
     #[test]
     fn gate_bot_disabled_first() {
-        let s = qualified();
+        let s = ready_signal();
         let (mut cfg, ctx) = open_ctx(1000.0);
         cfg.enabled = false;
         let d = evaluate_entry_gates(&s, &cfg, &ctx);
@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn gate_live_mode_hard_blocks() {
-        let s = qualified();
+        let s = ready_signal();
         let (cfg, mut ctx) = open_ctx(1000.0);
         ctx.live_mode = true;
         let d = evaluate_entry_gates(&s, &cfg, &ctx);
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn gate_engine_pause_blocks() {
-        let s = qualified();
+        let s = ready_signal();
         let (cfg, mut ctx) = open_ctx(1000.0);
         ctx.engine_paused = true;
         assert_eq!(
@@ -690,7 +690,7 @@ mod tests {
 
     #[test]
     fn gate_monitor_disabled_and_missing_snapshot() {
-        let s = qualified();
+        let s = ready_signal();
         let (cfg, mut ctx) = open_ctx(1000.0);
         ctx.monitor_enabled = false;
         assert!(!evaluate_entry_gates(&s, &cfg, &ctx).allow);
@@ -702,16 +702,16 @@ mod tests {
     }
 
     #[test]
-    fn gate_rejects_non_qualified_statuses() {
+    fn gate_rejects_non_ready_statuses() {
         let (cfg, ctx) = open_ctx(1000.0);
-        for status in ["collecting", "watching", "signaled", "stale"] {
-            let mut s = qualified();
+        for status in ["preparing", "tracking", "triggered", "no-data"] {
+            let mut s = ready_signal();
             s.status = status.into();
             let d = evaluate_entry_gates(&s, &cfg, &ctx);
             assert!(!d.allow, "status {status} must not trade");
-            assert_eq!(d.reason, "signal not qualified");
+            assert_eq!(d.reason, "signal not ready");
         }
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.executable = false;
         assert!(!evaluate_entry_gates(&s, &cfg, &ctx).allow);
     }
@@ -720,19 +720,19 @@ mod tests {
     fn gate_p_win_floor_and_unknown() {
         let (mut cfg, ctx) = open_ctx(1000.0);
         cfg.min_p_win = 0.93;
-        let mut low = qualified();
+        let mut low = ready_signal();
         low.p_win = Some(0.90);
         let d = evaluate_entry_gates(&low, &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("93% floor"));
-        let mut missing = qualified();
+        let mut missing = ready_signal();
         missing.p_win = None;
         assert_eq!(
             evaluate_entry_gates(&missing, &cfg, &ctx).reason,
             "win probability unknown"
         );
         // NaN never trades.
-        let mut nan = qualified();
+        let mut nan = ready_signal();
         nan.p_win = Some(f64::NAN);
         assert!(!evaluate_entry_gates(&nan, &cfg, &ctx).allow);
     }
@@ -741,7 +741,7 @@ mod tests {
     fn gate_expected_profit_hurdle_and_unknown() {
         let (mut cfg, ctx) = open_ctx(1000.0);
         cfg.min_expected_profit_bps = 6.0;
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.expected_profit_bps = Some(5.7);
         assert!(!evaluate_entry_gates(&s, &cfg, &ctx).allow);
         s.expected_profit_bps = None;
@@ -754,16 +754,16 @@ mod tests {
     #[test]
     fn gate_requires_converge_time_and_capacity() {
         let (cfg, ctx) = open_ctx(1000.0);
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.expected_converge_secs = None;
         assert_eq!(
             evaluate_entry_gates(&s, &cfg, &ctx).reason,
             "expected convergence time unknown"
         );
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.expected_converge_secs = Some(0.0);
         assert!(!evaluate_entry_gates(&s, &cfg, &ctx).allow);
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.optimal_size_usd = None;
         assert_eq!(
             evaluate_entry_gates(&s, &cfg, &ctx).reason,
@@ -774,7 +774,7 @@ mod tests {
     #[test]
     fn gate_rejects_funding_unknown() {
         let (cfg, ctx) = open_ctx(1000.0);
-        let mut s = qualified();
+        let mut s = ready_signal();
         s.funding_unknown = true;
         assert_eq!(
             evaluate_entry_gates(&s, &cfg, &ctx).reason,
@@ -787,7 +787,7 @@ mod tests {
         let (cfg, mut ctx) = open_ctx(1000.0);
         ctx.circuit_ok = false;
         ctx.circuit_reason = Some("drawdown".into());
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("drawdown"));
     }
@@ -798,11 +798,11 @@ mod tests {
         cfg.max_concurrent_positions = 2;
         let mut ctx = ctx_base;
         ctx.open_positions = 2;
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("max concurrent positions (2)"));
         ctx.open_positions = 1;
-        assert!(evaluate_entry_gates(&qualified(), &cfg, &ctx).allow);
+        assert!(evaluate_entry_gates(&ready_signal(), &cfg, &ctx).allow);
     }
 
     #[test]
@@ -811,18 +811,18 @@ mod tests {
         cfg.max_notional_per_venue_usd = 3000.0;
         let mut ctx = GateContext::open(500.0);
         ctx.buy_venue_notional_usd = 2600.0;
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("hyperliquid"));
         let mut ctx = GateContext::open(500.0);
         ctx.sell_venue_notional_usd = 2600.0;
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("lighter"));
         // Exact fit at the cap is allowed.
         let mut ctx = GateContext::open(400.0);
         ctx.buy_venue_notional_usd = 2600.0;
-        assert!(evaluate_entry_gates(&qualified(), &cfg, &ctx).allow);
+        assert!(evaluate_entry_gates(&ready_signal(), &cfg, &ctx).allow);
     }
 
     #[test]
@@ -831,7 +831,7 @@ mod tests {
         cfg.max_notional_per_symbol_usd = 2000.0;
         let mut ctx = GateContext::open(500.0);
         ctx.symbol_notional_usd = 1600.0;
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("BTC"));
     }
@@ -840,13 +840,13 @@ mod tests {
     fn gate_pair_cooldown_blocks_until_expiry() {
         let (cfg, mut ctx) = open_ctx(100.0);
         ctx.cooldown_remaining_secs = Some(12.0);
-        let d = evaluate_entry_gates(&qualified(), &cfg, &ctx);
+        let d = evaluate_entry_gates(&ready_signal(), &cfg, &ctx);
         assert!(!d.allow);
         assert!(d.reason.contains("cooling down"));
         ctx.cooldown_remaining_secs = Some(0.0);
-        assert!(evaluate_entry_gates(&qualified(), &cfg, &ctx).allow);
+        assert!(evaluate_entry_gates(&ready_signal(), &cfg, &ctx).allow);
         ctx.cooldown_remaining_secs = None;
-        assert!(evaluate_entry_gates(&qualified(), &cfg, &ctx).allow);
+        assert!(evaluate_entry_gates(&ready_signal(), &cfg, &ctx).allow);
     }
 
     #[test]
@@ -854,14 +854,14 @@ mod tests {
         let (cfg, mut ctx) = open_ctx(100.0);
         ctx.blocking_signal = true;
         assert_eq!(
-            evaluate_entry_gates(&qualified(), &cfg, &ctx).reason,
+            evaluate_entry_gates(&ready_signal(), &cfg, &ctx).reason,
             "unresolved signal on this symbol"
         );
     }
 
     #[test]
     fn gate_is_deterministic() {
-        let s = qualified();
+        let s = ready_signal();
         let (cfg, ctx) = open_ctx(777.0);
         let a = evaluate_entry_gates(&s, &cfg, &ctx);
         let b = evaluate_entry_gates(&s, &cfg, &ctx);
@@ -874,7 +874,7 @@ mod tests {
             max_notional_per_position_usd: 1000.0,
             ..AutoExecConfig::default()
         };
-        let mut s = qualified();
+        let mut s = ready_signal();
         // optimal 10k, breakeven 8k, cap 1k -> 1k.
         assert_eq!(size_position(&s, &cfg), Some(1000.0));
         let wide = AutoExecConfig {
@@ -926,7 +926,7 @@ mod tests {
             enabled: true,
             ..AutoExecConfig::default()
         };
-        let plan = plan_entry(&qualified(), &cfg, 0).expect("plan");
+        let plan = plan_entry(&ready_signal(), &cfg, 0).expect("plan");
         assert_eq!(plan.size_usd, 1000.0);
         assert_eq!(plan.friction_band_bps, 4.0);
         assert_eq!(plan.deadline_ms, 360_000);
@@ -951,7 +951,7 @@ mod tests {
         let cfg = exit_cfg();
         // Entry dev 10, friction 4: |dev| 3.9 converges; exactly 4.0 converges (inclusive).
         for dev in [0.0, 3.9, 4.0, -4.0] {
-            let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("qualified", Some(dev))), 0, &cfg);
+            let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(dev))), 0, &cfg);
             assert!(
                 matches!(e, ExitEval::Exit { trigger: ExitTrigger::Converged, .. }),
                 "dev {dev} must converge, got {e:?}"
@@ -959,7 +959,7 @@ mod tests {
         }
         // Just outside the band holds.
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("qualified", Some(4.1))), 0, &cfg),
+            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(4.1))), 0, &cfg),
             ExitEval::Hold
         );
     }
@@ -967,12 +967,12 @@ mod tests {
     #[test]
     fn exit_on_stop_band_breach() {
         let cfg = exit_cfg(); // stop 1.5 x |10| = 15
-        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("qualified", Some(15.0))), 0, &cfg);
+        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(15.0))), 0, &cfg);
         assert!(
             matches!(e, ExitEval::Exit { trigger: ExitTrigger::Stopped, .. }),
             "got {e:?}"
         );
-        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("qualified", Some(-20.0))), 0, &cfg);
+        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(-20.0))), 0, &cfg);
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -982,7 +982,7 @@ mod tests {
         ));
         // 14.9 holds (deadline far away).
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("qualified", Some(14.9))), 0, &cfg),
+            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(14.9))), 0, &cfg),
             ExitEval::Hold
         );
     }
@@ -992,7 +992,7 @@ mod tests {
         let cfg = exit_cfg();
         // Tiny entry dev: stop floors at the friction band, so the converged
         // region always wins ties.
-        let e = evaluate_exit(1.0, 4.0, 999_999, None, Some(&live("qualified", Some(4.0))), 0, &cfg);
+        let e = evaluate_exit(1.0, 4.0, 999_999, None, Some(&live("ready", Some(4.0))), 0, &cfg);
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -1006,7 +1006,7 @@ mod tests {
     fn exit_on_max_hold_timeout() {
         let cfg = exit_cfg();
         // Mid-band dev, deadline reached -> timeout.
-        let e = evaluate_exit(10.0, 4.0, 1000, None, Some(&live("qualified", Some(8.0))), 1000, &cfg);
+        let e = evaluate_exit(10.0, 4.0, 1000, None, Some(&live("ready", Some(8.0))), 1000, &cfg);
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -1016,7 +1016,7 @@ mod tests {
         ));
         // One ms early holds.
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 1000, None, Some(&live("qualified", Some(8.0))), 999, &cfg),
+            evaluate_exit(10.0, 4.0, 1000, None, Some(&live("ready", Some(8.0))), 999, &cfg),
             ExitEval::Hold
         );
     }
@@ -1042,7 +1042,7 @@ mod tests {
             4.0,
             9_999_999,
             Some(601.0),
-            Some(&live("stale", Some(8.0))),
+            Some(&live("no-data", Some(8.0))),
             0,
             &cfg,
         );
@@ -1059,7 +1059,7 @@ mod tests {
             4.0,
             9_999_999,
             Some(1.0),
-            Some(&live("qualified", None)),
+            Some(&live("ready", None)),
             0,
             &cfg,
         );
@@ -1118,7 +1118,7 @@ mod tests {
         // Days later: baseline shifted permanently to 25 bps.
         // Live spread is now 25.5 bps -> live_dev = 25.5 - 25.0 = 0.5 bps.
         // Live dev is well within the friction band (0.5 <= 4.0).
-        let live_row = live("qualified", Some(0.5));
+        let live_row = live("ready", Some(0.5));
         let e = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_row), 10_000, &cfg);
         assert!(
             matches!(e, ExitEval::Exit { trigger: ExitTrigger::Converged, .. }),
@@ -1127,7 +1127,7 @@ mod tests {
 
         // Conversely, if spread never converges (e.g. stays at 32 bps on a 25 bps baseline -> live_dev = 7.0 bps),
         // it holds until deadline expires, then exits on timeout:
-        let live_unconverged = live("qualified", Some(7.0));
+        let live_unconverged = live("ready", Some(7.0));
         let e_hold = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_unconverged), 50_000, &cfg);
         assert_eq!(e_hold, ExitEval::Hold);
 

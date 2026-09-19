@@ -24,7 +24,7 @@ const pos = (symbol: string, buyVenue: string, sellVenue: string): BotOpenPositi
   sizeUsd: 100,
   deadlineMs: 2,
   liveDevBps: 9,
-  liveStatus: "qualified",
+  liveStatus: "ready",
   unwatched: false,
 });
 
@@ -32,7 +32,7 @@ const row = (symbol: string, buyVenue: string, sellVenue: string): MonitorRowDto
   symbol,
   buyVenue,
   sellVenue,
-  status: "qualified",
+  status: "ready",
   currentEdgeBps: 12,
   baselineBps: 2,
   deviationBps: 10,

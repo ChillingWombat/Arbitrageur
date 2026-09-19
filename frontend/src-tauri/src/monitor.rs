@@ -221,7 +221,7 @@ pub struct MonitorRowDto {
     pub symbol: String,
     pub buy_venue: String,
     pub sell_venue: String,
-    /// collecting | watching | signaled | qualified | stale
+    /// preparing | tracking | triggered | ready | no-data
     pub status: String,
     /// Executable current edge (sell bid vs buy ask), bps.
     pub current_edge_bps: Option<f64>,
@@ -250,7 +250,7 @@ pub struct MonitorRowDto {
     pub signal_age_secs: Option<f64>,
     /// Expected seconds until the spread reverts (take-profit horizon).
     pub expected_converge_secs: Option<f64>,
-    /// Qualification progress 0..1 while collecting.
+    /// Qualification progress 0..1 while preparing.
     pub qualification_progress: f64,
     pub observed_episodes: usize,
     /// Whether Execute is allowed right now (paper path only).
@@ -638,7 +638,7 @@ pub(crate) fn pair_win_probability(
     if curve.episodes >= min_episodes {
         return match p_win_at_deviation(&curve, (current_spread_bps - mu).abs()) {
             Some(p) if p.is_finite() && (0.0..=1.0).contains(&p) => Some(p),
-            // Qualified episode count but no historical evidence at this
+            // Ready episode count but no historical evidence at this
             // magnitude — fail closed rather than extrapolating.
             _ => None,
         };
@@ -739,7 +739,7 @@ pub(crate) fn two_way_exit_estimate(
 /// execution mode. One-way mode never prices a close (`Some(0.0)` whatever
 /// the books hold — untouched by the depth walk). Two-way mode walks both
 /// reverse sides at the configured close qty; `None` marks the route
-/// uncostable and the caller must fail closed (cap at signaled, block
+/// uncostable and the caller must fail closed (cap at triggered, block
 /// execution, record it in the audit snapshot).
 pub(crate) fn exit_estimate_for_mode(
     execution_mode: &str,
@@ -927,30 +927,30 @@ impl VenueLane {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PairStatus {
-    Collecting,
-    Watching,
-    Signaled,
-    Qualified,
-    Stale,
+    Preparing,
+    Tracking,
+    Triggered,
+    Ready,
+    NoData,
 }
 
 impl PairStatus {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Collecting => "collecting",
-            Self::Watching => "watching",
-            Self::Signaled => "signaled",
-            Self::Qualified => "qualified",
-            Self::Stale => "stale",
+            Self::Preparing => "preparing",
+            Self::Tracking => "tracking",
+            Self::Triggered => "triggered",
+            Self::Ready => "ready",
+            Self::NoData => "no-data",
         }
     }
     fn from_str(s: &str) -> Self {
         match s {
-            "watching" => Self::Watching,
-            "signaled" => Self::Signaled,
-            "qualified" => Self::Qualified,
-            "stale" => Self::Stale,
-            _ => Self::Collecting,
+            "tracking" => Self::Tracking,
+            "triggered" => Self::Triggered,
+            "ready" => Self::Ready,
+            "no-data" => Self::NoData,
+            _ => Self::Preparing,
         }
     }
 }
@@ -1165,15 +1165,15 @@ impl SpreadMonitorEngine {
         *self.last_snapshot.lock() = Some(snap);
     }
 
-    /// Seam for the future auto-trading bot: only fully qualified rows.
+    /// Seam for the future auto-trading bot: only fully ready rows.
     /// Not consumed by the v1 UI — the bot contract is part of the spec.
     #[allow(dead_code)]
-    pub fn qualified_opportunities(&self) -> Vec<MonitorRowDto> {
+    pub fn ready_opportunities(&self) -> Vec<MonitorRowDto> {
         self.snapshot()
             .map(|s| {
                 s.rows
                     .into_iter()
-                    .filter(|r| r.status == "qualified" && r.executable)
+                    .filter(|r| r.status == "ready" && r.executable)
                     .collect()
             })
             .unwrap_or_default()
@@ -1733,7 +1733,7 @@ impl SpreadMonitorEngine {
             }
         }
 
-        // Sort by expected profit bps desc; non-qualified below qualified.
+        // Sort by expected profit bps desc; not-ready rows below ready rows.
         rows.sort_by(|a, b| {
             b.expected_profit_bps
                 .unwrap_or(f64::NEG_INFINITY)
@@ -2169,11 +2169,11 @@ impl SpreadMonitorEngine {
         }
 
         let status = if !books_ok {
-            PairStatus::Stale
+            PairStatus::NoData
         } else if !window_met {
-            PairStatus::Collecting
+            PairStatus::Preparing
         } else if !signal_active {
-            PairStatus::Watching
+            PairStatus::Tracking
         } else if exit_uncostable
             || !variation_ok
             || p_win.is_none()
@@ -2183,9 +2183,9 @@ impl SpreadMonitorEngine {
             || !ratio_ok
             || !coverage_ok
         {
-            PairStatus::Signaled
+            PairStatus::Triggered
         } else {
-            PairStatus::Qualified
+            PairStatus::Ready
         };
 
         // Lifecycle timestamps: discover on transition into an active signal;
@@ -2197,13 +2197,13 @@ impl SpreadMonitorEngine {
             .map(|r| (Some(r.status), r.last_seen_ms))
             .unwrap_or((None, None));
         let mut rt = self.pairs.lock().get(&key).cloned().unwrap_or(PairRuntime {
-            status: PairStatus::Collecting,
+            status: PairStatus::Preparing,
             first_seen_ms: None,
             last_seen_ms: None,
             last_edge_bps: None,
             last_dev_bps: None,
         });
-        let was_active = rt.status == PairStatus::Signaled || rt.status == PairStatus::Qualified;
+        let was_active = rt.status == PairStatus::Triggered || rt.status == PairStatus::Ready;
         if signal_active && window_met {
             if !was_active {
                 rt.first_seen_ms = Some(now_ms);
@@ -2278,7 +2278,7 @@ impl SpreadMonitorEngine {
             symbol,
         );
         if !gate_reasons.is_empty()
-            && status == PairStatus::Signaled
+            && status == PairStatus::Triggered
             && books_ok
             && window_met
             && signal_active
@@ -2435,8 +2435,8 @@ fn execution_gate(
     if let Some(reason) = session_block {
         return (false, Some(reason));
     }
-    if status != PairStatus::Qualified || !signal_active {
-        return (false, Some("signal not qualified".into()));
+    if status != PairStatus::Ready || !signal_active {
+        return (false, Some("signal not ready".into()));
     }
     match p_win {
         Some(p) if p >= p_min => {}
@@ -2698,10 +2698,10 @@ mod tests {
     }
 
     #[test]
-    fn execution_gate_blocks_unqualified() {
+    fn execution_gate_blocks_not_ready() {
         let state = AppEngineState::new();
         let (ok, why) = execution_gate(
-            PairStatus::Signaled,
+            PairStatus::Triggered,
             true,
             None,
             true,
@@ -2714,10 +2714,10 @@ mod tests {
             "BTC",
         );
         assert!(!ok);
-        assert!(why.unwrap().contains("not qualified"));
+        assert!(why.unwrap().contains("not ready"));
 
         let (ok, why) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             None,
             true,
@@ -2733,7 +2733,7 @@ mod tests {
         assert!(why.unwrap().contains("below"));
 
         let (ok, _) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             None,
             true,
@@ -2748,7 +2748,7 @@ mod tests {
         assert!(!ok);
 
         let (ok, why) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             None,
             true,
@@ -2766,10 +2766,10 @@ mod tests {
     #[test]
     fn execution_gate_blocks_uncostable_two_way_exit() {
         let state = AppEngineState::new();
-        // A fully qualified row with an uncostable two-way exit is blocked
+        // A fully ready row with an uncostable two-way exit is blocked
         // on the exit reason (checked before capacity/ticker gates).
         let (ok, why) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             None,
             true,
@@ -2785,7 +2785,7 @@ mod tests {
         assert_eq!(why.unwrap(), "exit depth insufficient for two-way close");
         // Same row with a priced exit opens.
         let (ok, _) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             None,
             true,
@@ -2804,7 +2804,7 @@ mod tests {
     fn execution_gate_session_block_precedes_signal_checks() {
         let state = AppEngineState::new();
         let (ok, why) = execution_gate(
-            PairStatus::Qualified,
+            PairStatus::Ready,
             true,
             Some("funding window stand-down".into()),
             true,
@@ -3024,14 +3024,14 @@ mod tests {
             .unwrap();
         assert!(row.current_edge_bps.is_some());
         assert!(row.baseline_bps.is_some());
-        // 2h of data > 30min floor -> not collecting.
-        assert_ne!(row.status, "collecting");
+        // 2h of data > 30min floor -> not preparing.
+        assert_ne!(row.status, "preparing");
 
-        // Now drop the books (staleness): fresh hub -> stale rows.
+        // Now drop the books: fresh hub -> no-data rows.
         state.market_data_hub.clear();
         engine.evaluate(&state).await;
         let snap2 = engine.snapshot().unwrap();
-        assert!(snap2.rows.iter().all(|r| r.status == "stale"));
+        assert!(snap2.rows.iter().all(|r| r.status == "no-data"));
         assert!(snap2.rows.iter().all(|r| !r.executable));
     }
 
@@ -3086,7 +3086,7 @@ mod tests {
 
     #[test]
     fn pair_win_probability_beyond_evidence_is_none() {
-        // Qualified episodes exist, but the current deviation exceeds every
+        // Ready episodes exist, but the current deviation exceeds every
         // observed peak -> no bucket, fail closed.
         let mut spreads = Vec::new();
         for _ in 0..6 {
@@ -3277,14 +3277,14 @@ mod tests {
     fn audit_trigger_transitions_heartbeat_idempotency() {
         // First sighting always logs.
         assert_eq!(
-            audit_trigger(None, PairStatus::Collecting, false, false, None, 60_001),
+            audit_trigger(None, PairStatus::Preparing, false, false, None, 60_001),
             Some("transition")
         );
         // Status change logs with the previous status attached.
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Watching),
-                PairStatus::Signaled,
+                Some(PairStatus::Tracking),
+                PairStatus::Triggered,
                 true,
                 true,
                 Some(60_000),
@@ -3295,8 +3295,8 @@ mod tests {
         // Same status, active, new minute bucket -> one heartbeat.
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Signaled),
-                PairStatus::Signaled,
+                Some(PairStatus::Triggered),
+                PairStatus::Triggered,
                 true,
                 true,
                 Some(60_000),
@@ -3307,8 +3307,8 @@ mod tests {
         // Same status, active, same minute -> silent (idempotent re-poll).
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Signaled),
-                PairStatus::Signaled,
+                Some(PairStatus::Triggered),
+                PairStatus::Triggered,
                 true,
                 true,
                 Some(120_001),
@@ -3319,8 +3319,8 @@ mod tests {
         // Inactive steady state never heartbeats.
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Watching),
-                PairStatus::Watching,
+                Some(PairStatus::Tracking),
+                PairStatus::Tracking,
                 false,
                 true,
                 Some(60_000),
@@ -3330,8 +3330,8 @@ mod tests {
         );
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Collecting),
-                PairStatus::Collecting,
+                Some(PairStatus::Preparing),
+                PairStatus::Preparing,
                 false,
                 false,
                 None,
@@ -3342,8 +3342,8 @@ mod tests {
         // Active but qualification window unmet -> silent.
         assert_eq!(
             audit_trigger(
-                Some(PairStatus::Signaled),
-                PairStatus::Signaled,
+                Some(PairStatus::Triggered),
+                PairStatus::Triggered,
                 true,
                 false,
                 Some(60_000),
@@ -3366,7 +3366,7 @@ mod tests {
             .venue_symbols
             .lock()
             .insert("lighter".into(), vec!["BTC".into()]);
-        // No books and no samples: every pair reports stale (inactive) — the
+        // No books and no samples: every pair reports no-data (inactive) — the
         // first pass logs one first-sighting transition per ordered pair and
         // re-polls log nothing.
         engine.evaluate(&state).await;
@@ -3382,7 +3382,7 @@ mod tests {
         assert_eq!(evs.len(), 2);
         for ev in &evs {
             assert_eq!(ev.old_status, None);
-            assert_eq!(ev.new_status, "stale");
+            assert_eq!(ev.new_status, "no-data");
             assert_eq!(ev.trigger, "transition");
             let econ: serde_json::Value =
                 serde_json::from_str(ev.economics_json.as_ref().unwrap()).unwrap();
@@ -3482,11 +3482,11 @@ mod tests {
         let cfg = gate_cfg(0.2, 0.0);
         let engine_p = SpreadMonitorEngine::new(&state);
         let row_p = gate_eval(&engine_p, &state, &cfg, &persistent, now);
-        assert_eq!(row_p.status, "qualified", "persistent must qualify: {:?}", row_p.block_reason);
+        assert_eq!(row_p.status, "ready", "persistent must qualify: {:?}", row_p.block_reason);
         assert!(row_p.threshold_ratio.unwrap() >= 0.2);
         let engine_f = SpreadMonitorEngine::new(&state);
         let row_f = gate_eval(&engine_f, &state, &cfg, &flicker, now);
-        assert_eq!(row_f.status, "signaled", "flicker must stay signaled");
+        assert_eq!(row_f.status, "triggered", "flicker must stay triggered");
         assert!(row_f.threshold_ratio.unwrap() < 0.2);
         assert!(
             row_f.block_reason.as_deref().unwrap_or("").contains("persistence"),
@@ -3511,11 +3511,11 @@ mod tests {
         let cfg = gate_cfg(0.0, 0.5);
         let engine_full = SpreadMonitorEngine::new(&state);
         let row_full = gate_eval(&engine_full, &state, &cfg, &full, now);
-        assert_eq!(row_full.status, "qualified", "full coverage must qualify: {:?}", row_full.block_reason);
+        assert_eq!(row_full.status, "ready", "full coverage must be ready: {:?}", row_full.block_reason);
         assert!(row_full.coverage.unwrap() >= 0.5);
         let engine_thin = SpreadMonitorEngine::new(&state);
         let row_thin = gate_eval(&engine_thin, &state, &cfg, &thin, now);
-        assert_eq!(row_thin.status, "signaled", "thin coverage must not qualify");
+        assert_eq!(row_thin.status, "triggered", "thin coverage must not be ready");
         assert!(row_thin.coverage.unwrap() < 0.5);
         assert!(
             row_thin.block_reason.as_deref().unwrap_or("").contains("coverage"),
@@ -3538,14 +3538,14 @@ mod tests {
         assert_eq!(a.status, b.status);
         assert_eq!(a.threshold_ratio, b.threshold_ratio);
         assert_eq!(a.coverage, b.coverage);
-        // Stale history (all observations older than the window): ratio has
-        // zero denominator -> None, must never force-qualify.
+        // Cold history (all observations older than the window): ratio has
+        // zero denominator -> None, must never force-ready.
         let stale: Vec<(i64, f64)> = (0..20)
             .map(|i| (now - 7_200_000 + i as i64 * 30_000, 12.0))
             .collect();
         let engine3 = SpreadMonitorEngine::new(&state);
         let row = gate_eval(&engine3, &state, &cfg, &stale, now);
-        assert_ne!(row.status, "qualified", "uncomputable gates never qualify");
+        assert_ne!(row.status, "ready", "uncomputable gates never qualify");
         assert!(row.threshold_ratio.is_none());
     }
 
@@ -3561,11 +3561,11 @@ mod tests {
         let active = gate_cfg(0.2, 0.5);
         let engine_a = SpreadMonitorEngine::new(&state);
         let blocked = gate_eval(&engine_a, &state, &active, &flicker_thin, now);
-        assert_eq!(blocked.status, "signaled");
+        assert_eq!(blocked.status, "triggered");
         let disabled = gate_cfg(0.0, 0.0);
         let engine_b = SpreadMonitorEngine::new(&state);
         let row = gate_eval(&engine_b, &state, &disabled, &flicker_thin, now);
-        assert_eq!(row.status, "qualified", "zero floors disable gates: {:?}", row.block_reason);
+        assert_eq!(row.status, "ready", "zero floors disable gates: {:?}", row.block_reason);
         // Old persisted JSON without the new keys falls back to sane defaults.
         let old_json = serde_json::json!({"enabled": true, "qualificationMode": "auto"});
         let cfg: MonitorConfigDto = serde_json::from_value(old_json).unwrap();

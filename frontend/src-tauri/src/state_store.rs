@@ -1005,6 +1005,80 @@ CREATE INDEX ix_funding_rate_samples_symbol_ts ON funding_rate_samples(symbol, t
 CREATE INDEX ix_funding_rate_samples_venue_symbol_ts ON funding_rate_samples(venue_id, symbol, ts_ms);
 PRAGMA user_version = 18;
 COMMIT;";
+
+/// v19 renames the spread-monitor lifecycle statuses to plainer terms and
+/// remaps every persisted row: collecting→preparing, watching→tracking,
+/// signaled→triggered, qualified→ready, stale→no-data. SQLite cannot alter
+/// a CHECK in place, so both tables are rebuilt (V10/V17 pattern) with the
+/// new status sets; bot decision rows (bot_enter/skip/exit) pass through
+/// untouched. Fresh databases skip straight to v19 via the chained
+/// migrations, so the remap is a no-op for them.
+const MIGRATION_V19_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE monitor_signals_v19 (
+    symbol TEXT NOT NULL COLLATE NOCASE,
+    buy_venue TEXT NOT NULL COLLATE NOCASE,
+    sell_venue TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL CHECK(status IN ('preparing','tracking','triggered','ready','no-data')),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    last_edge_bps REAL,
+    last_dev_bps REAL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, buy_venue, sell_venue)
+);
+INSERT INTO monitor_signals_v19
+    (symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
+     last_edge_bps, last_dev_bps, updated_at)
+    SELECT symbol, buy_venue, sell_venue,
+           CASE status WHEN 'collecting' THEN 'preparing'
+                       WHEN 'watching' THEN 'tracking'
+                       WHEN 'signaled' THEN 'triggered'
+                       WHEN 'qualified' THEN 'ready'
+                       WHEN 'stale' THEN 'no-data'
+                       ELSE status END,
+           first_seen_ms, last_seen_ms, last_edge_bps, last_dev_bps, updated_at
+    FROM monitor_signals;
+DROP TABLE monitor_signals;
+ALTER TABLE monitor_signals_v19 RENAME TO monitor_signals;
+CREATE TABLE monitor_signal_events_v19 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    old_status TEXT CHECK(old_status IN ('preparing','tracking','triggered','ready','no-data')),
+    new_status TEXT NOT NULL CHECK(new_status IN ('preparing','tracking','triggered','ready','no-data','bot_enter','bot_skip','bot_exit')),
+    edge_bps REAL,
+    dev_bps REAL,
+    p_win REAL,
+    economics_json TEXT,
+    trigger TEXT NOT NULL CHECK(trigger IN ('transition','heartbeat','bot_decision'))
+);
+INSERT INTO monitor_signal_events_v19
+    (id, symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
+     edge_bps, dev_bps, p_win, economics_json, trigger)
+    SELECT id, symbol, buy_venue, sell_venue, ts_ms,
+           CASE old_status WHEN 'collecting' THEN 'preparing'
+                           WHEN 'watching' THEN 'tracking'
+                           WHEN 'signaled' THEN 'triggered'
+                           WHEN 'qualified' THEN 'ready'
+                           WHEN 'stale' THEN 'no-data'
+                           ELSE old_status END,
+           CASE new_status WHEN 'collecting' THEN 'preparing'
+                           WHEN 'watching' THEN 'tracking'
+                           WHEN 'signaled' THEN 'triggered'
+                           WHEN 'qualified' THEN 'ready'
+                           WHEN 'stale' THEN 'no-data'
+                           ELSE new_status END,
+           edge_bps, dev_bps, p_win, economics_json, trigger
+    FROM monitor_signal_events;
+DROP TABLE monitor_signal_events;
+ALTER TABLE monitor_signal_events_v19 RENAME TO monitor_signal_events;
+CREATE INDEX ix_monitor_signal_events_pair_ts
+    ON monitor_signal_events(symbol, buy_venue, sell_venue, ts_ms);
+PRAGMA user_version = 19;
+COMMIT;";
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1400,7 +1474,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 18 {
+        if version > 19 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1507,6 +1581,12 @@ impl StateStore {
         }
         if version <= 17 {
             if let Err(err) = conn.execute_batch(MIGRATION_V18_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 18 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V19_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -3657,7 +3737,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let buy_venue = normalize_venue(buy_venue)?;
         let sell_venue = normalize_venue(sell_venue)?;
         match status {
-            "collecting" | "watching" | "signaled" | "qualified" | "stale" => {}
+            "preparing" | "tracking" | "triggered" | "ready" | "no-data" => {}
             other => anyhow::bail!("invalid monitor signal status '{other}'"),
         }
         if first_seen_ms < 0 || last_seen_ms < 0 {
@@ -3762,7 +3842,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         if ts_ms < 0 {
             anyhow::bail!("negative signal event timestamp");
         }
-        const LIFECYCLE: [&str; 5] = ["collecting", "watching", "signaled", "qualified", "stale"];
+        const LIFECYCLE: [&str; 5] = ["preparing", "tracking", "triggered", "ready", "no-data"];
         const DECISIONS: [&str; 3] = ["bot_enter", "bot_skip", "bot_exit"];
         if let Some(old) = old_status {
             if !LIFECYCLE.contains(&old) {
@@ -3946,7 +4026,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 18);
+            assert_eq!(version, 19);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4747,7 +4827,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 18);
+            assert_eq!(version, 19);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -4853,7 +4933,7 @@ mod tests {
                 "lighter",
                 60_000,
                 None,
-                "collecting",
+                "preparing",
                 Some(12.5),
                 Some(3.0),
                 Some(0.9),
@@ -4867,8 +4947,8 @@ mod tests {
                 "hyperliquid",
                 "lighter",
                 120_000,
-                Some("collecting"),
-                "signaled",
+                Some("preparing"),
+                "triggered",
                 None,
                 None,
                 None,
@@ -4883,7 +4963,7 @@ mod tests {
                 "hyperliquid",
                 120_000,
                 None,
-                "watching",
+                "tracking",
                 Some(1.0),
                 None,
                 None,
@@ -4898,8 +4978,8 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ts_ms, 120_000);
-        assert_eq!(rows[0].old_status.as_deref(), Some("collecting"));
-        assert_eq!(rows[0].new_status, "signaled");
+        assert_eq!(rows[0].old_status.as_deref(), Some("preparing"));
+        assert_eq!(rows[0].new_status, "triggered");
         assert_eq!(rows[1].old_status, None);
         assert_eq!(
             rows[1].economics_json.as_deref(),
@@ -4926,7 +5006,7 @@ mod tests {
         // Every invalid append is rejected and stores nothing new.
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", -1, None, "signaled",
+                "BTC", "hyperliquid", "lighter", -1, None, "triggered",
                 None, None, None, None, "transition",
             )
             .is_err());
@@ -4938,31 +5018,31 @@ mod tests {
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, Some("bogus"), "signaled",
+                "BTC", "hyperliquid", "lighter", 1, Some("bogus"), "triggered",
                 None, None, None, None, "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
                 None, None, None, None, "pulse",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
                 Some(f64::NAN), None, None, None, "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
                 None, None, Some(1.5), None, "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "signaled",
+                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
                 None, None, None, Some("{nope"), "transition",
             )
             .is_err());
@@ -4983,7 +5063,7 @@ mod tests {
                     "lighter",
                     i * 1_000,
                     None,
-                    "watching",
+                    "tracking",
                     None,
                     None,
                     None,
@@ -5048,7 +5128,16 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 18);
+        assert_eq!(v10, 19);
+        // v19 remaps the renamed lifecycle statuses on the way through.
+        let remapped: String = conn
+            .query_row(
+                "SELECT status FROM monitor_signals WHERE symbol = 'BTC'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remapped, "tracking");
         let kept: i64 = conn
             .query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))
             .unwrap();

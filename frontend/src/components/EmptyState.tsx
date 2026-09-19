@@ -4,7 +4,7 @@ import type { LucideIcon } from "lucide-react";
 interface EmptyStateProps {
   /** Optional small muted icon rendered above the title. */
   icon?: LucideIcon;
-  /** Pulses the icon — for "collecting / warming up" states. */
+  /** Pulses the icon — for "preparing / warming up" states. */
   pulse?: boolean;
   /** Renders the title as a quiet grey line instead of a bold header —
    *  for routine "nothing found" reminders. */

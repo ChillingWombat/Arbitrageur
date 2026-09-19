@@ -77,11 +77,11 @@ const fmtTs = (ms: number | null | undefined) =>
   ms == null ? "—" : new Date(ms).toLocaleTimeString();
 
 const STATUS_STYLE: Record<string, string> = {
-  qualified: "bg-profit-dim text-profit border-profit-border",
-  signaled: "bg-warn-dim text-warn border-warn-border",
-  watching: "bg-sky-50 text-sky-700 border-sky-300",
-  collecting: "bg-surface-raised text-slate-600 border-surface-border",
-  stale: "bg-loss-dim text-loss border-loss-border",
+  ready: "bg-profit-dim text-profit border-profit-border",
+  triggered: "bg-warn-dim text-warn border-warn-border",
+  tracking: "bg-sky-50 text-sky-700 border-sky-300",
+  preparing: "bg-surface-raised text-slate-600 border-surface-border",
+  "no-data": "bg-loss-dim text-loss border-loss-border",
 };
 
 const VENUE_LABEL: Record<string, string> = {
@@ -754,13 +754,13 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               <span
                 className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
                 title={
-                  r.status === "collecting"
+                  r.status === "preparing"
                     ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
                     : r.blockReason ?? r.status
                 }
               >
                 {r.status}
-                {r.status === "collecting" && ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
+                {r.status === "preparing" && ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
               </span>
             </div>
             <button
@@ -919,13 +919,13 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             <span
               className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
               title={
-                r.status === "collecting"
+                r.status === "preparing"
                   ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
                   : r.blockReason ?? r.status
               }
             >
               {r.status}
-              {r.status === "collecting" &&
+              {r.status === "preparing" &&
                 ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
             </span>
           </td>
