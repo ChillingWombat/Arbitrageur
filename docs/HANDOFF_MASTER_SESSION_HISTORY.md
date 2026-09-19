@@ -1188,3 +1188,47 @@ overhaul pass committed as `23d4aed`).
 - **Still owner-side**: vault test-key import, shred of relocated keychain
   file, rotation of the two exposed Lighter API keys; funding half-life
   modeling still needs days of v18 rate history.
+
+## 37. Session Handoff — 2026-09-19 (Agent-wallet Q&A, delta-farmer research, removal of non-native-API venues)
+
+- **Agent-wallet Q&A (PandaZhai context)**: clarified `panda_agent_wallet/` is a
+  delegated EVM signer (approve-once sub-key, trade-only, no withdraw), not an LLM
+  agent. Operator never pastes the main private key — only the agent key + main
+  public address. Corrected two overstatements: PopDEX closed beta and Variational
+  Omni both publish **no** agent/delegate creation flow (user-confirmed for PopDEX;
+  Omni is plain wallet-connect). Frontend hints + adapter doc-comments fixed to say
+  "dedicated trading wallet" instead of "agent key" for those venues.
+- **Mid-session adapter fix (superseded by removal below)**: `update_credentials`
+  in variational/popdex/edgex/grvt/ondoperps/extended_venues briefly changed from
+  address-must-match-key to format-only validation to allow delegation; tests
+  updated. Moot after removal — delegation model survives only where venues
+  natively support it (Hyperliquid/Aster/Decibel).
+- **delta-farmer research (`vladkens/delta-farmer`, cloned to `/tmp/delta-farmer`)**:
+  its `clients/omni.py` trades Variational by reverse-engineering the private web
+  app — `https://omni.variational.io/api` + `vr-connected-address` header +
+  `/auth/generate_signing_data` → EIP-191 personal-sign → `/auth/login` →
+  `vr-token` cookie (cached `.cache/omni_*_http.pkl`), Cloudflare-clearance
+  solving, then `POST /quotes/indicative` → `POST /orders/new/market`
+  (`quote_id`, `max_slippage` 0.005) / `/quotes/accept` for reduce-only /
+  `/orders/new/limit` / `/orders/cancel` (`rfq_id`). Direct wallet key, no agent
+  system. Documented as the exact cookie-replay/private-flow pattern Arbitrageur
+  refuses to ship (fragile, ToS-risk, hot-key exposure, last-look fill uncertainty);
+  offered as opt-in unaudited venue only on explicit operator request.
+- **Removal of all venues without native trading-API support** (operator request):
+  deleted `popdex.rs`, `variational.rs`, `edgex.rs`, `grvt.rs`, `ondoperps.rs`,
+  `extended_venues.rs` + `tests/live_probe.rs` (28 venues total); `lib.rs` exports
+  cleaned. `state.rs`: dropped `live_*`/`ex_*` fields, ctors, vault sync,
+  `get_venues` admission, `*_enabled` flags, alias/sim maps. `commands.rs`:
+  active-venue/status/probe/fee/enablement lists, tests updated (15 venues,
+  paper equity 8×100k→5×100k). Frontend: ExchangeAccounts sections, EngineSettings
+  panels/flags/IDs, ticker code maps + filters, contractSpecs, rebalanceFees rows,
+  VenueLogo no-logo sets, `EngineSettingsDto` fields. Docs: EXCHANGES.md +
+  REBUILD_GUIDE.md marked old sections historical.
+- **Admitted set is now 15 native-API venues**: Hyperliquid, Lighter, Robinhood,
+  Vanta, Aster, Arcus, Binance, OKX, Coinbase, Kraken, Decibel, Polymarket,
+  Kalshi, IBKR, IG.
+- **Verification**: `cargo test --workspace` all green (304 desktop, 78
+  exchanges), `cargo clippy -p arbitrageur-exchanges -p arbitrageur-desktop --
+  -D warnings` clean, frontend `npm run build` + full `npm test` green.
+- **Restore path**: pre-removal snapshot `102e40f`; removal commit `f68acb2`.
+  Re-admit a venue only with a native trading-API adapter.
