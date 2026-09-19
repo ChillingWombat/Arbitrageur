@@ -1049,7 +1049,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                             : "text-slate-500 hover:text-slate-800 hover:bg-slate-100/70"
                         }`}
                       >
-                        <Star className="w-3.5 h-3.5" />
                         <span>All</span>
                       </button>
                       <button
