@@ -24,7 +24,9 @@
 //!   venue's RFQ/contract flow is implemented and audited. Use
 //!   [`wallet_execution_unavailable`] for the standard refusal message.
 
-use k256::ecdsa::{RecoveryId, SigningKey, VerifyingKey};
+use k256::ecdsa::{RecoveryId, SigningKey};
+#[cfg(test)]
+use k256::ecdsa::VerifyingKey;
 use sha3::{Digest, Keccak256};
 use zeroize::{Zeroize, Zeroizing};
 

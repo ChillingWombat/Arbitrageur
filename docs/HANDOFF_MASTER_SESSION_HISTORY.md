@@ -1143,3 +1143,43 @@ overhaul pass committed as `23d4aed`).
   manual refresh (account reads are heavy). Two-click arm/confirm submit.
 - **Verification**: desktop external_positions tests 2/0, tsc clean, frontend
   all shards 0 fail (incl. 3 new grouping tests).
+
+## 36. Session Handoff — 2026-09-19 (Logo rebuild + button tokens + warning cleanup + full verification)
+
+- **Logo rebuild (36 real marks, user-reviewed)**: all 40 round venue logos
+  re-sourced from official marks (homepages, app subdomains, docs-site
+  icons, CoinGecko cross-checks, X avatars, dYdX brand page, Chrome-rasterized
+  Vest/Extended SVGs) and rebuilt through one deterministic pipeline
+  (`/tmp/build_logos.py`: flood-trim → content-center → authentic brand bed
+  at 66–86% scale for an edge gap → 512px supersample → 96px circular PNG).
+  Fixed wrong marks: derive (white/orange horse), helix (white/blue wave),
+  paradex (cyan/black P), ondoperps (Ondo rings), popdex (disco ball), vest
+  (coral V), decibel (neon-yellow blobs from app.decibel.trade), arcus
+  (dark-green on cream from arcus.xyz — was inverted), kalshi (kept black K
+  per official avatar after a wrong white-K detour). `public/` + `dist/`
+  copies in sync (38 PNGs).
+- **Demoted to initials badges**: gatedex (no such venue), niza (memecoin
+  site) join alphax/iotrader/sodex in `NO_LOGO_VENUES` — fabricated PNGs
+  deleted. 43 venues = 38 marks + 5 badges.
+- **VenueLogo coverage extended**: ExchangeAccounts card headers,
+  PortfolioMonitor allocation rows, ExternalPositions rows, LiveMatrix route
+  legs + matrix headers + consolidated book rows (all id-driven with display
+  fallbacks). Fallback badge got ring/border polish.
+- **Button tokens**: added missing `.btn-accent` (was referenced but
+  undefined — vault banner rendered unstyled) + `.btn-warning`, global
+  `:focus-visible` rings; Header Pause/Continue, EngineSettings saves and
+  ExchangeAccounts saves migrated to tokens. Exchange filter collapsed to a
+  single All/★ toggle + icon-only Ping, both `h-7`.
+- **Rust warning cleanup (check now 0 warnings)**: `VerifyingKey` import
+  scoped to `cfg(test)`; test-only `get_execution_logs_impl` marked
+  `#[cfg(test)]`; dead `triangle_target_profit_bps` helper wired into the
+  triangular scan hurdle (was duplicated inline) and hoisted out of the
+  params lock.
+- **Verification**: `cargo check --workspace --all-targets` 0 errors /
+  0 warnings; `cargo test --workspace` 638 passed / 0 failed (15 suites);
+  `tsc` clean; frontend suite 0 fail; `npm run build` ok; `npm audit` 0.
+  Release rebuild + clippy `-D warnings` kicked off detached (see
+  /tmp/clippy.log, /tmp/release-build.log).
+- **Still owner-side**: vault test-key import, shred of relocated keychain
+  file, rotation of the two exposed Lighter API keys; funding half-life
+  modeling still needs days of v18 rate history.

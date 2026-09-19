@@ -1997,20 +1997,14 @@ pub async fn scan_triangular_opportunities_impl(
     if venues.is_empty() {
         return Ok(Vec::new());
     }
-    let (hurdle, trade_size) = {
+    let hurdle = triangle_target_profit_bps(state);
+    let trade_size = {
         let params = state.strategy_params.read();
-        let h = params
-            .get("triangle")
-            .map(|p| p.triangle_min_profit_bps)
-            .or_else(|| params.get("futures").map(|p| p.target_profit_bps))
-            .filter(|v| v.is_finite() && *v >= 0.0)
-            .unwrap_or(2.0);
-        let size = params
+        params
             .get("triangle")
             .map(|p| p.triangle_trade_size_usd)
             .filter(|v| v.is_finite() && *v > 0.0)
-            .unwrap_or(TRIANGLE_SCAN_NOTIONAL_USD);
-        (h, size)
+            .unwrap_or(TRIANGLE_SCAN_NOTIONAL_USD)
     };
     let mut opps = Vec::new();
     for (vid, vname, adapter) in &venues {
@@ -5733,6 +5727,7 @@ pub fn get_execution_logs_by_mode_impl(
     Ok(filtered)
 }
 
+#[cfg(test)]
 pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_by_mode_impl(state, None)
 }
