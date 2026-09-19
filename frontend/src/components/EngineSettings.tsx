@@ -915,7 +915,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                         }`}
                       >
                         <Star className={`w-3.5 h-3.5 ${exchangeFilter === "favorites" ? "fill-current" : ""}`} />
-                        <span>{favoriteExchanges.length > 0 ? favoriteExchanges.length : "Fav"}</span>
                       </button>
                     </div>
                     <button
