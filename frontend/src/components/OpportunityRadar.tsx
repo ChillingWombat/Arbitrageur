@@ -878,14 +878,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
               {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
               {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
             </span>
-            {isLiveCapableRoute(r.buyVenue, r.sellVenue) ? (
-              <span
-                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold shadow-xs"
-                title="Both venues support live API execution"
-              >
-                LIVE
-              </span>
-            ) : (
+            {!isLiveCapableRoute(r.buyVenue, r.sellVenue) && (
               <span
                 className="ml-1.5 px-1.5 py-0.2 rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
                 title="Route involves a read-only venue — paper execution only"
