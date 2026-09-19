@@ -1232,3 +1232,48 @@ overhaul pass committed as `23d4aed`).
   -D warnings` clean, frontend `npm run build` + full `npm test` green.
 - **Restore path**: pre-removal snapshot `102e40f`; removal commit `f68acb2`.
   Re-admit a venue only with a native trading-API adapter.
+
+## 38. Session Handoff — 2026-09-20 (PopDEX re-admitted on published native API)
+
+- **Trigger:** operator-supplied doc
+  `https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api`
+  (deploy `604061a`). Refuted the 09-19 "no public API / no agent system"
+  findings — PopDEX publishes a complete native API (the old probing only hit
+  the parked `api.popdex.trade` domain and the SPA shell).
+- **Verified facts (docs + live curl):** Morph Tachyon EVM, gasless, instant
+  finality; mainnet chain 2184 (`app.popdex.xyz/api/v1/web3/rpc`), testnet
+  34952; precompiles Order `0x…1000` / Account `0x…1008` / UserConfig `0x…1009`;
+  Agent Key = on-chain Agent Account (`approveAgent`, max 10/main, timestamp
+  nonces, withdrawals main-only, 500-order cap); public REST
+  `api.popdex.xyz` envelope `{code:"200"}` — tickers (66 futures incl.
+  BTCUSDT id 20000), orderbook, 1h funding, VIP0 0.1% fees, symbol/token
+  config, account overview/positions/orders/agents (no auth). No-UI agent
+  management confirmed (script-only) — operator and prior research both right.
+- **New `popdex.rs` (~1500 lines, alloy 2.x):** REST market/account reads,
+  agent-gated `placeOrder`/`cancelOrder`/`cancelAllOrders`/`updateLeverage`
+  (legacy txs, node gas price, estimate-gated, 30s receipts, `OrderCreate`
+  decoding — ids never invented), timestamp-nonce monotonicity, chain-id
+  check, approval verification, delegation-enforcing credentials (agent key
+  deriving the main address is refused; main key never held — one-time
+  approval stays an external script with exact commands in the error text).
+- **Re-admitted through the stack** (removal commit `f68acb2` used as reverse
+  checklist): lib export, settings (`popdex_enabled` + `popdex_network`
+  mainnet/testnet), vault sync, `get_venues`, status/probe/fees/enablement,
+  paper sim (6 sims now — risk tests updated to 600k/40%), account fields,
+  engine panel + network toggle, tickers POP, contract specs, fee table,
+  labels, DTOs, frontend tests, `EXCHANGES.md` §11.
+- **Untracked-verification split:** market/account REST verified live;
+  contract submission is per-docs + unit-tested (packing vectors, wad math,
+  nonce rules, synthetic receipt decode) but NOT dry-run on testnet — fund
+  testnet first per PopDEX's own guidance.
+- **Follow-on fix `848bb14`:** alloy's TLS providers left rustls auto-detect
+  ambiguous → runtime panic on first HTTPS call in the release binary. Pinned
+  `ring` as process-wide provider via `install_default()` in `main()`.
+- **Verification:** workspace all green (304 desktop, 92 exchanges incl. 14
+  new popdex), clippy clean, frontend build + 204 tests pass. Release binary
+  rebuilt, panic-free, relaunched.
+- **Left for operator:** enable PopDEX in EngineSettings, paste main address +
+  agent key after testnet approveAgent; NOT committed: `PortfolioMonitor.tsx`
+  + `RiskOperations.tsx` contain another worker's uncommitted UI edits — left
+  untouched (only 3 never-read decls briefly touched to unbreak the build,
+  then restored byte-identical).
