@@ -138,6 +138,11 @@ fn price_decimals_for(mark: Option<Decimal>) -> u32 {
     }
 }
 
+fn is_valid_evm_address(a: &str) -> bool {
+    let s = a.trim();
+    s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Variational Omni-Perp connector (public market data + wallet-gated RFQ stub).
 pub struct VariationalAdapter {
     venue_id: VenueId,
@@ -175,9 +180,17 @@ impl VariationalAdapter {
         }
     }
 
-    /// Bind (or clear) the locally-held EVM wallet used for future RFQ
-    /// signing. The hex key is parsed into a zeroizing signer immediately;
-    /// the raw string is never retained.
+    /// Bind (or clear) the locally-held EVM agent wallet used for future RFQ
+    /// signing.
+    ///
+    /// Wallet binding (no agent system published for Omni as of 2026-09-19).
+    /// - `wallet_address` = dedicated Arbitrum trading EOA (public, holds USDC).
+    ///   Never paste a main vault key — create a separate trading wallet with
+    ///   only trading funds. In direct-wallet mode the address matches the key.
+    /// - `private_key_hex` = key for that trading wallet. A future delegation
+    ///   system would also bind here (addresses would then differ), so only
+    ///   address format is enforced, not equality. The hex key is parsed into a
+    ///   zeroizing signer immediately; the raw string is never retained.
     pub fn update_credentials(
         &self,
         wallet_address: Option<String>,
@@ -186,18 +199,17 @@ impl VariationalAdapter {
         let addr = wallet_address
             .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty());
+        if let Some(a) = addr.as_deref() {
+            if !is_valid_evm_address(a) {
+                anyhow::bail!("Variational wallet address is not a valid 0x EVM address");
+            }
+        }
         match private_key_hex
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
         {
             Some(hex_key) => {
                 let signer = EvmWalletSigner::from_hex(&hex_key)?;
-                // If the caller also gave an address, it must match the key.
-                if let Some(a) = addr.as_deref() {
-                    if !a.eq_ignore_ascii_case(&signer.address_hex()) {
-                        anyhow::bail!("Variational wallet address does not match the supplied private key");
-                    }
-                }
                 *self.wallet.write() = Some(signer);
                 *self.wallet_address.write() = addr;
                 Ok(())
@@ -208,6 +220,17 @@ impl VariationalAdapter {
                 Ok(())
             }
         }
+    }
+
+    /// Main funding address (public EOA), if bound.
+    pub fn wallet_address_hex(&self) -> Option<String> {
+        self.wallet_address.read().clone()
+    }
+
+    /// Derived agent-signer address (from the delegated private key), if bound.
+    /// This intentionally differs from the main address in the agent model.
+    pub fn agent_address_hex(&self) -> Option<String> {
+        self.wallet.read().as_ref().map(|w| w.address_hex())
     }
 
     async fn fetch_stats(&self) -> anyhow::Result<Arc<StatsPayload>> {
@@ -643,22 +666,37 @@ mod tests {
     }
 
     #[test]
-    fn wallet_binding_validates_address_match() {
+    fn wallet_binding_supports_agent_delegation() {
         let adapter = VariationalAdapter::new(None, None, None);
-        let key = "0000000000000000000000000000000000000000000000000000000000000001";
+        let agent_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        // Direct-key case: main address equals derived agent address.
         adapter
             .update_credentials(
                 Some("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf".into()),
-                Some(key.into()),
+                Some(agent_key.into()),
             )
             .unwrap();
         assert!(adapter.has_live_credentials());
-        // Mismatched address must not bind.
-        assert!(adapter
+        assert_eq!(
+            adapter.agent_address_hex().as_deref(),
+            Some("0x7e5f4552091a69125d5dfcb7b8c2659029395bdf")
+        );
+        // Delegated-agent case: main funding address differs from agent key —
+        // this is the expected PandaZhai/Hyperliquid-style setup and must bind.
+        adapter
             .update_credentials(
                 Some("0x0000000000000000000000000000000000000001".into()),
-                Some(key.into())
+                Some(agent_key.into()),
             )
+            .unwrap();
+        assert!(adapter.has_live_credentials());
+        assert_eq!(
+            adapter.wallet_address_hex().as_deref(),
+            Some("0x0000000000000000000000000000000000000001")
+        );
+        // Invalid address format must not bind.
+        assert!(adapter
+            .update_credentials(Some("not-an-address".into()), Some(agent_key.into()))
             .is_err());
         // Clearing the key drops credentials.
         adapter.update_credentials(None, None).unwrap();

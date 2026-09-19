@@ -28,6 +28,11 @@ use parking_lot::RwLock;
 /// funding through the read-only paths. Account/order/leverage stay
 /// fail-closed.
 #[allow(dead_code)]
+fn is_valid_evm_address(a: &str) -> bool {
+    let s = a.trim();
+    s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub struct GrvtAdapter {
     venue_id: VenueId,
     client: Client,
@@ -237,8 +242,9 @@ impl GrvtAdapter {
         Ok(format!("{}_{}_Perp", base.to_uppercase(), quote.to_uppercase()))
     }
 
-    /// Bind (or clear) the locally-held EVM wallet used for future
-    /// wallet-direct signing. The hex key is parsed into a zeroizing signer
+    /// Bind (or clear) the locally-held EVM agent wallet used for future
+    /// wallet-direct signing (agent-delegation model: main address is public,
+    /// private key is the agent key only — they intentionally differ). The hex key is parsed into a zeroizing signer
     /// immediately; the raw string is never retained. An invalid key fails
     /// the whole update so a half-bound state is impossible. Execution stays
     /// fail-closed until this venue's signing flow is implemented and
@@ -251,17 +257,17 @@ impl GrvtAdapter {
         let addr = wallet_address
             .map(|a| a.trim().to_string())
             .filter(|a| !a.is_empty());
+        if let Some(a) = addr.as_deref() {
+            if !is_valid_evm_address(a) {
+                anyhow::bail!("GRVT wallet address is not a valid 0x EVM address");
+            }
+        }
         match private_key_hex
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
         {
             Some(hex_key) => {
                 let signer = EvmWalletSigner::from_hex(&hex_key)?;
-                if let Some(a) = addr.as_deref() {
-                    if !a.eq_ignore_ascii_case(&signer.address_hex()) {
-                        anyhow::bail!("GRVT wallet address does not match the supplied private key");
-                    }
-                }
                 *self.wallet.write() = Some(signer);
                 *self.wallet_address.write() = addr;
                 Ok(())
@@ -278,6 +284,11 @@ impl GrvtAdapter {
     /// stays disabled until the signing flow is audited).
     pub fn wallet_address_hex(&self) -> Option<String> {
         self.wallet_address.read().clone()
+    }
+
+    /// Derived agent-signer address (from the delegated private key), if bound.
+    pub fn agent_address_hex(&self) -> Option<String> {
+        self.wallet.read().as_ref().map(|w| w.address_hex())
     }
 
     #[allow(dead_code)]
@@ -687,15 +698,25 @@ mod wallet_direct_tests {
         // Empty binding clears without error.
         assert!(a.update_credentials(None, None).is_ok());
         assert_eq!(a.wallet_address_hex(), None);
-        // Mismatched address fails the whole update (no half-bound state).
+        // Delegated-agent case: main address differs from agent key — must bind.
         assert!(a
             .update_credentials(
                 Some("0x0000000000000000000000000000000000000001".to_string()),
                 Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
             )
+            .is_ok());
+        assert_eq!(
+            a.wallet_address_hex(),
+            Some("0x0000000000000000000000000000000000000001".to_string())
+        );
+        // Invalid address format fails the whole update (no half-bound state).
+        assert!(a
+            .update_credentials(
+                Some("not-an-address".to_string()),
+                Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            )
             .is_err());
-        assert_eq!(a.wallet_address_hex(), None);
-        // Scalar-1 test vector binds; address must match the derived key.
+        // Scalar-1 test vector binds (direct-key case).
         assert!(a
             .update_credentials(
                 Some("0x7E5F4552091a69125d5dfcb7b8c2659029395bdf".to_string()),

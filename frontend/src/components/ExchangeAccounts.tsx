@@ -47,8 +47,8 @@ interface CredFieldSpec {
  * implemented and audited. Keys are vault-encrypted and never leave host.
  */
 const WALLET_DIRECT_FIELDS: CredFieldSpec[] = [
-  { key: "walletAddress", label: "Wallet Address", placeholder: "0x...", optional: true, hint: "Optional. Your EVM wallet address for future wallet-direct signing. Leave blank to track read-only." },
-  { key: "privateKey", label: "Wallet Private Key (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. EVM key for future wallet-direct signing. Vault-encrypted, never leaves this host. Execution stays off until the signing flow is audited." },
+  { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", optional: true, hint: "Optional. Main funding address (public). Never paste its private key — only the agent key below." },
+  { key: "privateKey", label: "Agent Private Key Only (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. ONLY the delegated agent key. Vault-encrypted, never leaves this host. Execution stays off until audited." },
 ];
 
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
@@ -95,8 +95,8 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // = beta REST pair if granted. Beta Base URL is set in the venue panel above (Engine Settings
   // → Exchanges → PopDEX); market data has no public endpoint until beta creds exist.
   popdex: [
-    { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", hint: "Your PopDEX main account address on Morph (0x...). Must match the agent key below." },
-    { key: "privateKey", label: "Wallet / Agent Private Key", secret: true, placeholder: "0x...", hint: "Your EVM private key, or the agent/delegate key if your beta grant issued one. Signs locally; the main key stays in the vault." },
+    { key: "walletAddress", label: "Trading Wallet Address (Morph)", placeholder: "0x...", hint: "Your PopDEX trading wallet on Morph (public 0x...). PopDEX has no agent/delegate system — use a dedicated trading wallet, never your main vault key." },
+    { key: "privateKey", label: "Trading Wallet Private Key (EVM)", secret: true, placeholder: "0x...", hint: "Key for the dedicated trading wallet above (address must match). Vault-encrypted, never leaves this host. There is no agent-key option on PopDEX — never paste a main vault key." },
     { key: "apiKey", label: "API Token", secret: true, optional: true, hint: "Optional. Beta REST token if PopDEX granted you one. Leave blank for wallet-only mode." },
     { key: "apiSecret", label: "API Secret", secret: true, optional: true, hint: "Optional. Beta API secret if issued alongside the token. Leave blank otherwise." },
   ],
@@ -210,8 +210,8 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // leaves this host). Paste the wallet now to prepare; execution stays
   // disabled until the RFQ flow is implemented and audited.
   variational: [
-    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true, hint: "Optional. Your Arbitrum EOA for future RFQ signing. Market data is public — leave both blank to track Variational read-only." },
-    { key: "privateKey", label: "Wallet Private Key (EVM, RFQ signing)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. EVM key that will sign RFQ quotes on Arbitrum. Vault-encrypted, never leaves this host. Execution stays off until the RFQ flow is audited. Address is derived automatically when only the key is pasted." },
+    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true, hint: "Optional. Dedicated Arbitrum trading EOA holding USDC (public). Omni has no agent system — just connect wallet in app. Leave blank for read-only." },
+    { key: "privateKey", label: "Trading Wallet Private Key (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. Key for the dedicated trading wallet above (address must match). Vault-encrypted, never leaves this host. Execution stays off until audited." },
   ],
   // Coinbase Advanced Trade (CDP): API key name + EC private key (PEM)
   coinbase: [

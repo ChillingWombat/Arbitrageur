@@ -69,6 +69,11 @@ fn normalize_base_url(raw: Option<String>) -> Option<String> {
     Some(b)
 }
 
+fn is_valid_evm_address(a: &str) -> bool {
+    let s = a.trim();
+    s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn has_secret(s: Option<&str>) -> bool {
     s.is_some_and(|v| !v.trim().is_empty())
 }
@@ -111,6 +116,14 @@ impl PopDexAdapter {
     /// Rebind credentials at runtime (Settings save / vault unlock).
     /// Dead placeholder hosts are normalized to unconfigured; an invalid EVM
     /// key fails the whole update so a half-bound state is impossible.
+    ///
+    /// Wallet binding (PopDEX closed beta has no published agent/delegate system
+    /// as of 2026-09-19 — user-confirmed: no create-agent option in app).
+    /// - `wallet_address` = dedicated Morph trading wallet (public).
+    ///   Never paste a main vault key — use a separate trading wallet.
+    ///   In direct-wallet mode the address matches the key; only format is
+    ///   enforced so a future delegation system would also bind.
+    /// - `private_key_hex` = key for that trading wallet.
     pub fn update_credentials(
         &self,
         base_url: Option<String>,
@@ -119,25 +132,24 @@ impl PopDexAdapter {
         wallet_address: Option<String>,
         private_key_hex: Option<String>,
     ) -> anyhow::Result<()> {
+        let addr = wallet_address
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty());
+        if let Some(a) = addr.as_deref() {
+            if !is_valid_evm_address(a) {
+                anyhow::bail!("PopDEX wallet address is not a valid 0x EVM address");
+            }
+        }
         if let Some(hex_key) = private_key_hex
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
         {
             let signer = EvmWalletSigner::from_hex(&hex_key)?;
-            if let Some(a) = wallet_address.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
-                if !a.eq_ignore_ascii_case(&signer.address_hex()) {
-                    anyhow::bail!("PopDEX wallet address does not match the supplied private key");
-                }
-            }
             *self.wallet.write() = Some(signer);
-            *self.wallet_address.write() = wallet_address
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty());
+            *self.wallet_address.write() = addr;
         } else {
             *self.wallet.write() = None;
-            *self.wallet_address.write() = wallet_address
-                .map(|a| a.trim().to_string())
-                .filter(|a| !a.is_empty());
+            *self.wallet_address.write() = addr;
         }
         *self.base_url.write() = normalize_base_url(base_url);
         *self.api_key.write() = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).map(Zeroizing::new);
@@ -153,6 +165,16 @@ impl PopDexAdapter {
     /// REST market data.
     pub fn is_configured(&self) -> bool {
         self.base_url.read().is_some() && has_secret(self.api_key.read().as_deref().map(String::as_str))
+    }
+
+    /// Main account address (public), if bound.
+    pub fn wallet_address_hex(&self) -> Option<String> {
+        self.wallet_address.read().clone()
+    }
+
+    /// Derived agent-signer address (from the delegated private key), if bound.
+    pub fn agent_address_hex(&self) -> Option<String> {
+        self.wallet.read().as_ref().map(|w| w.address_hex())
     }
 
     fn not_configured_error(&self, what: &str) -> anyhow::Error {
