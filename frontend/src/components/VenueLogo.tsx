@@ -1,33 +1,25 @@
-import React, { useMemo } from "react";
+import React, { useMemo, useState } from "react";
 
 interface VenueLogoProps {
   /** Canonical venue id (e.g. "hyperliquid", "standx"). */
   venueId: string;
-  /** Display name used to derive initials (e.g. "dYdX Chain"). */
+  /** Display name used to derive fallback initials (e.g. "dYdX Chain"). */
   name: string;
   /** Diameter in px. Defaults to 22 (settings tab size). */
   size?: number;
 }
 
-/** Curated brand hues (0-360) for major venues; everything else hashes
- *  deterministically from the venue id so logos are stable across reloads. */
+/**
+ * Venues with no recoverable brand mark (parked domains / no public
+ * logo found). They render the initials badge instead of an <img>.
+ */
+const NO_LOGO_VENUES = new Set(["alphax", "iotrader", "sodex"]);
+
+/** Curated brand hues (0-360) for the initials fallback badges. */
 const BRAND_HUE: Record<string, number> = {
-  hyperliquid: 160,
-  lighter: 210,
-  binance: 45,
-  okx: 220,
-  coinbase: 215,
-  kraken: 260,
-  dydx: 230,
-  paradex: 190,
-  gmx: 200,
-  aevo: 250,
-  apex: 20,
-  grvt: 150,
-  edgex: 180,
-  polymarket: 265,
-  kalshi: 110,
-  hyperliquid_evm: 160,
+  alphax: 210,
+  iotrader: 200,
+  sodex: 190,
 };
 
 function hashHue(id: string): number {
@@ -48,13 +40,15 @@ function initialsOf(name: string): string {
 }
 
 /**
- * Round venue badge: initials on a soft tinted disc. Offline-safe (no
- * remote images) and deterministic per venue, so all 43 exchange tabs
- * share one consistent logo language. Real brand SVGs can replace
- * individual venues later by extending BRAND_HUE or this component.
+ * Round venue logo. Real brand marks live in `public/logos/{venueId}.png`
+ * (96px round-cropped PNGs fetched from official sites/favicons and
+ * circular-masked; see /tmp for the fetch/crop scripts). Venues without a
+ * recoverable mark — or any logo that fails to load — fall back to a
+ * deterministic initials badge, so no tab ever renders broken.
  */
 export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }) => {
-  const { initials, bg, fg } = useMemo(() => {
+  const [failed, setFailed] = useState(false);
+  const fallback = useMemo(() => {
     const hue = BRAND_HUE[venueId] ?? hashHue(venueId);
     return {
       initials: initialsOf(name),
@@ -63,22 +57,49 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
     };
   }, [venueId, name]);
 
+  const style: React.CSSProperties = {
+    width: size,
+    height: size,
+    borderRadius: 9999,
+    flexShrink: 0,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    userSelect: "none",
+    overflow: "hidden",
+  };
+
+  if (!failed && !NO_LOGO_VENUES.has(venueId)) {
+    return (
+      <img
+        src={`logos/${venueId}.png`}
+        alt=""
+        aria-hidden="true"
+        title={name}
+        width={size}
+        height={size}
+        style={{ ...style, objectFit: "cover", backgroundColor: "#fff" }}
+        onError={() => setFailed(true)}
+        draggable={false}
+      />
+    );
+  }
+
   return (
     <span
       aria-hidden="true"
       title={name}
-      className="rounded-full shrink-0 inline-flex items-center justify-center font-semibold select-none"
+      className="font-semibold"
       style={{
-        width: size,
-        height: size,
+        ...style,
         fontSize: Math.max(8, Math.round(size * 0.42)),
         lineHeight: 1,
-        backgroundColor: bg,
-        color: fg,
+        backgroundColor: fallback.bg,
+        color: fallback.fg,
         fontFamily: "Inter, system-ui, sans-serif",
       }}
     >
-      {initials}
+      {fallback.initials}
     </span>
   );
 };
