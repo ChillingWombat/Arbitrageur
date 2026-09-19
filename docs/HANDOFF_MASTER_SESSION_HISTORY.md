@@ -1176,10 +1176,15 @@ overhaul pass committed as `23d4aed`).
   triangular scan hurdle (was duplicated inline) and hoisted out of the
   params lock.
 - **Verification**: `cargo check --workspace --all-targets` 0 errors /
-  0 warnings; `cargo test --workspace` 638 passed / 0 failed (15 suites);
-  `tsc` clean; frontend suite 0 fail; `npm run build` ok; `npm audit` 0.
-  Release rebuild + clippy `-D warnings` kicked off detached (see
-  /tmp/clippy.log, /tmp/release-build.log).
+  0 warnings; `cargo test --workspace` 638 passed / 0 failed (15 suites,
+  re-run after every Rust edit); `cargo clippy --workspace --all-targets
+  -- -D warnings` fully green (was 29 pre-existing style lints — fixed via
+  `clippy --fix` + 8 manual fixes across 12 adapter/desktop files, all
+  semantics-preserving); `tsc` clean; frontend suite 0 fail;
+  `npm run build` ok; `npm audit` 0; release binary rebuilt.
+- **LiveMatrix VenueLogo**: route legs (via `buy/sell_venue_id`), matrix
+  column + row headers (via `venues[]` ids), consolidated book rows (via
+  `venue_id`) — verified against `matrixQuant` id flow + DTO types.
 - **Still owner-side**: vault test-key import, shred of relocated keychain
   file, rotation of the two exposed Lighter API keys; funding half-life
   modeling still needs days of v18 rate history.
