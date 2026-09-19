@@ -25,6 +25,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDownUp, HandCoins, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 import { api } from "../services/api";
 import { groupExternalPositions, type ExternalGroupBy } from "../services/externalPositions";
 import type {
@@ -241,7 +242,10 @@ export const ExternalPositionsGadget: React.FC = () => {
                         {p.side.toUpperCase()}
                       </span>
                       <span className="font-bold text-slate-900 truncate">{p.symbol}</span>
-                      <span className="text-slate-400">{p.venue}</span>
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <VenueLogo venueId={p.venue.toLowerCase()} name={p.venue} size={16} />
+                        <span className="text-slate-400 truncate">{p.venue}</span>
+                      </span>
                       {!p.closeSupported && <span className="text-warn text-[10px] font-bold">NO BOT CLOSE</span>}
                     </span>
                     <span className="tabular-nums text-slate-700 shrink-0">

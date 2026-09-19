@@ -21,6 +21,7 @@ import type {
 } from "../types";
 import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { VenueLogo } from "./VenueLogo";
 
 /* ------------------------------------------------------------------ */
 /* Per-venue credential field specifications                            */
@@ -740,6 +741,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
       {/* Card header: title + inline label + default state + delete, toggle */}
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div className="flex items-center space-x-2 min-w-0 flex-1">
+          <VenueLogo venueId={account.venue.toLowerCase()} name={venueDisplay(account.venue)} size={20} />
           <h3 className="text-[13px] font-mono font-bold text-slate-900 shrink-0">
             {venueDisplay(account.venue)} #{ordinal}
           </h3>
@@ -874,7 +876,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             type="button"
             disabled={busy || locked || !dirty}
             onClick={() => void handleSave()}
-            className="px-2 py-2 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="btn-accent text-xs font-mono font-bold flex items-center gap-1.5"
           >
             {saved && !dirty ? <CheckCircle2 className="w-3 h-3" /> : null}
             <span>{busy ? "Saving..." : saved && !dirty ? "Saved" : "Save Account"}</span>
@@ -1046,7 +1048,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
             type="button"
             disabled={busy}
             onClick={() => void handleCreate()}
-            className="px-2 py-2 bg-accent hover:bg-blue-600 text-white text-xs font-mono font-bold rounded-lg transition shadow-2xs disabled:opacity-40 cursor-pointer flex items-center gap-1.5"
+            className="btn-accent text-xs font-mono font-bold flex items-center gap-1.5"
           >
             <span>{busy ? "Saving..." : "Save Account"}</span>
           </button>

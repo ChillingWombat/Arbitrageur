@@ -137,6 +137,12 @@
   .btn-success-subtle {
     @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-emerald-700 bg-emerald-50 hover:bg-emerald-100 active:scale-[0.98] border border-emerald-200 hover:border-emerald-300 rounded-lg px-2 py-2 transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
   }
+  .btn-accent {
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-white bg-accent hover:bg-accent-hover active:scale-[0.98] rounded-lg px-2 py-2 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
+  .btn-warning {
+    @apply inline-flex items-center justify-center gap-2 font-sans font-semibold text-xs text-white bg-amber-500 hover:bg-amber-600 active:scale-[0.98] rounded-lg px-2 py-2 shadow-2xs transition-all duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none;
+  }
 
   /* Standardized inputs */
   .input-field {
@@ -242,4 +248,16 @@
   box-shadow: none;
 }
 
-
+/* Button a11y: visible keyboard focus for all tokens + native buttons */
+.btn-primary:focus-visible,
+.btn-secondary:focus-visible,
+.btn-danger:focus-visible,
+.btn-danger-subtle:focus-visible,
+.btn-warning-subtle:focus-visible,
+.btn-success-subtle:focus-visible,
+.btn-accent:focus-visible,
+.btn-warning:focus-visible,
+button:focus-visible {
+  outline: 2px solid #1677ff;
+  outline-offset: 2px;
+}

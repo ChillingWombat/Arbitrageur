@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
 import { RebalanceEstimatorGadget } from "./RebalanceEstimatorGadget";
 import { ExternalPositionsGadget } from "./ExternalPositionsGadget";
@@ -310,7 +311,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 return (
                   <div key={`${b.venue}-${b.account_id ?? "default"}`} className="space-y-1">
                     <div className="flex items-center justify-between gap-2 text-xs font-mono">
-                      <span className="font-bold text-slate-900 truncate">{b.venue}</span>
+                      <span className="font-bold text-slate-900 truncate flex items-center gap-2 min-w-0">
+                        <VenueLogo venueId={(b.venue ?? "").toLowerCase()} name={b.venue} size={18} />
+                        <span className="truncate">{b.venue}</span>
+                      </span>
                       <span className="tabular-nums text-slate-700">
                         {usdPlain(Math.max(0, b.equity_usd))} <span className="text-slate-400">({share.toFixed(0)}%)</span>
                         {b.available_margin_usd > 0 && (

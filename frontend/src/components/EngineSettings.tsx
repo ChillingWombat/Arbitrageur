@@ -1031,52 +1031,42 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
                     Exchanges ({configuredCount}/{EXCHANGES_ALPHABETICAL.length})
                   </span>
-                  <div className="flex gap-1" title="Show all exchanges or favorites only">
+                  <div className="flex items-center gap-1.5">
                     <button
                       type="button"
-                      onClick={() => setExchangeFilter("all")}
-                      className={`px-2 py-1 rounded-md text-[10px] font-mono font-bold border transition cursor-pointer ${
-                        exchangeFilter === "all"
-                          ? "bg-accent-dim text-accent border-accent-line/60"
-                          : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
-                      }`}
-                    >
-                      All
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setExchangeFilter("favorites")}
-                      className={`px-2 py-1 rounded-md text-[10px] font-mono font-bold border transition cursor-pointer flex items-center gap-1 ${
+                      onClick={() => setExchangeFilter(exchangeFilter === "all" ? "favorites" : "all")}
+                      aria-pressed={exchangeFilter === "favorites"}
+                      title={exchangeFilter === "all" ? "Showing all exchanges — click to show favorites only" : `Showing favorites only (${favoriteExchanges.length} starred) — click to show all`}
+                      className={`h-7 px-2 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer flex items-center gap-1.5 ${
                         exchangeFilter === "favorites"
                           ? "bg-accent-dim text-accent border-accent-line/60"
                           : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
                       }`}
-                      title={`Favorites only (${favoriteExchanges.length} starred)`}
                     >
-                      <Star className="w-3 h-3" />
-                      <span>{favoriteExchanges.length > 0 ? favoriteExchanges.length : ""}</span>
+                      <Star className={`w-3.5 h-3.5 ${exchangeFilter === "favorites" ? "fill-amber-500 text-amber-500" : ""}`} />
+                      <span>{exchangeFilter === "favorites" ? (favoriteExchanges.length > 0 ? favoriteExchanges.length : "Favorites") : "All"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        setPinging(true);
+                        try {
+                          const status = await api.refreshVenueLatencies();
+                          if (status.active_venues) setLiveVenues(status.active_venues);
+                        } catch (err: unknown) {
+                          setErrorMsg(err instanceof Error ? err.message : String(err));
+                        } finally {
+                          setPinging(false);
+                        }
+                      }}
+                      disabled={pinging}
+                      title="Measure HTTP round-trip to all enabled venue API endpoints now"
+                      aria-label="Measure venue API latency now"
+                      className="h-7 w-7 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg transition flex items-center justify-center disabled:opacity-50 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${pinging ? "animate-spin" : ""}`} />
                     </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      setPinging(true);
-                      try {
-                        const status = await api.refreshVenueLatencies();
-                        if (status.active_venues) setLiveVenues(status.active_venues);
-                      } catch (err: unknown) {
-                        setErrorMsg(err instanceof Error ? err.message : String(err));
-                      } finally {
-                        setPinging(false);
-                      }
-                    }}
-                    disabled={pinging}
-                    title="Measure HTTP round-trip to all enabled venue API endpoints now"
-                    className="px-2 py-2 bg-surface hover:bg-surface-raised border border-surface-border text-slate-600 hover:text-slate-900 rounded-lg text-[10px] font-mono transition flex items-center space-x-1 disabled:opacity-50"
-                  >
-                    <RefreshCw className={`w-3 h-3 ${pinging ? "animate-spin" : ""}`} />
-                    <span>Ping</span>
-                  </button>
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-2 space-y-1">
@@ -1583,7 +1573,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     type="button"
                     onClick={handleCheckForUpdates}
                     disabled={checkingUpdate}
-                    className="px-2 py-2 bg-surface-raised hover:bg-slate-200 border border-surface-border text-slate-800 rounded-lg text-xs font-mono font-medium transition flex items-center space-x-1.5 shadow-2xs"
+                    className="btn-secondary font-mono font-medium flex items-center space-x-1.5"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${checkingUpdate ? "animate-spin text-accent" : ""}`} />
                     <span>{checkingUpdate ? "Checking..." : "Check for Updates"}</span>
@@ -1678,7 +1668,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="submit"
             disabled={loading || saving}
-            className="px-2.5 py-2.5 bg-accent hover:bg-blue-600 text-white font-medium text-xs font-mono rounded-lg transition flex items-center space-x-2 shadow-2xs disabled:opacity-50 cursor-pointer"
+            className="btn-accent font-mono font-medium flex items-center space-x-2 disabled:opacity-50"
           >
             {saving ? (
               <span>Saving...</span>

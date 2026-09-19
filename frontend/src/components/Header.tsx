@@ -90,11 +90,7 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
           <button
             onClick={() => onTogglePause?.(!isPaused)}
-            className={`px-2 py-2 rounded-lg text-xs font-sans font-semibold transition-all flex items-center space-x-1.5 cursor-pointer shadow-2xs active:scale-[0.98] ${
-              isPaused
-                ? "bg-amber-500 hover:bg-amber-600 text-white shadow-xs animate-pulse"
-                : "bg-surface hover:bg-slate-100 text-slate-700 border border-surface-border"
-            }`}
+            className={isPaused ? "btn-warning-subtle animate-pulse" : "btn-secondary"}
             title={
               isPaused
                 ? "Continue Trading: Resume automated and manual executions (Positions Preserved)"

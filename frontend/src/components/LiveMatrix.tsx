@@ -45,6 +45,7 @@ import { TickerLogMonitor } from "./TickerLogMonitor";
 import { SignalTrendGadget } from "./SignalTrendGadget";
 import { TickerConfigModal } from "./TickerConfigModal";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 import { api } from "../services/api";
 
 interface LiveMatrixProps {
@@ -174,9 +175,15 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
     return (
       <tr className={`hover:bg-surface-raised transition ${isExec ? "bg-accent-dim/30" : ""}`}>
         <td className="py-2.5 px-3 font-medium text-slate-900 flex items-center space-x-1.5">
-          <span className="text-slate-800 font-semibold">{opp.buy_venue}</span>
+          <span className="flex items-center gap-1 min-w-0">
+            <VenueLogo venueId={(opp.buy_venue_id ?? opp.buy_venue ?? "").toLowerCase()} name={opp.buy_venue} size={16} />
+            <span className="text-slate-800 font-semibold">{opp.buy_venue}</span>
+          </span>
           <span className="text-slate-400 text-xs">➔</span>
-          <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
+          <span className="flex items-center gap-1 min-w-0">
+            <VenueLogo venueId={(opp.sell_venue_id ?? opp.sell_venue ?? "").toLowerCase()} name={opp.sell_venue} size={16} />
+            <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
+          </span>
           {isLive ? (
             <span
               className="ml-1.5 px-1.5 py-0.5 rounded-md border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
@@ -898,7 +905,10 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                             key={colVenue}
                             className="w-[130px] p-1.5 text-center font-bold text-slate-800 border-r border-b border-surface-border last:border-r-0 whitespace-nowrap overflow-hidden sticky top-0 bg-surface-raised z-20"
                           >
-                            <div className="text-[10px] text-slate-900 truncate">{colVenue}</div>
+                            <div className="text-[10px] text-slate-900 truncate flex items-center justify-center gap-1">
+                              <VenueLogo venueId={(venueMatrix.venues[j] ?? colVenue).toLowerCase()} name={colVenue} size={14} />
+                              <span className="truncate">{colVenue}</span>
+                            </div>
                             <div className="text-[10px] font-normal text-profit mt-0.5 truncate">
                               Sell @ {formatCurrencyPrice(sellPrice)}
                             </div>
@@ -916,7 +926,10 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                         <tr key={venueMatrix.venues[i]} className="h-10 hover:bg-surface-raised/40 transition">
                           {/* Row Header (Long Leg) */}
                           <td className="h-10 p-1.5 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10 whitespace-nowrap overflow-hidden">
-                            <div className="text-[10px] font-bold text-slate-900 truncate">{rowLabel}</div>
+                            <div className="text-[10px] font-bold text-slate-900 truncate flex items-center gap-1">
+                              <VenueLogo venueId={(venueMatrix.venues[i] ?? rowLabel).toLowerCase()} name={rowLabel} size={14} />
+                              <span className="truncate">{rowLabel}</span>
+                            </div>
                             <div className="text-[10px] font-normal text-loss mt-0.5 truncate">
                               Buy @ {formatCurrencyPrice(buyPrice)}
                             </div>
@@ -984,7 +997,10 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                     return (
                       <tr key={book.venue_id} className="hover:bg-surface-raised/50 transition">
                         <td className="py-2 px-2.5 font-bold text-slate-900">
-                          {book.venue_name}
+                          <span className="flex items-center gap-1.5 min-w-0">
+                            <VenueLogo venueId={(book.venue_id ?? book.venue_name ?? "").toLowerCase()} name={book.venue_name} size={16} />
+                            <span className="truncate">{book.venue_name}</span>
+                          </span>
                         </td>
                         <td className="py-2 px-2.5 text-profit font-semibold">
                           <span className="flex items-center space-x-1">
