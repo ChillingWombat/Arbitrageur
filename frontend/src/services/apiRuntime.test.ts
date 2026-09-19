@@ -109,6 +109,7 @@ const REGISTERED_NATIVE_COMMANDS = [
   "delete_exchange_credentials",
   "delete_account_credentials",
   "get_account_credentials",
+  "get_account_credential_field",
   "execute_spatial_candidates",
   "list_signal_executions",
   "get_ticker_position_state",

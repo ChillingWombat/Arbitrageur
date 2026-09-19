@@ -155,6 +155,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "delete_account",
   "delete_account_credentials",
   "get_account_credentials",
+  "get_account_credential_field",
   "set_default_account",
   "list_strategy_routes",
   "upsert_strategy_route",
@@ -773,6 +774,11 @@ export const api = {
   /** Full decrypted credentials for one account. Requires unlocked vault; desktop only. */
   async getAccountCredentials(accountId: string): Promise<AccountCredentialInput> {
     return invokeDesktop<AccountCredentialInput>("get_account_credentials", { accountId });
+  },
+  /** Field-scoped reveal: fetches ONE secret field on explicit user reveal,
+   *  so the full credential bundle never sits in renderer memory. */
+  async getAccountCredentialField(accountId: string, field: string): Promise<string> {
+    return invokeDesktop<string>("get_account_credential_field", { accountId, field });
   },
 
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {

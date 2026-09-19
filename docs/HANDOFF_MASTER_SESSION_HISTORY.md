@@ -1073,3 +1073,28 @@ overhaul pass committed as `23d4aed`).
   just views), routing, risk/limits. `min_win_probability` tooltip corrected
   to state its engine role and point table filtering at the gadget.
 - **Verification**: tsc clean, full frontend suite green (all shards 0 fail).
+
+## 32. Session Handoff — 2026-09-19 (Security mitigations, all items)
+
+- **HIGH fixed — keychain.toml**: live Lighter keys moved from the repo root
+  (NTFS mount where chmod is a no-op, world-readable) to
+  `~/.config/arbitrageur/keychain.toml` with enforced 0600 on a native fs.
+  SPEC pointer updated. Standing advice: import into the vault UI and
+  `shred -u` the file, then rotate the two exposed API keys.
+- **MEDIUM fixed — renderer secret exposure**: new `get_account_credential_field`
+  IPC (one whitelisted field per call, vault-gated, fail-closed) registered in
+  main.rs + api.ts allowlists; ExchangeAccounts card rewritten to per-field
+  fetch-on-reveal — the full bundle never sits in React state. Placeholders
+  still work via presence flags; cache drops on save/lock/account-switch.
+- **MEDIUM fixed — memory hygiene**: 10 adapters' stored secrets
+  (api_key/secret, passphrase, node key, private keys across
+  aster/binance/coinbase/decibel/hyperliquid/kraken/lighter/okx/popdex/arcus)
+  moved to `RwLock<Option<Zeroizing<String>>>`; boundaries fixed (hyperliquid
+  trim closures, arcus deref, popdex wrap, aster transient header copy
+  documented). Variational needed nothing (already zeroizing-signs on load).
+- **LOW fixed — headless bind**: `run_serve` refuses non-loopback binds unless
+  ARBITRAGEUR_ALLOW_LAN=1 (explicit, warns). Everything else from the audit
+  needed no change (vault crypto, Tauri lockdown, no unsafe/spawn/dlopen,
+  redacted Debug, no secret logging, npm audit 0, single author).
+- **Verification**: exchanges 111/0, desktop credential test (extended with
+  field-reveal asserts) ok, tsc clean, frontend all shards 0 fail.

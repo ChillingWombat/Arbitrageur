@@ -8,6 +8,7 @@ use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use zeroize::Zeroizing;
 
 /// Arcus High-Speed CLOB Perpetual DEX connector.
 #[allow(dead_code)]
@@ -15,8 +16,8 @@ pub struct ArcusAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    api_key: Option<String>,
-    api_secret: Option<String>,
+    api_key: Option<Zeroizing<String>>,
+    api_secret: Option<Zeroizing<String>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -33,8 +34,8 @@ impl ArcusAdapter {
             venue_id: VenueId::new("arcus"),
             client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
-            api_key,
-            api_secret,
+            api_key: api_key.map(Zeroizing::new),
+            api_secret: api_secret.map(Zeroizing::new),
             rate_limiter: AccountRequestCoordinator::new("arcus", 100, 2000, 500, 10000),
         }
     }
@@ -101,7 +102,7 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let key = self.api_key.as_deref().unwrap_or("").trim();
+        let key = self.api_key.as_deref().map(String::as_str).unwrap_or("").trim();
         if key.is_empty() {
             anyhow::bail!("Arcus API key not configured");
         }
@@ -162,7 +163,7 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let key = self.api_key.as_deref().unwrap_or("").trim();
+        let key = self.api_key.as_deref().map(String::as_str).unwrap_or("").trim();
         if key.is_empty() {
             anyhow::bail!("Arcus API key not configured");
         }

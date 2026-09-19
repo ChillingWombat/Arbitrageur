@@ -9,6 +9,7 @@ use arbitrageur_core::position::{AccountSnapshot, Balance};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use zeroize::Zeroizing;
 
 fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     match v? {
@@ -24,10 +25,10 @@ pub struct DecibelAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    api_key: RwLock<Option<String>>,
-    node_api_key: RwLock<Option<String>>,
+    api_key: RwLock<Option<Zeroizing<String>>>,
+    node_api_key: RwLock<Option<Zeroizing<String>>>,
     wallet_address: RwLock<Option<String>>,
-    private_key: RwLock<Option<String>>,
+    private_key: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -56,10 +57,10 @@ impl DecibelAdapter {
                     .unwrap_or_default()
             },
             base_url: base,
-            api_key: RwLock::new(api_key),
-            node_api_key: RwLock::new(api_secret),
+            api_key: RwLock::new(api_key.map(Zeroizing::new)),
+            node_api_key: RwLock::new(api_secret.map(Zeroizing::new)),
             wallet_address: RwLock::new(None),
-            private_key: RwLock::new(None),
+            private_key: RwLock::new(None::<Zeroizing<String>>),
             rate_limiter: AccountRequestCoordinator::new("decibel", 100, 2000, 500, 10000),
         }
     }
@@ -71,10 +72,10 @@ impl DecibelAdapter {
         wallet_address: Option<String>,
         private_key: Option<String>,
     ) {
-        *self.api_key.write() = api_key;
-        *self.node_api_key.write() = node_api_key;
+        *self.api_key.write() = api_key.map(Zeroizing::new);
+        *self.node_api_key.write() = node_api_key.map(Zeroizing::new);
         *self.wallet_address.write() = wallet_address;
-        *self.private_key.write() = private_key;
+        *self.private_key.write() = private_key.map(Zeroizing::new);
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {

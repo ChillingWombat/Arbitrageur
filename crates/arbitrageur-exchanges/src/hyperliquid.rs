@@ -14,6 +14,7 @@ use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use zeroize::Zeroizing;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HlOrderWire {
@@ -146,7 +147,7 @@ pub struct HyperliquidAdapter {
     client: Client,
     base_url: String,
     wallet_address: RwLock<Option<String>>,
-    private_key: RwLock<Option<String>>,
+    private_key: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -162,7 +163,7 @@ impl HyperliquidAdapter {
             client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
             wallet_address: RwLock::new(wallet_address),
-            private_key: RwLock::new(private_key),
+            private_key: RwLock::new(private_key.map(Zeroizing::new)),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
         }
     }
@@ -170,7 +171,7 @@ impl HyperliquidAdapter {
     /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
     pub fn update_credentials(&self, wallet_address: Option<String>, private_key: Option<String>) {
         *self.wallet_address.write() = wallet_address;
-        *self.private_key.write() = private_key;
+        *self.private_key.write() = private_key.map(Zeroizing::new);
     }
 
     /// Whether valid, non-empty API credentials are held in memory.
@@ -438,7 +439,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             let guard = self.wallet_address.read();
             guard
                 .as_deref()
-                .map(str::trim)
+                .map(|k| k.trim())
                 .filter(|v| !v.is_empty())
                 .map(ToString::to_string)
         }
@@ -551,7 +552,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             let guard = self.private_key.read();
             guard
                 .as_deref()
-                .map(str::trim)
+                .map(|k| k.trim())
                 .filter(|k| !k.is_empty())
                 .map(ToString::to_string)
         }
@@ -713,7 +714,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             let guard = self.private_key.read();
             guard
                 .as_deref()
-                .map(str::trim)
+                .map(|k| k.trim())
                 .filter(|k| !k.is_empty())
                 .map(ToString::to_string)
         }

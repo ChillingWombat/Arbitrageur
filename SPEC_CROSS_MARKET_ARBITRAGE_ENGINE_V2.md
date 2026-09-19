@@ -241,4 +241,4 @@ pub struct TickerStrategyConfigDto {
 
 ## Further Notes
 - The minimalist blue and light theme follows the design system derived from [ddeng.me](https://ddeng.me/), featuring high-contrast slate typography (`#0f172a`), subtle slate borders (`#e2e8f0`), and vibrant brand accent blue (`#2563eb`).
-- Private keys and testing credentials must never be committed to git repositories. All local testing keys are preserved solely in git-ignored local storage and `keychain.toml`.
+- Private keys and testing credentials must never be committed to git repositories. All local testing keys are preserved solely in git-ignored local storage at `~/.config/arbitrageur/keychain.toml` (mode 0600 on a native filesystem — never on the shared NTFS mount, where chmod is a no-op and the file would stay world-readable).

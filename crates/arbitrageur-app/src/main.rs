@@ -433,6 +433,18 @@ fn daemon_health_response() -> &'static str {
 }
 
 async fn run_serve(bind: &str, port: u16) -> anyhow::Result<()> {
+    // Security: this placeholder answers a static 503 to ANY bytes, but a
+    // non-loopback bind would still expose the port to the LAN. Refuse unless
+    // the operator explicitly opts in via ARBITRAGEUR_ALLOW_LAN=1.
+    if bind != "127.0.0.1" && bind != "localhost" && bind != "::1" {
+        let explicit = std::env::var("ARBITRAGEUR_ALLOW_LAN").unwrap_or_default();
+        if explicit != "1" {
+            anyhow::bail!(
+                "Refusing non-loopback bind '{bind}' (set ARBITRAGEUR_ALLOW_LAN=1 to override)"
+            );
+        }
+        eprintln!("[WARN] LAN-exposed placeholder server on {bind} (explicit override)");
+    }
     println!("\n[DAEMON] Starting read-only placeholder server...");
     println!("  -> Health Listener:   http://{}:{}", bind, port);
     println!("  -> Market Data:       none (no feed ingestion running)");

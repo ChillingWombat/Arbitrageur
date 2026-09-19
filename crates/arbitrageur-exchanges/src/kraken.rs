@@ -10,6 +10,7 @@ use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use zeroize::Zeroizing;
 
 /// Kraken Futures and Spot connector (https://futures.kraken.com/derivatives/api/v3).
 #[allow(dead_code)]
@@ -18,8 +19,8 @@ pub struct KrakenAdapter {
     client: Client,
     futures_base_url: String,
     spot_base_url: String,
-    api_key: RwLock<Option<String>>,
-    api_secret: RwLock<Option<String>>,
+    api_key: RwLock<Option<Zeroizing<String>>>,
+    api_secret: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -74,15 +75,15 @@ impl KrakenAdapter {
             },
             futures_base_url: f_url,
             spot_base_url: s_url,
-            api_key: RwLock::new(api_key),
-            api_secret: RwLock::new(api_secret),
+            api_key: RwLock::new(api_key.map(Zeroizing::new)),
+            api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
             rate_limiter: AccountRequestCoordinator::new("kraken", 200, 3000, 500, 15000),
         }
     }
 
     pub fn update_credentials(&self, api_key: Option<String>, api_secret: Option<String>) {
-        *self.api_key.write() = api_key;
-        *self.api_secret.write() = api_secret;
+        *self.api_key.write() = api_key.map(Zeroizing::new);
+        *self.api_secret.write() = api_secret.map(Zeroizing::new);
     }
 
     async fn get_futures_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {

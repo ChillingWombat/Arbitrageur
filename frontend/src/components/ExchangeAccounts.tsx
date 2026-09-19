@@ -502,8 +502,12 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   // Decrypted credentials loaded on demand — never fetched while locked.
-  const [storedCreds, setStoredCreds] = useState<AccountCredentialInput | null>(null);
-  const [credsRequested, setCredsRequested] = useState(false);
+  // Security hardening: NEVER hold the whole credential bundle in renderer
+  // memory. `revealed` keeps only fields the user explicitly revealed,
+  // fetched one at a time via getAccountCredentialField; `requested` stops
+  // refetch loops (requested-but-empty stays empty until next save/unlock).
+  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [requested, setRequested] = useState<Record<string, boolean>>({});
 
   // Reset local drafts when the account identity changes (e.g. venue switch).
   useEffect(() => {
@@ -514,33 +518,35 @@ export const AccountCard: React.FC<AccountCardProps> = ({
     setError(null);
     setSaved(false);
     setShowSecrets({});
-    setStoredCreds(null);
-    setCredsRequested(false);
+    // Drop revealed secrets when switching accounts (they belong to the last one).
+    setRevealed({});
+    setRequested({});
   }, [account.id, account.label]);
 
-  const ensureStoredCreds = useCallback(() => {
-    if (credsRequested || locked || !api.isTauri) return;
-    setCredsRequested(true);
+  // Fetch ONE field on explicit reveal. Bulk prefetch was removed: pulling
+  // the full bundle meant every secret sat in React state from the first
+  // eye-click. Numeric index fields never fetch (prefilled from AccountDto).
+  const revealField = useCallback((key: CredFieldKey) => {
+    if (requested[key] || locked || !api.isTauri) return;
+    if (key === "accountIndex" || key === "subaccountIndex" || key === "apiKeyIndex") return;
+    setRequested((r) => ({ ...r, [key]: true }));
     api
-      .getAccountCredentials(account.id)
-      .then(setStoredCreds)
-      .catch(() => setStoredCreds(null));
-  }, [credsRequested, locked, account.id]);
+      .getAccountCredentialField(account.id, key)
+      .then((v) => setRevealed((r) => ({ ...r, [key]: v ?? "" })))
+      .catch(() => {});
+  }, [requested, locked, account.id]);
 
   // Drop decrypted material the moment the vault re-locks.
   useEffect(() => {
     if (locked) {
-      setStoredCreds(null);
-      setCredsRequested(false);
+      // Drop decrypted material the moment the vault re-locks.
+      setRevealed({});
+      setRequested({});
       setShowSecrets({});
     }
   }, [locked]);
 
-  const storedValueFor = (key: CredFieldKey): string => {
-    if (!storedCreds) return "";
-    const raw = storedCreds[key];
-    return raw === null || raw === undefined ? "" : String(raw);
-  };
+  const storedValueFor = (key: CredFieldKey): string => revealed[key] ?? "";
 
   const valueFor = (key: CredFieldKey): string => {
     if (drafts[key] !== undefined) return drafts[key];
@@ -611,14 +617,10 @@ export const AccountCard: React.FC<AccountCardProps> = ({
       });
       setDrafts({});
       setSaved(true);
-      setCredsRequested(false);
-      // Refresh stored values so revealed fields show the new material.
-      if (storedCreds) {
-        api
-          .getAccountCredentials(account.id)
-          .then(setStoredCreds)
-          .catch(() => setStoredCreds(null));
-      }
+      // Drop revealed secrets after save: placeholders fall back to the
+      // presence flags (STORED_MASK) until the user reveals a field again.
+      setRevealed({});
+      setRequested({});
     });
 
   const handleToggleEnabled = () =>
@@ -782,8 +784,9 @@ export const AccountCard: React.FC<AccountCardProps> = ({
           account={account}
           showSecrets={showSecrets}
           toggleShow={(k) => {
-            setShowSecrets((s) => ({ ...s, [k]: !s[k] }));
-            ensureStoredCreds();
+            const opening = !showSecrets[k];
+            setShowSecrets((st) => ({ ...st, [k]: !st[k] }));
+            if (opening) revealField(k as CredFieldKey);
           }}
         />
 

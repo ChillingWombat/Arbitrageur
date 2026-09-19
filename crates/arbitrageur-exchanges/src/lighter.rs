@@ -11,6 +11,7 @@ use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
 use parking_lot::RwLock;
+use zeroize::Zeroizing;
 
 /// Lighter zk-Rollup DEX adapter.
 #[allow(dead_code)]
@@ -19,7 +20,7 @@ pub struct LighterAdapter {
     client: Client,
     base_url: String,
     account_index: RwLock<Option<u64>>,
-    api_key_private_key: RwLock<Option<String>>,
+    api_key_private_key: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -60,7 +61,7 @@ impl LighterAdapter {
             },
             base_url: base,
             account_index: parking_lot::RwLock::new(account_index),
-            api_key_private_key: parking_lot::RwLock::new(api_key_private_key),
+            api_key_private_key: parking_lot::RwLock::new(api_key_private_key.map(Zeroizing::new)),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
@@ -71,7 +72,7 @@ impl LighterAdapter {
         api_key_private_key: Option<String>,
     ) {
         *self.account_index.write() = account_index;
-        *self.api_key_private_key.write() = api_key_private_key;
+        *self.api_key_private_key.write() = api_key_private_key.map(Zeroizing::new);
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {

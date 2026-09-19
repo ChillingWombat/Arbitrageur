@@ -8713,6 +8713,50 @@ pub fn get_account_credentials_impl(
     }
 }
 
+/// Field-scoped credential reveal (security hardening, 2026-09-19).
+/// The legacy `get_account_credentials` call returns the WHOLE secret bundle
+/// (API key + secret + passphrase + private key) into the renderer, where it
+/// lingers in React state and DOM inputs. This endpoint returns ONE whitelisted
+/// field so the UI only pulls a secret across IPC when the user explicitly
+/// reveals that field. Unknown fields fail closed; vault must be unlocked.
+pub fn get_account_credential_field_impl(
+    account_id: &str,
+    field: &str,
+    state: &AppEngineState,
+) -> Result<String, String> {
+    let exists = state
+        .state_store
+        .get_account(account_id)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !exists {
+        return Err(format!("Unknown account '{account_id}'"));
+    }
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before viewing credentials.".into());
+    }
+    let data = vault.get_data().map_err(|e| e.to_string())?;
+    let cred = data
+        .credentials
+        .iter()
+        .find(|c| c.profile_id.as_deref() == Some(account_id));
+    match cred {
+        Some(c) => Ok(match field {
+            "apiKey" => c.api_key.clone(),
+            "apiSecret" => c.api_secret.clone(),
+            "passphrase" => c.passphrase.clone().unwrap_or_default(),
+            "accountId" => c.account_id.clone().unwrap_or_default(),
+            "walletAddress" => c.wallet_address.clone().unwrap_or_default(),
+            "privateKey" => c.private_key.clone().unwrap_or_default(),
+            _ => return Err(format!("Unknown credential field '{field}'")),
+        }),
+        None => Err(format!(
+            "No credentials configured for account '{account_id}'"
+        )),
+    }
+}
+
 pub fn set_default_account_impl(
     venue: &str,
     account_id: &str,
@@ -9259,6 +9303,15 @@ pub async fn delete_account_credentials(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<bool, String> {
     delete_account_credentials_impl(&account_id, &state)
+}
+
+#[tauri::command]
+pub async fn get_account_credential_field(
+    account_id: String,
+    field: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
+    get_account_credential_field_impl(&account_id, &field, &state)
 }
 
 #[tauri::command]
@@ -11124,6 +11177,19 @@ mod tests {
             &state,
         )
         .expect("create a2");
+
+        // Field-scoped reveal returns exactly one field: the secret, nothing
+        // else. Unknown fields and unknown accounts fail closed.
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "apiSecret", &state).expect("field reveal"),
+            "SENTINEL_REVEAL1"
+        );
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "privateKey", &state).expect("field reveal"),
+            "0xSENTINEL_PK1"
+        );
+        assert!(get_account_credential_field_impl(&a1.id, "nope", &state).is_err());
+        assert!(get_account_credential_field_impl("no-such-account", &a1.id, &state).is_err());
 
         // Reveal returns only the requested profile's material.
         let revealed = get_account_credentials_impl(&a1.id, &state).expect("reveal a1");

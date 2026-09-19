@@ -43,6 +43,7 @@ use arbitrageur_core::quote::{FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::VenueId;
 
 use crate::wallet::{wallet_execution_unavailable, EvmWalletSigner};
+use zeroize::Zeroizing;
 
 /// Placeholder hosts that must never be treated as configured endpoints.
 /// `api.popdex.trade` is a parked domain; `api.popdex.xyz` 404s.
@@ -77,8 +78,8 @@ pub struct PopDexAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: RwLock<Option<String>>,
-    api_key: RwLock<Option<String>>,
-    api_secret: RwLock<Option<String>>,
+    api_key: RwLock<Option<Zeroizing<String>>>,
+    api_secret: RwLock<Option<Zeroizing<String>>>,
     wallet_address: RwLock<Option<String>>,
     wallet: RwLock<Option<EvmWalletSigner>>,
 }
@@ -100,8 +101,8 @@ impl PopDexAdapter {
                 .build()
                 .unwrap_or_default(),
             base_url: RwLock::new(normalize_base_url(base_url)),
-            api_key: RwLock::new(key),
-            api_secret: RwLock::new(secret),
+            api_key: RwLock::new(key.map(Zeroizing::new)),
+            api_secret: RwLock::new(secret.map(Zeroizing::new)),
             wallet_address: RwLock::new(None),
             wallet: RwLock::new(None),
         }
@@ -139,10 +140,11 @@ impl PopDexAdapter {
                 .filter(|a| !a.is_empty());
         }
         *self.base_url.write() = normalize_base_url(base_url);
-        *self.api_key.write() = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty());
+        *self.api_key.write() = api_key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).map(Zeroizing::new);
         *self.api_secret.write() = api_secret
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            .map(Zeroizing::new);
         Ok(())
     }
 
@@ -150,7 +152,7 @@ impl PopDexAdapter {
     /// are bound. Wallet-only binding enables future contract execution, not
     /// REST market data.
     pub fn is_configured(&self) -> bool {
-        self.base_url.read().is_some() && has_secret(self.api_key.read().as_deref())
+        self.base_url.read().is_some() && has_secret(self.api_key.read().as_deref().map(String::as_str))
     }
 
     fn not_configured_error(&self, what: &str) -> anyhow::Error {

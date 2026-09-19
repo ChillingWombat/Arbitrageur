@@ -10,6 +10,7 @@ use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
+use zeroize::Zeroizing;
 
 /// Aster (asterdex.com, Binance-style USDT-margined futures) connector.
 ///
@@ -20,8 +21,8 @@ pub struct AsterAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
-    api_key: RwLock<Option<String>>,
-    api_secret: RwLock<Option<String>>,
+    api_key: RwLock<Option<Zeroizing<String>>>,
+    api_secret: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -243,16 +244,16 @@ impl AsterAdapter {
             venue_id: VenueId::new(venue_id),
             client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
             base_url: base,
-            api_key: RwLock::new(api_key),
-            api_secret: RwLock::new(api_secret),
+            api_key: RwLock::new(api_key.map(Zeroizing::new)),
+            api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 100, 2000, 500, 10000),
         }
     }
 
     /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
     pub fn update_credentials(&self, api_key: Option<String>, api_secret: Option<String>) {
-        *self.api_key.write() = api_key;
-        *self.api_secret.write() = api_secret;
+        *self.api_key.write() = api_key.map(Zeroizing::new);
+        *self.api_secret.write() = api_secret.map(Zeroizing::new);
     }
 
     /// Whether valid, non-empty API credentials are held in memory.
@@ -298,7 +299,9 @@ impl AsterAdapter {
 
         query.push_str("&signature=");
         query.push_str(&signature);
-        Ok((api_key, query))
+        // Transient copy at the signing boundary: the secret must become a
+        // request header value here; long-term storage stays zeroizing.
+        Ok((api_key.to_string(), query))
     }
 
     /// Map a UI/canonical symbol to the concatenated Aster venue spelling.

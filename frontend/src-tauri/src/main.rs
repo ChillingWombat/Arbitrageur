@@ -141,6 +141,7 @@ fn main() {
             commands::delete_account,
             commands::delete_account_credentials,
             commands::get_account_credentials,
+            commands::get_account_credential_field,
             commands::set_default_account,
             commands::list_strategy_routes,
             commands::upsert_strategy_route,
