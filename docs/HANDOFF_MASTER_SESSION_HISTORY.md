@@ -1122,3 +1122,24 @@ overhaul pass committed as `23d4aed`).
   kept append-only (history entries still cite old filenames — correct as
   dated records). Old files `git rm`'d; pointers fixed in `monitor.rs` and
   the README tree.
+
+## 35. Session Handoff — 2026-09-19 (External Positions gadget)
+
+- **New Portfolio Monitor gadget (§2c)**: `ExternalPositionsGadget` manages
+  manual (non-system) holdings — live on-exchange positions minus system legs
+  (new `external_positions.rs`: `get_external_positions`, per-venue
+  `unreadable` notes, $1 dust floor, biggest-notional-first). Group by ticker
+  (signed-net view) or venue (ops view) via pure `groupExternalPositions`.
+- **Bot close with depth pricing**: `recommend_external_close` quotes touch vs
+  full-size VWAP slip, touch spread, mid-vs-mark drift (indicative), and an
+  all-in friction roll-up (slip + ½spread + adjustable taker fee, default
+  5bps) with limit/market recommendation + warnings (stale/thin book, drift).
+  `close_external_position` submits live reduce-only orders (opposite side,
+  fresh re-read, execution lock, `extclose-` client id) and records them under
+  a new strategy-"external" bucket (allowlist 7→8, "External (manual)" label).
+- **Gates (fail-closed)**: reads need unlocked vault + creds; closes need Live
+  Trading + unlocked vault + `supports_live_execution` (else the exact reason
+  shows inline). Paper mode keeps the analysis, refuses the submit. Poll 15s +
+  manual refresh (account reads are heavy). Two-click arm/confirm submit.
+- **Verification**: desktop external_positions tests 2/0, tsc clean, frontend
+  all shards 0 fail (incl. 3 new grouping tests).

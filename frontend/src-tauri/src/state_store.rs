@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 7] =
-    ["futures", "radar", "funding", "spot", "prediction", "stat_arb", "triangle"];
+pub const ALLOWED_STRATEGY_IDS: [&str; 8] =
+    ["futures", "radar", "funding", "spot", "prediction", "stat_arb", "triangle", "external"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

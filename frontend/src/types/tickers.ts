@@ -79,6 +79,7 @@ export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
   prediction: "Prediction Market",
   stat_arb: "Statistical",
   triangle: "Triangle",
+  external: "External (manual)",
 };
 
 /** Display name for a persisted strategy id; falls back to the raw id. */

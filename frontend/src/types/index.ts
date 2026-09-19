@@ -644,6 +644,66 @@ export interface VaultStatus {
   unlocked_until?: string | null;
 }
 
+// External (non-system) positions: live on-exchange holdings minus every
+// filled leg the system opened itself. Closed through the bot as reduce-only
+// live orders (Live Trading + unlocked vault + execution-capable venue).
+export interface ExternalPositionDto {
+  key: string;
+  venue: string;
+  symbol: string;
+  base: string;
+  side: "long" | "short";
+  quantity: number;
+  entryPrice: number;
+  markPrice: number;
+  notionalUsd: number;
+  unrealizedPnlUsd: number;
+  liquidationPrice: number | null;
+  liquidationDistancePct: number | null;
+  leverage: number;
+  systemQty: number;
+  externalQty: number;
+  closeSupported: boolean;
+  updatedAt: string;
+}
+
+export interface ExternalPositionsResponse {
+  positions: ExternalPositionDto[];
+  unreadable: string[];
+  liveMode: boolean;
+}
+
+export interface CloseRecommendationDto {
+  venue: string;
+  symbol: string;
+  closeSide: string;
+  closeQty: number;
+  touchPrice: number;
+  touchSpreadBps: number;
+  marketVwap: number;
+  vwapSlipBps: number;
+  depthFillableQty: number;
+  fullSizeFillable: boolean;
+  recommendedMode: string;
+  recommendedLimitPrice: number | null;
+  takerFeeBps: number;
+  estFrictionBps: number;
+  midVsMarkBps: number | null;
+  bookAgeMs: number;
+  warnings: string[];
+}
+
+export interface CloseResultDto {
+  venue: string;
+  symbol: string;
+  mode: string;
+  orderId: string | null;
+  filledQty: number | null;
+  avgFillPrice: number | null;
+  status: string;
+  note: string;
+}
+
 export interface VenueBalanceInfo {
   venue: string;
   equity_usd: number;

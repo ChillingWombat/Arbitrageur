@@ -4,6 +4,7 @@ mod commands;
 mod attribution;
 mod auto_exec;
 mod equity_attribution;
+mod external_positions;
 mod feed;
 mod monitor;
 mod seasonality;
@@ -151,6 +152,9 @@ fn main() {
             commands::list_signal_executions,
             commands::get_ticker_position_state,
             commands::get_open_positions,
+            external_positions::get_external_positions,
+            external_positions::recommend_external_close,
+            external_positions::close_external_position,
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::get_strategy_fill_pnl,

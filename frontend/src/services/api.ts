@@ -30,6 +30,9 @@ import type {
   PassiveUnwindDto,
   VaultStatus,
   VenueBalanceInfo,
+  ExternalPositionsResponse,
+  CloseRecommendationDto,
+  CloseResultDto,
   StrategyMetrics,
   StrategyFillPnl,
   UtilisationHistory,
@@ -181,6 +184,9 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "list_signal_executions",
   "get_ticker_position_state",
   "get_open_positions",
+  "get_external_positions",
+  "recommend_external_close",
+  "close_external_position",
 ]);
 
 export function nativeCommandAvailable(command: string): boolean {
@@ -851,6 +857,15 @@ export const api = {
     return invokeDesktop<StrategyFillPnl>("get_strategy_fill_pnl", { strategyId });
   },
 
+  async getExternalPositions(): Promise<ExternalPositionsResponse> {
+    return invokeDesktop<ExternalPositionsResponse>("get_external_positions");
+  },
+  async recommendExternalClose(venue: string, symbol: string, takerFeeBps?: number): Promise<CloseRecommendationDto> {
+    return invokeDesktop<CloseRecommendationDto>("recommend_external_close", { venue, symbol, takerFeeBps: takerFeeBps ?? null });
+  },
+  async closeExternalPosition(input: { venue: string; symbol: string; mode: string; limitPrice?: number | null }): Promise<CloseResultDto> {
+    return invokeDesktop<CloseResultDto>("close_external_position", { input });
+  },
   async getUtilisationHistory(venue: string, windowHours?: number): Promise<UtilisationHistory> {
     return invokeDesktop<UtilisationHistory>("get_utilisation_history", {
       venue,
