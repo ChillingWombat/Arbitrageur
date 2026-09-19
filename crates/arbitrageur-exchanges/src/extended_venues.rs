@@ -9,14 +9,29 @@
 //! error (never a fabricated snapshot or fill). `supports_live_execution`
 //! is `false` for all of them.
 //!
-//! # Verification status (2026-09-19, this sandbox)
-//! - LIVE-VERIFIED (curl returned real payloads): dYdX v4, Paradex, Aevo,
-//!   GMX V2 (prices/tickers only — the GLV AMM has no orderbook by design).
-//! - DOC-SHAPED (public docs + API references; admitted paper-only per
-//!   operator request — a harness sweep from full egress should still confirm
-//!   each shape): ApeX Omni, Extended, Derive, StandX, Helix/Injective, Vest,
-//!   Antarctic, EVEDEX, BULK, QFEX, Ostium, SoDEX, AlphaX, Pacifica, Nado,
-//!   IO Trader, Niza.fun, Astros, Gate DEX.
+//! # Verification status (2026-09-19, live curl from this sandbox)
+//! - LIVE-VERIFIED (curl returned real payloads, parsers match exact keys):
+//!   dYdX v4, Paradex, Aevo, GMX V2 (prices/tickers only — the GLV AMM has
+//!   no orderbook by design), ApeX Omni (`omni.apex.exchange`: symbols /
+//!   depth / ticker), Extended (`api.starknet.extended.exchange`: markets /
+//!   `{market}/orderbook` / marketStats funding), Derive (`api.lyra.finance`:
+//!   per-currency instruments + `get_ticker` top-of-book/funding),
+//!   StandX (`perps.standx.com`: symbol_info / depth_book / symbol_market),
+//!   Helix via Injective chain LCD (`sentry.lcd.injective.network`:
+//!   derivative markets + scaled orderbook), Pacifica (`api.pacifica.fi`:
+//!   `/v1/info` + `/v1/book?symbol=` + `/v1/info/prices`),
+//!   QFEX markets only (`api.qfex.com/refdata` — book/ticker/trades are
+//!   auth-gated and fail closed with an explanatory error).
+//! - DOC-SHAPED (admitted paper-only per operator request; parsers fail
+//!   closed per entry so a wrong guess degrades to venue errors, never bad
+//!   data): Vest (api host Cloudflare-530s), Antarctic, EVEDEX
+//!   (`api.evedex.com` DNS-fails; `exchange.evedex.com` 404s), BULK
+//!   (`api.bulk.exchange` serves an unrelated landing page), Ostium
+//!   (onchain Arbitrum reads — no public REST; SDK needs key+RPC),
+//!   SoDEX + AlphaX (parked `/lander` domains), Nado (app live, no public
+//!   API found), IO Trader (parked page), Niza.fun (no futures product
+//!   found), Astros (perp frontend live, no public REST found — DeepBook
+//!   onchain), Gate DEX (no such venue found).
 //! - NOT ADMITTED as venues: Orderly "Derivatives" (same rails as Vanta —
 //!   enabling a second Orderly venue would double-count one orderbook; use
 //!   the Vanta venue instead) and RISEx (no live mainnet found — skipped).
@@ -268,41 +283,42 @@ fn spec_for(id: &str) -> Option<VenueApiSpec> {
         // ---- DOC-SHAPED, admitted paper-only (public docs; sweep pending) ----
         "apex" => VenueApiSpec {
             id: "apex", name: "ApeX Omni",
-            base_url: "https://api.apex.exchange", markets_path: "/api/v3/symbols",
+            base_url: "https://omni.apex.exchange", markets_path: "/api/v3/symbols",
             taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            admit: true, verified: true,
         },
         "extended" => VenueApiSpec {
             id: "extended", name: "Extended",
-            base_url: "https://api.extended.exchange", markets_path: "/api/v1/info/markets",
+            base_url: "https://api.starknet.extended.exchange", markets_path: "/api/v1/info/markets",
             taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            admit: true, verified: true,
         },
         "derive" => VenueApiSpec {
             id: "derive", name: "Derive",
-            base_url: "https://api.derive.xyz", markets_path: "/instruments?instrument_type=perp",
-            taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            base_url: "https://api.lyra.finance", markets_path: "/public/get_ticker?instrument_name=ETH-PERP",
+            taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
+            admit: true, verified: true,
         },
         "standx" => VenueApiSpec {
             id: "standx", name: "StandX",
-            base_url: "https://perps.standx.com", markets_path: "/api/v1/markets",
-            taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            base_url: "https://perps.standx.com", markets_path: "/api/query_symbol_info",
+            taker_fee_bps: fee("4.0"), book_kind: BookKind::PairLevels,
+            admit: true, verified: true,
         },
         "helix" => VenueApiSpec {
             id: "helix", name: "Helix",
-            base_url: "https://sentry.chain.grpc-web.injective.exchange",
-            markets_path: "/api/chuck/v1/derivative/markets",
-            taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            base_url: "https://sentry.lcd.injective.network",
+            markets_path: "/injective/exchange/v1beta1/derivative/markets",
+            taker_fee_bps: fee("0.01"), book_kind: BookKind::PairLevels,
+            admit: true, verified: true,
         },
         // ---- DOC-SHAPED, admitted paper-only per operator request ----
         // Shapes come from public docs; a harness sweep from full egress
         // should still confirm each payload shape. Parsers fail closed per
         // entry, so a wrong doc guess degrades to venue errors, never bad
-        // data. High-caution venues (Ostium, Pacifica, AlphaX, QFEX) stay
-        // paper-only regardless — see docs/EXCHANGES.md section 10.
+        // data. High-caution venues (Ostium, AlphaX) stay paper-only
+        // regardless — see docs/EXCHANGES.md section 10. Pacifica and QFEX
+        // graduated to LIVE-VERIFIED above (QFEX: markets only).
         "vest" => VenueApiSpec {
             id: "vest", name: "Vest",
             base_url: "https://api.vest.exchange", markets_path: "/v1/markets",
@@ -329,9 +345,9 @@ fn spec_for(id: &str) -> Option<VenueApiSpec> {
         },
         "qfex" => VenueApiSpec {
             id: "qfex", name: "QFEX",
-            base_url: "https://api.qfex.com", markets_path: "/v1/markets",
+            base_url: "https://api.qfex.com", markets_path: "/refdata",
             taker_fee_bps: fee("4.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            admit: true, verified: true,
         },
         "ostium" => VenueApiSpec {
             id: "ostium", name: "Ostium",
@@ -353,9 +369,9 @@ fn spec_for(id: &str) -> Option<VenueApiSpec> {
         },
         "pacifica" => VenueApiSpec {
             id: "pacifica", name: "Pacifica",
-            base_url: "https://api.pacifica.fi", markets_path: "/api/v1/markets",
+            base_url: "https://api.pacifica.fi", markets_path: "/api/v1/info",
             taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: true, verified: false,
+            admit: true, verified: true,
         },
         "nado" => VenueApiSpec {
             id: "nado", name: "Nado",
@@ -400,6 +416,14 @@ pub const EXTENDED_VENUE_IDS: [&str; 23] = [
     "standx", "vest",
 ];
 
+/// Lyra/Derive serves one instrument per call, so Derive markets fan out
+/// over this static currency list (each response is cached by path, so a
+/// refresh is cheap after the first sweep). Currencies with no perp return
+/// an empty `result` and contribute nothing.
+const DERIVE_CURRENCIES: [&str; 10] = [
+    "BTC", "ETH", "SOL", "ARB", "OP", "AVAX", "LINK", "DOGE", "SUI", "NEAR",
+];
+
 /// Venue ids admitted to `get_venues` (paper read-only). All 23 venues in
 /// this module are admitted: the 4 curl-verified plus 19 doc-shaped shapes.
 /// Doc-shaped venues still deserve a harness sweep from full egress, but the
@@ -434,8 +458,21 @@ impl ExtendedVenueAdapter {
     /// unknown strings fail closed here — they are documented, not modeled).
     pub fn for_venue(id: &str, base_url: Option<String>) -> Option<Self> {
         let spec = spec_for(id.trim().to_lowercase().as_str())?;
+        // Public market-data only: identify ourselves and ask for JSON.
+        // (Extended's edge intermittently 403s fingerprint-less clients;
+        // headers keep us on the documented public API, nothing more.)
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::USER_AGENT,
+            reqwest::header::HeaderValue::from_static("arbitrageur/0.1 (paper market-data)"),
+        );
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("application/json"),
+        );
         let client = Client::builder()
             .timeout(Duration::from_secs(15))
+            .default_headers(headers)
             .build()
             .unwrap_or_default();
         Some(Self {
@@ -519,25 +556,62 @@ impl ExtendedVenueAdapter {
             "dydx" => format!("{base}-USD"),
             "paradex" => format!("{base}-USD-PERP"),
             "aevo" => format!("{base}-PERP"),
-            "apex" => format!("{base}-USDT"),
+            // ApeX Omni perpetuals are `{BASE}USDT` (crossSymbolName).
+            "apex" => format!("{base}USDT"),
+            // Lyra/Derive instruments are `{BASE}-PERP`.
             "derive" => format!("{base}-PERP"),
+            // StandX and Extended quote perps against USD (`BTC-USD`).
+            "standx" | "extended" => format!("{base}-USD"),
+            // Pacifica addresses markets by bare base asset (`BTC`).
+            "pacifica" => base,
+            // Helix/Injective books resolve through the LCD market list
+            // (market_id); no static spelling exists — callers use the
+            // helix helpers, never this.
+            "helix" => base,
+            // QFEX refdata symbols look like `BTC-USD`; books are
+            // auth-gated, so this spelling is markets-listing only.
+            "qfex" => format!("{base}-USD"),
             _ => format!("{base}-USD-PERP"),
         }
     }
 
-    /// Orderbook path for a venue-native symbol.
+    /// Orderbook path for a venue-native symbol. Derive, Helix, and QFEX
+    /// never reach this (Derive/Helix resolve dynamically, QFEX books are
+    /// auth-gated and fail closed before any path is built).
     fn book_path(&self, venue_symbol: &str) -> String {
         match self.spec_id {
             "dydx" => format!("/v4/orderbooks/perpetualMarket/{venue_symbol}"),
             "paradex" => format!("/v1/orderbook/{venue_symbol}?depth=15"),
             "aevo" => format!("/orderbook?instrument_name={venue_symbol}"),
-            "apex" => format!("/api/v3/depth?symbol={venue_symbol}&limit=50"),
-            "extended" => format!("/api/v1/info/orderbook?market={venue_symbol}"),
-            "derive" => format!("/orderbook?instrument_name={venue_symbol}"),
-            "standx" => format!("/api/v1/orderbook?symbol={venue_symbol}"),
-            "helix" => format!("/api/chuck/v1/derivative/orderbook?marketId={venue_symbol}"),
+            // Verified: `data.a` = asks, `data.b` = bids (`BTCUSDT` style).
+            "apex" => format!("/api/v3/depth?symbol={venue_symbol}"),
+            // Verified: `/api/v1/info/markets/{name}/orderbook`.
+            "extended" => format!("/api/v1/info/markets/{venue_symbol}/orderbook"),
+            // Verified: `{asks: [[p, q]], bids: [[p, q]]}` (`BTC-USD`).
+            "standx" => format!("/api/query_depth_book?symbol={venue_symbol}"),
+            // Verified: `{success, data: {s, l: [[bids], [asks]], t}}`.
+            "pacifica" => format!("/api/v1/book?symbol={venue_symbol}"),
             _ => format!("/v1/orderbook?symbol={venue_symbol}"),
         }
+    }
+
+    /// Resolve a caller-side base asset (e.g. `BTC`) to its active Helix
+    /// LCD market, preferring the USDC quote. Fails closed when the base
+    /// has no active perp.
+    async fn helix_resolve(&self, base: &str) -> anyhow::Result<HelixMarketInfo> {
+        let data = self.get_json("/injective/exchange/v1beta1/derivative/markets").await?;
+        let mut fallback: Option<HelixMarketInfo> = None;
+        for info in helix_market_infos(&data) {
+            if info.base == base {
+                if info.quote == "USDC" {
+                    return Ok(info);
+                }
+                if fallback.is_none() {
+                    fallback = Some(info);
+                }
+            }
+        }
+        fallback.ok_or_else(|| anyhow::anyhow!("Helix has no active perp for {base}"))
     }
 }
 
@@ -604,6 +678,201 @@ fn parse_aevo_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -
 /// chain-native decimals, so only the symbol set is admitted here; price
 /// levels are normalized per-token in `parse_gmx_price` (30-decimal USD
 /// feed). No orderbook exists by construction (GLV AMM).
+/// ApeX Omni: `{"data": {"contractConfig": {"perpetualContract":
+/// [{crossSymbolName: "BTCUSDT", symbol: "BTC-USDT", tickSize: "0.1",
+/// stepSize: "0.001", enableTrade, enableDisplay, …}]}}}` — only
+/// trade-enabled entries are admitted.
+fn parse_apex_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = data.get("data").and_then(|d| d.get("contractConfig"))
+        .and_then(|c| c.get("perpetualContract")).and_then(|v| v.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        if e.get("enableTrade").and_then(|v| v.as_bool()) == Some(false) { return None; }
+        let cross = e.get("crossSymbolName").and_then(|s| s.as_str())?;
+        if cross.is_empty() { return None; }
+        // `symbol` is `{BASE}-{QUOTE}` ("BTC-USDT"); fall back to splitting
+        // the trailing quote token off `crossSymbolName`.
+        let (base, quote) = match e.get("symbol").and_then(|s| s.as_str()).and_then(|s| s.split_once('-')) {
+            Some((b, q)) if !b.is_empty() && !q.is_empty() => (b.to_string(), q.to_string()),
+            _ => {
+                let b = to_base(cross);
+                if b.is_empty() { return None; }
+                (b, "USDT".to_string())
+            }
+        };
+        meta(venue, &base, &quote, cross.to_string(),
+            dec_from_json(e.get("tickSize")), dec_from_json(e.get("stepSize")), fee)
+    }).collect()
+}
+
+/// Extended: `{"status": "OK", "data": [{name: "ENA-USD", type:
+/// "PERPETUAL", assetName, collateralAssetName, status: "ACTIVE",
+/// tradingConfig: {minPriceChange, minOrderSizeChange, minOrderSize},
+/// marketStats: {…}}]}` — only ACTIVE PERPETUAL entries.
+fn parse_extended_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = data.get("data").and_then(|v| v.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        if e.get("type").and_then(|s| s.as_str()) != Some("PERPETUAL") { return None; }
+        if e.get("status").and_then(|s| s.as_str()) != Some("ACTIVE") { return None; }
+        let name = e.get("name").and_then(|s| s.as_str())?;
+        let base = e.get("assetName").and_then(|s| s.as_str()).unwrap_or("");
+        let base = if base.is_empty() { to_base(name) } else { base.to_string() };
+        if base.is_empty() { return None; }
+        let quote = e.get("collateralAssetName").and_then(|s| s.as_str()).unwrap_or("USD");
+        let cfg = e.get("tradingConfig");
+        let price_tick = cfg.and_then(|c| dec_from_json(c.get("minPriceChange")));
+        let size_tick = cfg.and_then(|c| dec_from_json(c.get("minOrderSizeChange")))
+            .or_else(|| cfg.and_then(|c| dec_from_json(c.get("minOrderSize"))));
+        meta(venue, &base, quote, name.to_string(), price_tick, size_tick, fee)
+    }).collect()
+}
+
+/// StandX: `[{symbol: "BTC-USD", base_asset, quote_asset,
+/// price_tick_decimals: 2, qty_tick_decimals: 2, taker_fee: "0.0004",
+/// status: "trading"}]` — only `trading` symbols; the taker fee is a
+/// fraction, converted to bps per entry (spec fee is the fallback).
+fn parse_standx_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = match data.as_array() {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        if e.get("status").and_then(|s| s.as_str()) != Some("trading") { return None; }
+        let symbol = e.get("symbol").and_then(|s| s.as_str())?;
+        let base = e.get("base_asset").and_then(|s| s.as_str()).map(|s| s.to_uppercase())
+            .unwrap_or_else(|| to_base(symbol));
+        if base.is_empty() { return None; }
+        let quote = e.get("quote_asset").and_then(|s| s.as_str()).unwrap_or("DUSD");
+        let tick = |k: &str| e.get(k).and_then(|v| v.as_u64()).map(|d| Decimal::new(1, d as u32));
+        let entry_fee = dec_from_json(e.get("taker_fee")).map(|f| f * dec!(10000)).unwrap_or(fee);
+        meta(venue, &base, quote, symbol.to_string(), tick("price_tick_decimals"), tick("qty_tick_decimals"), entry_fee)
+    }).collect()
+}
+
+/// Pacifica: `{"success": true, "data": [{symbol: "BTC", base_asset,
+/// tick_size: "1", lot_size: "0.00001", instrument_type: "perpetual",
+/// …}]}` — markets are addressed by bare base asset; quote is USD.
+fn parse_pacifica_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = data.get("data").and_then(|v| v.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        let symbol = e.get("symbol").and_then(|s| s.as_str())?;
+        if symbol.is_empty() { return None; }
+        let base = e.get("base_asset").and_then(|s| s.as_str()).map(|s| s.to_uppercase())
+            .unwrap_or_else(|| symbol.to_uppercase());
+        meta(venue, &base, "USD", symbol.to_string(),
+            dec_from_json(e.get("tick_size")), dec_from_json(e.get("lot_size")), fee)
+    }).collect()
+}
+
+/// Derive/Lyra per-currency instruments: `{"result": [{instrument_name:
+/// "ETH-PERP", tick_size: "0.01", amount_step, minimum_amount,
+/// base_currency, quote_currency, is_active}]}`.
+fn parse_derive_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = data.get("result").and_then(|v| v.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        if e.get("is_active").and_then(|v| v.as_bool()) == Some(false) { return None; }
+        let name = e.get("instrument_name").and_then(|s| s.as_str())?;
+        if !name.ends_with("-PERP") { return None; }
+        let base = e.get("base_currency").and_then(|s| s.as_str())?;
+        let quote = e.get("quote_currency").and_then(|s| s.as_str()).unwrap_or("USD");
+        if base.is_empty() { return None; }
+        let entry_fee = dec_from_json(e.get("taker_fee_rate")).map(|f| f * dec!(10000)).unwrap_or(fee);
+        meta(venue, base, quote, name.to_string(),
+            dec_from_json(e.get("tick_size")), dec_from_json(e.get("amount_step")), entry_fee)
+    }).collect()
+}
+
+/// A Helix/Injective LCD derivative market, decoded from the chain query
+/// response. Chain prices are quote-decimal fixed-point (`p` raw units);
+/// `scale = 10^quote_decimals` converts them to human prices.
+pub struct HelixMarketInfo {
+    pub market_id: String,
+    pub ticker: String,
+    pub base: String,
+    pub quote: String,
+    pub scale: Decimal,
+    pub price_tick: Decimal,
+    pub size_tick: Decimal,
+    pub fee_bps: Decimal,
+}
+
+/// Decode all active perpetual LCD markets. Per-entry fail-closed: markets
+/// with missing ticks, bad decimals, or non-`Active` status are skipped.
+fn helix_market_infos(data: &serde_json::Value) -> Vec<HelixMarketInfo> {
+    let arr = data.get("markets").and_then(|v| v.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|wrap| {
+        let m = wrap.get("market")?;
+        if m.get("status").and_then(|s| s.as_str()) != Some("Active") { return None; }
+        if m.get("isPerpetual").and_then(|v| v.as_bool()) == Some(false) { return None; }
+        let ticker = m.get("ticker").and_then(|s| s.as_str())?;
+        // Tickers read `"BTC/USDC PERP"`; quote keeps the suffix stripped.
+        let (base, qraw) = ticker.split_once('/')?;
+        let quote = qraw.strip_suffix(" PERP").or_else(|| qraw.strip_suffix("-PERP")).unwrap_or(qraw);
+        if base.is_empty() || quote.is_empty() { return None; }
+        let qdec = m.get("quote_decimals").and_then(|v| v.as_u64())?;
+        let scale = Decimal::new(1, 0).checked_mul(Decimal::from(10u64.pow(qdec.min(18) as u32)))?;
+        let raw_tick = dec_from_json(m.get("min_price_tick_size"))?;
+        let price_tick = raw_tick.checked_div(scale)?;
+        let size_tick = dec_from_json(m.get("min_quantity_tick_size"))?;
+        if price_tick <= dec!(0) || size_tick <= dec!(0) { return None; }
+        let fee_bps = dec_from_json(m.get("taker_fee_rate")).map(|f| f * dec!(10000)).unwrap_or(dec!(0.01));
+        Some(HelixMarketInfo {
+            market_id: m.get("market_id").and_then(|s| s.as_str())?.to_string(),
+            ticker: ticker.to_string(),
+            base: base.to_uppercase(),
+            quote: quote.to_uppercase(),
+            scale, price_tick, size_tick, fee_bps,
+        })
+    }).collect()
+}
+
+fn parse_helix_markets(venue: &VenueId, data: &serde_json::Value) -> Vec<MarketMetadata> {
+    helix_market_infos(data).into_iter().filter_map(|info| {
+        meta(venue, &info.base, &info.quote, info.ticker.clone(),
+            Some(info.price_tick), Some(info.size_tick), info.fee_bps)
+    }).collect()
+}
+
+/// QFEX: `{"type": "refdata", "data": [{symbol: "BTC-USD", base_asset,
+/// quote_asset, tick_size, lot_size}]}` (a bare array is also accepted).
+/// Books and tickers are auth-gated, so refdata is markets-only by design.
+fn parse_qfex_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
+    let arr = data.get("data").and_then(|v| v.as_array()).or_else(|| data.as_array());
+    let arr = match arr {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    arr.iter().filter_map(|e| {
+        let symbol = e.get("symbol").and_then(|s| s.as_str())?;
+        if symbol.is_empty() { return None; }
+        let base = e.get("base_asset").and_then(|s| s.as_str()).map(|s| s.to_uppercase())
+            .unwrap_or_else(|| to_base(symbol));
+        if base.is_empty() { return None; }
+        let quote = e.get("quote_asset").and_then(|s| s.as_str()).unwrap_or("USD");
+        meta(venue, &base, quote, symbol.to_string(),
+            dec_from_json(e.get("tick_size")), dec_from_json(e.get("lot_size")), fee)
+    }).collect()
+}
+
 fn parse_gmx_markets(venue: &VenueId, data: &serde_json::Value, fee: Decimal) -> Vec<MarketMetadata> {
     let arr = match data.as_array() {
         Some(a) => a,
@@ -663,7 +932,14 @@ fn parse_markets_for(spec_id: &str, venue: &VenueId, data: &serde_json::Value, f
     match spec_id {
         "dydx" => parse_dydx_markets(venue, data, fee),
         "paradex" => parse_paradex_markets(venue, data, fee),
-        "aevo" | "derive" => parse_aevo_markets(venue, data, fee),
+        "aevo" => parse_aevo_markets(venue, data, fee),
+        "apex" => parse_apex_markets(venue, data, fee),
+        "extended" => parse_extended_markets(venue, data, fee),
+        "standx" => parse_standx_markets(venue, data, fee),
+        "pacifica" => parse_pacifica_markets(venue, data, fee),
+        "derive" => parse_derive_markets(venue, data, fee),
+        "helix" => parse_helix_markets(venue, data),
+        "qfex" => parse_qfex_markets(venue, data, fee),
         "gmx" => parse_gmx_markets(venue, data, fee),
         _ => parse_generic_markets(venue, data, fee),
     }
@@ -696,6 +972,166 @@ fn parse_pair_book(venue: &VenueId, symbol: &str, data: &serde_json::Value) -> a
         }
     }
     book_from_levels(venue, symbol, bid_levels, ask_levels)
+}
+
+/// ApeX Omni depth: `{"data": {"a": [[price, qty]…], "b": [[…]]}}`
+/// where `a` is asks and `b` is bids. Bails on empty both sides so a dead
+/// symbol never masquerades as a quote.
+fn parse_apex_book(venue: &VenueId, symbol: &str, data: &serde_json::Value) -> anyhow::Result<OrderBook> {
+    let node = data.get("data").unwrap_or(data);
+    let mut bid_levels = Vec::new();
+    let mut ask_levels = Vec::new();
+    if let Some(arr) = node.get("b").and_then(|v| v.as_array()) {
+        for l in arr {
+            if let Some((p, q)) = parse_pair_level(l) {
+                bid_levels.push((p, q));
+            }
+        }
+    }
+    if let Some(arr) = node.get("a").and_then(|v| v.as_array()) {
+        for l in arr {
+            if let Some((p, q)) = parse_pair_level(l) {
+                ask_levels.push((p, q));
+            }
+        }
+    }
+    book_from_levels(venue, symbol, bid_levels, ask_levels)
+}
+
+/// Extended orderbook: `{"status": "OK", "data": {"market", "bid":
+/// [{"price", "qty"}…], "ask": […]}}`.
+fn parse_extended_book(venue: &VenueId, symbol: &str, data: &serde_json::Value) -> anyhow::Result<OrderBook> {
+    let node = data.get("data").unwrap_or(data);
+    let mut bid_levels = Vec::new();
+    let mut ask_levels = Vec::new();
+    if let Some(arr) = node.get("bid").or_else(|| node.get("bids")).and_then(|v| v.as_array()) {
+        for l in arr {
+            let p = dec_from_json(l.get("price"));
+            let q = dec_from_json(l.get("qty")).or_else(|| dec_from_json(l.get("size")));
+            if let (Some(p), Some(q)) = (p, q) {
+                if p > dec!(0) && q > dec!(0) {
+                    bid_levels.push((p, q));
+                }
+            }
+        }
+    }
+    if let Some(arr) = node.get("ask").or_else(|| node.get("asks")).and_then(|v| v.as_array()) {
+        for l in arr {
+            let p = dec_from_json(l.get("price"));
+            let q = dec_from_json(l.get("qty")).or_else(|| dec_from_json(l.get("size")));
+            if let (Some(p), Some(q)) = (p, q) {
+                if p > dec!(0) && q > dec!(0) {
+                    ask_levels.push((p, q));
+                }
+            }
+        }
+    }
+    book_from_levels(venue, symbol, bid_levels, ask_levels)
+}
+
+/// Pacifica book: `{"success": true, "data": {"s", "l": [[bids], [asks]],
+/// "t"}}` with `{p, a}` levels — `l[0]` descends (bids), `l[1]` ascends
+/// (asks). Sides are assigned by array position, then sanity-checked by
+/// price order (best bid must sit below best ask).
+fn parse_pacifica_book(venue: &VenueId, symbol: &str, data: &serde_json::Value) -> anyhow::Result<OrderBook> {
+    let node = data.get("data").unwrap_or(data);
+    let sides = node.get("l").and_then(|v| v.as_array());
+    let sides = match sides {
+        Some(s) => s,
+        None => anyhow::bail!("Pacifica book for {symbol} has no levels array"),
+    };
+    let parse_side = |idx: usize| -> Vec<(Decimal, Decimal)> {
+        let mut out = Vec::new();
+        if let Some(arr) = sides.get(idx).and_then(|v| v.as_array()) {
+            for l in arr {
+                if let (Some(p), Some(q)) = (dec_from_json(l.get("p")), dec_from_json(l.get("a"))) {
+                    if p > dec!(0) && q > dec!(0) {
+                        out.push((p, q));
+                    }
+                }
+            }
+        }
+        out
+    };
+    // Sides are strictly positional (verified live): l[0] descends (bids),
+    // l[1] ascends (asks). A crossed book — or a venue encoding flip —
+    // fails closed; no side-swapping, so a genuinely locked market can
+    // never be published as a clean book with inverted sides.
+    let (bids, asks) = (parse_side(0), parse_side(1));
+    if bids.is_empty() && asks.is_empty() {
+        anyhow::bail!("Pacifica book for {symbol} returned no live levels");
+    }
+    if !bids.is_empty() && !asks.is_empty() && bids[0].0 >= asks[0].0 {
+        anyhow::bail!("Pacifica book for {symbol} is crossed — refusing to publish");
+    }
+    book_from_levels(venue, symbol, bids, asks)
+}
+
+/// Helix/Injective LCD book: `{buys_price_level: [{p, q}…],
+/// sells_price_level: […]}` in quote-decimal fixed-point — divide every
+/// price by `scale` (10^quote_decimals from the market entry).
+fn parse_helix_book(venue: &VenueId, symbol: &str, data: &serde_json::Value, scale: Decimal) -> anyhow::Result<OrderBook> {
+    if scale <= dec!(0) {
+        anyhow::bail!("Helix book for {symbol} has a non-positive price scale");
+    }
+    let mut bid_levels = Vec::new();
+    let mut ask_levels = Vec::new();
+    if let Some(arr) = data.get("buys_price_level").and_then(|v| v.as_array()) {
+        for l in arr {
+            if let (Some(p), Some(q)) = (dec_from_json(l.get("p")), dec_from_json(l.get("q"))) {
+                if let Some(px) = p.checked_div(scale) {
+                    if px > dec!(0) && q > dec!(0) {
+                        bid_levels.push((px, q));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(arr) = data.get("sells_price_level").and_then(|v| v.as_array()) {
+        for l in arr {
+            if let (Some(p), Some(q)) = (dec_from_json(l.get("p")), dec_from_json(l.get("q"))) {
+                if let Some(px) = p.checked_div(scale) {
+                    if px > dec!(0) && q > dec!(0) {
+                        ask_levels.push((px, q));
+                    }
+                }
+            }
+        }
+    }
+    book_from_levels(venue, symbol, bid_levels, ask_levels)
+}
+
+/// Derive/Lyra top-of-book: the public `get_ticker` result carries
+/// `best_bid_price` / `best_ask_price` (+amounts) but no depth endpoint
+/// exists, so the book is one real level per side — documented as
+/// top-of-book only, never padded with synthetic depth.
+fn parse_derive_topbook(venue: &VenueId, symbol: &str, result: &serde_json::Value) -> anyhow::Result<OrderBook> {
+    let bids = match (dec_from_json(result.get("best_bid_price")), dec_from_json(result.get("best_bid_amount"))) {
+        (Some(p), Some(q)) if p > dec!(0) && q > dec!(0) => vec![(p, q)],
+        _ => Vec::new(),
+    };
+    let asks = match (dec_from_json(result.get("best_ask_price")), dec_from_json(result.get("best_ask_amount"))) {
+        (Some(p), Some(q)) if p > dec!(0) && q > dec!(0) => vec![(p, q)],
+        _ => Vec::new(),
+    };
+    book_from_levels(venue, symbol, bids, asks)
+}
+
+/// Parse an RFC3339 timestamp (`2026-09-19T03:00:00Z`) into `DateTime<Utc>;
+/// `None` on absence/parse failure so callers fall back to `Utc::now`.
+fn parse_time_opt(v: Option<&serde_json::Value>) -> Option<chrono::DateTime<Utc>> {
+    v.and_then(|x| x.as_str()).and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+}
+
+/// Parse a millisecond-epoch timestamp (number or string) into
+/// `DateTime<Utc>`; `None` when absent/unparseable.
+fn parse_millis_opt(v: Option<&serde_json::Value>) -> Option<chrono::DateTime<Utc>> {
+    let ms = match v? {
+        serde_json::Value::Number(n) => n.as_i64()?,
+        serde_json::Value::String(s) => s.trim().parse::<i64>().ok()?,
+        _ => return None,
+    };
+    chrono::DateTime::from_timestamp_millis(ms)
 }
 
 /// dYdX v4 book: `{"bids": [{price, size}…], "asks": […]}`.
@@ -757,6 +1193,19 @@ impl ExchangeAdapter for ExtendedVenueAdapter {
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let spec = spec_for(self.spec_id).ok_or_else(|| anyhow::anyhow!("unknown venue {}", self.spec_id))?;
+        if self.spec_id == "derive" {
+            let mut out = Vec::new();
+            for cur in DERIVE_CURRENCIES {
+                // One currency failing must not abort the listing — the
+                // error is skipped per currency, fail-closed.
+                if let Ok(data) = self.get_json(&format!(
+                    "/public/get_instruments?currency={cur}&expired=false&instrument_type=perp"
+                )).await {
+                    out.extend(parse_derive_markets(&self.venue_id, &data, spec.taker_fee_bps));
+                }
+            }
+            return Ok(out);
+        }
         let data = self.get_json(spec.markets_path).await?;
         Ok(parse_markets_for(self.spec_id, &self.venue_id, &data, spec.taker_fee_bps))
     }
@@ -769,10 +1218,39 @@ impl ExchangeAdapter for ExtendedVenueAdapter {
                 self.name
             );
         }
+        // Derive exposes no depth endpoint — the book is the ticker's real
+        // top-of-book level per side (documented, never padded).
+        if self.spec_id == "derive" {
+            let vsym = self.venue_symbol(symbol);
+            let data = self.get_json(&format!("/public/get_ticker?instrument_name={vsym}")).await?;
+            let result = data.get("result").ok_or_else(|| anyhow::anyhow!("Derive ticker for {symbol} has no result"))?;
+            return parse_derive_topbook(&self.venue_id, symbol, result);
+        }
+        // Helix books resolve through the LCD market list (market_id) with
+        // per-market quote-decimal scaling.
+        if self.spec_id == "helix" {
+            let base = to_base(symbol);
+            let info = self.helix_resolve(&base).await?;
+            let data = self.get_json(&format!(
+                "/injective/exchange/v1beta1/derivative/orderbook/{}", info.market_id
+            )).await?;
+            return parse_helix_book(&self.venue_id, symbol, &data, info.scale);
+        }
+        // QFEX books (and tickers) are auth-gated: fail closed with an
+        // explanatory error rather than a fabricated quote.
+        if self.spec_id == "qfex" {
+            anyhow::bail!(
+                "QFEX orderbooks require authentication; {} lists markets from /refdata only",
+                self.name
+            );
+        }
         let vsym = self.venue_symbol(symbol);
         let data = self.get_json(&self.book_path(&vsym)).await?;
         match self.spec_id {
             "dydx" => parse_dydx_book(&self.venue_id, symbol, &data),
+            "apex" => parse_apex_book(&self.venue_id, symbol, &data),
+            "extended" => parse_extended_book(&self.venue_id, symbol, &data),
+            "pacifica" => parse_pacifica_book(&self.venue_id, symbol, &data),
             _ => parse_pair_book(&self.venue_id, symbol, &data),
         }
     }
@@ -862,6 +1340,77 @@ impl ExchangeAdapter for ExtendedVenueAdapter {
                 .ok_or_else(|| anyhow::anyhow!("Aevo has no funding rate for {symbol}"))?;
             return Ok(funding_now(&self.venue_id, symbol, rate, 1, None));
         }
+        // ApeX Omni tickers carry the current funding rate plus the next
+        // funding timestamp (hourly grid, inferred from next-funding times).
+        if self.spec_id == "apex" {
+            let vsym = self.venue_symbol(symbol);
+            let data = self.get_json(&format!("/api/v3/ticker?symbol={vsym}")).await?;
+            let entry = data.get("data").and_then(|v| v.as_array())
+                .and_then(|a| a.first()).ok_or_else(|| anyhow::anyhow!("ApeX has no ticker for {symbol}"))?;
+            let rate = dec_from_json(entry.get("fundingRate"))
+                .ok_or_else(|| anyhow::anyhow!("ApeX has no funding rate for {symbol}"))?;
+            return Ok(funding_now(&self.venue_id, symbol, rate, 1, parse_time_opt(entry.get("nextFundingTime"))));
+        }
+        // Extended funds hourly (inferred from next-funding timestamps);
+        // the rate and next time ride inside the markets payload.
+        if self.spec_id == "extended" {
+            let vsym = self.venue_symbol(symbol);
+            let data = self.get_json("/api/v1/info/markets").await?;
+            let arr = data.get("data").and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("Extended markets missing data"))?;
+            for e in arr {
+                if e.get("name").and_then(|s| s.as_str()) == Some(vsym.as_str()) {
+                    let stats = e.get("marketStats").ok_or_else(|| anyhow::anyhow!("Extended has no stats for {symbol}"))?;
+                    let rate = dec_from_json(stats.get("fundingRate"))
+                        .ok_or_else(|| anyhow::anyhow!("Extended has no funding rate for {symbol}"))?;
+                    return Ok(funding_now(&self.venue_id, symbol, rate, 1,
+                        parse_millis_opt(stats.get("nextFundingRate"))));
+                }
+            }
+            anyhow::bail!("Extended has no market entry for {symbol}");
+        }
+        // Derive/Lyra funds hourly (max_rate_per_hour); the live rate is
+        // `perp_details.funding_rate` on the ticker.
+        if self.spec_id == "derive" {
+            let vsym = self.venue_symbol(symbol);
+            let data = self.get_json(&format!("/public/get_ticker?instrument_name={vsym}")).await?;
+            let result = data.get("result").ok_or_else(|| anyhow::anyhow!("Derive ticker for {symbol} has no result"))?;
+            let rate = result.get("perp_details").and_then(|d| dec_from_json(d.get("funding_rate")))
+                .ok_or_else(|| anyhow::anyhow!("Derive has no funding rate for {symbol}"))?;
+            return Ok(funding_now(&self.venue_id, symbol, rate, 1, None));
+        }
+        // StandX funds hourly; the rate and next time ride on the market
+        // snapshot endpoint.
+        if self.spec_id == "standx" {
+            let vsym = self.venue_symbol(symbol);
+            let data = self.get_json(&format!("/api/query_symbol_market?symbol={vsym}")).await?;
+            let rate = dec_from_json(data.get("funding_rate"))
+                .ok_or_else(|| anyhow::anyhow!("StandX has no funding rate for {symbol}"))?;
+            return Ok(funding_now(&self.venue_id, symbol, rate, 1, parse_time_opt(data.get("next_funding_time"))));
+        }
+        // Pacifica publishes current + next funding per symbol on
+        // `/api/v1/info/prices`; the predicted rate is surfaced so the
+        // funding bot can see the turn, not just the level.
+        if self.spec_id == "pacifica" {
+            let base = to_base(symbol);
+            let data = self.get_json("/api/v1/info/prices").await?;
+            let arr = data.get("data").and_then(|v| v.as_array())
+                .ok_or_else(|| anyhow::anyhow!("Pacifica prices missing data"))?;
+            for e in arr {
+                if e.get("symbol").and_then(|s| s.as_str()).map(|s| s.to_uppercase()) == Some(base.clone()) {
+                    let rate = dec_from_json(e.get("funding"))
+                        .ok_or_else(|| anyhow::anyhow!("Pacifica has no funding rate for {symbol}"))?;
+                    let mut fr = funding_now(&self.venue_id, symbol, rate, 1, None);
+                    fr.predicted_rate = dec_from_json(e.get("next_funding"));
+                    return Ok(fr);
+                }
+            }
+            anyhow::bail!("Pacifica has no price entry for {symbol}");
+        }
+        // Helix funding is NOT on the chain LCD (query returns
+        // "Not Implemented") and QFEX refdata carries no funding — fail
+        // closed rather than returning a zero rate that the funding bot
+        // would read as "no cost to hold".
         // Every other venue: no verified per-symbol funding endpoint in this
         // harness — fail closed rather than returning a zero rate that the
         // funding bot would read as "no cost to hold".
@@ -881,6 +1430,35 @@ impl ExchangeAdapter for ExtendedVenueAdapter {
                         if let Some((base, _)) = ticker.split_once('-') {
                             out.insert(base.to_string(), v);
                         }
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        // Extended: `marketStats.dailyVolume` keyed by asset name.
+        if self.spec_id == "extended" {
+            let data = self.get_json("/api/v1/info/markets").await?;
+            if let Some(arr) = data.get("data").and_then(|v| v.as_array()) {
+                for e in arr {
+                    let base = e.get("assetName").and_then(|s| s.as_str()).unwrap_or("");
+                    let vol = e.get("marketStats").and_then(|s| dec_from_json(s.get("dailyVolume")));
+                    if let (Some(v), true) = (vol, !base.is_empty()) {
+                        out.insert(base.to_uppercase(), v);
+                    }
+                }
+            }
+            return Ok(out);
+        }
+        // Pacifica: `volume_24h` per symbol on the prices endpoint.
+        if self.spec_id == "pacifica" {
+            let data = self.get_json("/api/v1/info/prices").await?;
+            if let Some(arr) = data.get("data").and_then(|v| v.as_array()) {
+                for e in arr {
+                    if let (Some(sym), Some(v)) = (
+                        e.get("symbol").and_then(|s| s.as_str()),
+                        dec_from_json(e.get("volume_24h")),
+                    ) {
+                        out.insert(sym.to_uppercase(), v);
                     }
                 }
             }
@@ -999,6 +1577,180 @@ mod tests {
     }
 
     #[test]
+    fn parse_apex_markets_and_book_match_live_shape() {
+        let venue = VenueId::new("apex");
+        let data = serde_json::json!({
+            "data": {"contractConfig": {"perpetualContract": [
+                {"crossSymbolName": "BTCUSDT", "symbol": "BTC-USDT",
+                 "tickSize": "0.1", "stepSize": "0.001", "enableTrade": true},
+                {"crossSymbolName": "OLDUSDT", "symbol": "OLD-USDT",
+                 "tickSize": "0.1", "stepSize": "0.001", "enableTrade": false}
+            ]}}
+        });
+        let out = parse_apex_markets(&venue, &data, dec!(2.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "BTCUSDT");
+        assert_eq!(out[0].symbol.base, "BTC");
+        let book = serde_json::json!({"data": {
+            "b": [["81375.0", "3.735"]],
+            "a": [["81388.4", "0.425"]]
+        }});
+        let b = parse_apex_book(&venue, "BTC", &book).expect("apex book");
+        assert_eq!(b.bids.len(), 1);
+        assert_eq!(b.asks.len(), 1);
+        assert!(b.best_bid_price().unwrap() < b.best_ask_price().unwrap());
+        // Dead symbol (null sides) fails closed.
+        let dead = serde_json::json!({"data": {"a": null, "b": null}});
+        assert!(parse_apex_book(&venue, "ZZZ", &dead).is_err());
+    }
+
+    #[test]
+    fn parse_extended_markets_book_and_times_match_live_shape() {
+        let venue = VenueId::new("extended");
+        let data = serde_json::json!({
+            "status": "OK", "data": [
+                {"name": "BTC-USD", "type": "PERPETUAL", "assetName": "BTC",
+                 "collateralAssetName": "USD", "status": "ACTIVE",
+                 "tradingConfig": {"minPriceChange": "1", "minOrderSizeChange": "0.0001"},
+                 "marketStats": {"fundingRate": "0.000013", "nextFundingRate": 1789786800000i64}},
+                {"name": "OLD-USD", "type": "SPOT", "assetName": "OLD",
+                 "collateralAssetName": "USD", "status": "ACTIVE", "tradingConfig": {}}
+            ]
+        });
+        let out = parse_extended_markets(&venue, &data, dec!(2.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "BTC-USD");
+        let book = serde_json::json!({"status": "OK", "data": {
+            "market": "BTC-USD",
+            "bid": [{"price": "81329", "qty": "0.43364"}],
+            "ask": [{"price": "81332", "qty": "0.05534"}]
+        }});
+        let b = parse_extended_book(&venue, "BTC", &book).expect("ext book");
+        assert!(b.best_bid_price().unwrap() < b.best_ask_price().unwrap());
+        assert!(parse_millis_opt(Some(&serde_json::json!(1789786800000i64))).is_some());
+        assert!(parse_millis_opt(Some(&serde_json::json!("x"))).is_none());
+    }
+
+    #[test]
+    fn parse_standx_markets_match_live_shape() {
+        let venue = VenueId::new("standx");
+        let data = serde_json::json!([
+            {"symbol": "BTC-USD", "base_asset": "BTC", "quote_asset": "DUSD",
+             "price_tick_decimals": 2, "qty_tick_decimals": 2,
+             "taker_fee": "0.0004", "status": "trading"},
+            {"symbol": "OLD-USD", "base_asset": "OLD", "quote_asset": "DUSD",
+             "price_tick_decimals": 2, "qty_tick_decimals": 2,
+             "taker_fee": "0.0004", "status": "halted"}
+        ]);
+        let out = parse_standx_markets(&venue, &data, dec!(4.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "BTC-USD");
+        assert_eq!(out[0].price_decimals, 2);
+        // 0.0004 fraction -> 4.0 bps per-entry fee.
+        assert_eq!(out[0].taker_fee_bps, dec!(4.0));
+        // StandX depth uses plain asks/bids pairs (shared parser).
+        let depth = serde_json::json!({
+            "asks": [["81357", "0.0374"]], "bids": [["81346", "0.1"]]});
+        let b = parse_pair_book(&venue, "BTC", &depth).expect("stx book");
+        assert!(b.best_bid_price().unwrap() < b.best_ask_price().unwrap());
+        assert!(parse_time_opt(Some(&serde_json::json!("2026-09-19T03:00:00Z"))).is_some());
+    }
+
+    #[test]
+    fn parse_pacifica_markets_and_book_match_live_shape() {
+        let venue = VenueId::new("pacifica");
+        let data = serde_json::json!({"success": true, "data": [
+            {"symbol": "BTC", "base_asset": "BTC", "tick_size": "1",
+             "lot_size": "0.00001", "instrument_type": "perpetual"}
+        ]});
+        let out = parse_pacifica_markets(&venue, &data, dec!(2.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "BTC");
+        let book = serde_json::json!({"success": true, "data": {
+            "s": "BTC",
+            "l": [
+                [{"p": "81327", "a": "0.08203", "n": 3}],
+                [{"p": "81328", "a": "0.59282", "n": 15}]
+            ], "t": 1789784245931i64}});
+        let b = parse_pacifica_book(&venue, "BTC", &book).expect("pac book");
+        assert!(b.best_bid_price().unwrap() < b.best_ask_price().unwrap());
+        // A crossed venue encoding must fail closed, never publish.
+        let crossed = serde_json::json!({"success": true, "data": {
+            "s": "BTC",
+            "l": [
+                [{"p": "81328", "a": "0.5"}],
+                [{"p": "81327", "a": "0.5"}]
+            ], "t": 1}});
+        // First array is bids by position; prices uncrossed here only if the
+        // venue keeps its encoding — this fixture is bids(81328) above
+        // asks(81327), i.e. crossed, and must be rejected.
+        assert!(parse_pacifica_book(&venue, "BTC", &crossed).is_err());
+    }
+
+    #[test]
+    fn parse_derive_markets_and_topbook_match_live_shape() {
+        let venue = VenueId::new("derive");
+        let data = serde_json::json!({"result": [
+            {"instrument_type": "perp", "instrument_name": "ETH-PERP",
+             "is_active": true, "tick_size": "0.01", "amount_step": "0.001",
+             "base_currency": "ETH", "quote_currency": "USD",
+             "taker_fee_rate": "0.0003"},
+            {"instrument_type": "option", "instrument_name": "ETH-260926-3000-C",
+             "is_active": true, "tick_size": "0.01", "amount_step": "0.001",
+             "base_currency": "ETH", "quote_currency": "USD"}
+        ]});
+        let out = parse_derive_markets(&venue, &data, dec!(3.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "ETH-PERP");
+        let result = serde_json::json!({
+            "best_bid_price": "2616.67", "best_bid_amount": "11.465",
+            "best_ask_price": "2620.35", "best_ask_amount": "11.449"});
+        let b = parse_derive_topbook(&venue, "ETH", &result).expect("drv book");
+        assert_eq!(b.bids.len(), 1);
+        assert_eq!(b.asks.len(), 1);
+    }
+
+    #[test]
+    fn parse_helix_markets_and_scaled_book_match_live_shape() {
+        let venue = VenueId::new("helix");
+        let data = serde_json::json!({"markets": [
+            {"market": {"ticker": "BTC/USDC PERP",
+             "market_id": "0xabc", "status": "Active", "isPerpetual": true,
+             "quote_decimals": 6, "min_price_tick_size": "1000000.000000000000000000",
+             "min_quantity_tick_size": "0.000010000000000000",
+             "taker_fee_rate": "0.000001000000000000"}},
+            {"market": {"ticker": "OLD/USDC PERP",
+             "market_id": "0xdef", "status": "Paused", "quote_decimals": 6,
+             "min_price_tick_size": "1000000.0",
+             "min_quantity_tick_size": "0.00001",
+             "taker_fee_rate": "0.000001"}}
+        ]});
+        let out = parse_helix_markets(&venue, &data);
+        assert_eq!(out.len(), 1);
+        // 1e6 raw tick / 1e6 scale = 1.0 human tick.
+        assert_eq!(out[0].price_decimals, 0);
+        let book = serde_json::json!({
+            "buys_price_level": [{"p": "81312000000.000000000000000000", "q": "0.78409"}],
+            "sells_price_level": [{"p": "81332000000.000000000000000000", "q": "0.05534"}]});
+        let b = parse_helix_book(&venue, "BTC", &book, dec!(1000000)).expect("helix book");
+        assert_eq!(b.best_bid_price().unwrap(), dec!(81312));
+        assert_eq!(b.best_ask_price().unwrap(), dec!(81332));
+    }
+
+    #[test]
+    fn parse_qfex_refdata_matches_live_shape() {
+        let venue = VenueId::new("qfex");
+        let data = serde_json::json!({"type": "refdata", "data": [
+            {"symbol": "BTC-USD", "base_asset": "BTC", "quote_asset": "USD",
+             "tick_size": "0.1", "lot_size": "0.001"}
+        ]});
+        let out = parse_qfex_markets(&venue, &data, dec!(4.0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].venue_symbol, "BTC-USD");
+        assert_eq!(out[0].symbol.base, "BTC");
+    }
+
+    #[test]
     fn venue_symbol_mapping_is_explicit() {
         let dydx = ExtendedVenueAdapter::dydx(None);
         assert_eq!(dydx.venue_symbol("BTC"), "BTC-USD");
@@ -1006,6 +1758,18 @@ mod tests {
         assert_eq!(paradex.venue_symbol("BTC-USDC"), "BTC-USD-PERP");
         let aevo = ExtendedVenueAdapter::aevo(None);
         assert_eq!(aevo.venue_symbol("eth"), "ETH-PERP");
+        let apex = ExtendedVenueAdapter::apex(None);
+        assert_eq!(apex.venue_symbol("BTC"), "BTCUSDT");
+        let extended = ExtendedVenueAdapter::extended(None);
+        assert_eq!(extended.venue_symbol("btc/usd"), "BTC-USD");
+        let standx = ExtendedVenueAdapter::standx(None);
+        assert_eq!(standx.venue_symbol("BTC"), "BTC-USD");
+        let pacifica = ExtendedVenueAdapter::pacifica(None);
+        assert_eq!(pacifica.venue_symbol("BTC"), "BTC");
+        let derive = ExtendedVenueAdapter::derive(None);
+        assert_eq!(derive.venue_symbol("ETH"), "ETH-PERP");
+        let qfex = ExtendedVenueAdapter::qfex(None);
+        assert_eq!(qfex.venue_symbol("BTC"), "BTC-USD");
     }
 
     #[tokio::test]

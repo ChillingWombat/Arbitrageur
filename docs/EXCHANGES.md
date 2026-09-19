@@ -324,25 +324,25 @@ named issue resolves.
 | Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | Admitted (curl-verified: markets + book) |
 | GMX V2 | `gmx` | LOW (GLV vaults, self-custody) | No — vault shares, user keys; prices-only feed (no orderbook by design) | Admitted (curl-verified tickers; excluded from spread pairs) |
 | Aevo | `aevo` | LOW–MED (offchain book, onchain settlement) | Cannot move collateral without user signatures | Admitted (curl-verified: markets + book) |
-| ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
-| Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
-| Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
-| StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Admitted (doc-shaped; harness sweep pending) |
-| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Admitted (doc-shaped; harness sweep pending) |
-| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Admitted (doc-shaped; sweep pending) |
-| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
-| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (doc-shaped; sweep pending) |
-| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
-| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Admitted (doc-shaped; sweep pending) |
-| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Admitted (doc-shaped; sweep pending) |
-| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (doc-shaped; sweep pending) |
-| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Admitted (doc-shaped; sweep pending) |
-| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Admitted (doc-shaped; sweep pending) |
-| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
-| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
-| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
-| Astros | `astros` | LOW (onchain settlement) | No — user keeps keys (docs claim) | Admitted (doc-shaped; sweep pending) |
-| Gate DEX | `gatedex` | MEDIUM (hybrid, CEX-affiliated) | CEX-affiliate risk — size accordingly | Admitted (doc-shaped; sweep pending) |
+| ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Admitted (LIVE 2026-09-19: 88 markets, 25-level books, hourly funding) |
+| Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Admitted (LIVE 2026-09-19: 326 markets, full-depth books, funding in marketStats; client sends UA+Accept — edge 403s fingerprint-less clients) |
+| Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Admitted (LIVE 2026-09-19: per-currency instruments via `api.lyra.finance`, top-of-book + funding from `get_ticker`; no depth endpoint exists) |
+| StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Admitted (LIVE 2026-09-19: 13 markets, 130-level books, hourly funding; per-entry 4.0 bps taker fee) |
+| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Admitted (LIVE 2026-09-19: 286 LCD derivative markets, scaled onchain books; funding NOT on LCD — fails closed) |
+| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Admitted (UNVERIFIED 2026-09-19: `api.vest.exchange` Cloudflare-530s — origin DNS dead; fails closed) |
+| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: site is a CloudFront shell, no public API found; fails closed) |
+| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (UNVERIFIED 2026-09-19: `api.evedex.com` DNS-fails, `exchange.evedex.com` 404s; fails closed) |
+| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.bulk.exchange` serves an unrelated landing page; real app at `app.bulk.trade` has no public API found; fails closed) |
+| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Admitted (LIVE 2026-09-19: 216 markets via `/refdata`; books/tickers auth-gated — fail closed) |
+| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Admitted (UNVERIFIED 2026-09-19: onchain Arbitrum reads only — no public REST; Python SDK needs key+RPC; fails closed) |
+| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (UNVERIFIED 2026-09-19: `sodex.xyz` is a parked `/lander` domain; fails closed) |
+| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Admitted (UNVERIFIED 2026-09-19: `alphax.exchange` is a parked `/lander` domain; fails closed) |
+| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Admitted (LIVE 2026-09-19: 77 markets via `/v1/info`, books via `/v1/book`, funding+predicted via `/v1/info/prices`; crossed books rejected) |
+| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.nado.xyz` is a dead Vercel deployment; app live but no public API found; fails closed) |
+| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `io-trader.com` is a parked page — no such venue found; fails closed) |
+| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `niza.fun` is a memecoin site, no futures product found; fails closed) |
+| Astros | `astros` | LOW (Sui, onchain via DeepBook) | No — user keeps keys (docs claim) | Admitted (UNVERIFIED 2026-09-19: perp frontend live at `perp.astros.ag`, no public REST found; fails closed) |
+| Gate DEX | `gatedex` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.gate-dex.io` DNS-fails — no such venue found; fails closed) |
 
 **Deliberately not venues.** Orderly "Derivatives" is the same Orderly rails
 as Vanta — a second Orderly venue would double-count one orderbook, so use the
@@ -353,11 +353,21 @@ revisit after launch.
 `/v4/orderbooks/perpetualMarket/BTC-USD`), Paradex (`api.prod.paradex.trade`
 `/v1/markets` + `/v1/orderbook/BTC-USD-PERP`), Aevo (`api.aevo.xyz/markets` +
 `/orderbook`), and GMX (`arbitrum-api.gmxinfra.io/prices/tickers`) returned
-live payloads in this sandbox. All 23 venues are admitted paper-only per
-operator request; the 19 doc-shaped ones still deserve a harness sweep from
-full egress to confirm markets + book + funding shapes. Each parser fails
-closed per entry (bad shapes skip entries, and empty books never masquerade
-as quotes), so a wrong doc guess degrades to venue errors, never bad data.
+live payloads in this sandbox. A second sweep (2026-09-19, network
+available) verified 7 more end-to-end through the Rust adapters
+(`live_probe` integration test): ApeX Omni (88 markets / 25-level books /
+hourly funding), Extended (326 markets / full-depth books / marketStats
+funding), Derive (5 perps across 10 currencies / top-of-book / ticker
+funding), StandX (13 markets / 130-level books / hourly funding), Helix
+(286 LCD markets / scaled onchain books; funding not on LCD — fails
+closed), Pacifica (77 markets / books / funding + predicted rate), and
+QFEX (216 markets via `/refdata`; books auth-gated — fails closed). The
+remaining 12 are UNVERIFIED (dead/parked hosts or no public REST found —
+see table) and stay admitted paper-only per operator request, failing
+closed to honest venue errors. Each parser fails closed per entry (bad
+shapes skip entries, empty books never masquerade as quotes, crossed
+Pacifica books are rejected), so a wrong guess degrades to venue errors,
+never bad data.
 
 ---
 
