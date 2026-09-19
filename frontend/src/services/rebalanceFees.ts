@@ -127,6 +127,14 @@ export const VENUE_TRANSFER_PROFILES: VenueTransferProfile[] = [
     confidence: "estimated", sourceNote: "Typical perp-DEX range — re-check withdraw page.",
   },
   {
+    venue: "popdex", label: "PopDEX",
+    depositCoins: ["USDT (Arbitrum / Morph bridge)", "USDT (top-up address)"], withdrawCoins: ["USDT"],
+    withdrawFeeUsd: null, depositFeeUsd: 0,
+    gasRangeUsd: null, networks: ["Morph Tachyon (gasless)", "Arbitrum / Morph (bridge)"],
+    supportsDirectToAddress: true, timeEstimate: "~2–10 min (bridge quorum ~1–2 min)",
+    confidence: "documented", sourceNote: "PopDEX API guide Steps 2+8: bridge/top-up deposit, main-wallet withdrawal. Withdraw fee unverified — re-check.",
+  },
+  {
     venue: "decibel", label: "Decibel",
     depositCoins: ["USDC"], withdrawCoins: ["USDC"],
     withdrawFeeUsd: 1.0, depositFeeUsd: 0,

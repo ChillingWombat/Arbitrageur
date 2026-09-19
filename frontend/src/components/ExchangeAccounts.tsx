@@ -77,6 +77,15 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
   ],
+  // PopDEX (Morph Tachyon EVM, native API): main account address + delegated
+  // agent key. One-time approveAgent runs externally per the official guide
+  // (https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api,
+  // Step 4 — no UI exists); the bot only ever holds the agent key and the
+  // main private key must never be pasted here.
+  popdex: [
+    { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", hint: "Your PopDEX main account holding funds (public 0x...). Orders trade for this account." },
+    { key: "privateKey", label: "Agent Private Key", secret: true, placeholder: "0x...", hint: "ONLY the delegated agent key approved via approveAgent. Signs orders with timestamp nonces; cannot withdraw. Never paste the main private key." },
+  ],
   // Robinhood Chain is a Lighter deployment (apidocs.rh.lighter.xyz): same
   // credential scheme — account_index + api_key_index + API private key.
   robinhood: [
@@ -162,6 +171,7 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   kraken_futures: "Kraken Futures",
   lighter: "Lighter",
   polymarket: "Polymarket",
+  popdex: "PopDEX",
   robinhood: "Robinhood Lighter",
   vanta: "Vanta",
   decibel: "Decibel",
@@ -191,6 +201,7 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   lighter: "lighter_enabled",
   okx: "okx_enabled",
   polymarket: "polymarket_enabled",
+  popdex: "popdex_enabled",
   robinhood: "robinhood_enabled",
   vanta: "vanta_enabled",
 };

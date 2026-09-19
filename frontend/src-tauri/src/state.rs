@@ -10,6 +10,7 @@ use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
+use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrageur_exchanges::simulated::SimulatedExchange;
 use arbitrageur_exchanges::vanta::VantaAdapter;
@@ -387,6 +388,12 @@ fn default_kraken_spot_url() -> String {
 fn default_kraken_futures_url() -> String {
     "https://futures.kraken.com".into()
 }
+fn default_popdex_network() -> String {
+    // PopDEX network selector: mainnet (chain 2184, real prices) by default;
+    // operators should validate automation on testnet (chain 34952) first.
+    "mainnet".into()
+}
+
 fn default_arcus_url() -> String {
     "https://api.arcus.exchange".into()
 }
@@ -468,6 +475,10 @@ pub struct EngineSettingsDto {
     pub okx_enabled: bool,
     #[serde(default)]
     pub aster_enabled: bool,
+    #[serde(default)]
+    pub popdex_enabled: bool,
+    #[serde(default = "default_popdex_network")]
+    pub popdex_network: String,
     #[serde(default)]
     pub coinbase_enabled: bool,
 
@@ -603,6 +614,8 @@ impl Default for EngineSettingsDto {
             binance_enabled: false,
             okx_enabled: false,
             aster_enabled: false,
+            popdex_enabled: false,
+            popdex_network: default_popdex_network(),
             coinbase_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
@@ -933,6 +946,7 @@ pub struct AppEngineState {
     pub ex_robinhood: Arc<SimulatedExchange>,
     pub ex_arcus: Arc<SimulatedExchange>,
     pub ex_aster: Arc<SimulatedExchange>,
+    pub ex_popdex: Arc<SimulatedExchange>,
     pub ex_binance: Arc<SimulatedExchange>,
     pub ex_okx: Arc<SimulatedExchange>,
     pub ex_coinbase: Arc<SimulatedExchange>,
@@ -944,6 +958,7 @@ pub struct AppEngineState {
     pub live_robinhood: Arc<LighterAdapter>,
     pub live_arcus: Arc<ArcusAdapter>,
     pub live_aster: Arc<AsterAdapter>,
+    pub live_popdex: Arc<PopDexAdapter>,
     pub live_binance: Arc<BinanceAdapter>,
     pub live_okx: Arc<OkxAdapter>,
     pub live_coinbase: Arc<CoinbaseAdapter>,
@@ -1022,6 +1037,7 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
             Some("vanta")
         }
         "aster" | "ast" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
+        "popdex" | "pop" => Some("popdex"),
         "arcus" | "arc" | "arcus dex" | "arcus (fast clob)" | "arcus (perp dex)" => Some("arcus"),
         "binance" | "bnb" | "bin" | "binance futures" | "binance (perp)" => Some("binance"),
         "okx" | "okx swaps" | "okx (perp)" => Some("okx"),
@@ -1129,6 +1145,13 @@ impl AppEngineState {
             dec!(3.5),
             dec!(100000.0),
         ));
+        let ex_popdex = Arc::new(SimulatedExchange::new(
+            "popdex",
+            "PopDEX",
+            3,
+            dec!(10.0),
+            dec!(100000.0),
+        ));
         let ex_binance = Arc::new(SimulatedExchange::new(
             "binance",
             "Binance",
@@ -1181,6 +1204,7 @@ impl AppEngineState {
         ));
         let live_arcus = Arc::new(ArcusAdapter::new(None, None, None));
         let live_aster = Arc::new(AsterAdapter::new(None, None, None));
+        let live_popdex = Arc::new(PopDexAdapter::new(None));
         let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
         let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
         let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
@@ -1237,6 +1261,7 @@ impl AppEngineState {
             ex_robinhood,
             ex_arcus,
             ex_aster,
+            ex_popdex,
             ex_binance,
             ex_okx,
             ex_coinbase,
@@ -1248,6 +1273,7 @@ impl AppEngineState {
             live_robinhood,
             live_arcus,
             live_aster,
+            live_popdex,
             live_binance,
             live_okx,
             live_coinbase,
@@ -1297,6 +1323,7 @@ impl AppEngineState {
         let mut vault = self.vault.write();
         if !vault.is_unlocked() {
             self.live_aster.update_credentials(None, None);
+            let _ = self.live_popdex.update_credentials(None, None, None);
             self.live_hl.update_credentials(None, None);
             self.live_lighter.update_credentials(None, None);
             self.live_robinhood.update_credentials(None, None);
@@ -1450,6 +1477,28 @@ impl AppEngineState {
             }
 
             self.live_aster.update_credentials(aster_key, aster_secret);
+
+            // PopDEX: main account + delegated agent key from the vault, network
+            // from settings. The agent key alone enables trading; the main key
+            // is never held (one-time approveAgent runs externally per docs).
+            let popdex_network = {
+                let guards = self.settings.read();
+                let n = guards.popdex_network.trim().to_string();
+                if n.is_empty() { None } else { Some(n) }
+            };
+            let mut popdex_wallet = None;
+            let mut popdex_agent = None;
+            if let Some(cred) = get_active_cred(&["popdex", "pop"]) {
+                popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+                popdex_agent = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            }
+            if let Err(e) = self.live_popdex.update_credentials(
+                popdex_network,
+                popdex_wallet,
+                popdex_agent,
+            ) {
+                tracing::warn!("PopDEX credential sync refused: {e}");
+            }
             self.live_hl.update_credentials(hl_wallet, hl_pk);
             self.live_lighter.update_credentials(lighter_idx, lighter_key);
             self.live_robinhood.update_credentials(rh_idx, rh_key);
@@ -1469,6 +1518,7 @@ impl AppEngineState {
 
         } else {
             self.live_aster.update_credentials(None, None);
+            let _ = self.live_popdex.update_credentials(None, None, None);
             self.live_hl.update_credentials(None, None);
             self.live_lighter.update_credentials(None, None);
             self.live_robinhood.update_credentials(None, None);
@@ -1537,6 +1587,13 @@ impl AppEngineState {
                 "aster",
                 "Aster",
                 self.live_aster.clone(),
+            ));
+        }
+        if s.popdex_enabled || account_enabled("popdex") {
+            list.push((
+                "popdex",
+                "PopDEX",
+                self.live_popdex.clone(),
             ));
         }
         if s.binance_enabled || account_enabled("binance") {
@@ -1610,6 +1667,7 @@ impl AppEngineState {
             "robinhood" => Some(self.ex_robinhood.clone()),
             "vanta" => Some(self.ex_vanta.clone()),
             "aster" => Some(self.ex_aster.clone()),
+            "popdex" => Some(self.ex_popdex.clone()),
             "binance" => Some(self.ex_binance.clone()),
             "okx" => Some(self.ex_okx.clone()),
             "coinbase" => Some(self.ex_coinbase.clone()),
@@ -1637,6 +1695,7 @@ impl AppEngineState {
             ("robinhood", self.ex_robinhood.clone()),
             ("vanta", self.ex_vanta.clone()),
             ("aster", self.ex_aster.clone()),
+            ("popdex", self.ex_popdex.clone()),
         ]
     }
 }
@@ -1759,14 +1818,16 @@ mod tests {
             s.polymarket_enabled = true;
             s.kalshi_enabled = true;
             s.aster_enabled = true;
+            s.popdex_enabled = true;
         }
         let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 5);
+        assert_eq!(venues_paper.len(), 6);
         assert_eq!(venues_paper[0].0, "hyperliquid");
         assert_eq!(venues_paper[1].0, "lighter");
         assert_eq!(venues_paper[2].0, "robinhood");
         assert_eq!(venues_paper[3].0, "vanta");
         assert_eq!(venues_paper[4].0, "aster");
+        assert_eq!(venues_paper[5].0, "popdex");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
@@ -1775,7 +1836,7 @@ mod tests {
         assert!(state.get_adapter("aster").is_some());
         assert!(state.get_adapter("arcus").is_none());
         // Removed venues without native trading API stay unresolvable.
-        assert!(state.get_adapter("popdex").is_none());
+        assert!(state.get_adapter("popdex").is_some());
         assert!(state.get_adapter("ondoperps").is_none());
         assert!(state.get_adapter("ondo").is_none());
         assert!(state.get_adapter("grvt").is_none());

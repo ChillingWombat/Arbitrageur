@@ -548,6 +548,8 @@ export interface EngineSettingsDto {
   binance_enabled?: boolean;
   okx_enabled?: boolean;
   aster_enabled?: boolean;
+  popdex_enabled?: boolean;
+  popdex_network?: string;
   coinbase_enabled?: boolean;
 
   // Kraken Spot & Futures

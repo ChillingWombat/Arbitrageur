@@ -1,15 +1,15 @@
 # Exchange Integrations Guide
 
 > Living venue reference — native-API venues only (2026-09-19 cleanup removed all
-> venues without native trading-API support: PopDEX closed beta, Variational RFQ-only,
-> edgeX, GRVT, Ondo Perps and the 23 long-tail paper venues). §6 transfer-rails/rebalance
-> research. Re-check fee figures on venue pages before moving size.
+> venues without native trading-API support: Variational RFQ-only, edgeX, GRVT,
+> Ondo Perps and the 23 long-tail paper venues; PopDEX was re-admitted 2026-09-20
+> on its newly published native API — contracts + REST, §11). §6 transfer-rails /
+> rebalance research. Re-check fee figures on venue pages before moving size.
 
-> NOTE (2026-09-19): sections below mentioning PopDEX / Variational / edgeX / GRVT /
-> Ondo Perps / dYdX / Paradex / long-tail venues are historical research notes kept for
-> context. Those venues are no longer admitted, listed, or credentialed anywhere in the
-> system (backend adapters, EngineSettings, ExchangeAccounts, logos, fee tables all removed).
-> Restoring one means re-adding a native-API adapter — see git snapshot `102e40f` (pre-removal).
+> NOTE: sections below mentioning Variational / edgeX / GRVT / Ondo Perps /
+> dYdX / Paradex / long-tail venues are historical research notes kept for
+> context. Those venues are not admitted, listed, or credentialed anywhere in the
+> system. Restoring one means adding a native-API adapter.
 
 
 This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrageur** platform.
@@ -386,6 +386,58 @@ never bad data.
 
 ---
 
+## 11. PopDEX (Morph Tachyon EVM)
+
+Native-API adapter (`PopDexAdapter`, venue `popdex`, admitted to `get_venues`).
+Trading is entirely on-chain via precompile contracts; market/account data is
+public REST. Guide: <https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api>
+(docs deploy `604061a`, researched 2026-09-20).
+
+- **Chain:** Morph Tachyon, full EVM, gasless, instant HotStuff-BFT finality.
+  Mainnet chain id `2184`, RPC `https://app.popdex.xyz/api/v1/web3/rpc`;
+  testnet chain id `34952`, RPC `https://testnet-app.popdex.xyz/api/v1/web3/rpc`
+  (test USDT faucet; validate automation there first per PopDEX's own advice).
+- **Contracts (fixed precompiles, never change):** `Order` `0x…1000`
+  (place/cancel/match), `Account` `0x…1008` (sub-accounts, agent auth),
+  `UserConfig` `0x…1009` (leverage, position mode).
+- ** REST (`https://api.popdex.xyz`, testnet `https://testnet-api.popdex.xyz`,
+  no auth, `{code:"200",…}` envelope):** `GET /api/v1/public/market/tickers`
+  (66 futures symbols live, carries `symbolId`, top-of-book, mark/index,
+  funding, OI, 24h turnover), `.../orderbook` (levels 1/5/25/50/100/200),
+  `GET /api/v1/market/funding-rate` (rate, hour interval, next update),
+  `.../fee-rate` (VIP0 taker/maker 0.1% = 10 bps), `.../config/symbol`
+  (tick/lot sizes, min qty/notional), account `.../{wallet}/overview`
+  (equity, margins, balances), `.../positions`, `.../orders`, `.../agents`.
+  Rate limit 1200 weight/min/IP sliding window (tickers/book/funding weight 2,
+  account reads weight 5); 429 feeds the coordinator backoff.
+- **Agent model:** the Agent Key (`Agent Account` on-chain) is PopDEX's API
+  key. Generated fresh locally, approved once by the main wallet via
+  `approveAgent(agent, delegator, 0, 0, initialNonce, false)` (max 10 agents
+  per main account; never re-approve a revoked address — replay risk).
+  Orders are agent-signed with millisecond **timestamp nonces** (window
+  now−1h…now+1d, above the smallest of the last 100, never reused); the
+  adapter enforces monotonicity. Withdrawals are main-wallet-only; a deposit
+  must land before approval. Max 500 open orders per account.
+- **Order encoding:** `placeOrder(account, clientOrderId, symbolId, orderParams,
+  price, qty, slippage, 0, 0)` with unified `orderParams` bytes
+  (Futures=2, Limit/Market, Buy/Sell, GTC/IOC/FOK/PostOnly, BaseToken qty,
+  reduce-only, one-way default), 18-decimal price/qty, `cancelOrder` by
+  numeric id or client oid, `cancelAllOrders` per symbol, `updateLeverage`
+  via `UserConfig` (USDT margin token). Legacy txs (chain-id bound, node gas
+  price, `estimateGas`-gated so reverts fail closed pre-send); receipts waited
+  ≤30s and `OrderCreate` events decoded for the `orderId` — never invented.
+- **Credentials (vault):** main account address (public) + agent private key
+  only. The main key is never held — one-time approval runs externally
+  (exact `cast`/ethers commands in the adapter error text + guide Step 4).
+  Binding an agent key that derives the main address is refused.
+- **Verification:** market/account REST verified live 2026-09-20 (real BTC
+  book, 1h funding, empty-array reads for unknown accounts). Contract
+  submission paths are implemented per the published interface with
+  unit-tested packing/nonce/receipt logic but **not yet dry-run on testnet**
+  — fund testnet first, then mainnet size.
+
+---
+
 ## 6. Transfer Rails & Rebalance Friction (researched 2026-09-19)
 
 | Venue | Deposit rails | Withdraw rails | Withdraw fee | Deposit fee | Direct venue→venue? | Confidence |
@@ -399,7 +451,7 @@ never bad data.
 | Coinbase | USDC/USD | USDC/USD | network only | Free | Yes | estimated |
 | Kraken | USDC/USD | USDC/USD | ~$2.50 | Free | Yes | estimated |
 | Robinhood | USD (crypto limited) | USD | unknown | Free | No | unknown |
-| PopDEX (beta) | TBD | TBD | unknown | unknown | No | unknown |
+| PopDEX | USDT (ARB/Morph bridge, top-up addr) | USDT (main-wallet signed) | unknown | Free | Yes | documented |
 
 Notes: CEX fees vary by withdrawal network — always choose Arbitrum over ERC-20
 for cents-vs-dollars gas. Swap friction default 15 bps (taker + spread),

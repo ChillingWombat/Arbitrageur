@@ -218,6 +218,7 @@ export function getVenueFeeBps(venueIdOrName: string): number {
   if (v.includes("vanta") || v.includes("vnt")) return 3.0;
   if (v.includes("robinhood") || v.includes("rh")) return 2.5;
   if (v.includes("arcus") || v.includes("arc")) return 1.5;
+  if (v.includes("popdex") || v.includes("pop")) return 10.0;
   return 2.0;
 }
 
@@ -230,6 +231,7 @@ export function getVenueShortLabel(name: string): string {
   if (name.includes("Lighter") || name.toLowerCase() === "lighter" || name.toLowerCase() === "lgt") return "Lighter";
   if (name.includes("Vanta") || name.toLowerCase() === "vanta" || name.toLowerCase() === "vnt") return "Vanta";
   if (name.includes("Arcus") || name.toLowerCase() === "arcus" || name.toLowerCase() === "arc") return "Arcus";
+  if (name.includes("PopDEX") || name.toLowerCase() === "popdex" || name.toLowerCase() === "pop") return "PopDEX";
   return name.split(" ")[0];
 }
 

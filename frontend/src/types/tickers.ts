@@ -93,6 +93,7 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   robinhood: "RH",
   arcus: "ARC",
   aster: "AST",
+  popdex: "POP",
   kraken: "KRK",
   binance: "BNB",
   okx: "OKX",
@@ -107,6 +108,7 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   RH: "robinhood",
   ARC: "arcus",
   AST: "aster",
+  POP: "popdex",
   KRK: "kraken",
   BNB: "binance",
   OKX: "okx",
@@ -134,6 +136,7 @@ export interface VenueSettingsFilter {
   arcus_enabled?: boolean;
   arcus_api_key?: string;
   aster_enabled?: boolean;
+  popdex_enabled?: boolean;
   kraken_enabled?: boolean;
   kraken_spot_enabled?: boolean;
   kraken_futures_enabled?: boolean;
@@ -155,8 +158,8 @@ export interface VenueSettingsFilter {
 /**
  * Determines the set of natively connected venue codes from sanitized engine settings.
  * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), Vanta/Orderly
- * ("VNT") and Aster ("AST") expose native market-data adapters in this phase,
- * and only outside live trading mode.
+ * ("VNT"), Aster ("AST") and PopDEX ("POP") expose native market-data
+ * adapters in this phase, and only outside live trading mode.
  * Public read-only feeds require the venue's enable toggle, not secrets; connectivity
  * is never inferred from credential-looking strings.
  *
@@ -186,6 +189,9 @@ export function getEnabledConnectedVenueCodes(
   }
   if (settings.aster_enabled === true) {
     active.add("AST");
+  }
+  if (settings.popdex_enabled === true) {
+    active.add("POP");
   }
   if (settings.binance_enabled === true) {
     active.add("BNB");

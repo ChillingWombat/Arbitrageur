@@ -12,9 +12,14 @@ import {
 
 test("fee table covers the venues the app trades on", () => {
   const venues = listRebalanceVenues();
-  for (const v of ["hyperliquid", "lighter", "vanta", "binance"]) {
+  for (const v of ["hyperliquid", "lighter", "vanta", "binance", "popdex"]) {
     assert.ok(venues.includes(v), `missing ${v}`);
   }
+});
+
+test("popdex withdraw fee is unknown (fail-closed null)", () => {
+  assert.equal(getVenueProfile("popdex")?.withdrawFeeUsd, null);
+  assert.equal(getVenueProfile("popdex")?.depositFeeUsd, 0);
 });
 
 test("hyperliquid encodes the verified $1 withdrawal fee", () => {

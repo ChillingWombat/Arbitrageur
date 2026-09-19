@@ -390,6 +390,7 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
         "robinhood" => dec!(2.5),
         "arcus" => dec!(1.5),
         "aster" => dec!(3.5),
+        "popdex" => dec!(10.0),
         "polymarket" => dec!(0.0),
         "kalshi" => dec!(10.0),
         _ => dec!(2.0),
@@ -669,6 +670,7 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("kalshi", s.kalshi_enabled || account_enabled("kalshi"));
     push("decibel", s.decibel_enabled || account_enabled("decibel"));
     push("aster", s.aster_enabled || account_enabled("aster"));
+    push("popdex", s.popdex_enabled || account_enabled("popdex"));
     push("binance", s.binance_enabled || account_enabled("binance"));
     push("coinbase", s.coinbase_enabled || account_enabled("coinbase"));
     push("okx", s.okx_enabled || account_enabled("okx"));
@@ -719,6 +721,7 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
         "okx" => p("https://www.okx.com/api/v5/public/time", false),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
         "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
+        "popdex" => p("https://api.popdex.xyz/api/v1/public/market/tickers?category=Futures&limit=1", false),
         // IG has no public endpoint; the session route returns an
         // app-level JSON 400 that proves the API gateway responded.
         "ig" => p("https://api.ig.com/gateway/deal/session", true),
@@ -999,6 +1002,14 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("aster", s.aster_enabled || account_enabled("aster")).into(),
             latency_ms: probe_ms("aster"),
             fee_bps: 3.5,
+        },
+        VenueStatusDto {
+            id: "popdex".into(),
+            name: "PopDEX".into(),
+            market_type: "EVM Perp DEX".into(),
+            status: venue_status("popdex", s.popdex_enabled || account_enabled("popdex")).into(),
+            latency_ms: probe_ms("popdex"),
+            fee_bps: 10.0,
         },
         VenueStatusDto {
             id: "binance".into(),
@@ -4467,13 +4478,40 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let cb = &state.circuit_breaker;
     let monitor = MarginMonitor::new(MarginMonitorConfig::default());
 
-    // Paper exchange accounts are the source of truth for risk telemetry;
-    // live execution is unavailable, so no venue adapters are queried here.
+    // Risk telemetry: live mode reads live adapters for admitted venues so
+    // the header reconciles with the Capital Allocation gadget. Paper mode
+    // sums all paper simulators (legacy baseline — disabled venues still
+    // hold paper equity; the venue gadget shows admitted only and the UI
+    // footers the drift).
+    let is_live = *state.is_live_mode.read();
     let mut accounts = Vec::new();
-    for (vid, paper) in state.paper_exchanges() {
-        let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-        acc.venue = vid.into();
-        accounts.push(acc);
+    if is_live {
+        for (vid, _name, adapter) in state.get_venues() {
+            match adapter.fetch_account().await {
+                Ok(mut acc) => {
+                    acc.venue = vid.into();
+                    accounts.push(acc);
+                }
+                Err(e) => {
+                    tracing::warn!("risk overview: live account read failed for {vid}: {e}");
+                }
+            }
+        }
+        // Fall back to paper baseline if no live account read succeeded
+        // (e.g. missing credentials) so the overview never goes blank.
+        if accounts.is_empty() {
+            for (vid, paper) in state.paper_exchanges() {
+                let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+                acc.venue = vid.into();
+                accounts.push(acc);
+            }
+        }
+    } else {
+        for (vid, paper) in state.paper_exchanges() {
+            let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+            acc.venue = vid.into();
+            accounts.push(acc);
+        }
     }
 
     let total_equity_dec: Decimal = accounts.iter().map(|a| a.equity).sum();
@@ -4614,7 +4652,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                 0.0
             },
             liquidation_distance_pct: if all_positions.is_empty() {
-                0.0
+                100.0
             } else {
                 min_liq_dist_pct.unwrap_or(0.0)
             },
@@ -5802,6 +5840,10 @@ pub fn save_engine_settings_impl(
         (
             "aster".into(),
             settings.aster_enabled || account_enabled("aster"),
+        ),
+        (
+            "popdex".into(),
+            settings.popdex_enabled || account_enabled("popdex"),
         ),
         (
             "binance".into(),
@@ -8002,6 +8044,7 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
     "vanta",
     "robinhood",
     "arcus",
+    "popdex",
     "kraken_spot",
     "kraken_futures",
     "polymarket",
@@ -9929,7 +9972,7 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        assert_eq!(status.active_venues.len(), 15);
+        assert_eq!(status.active_venues.len(), 16);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);
@@ -10486,13 +10529,13 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Five seeded paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 500000.0);
+        // Six seeded paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 600000.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
         assert_eq!(risk.margin_health.status, "FLAT");
-        assert_eq!(risk.margin_health.liquidation_distance_pct, 0.0);
+        assert_eq!(risk.margin_health.liquidation_distance_pct, 100.0);
         assert_eq!(risk.margin_health.maintenance_margin_req_usd, 0.0);
 
         // Trigger killswitch
@@ -12800,6 +12843,7 @@ mod tests {
             s.aster_enabled = true;
             s.hyperliquid_enabled = true;
             s.vanta_enabled = true;
+            s.popdex_enabled = true;
         }
 
         // 1. Vault locked -> live mode rejected
@@ -12843,6 +12887,11 @@ mod tests {
         assert!(aster_cap.supports_live);
         assert!(aster_cap.has_credentials);
         assert!(aster_cap.live_ready);
+
+        let popdex_cap = caps.iter().find(|c| c.venue == "popdex").expect("popdex cap");
+        assert!(popdex_cap.supports_live);
+        assert!(!popdex_cap.has_credentials);
+        assert!(!popdex_cap.live_ready);
 
         let hl_cap = caps.iter().find(|c| c.venue == "hyperliquid").expect("hl cap");
         assert!(hl_cap.supports_live);
@@ -14319,8 +14368,8 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 500000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 500000.0);
+        assert_eq!(before.total_portfolio_value_usd, 600000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 600000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -15105,8 +15154,8 @@ mod tests {
         assert_eq!(state.circuit_breaker.day_start_equity(), dec!(1000000.0));
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        assert_eq!(risk.current_drawdown_usd, 500000.0);
-        assert_eq!(risk.drawdown_pct, 50.0);
+        assert_eq!(risk.current_drawdown_usd, 400000.0);
+        assert_eq!(risk.drawdown_pct, 40.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();

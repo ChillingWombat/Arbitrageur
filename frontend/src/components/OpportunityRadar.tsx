@@ -91,6 +91,7 @@ const VENUE_LABEL: Record<string, string> = {
   vanta: "VNT",
   aster: "AST",
   arcus: "ARC",
+  popdex: "POP",
   kraken_spot: "KRK",
   kraken_futures: "KFUT",
   polymarket: "POLY",
@@ -105,6 +106,7 @@ const VENUE_LABEL: Record<string, string> = {
 
 const LIVE_CAPABLE_VENUES = new Set([
   "aster",
+  "popdex",
   "hyperliquid",
   "lighter",
   "robinhood",
@@ -968,7 +970,8 @@ const OpportunityRadarInner: React.FC = () => {
   const [showConfig, setShowConfig] = useState(false);
   const [search, setSearch] = useState("");
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
-  const [minExpBps, setMinExpBps] = useState("0"); // default mirrors the old positive-only table floor
+  const [minExpBps, setMinExpBps] = useState(() => String(defaultRadarBotConfig().minExpectedProfitBps)); // default mirrors the bot entry hurdle (bot minExpectedProfitBps)
+  const minExpTouched = useRef(false);
   const [minPWin, setMinPWin] = useState("95"); // default mirrors the monitor ready floor (minWinProbability 0.95)
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
@@ -1039,6 +1042,14 @@ const OpportunityRadarInner: React.FC = () => {
     api.getMonitorConfig().then(setCfg).catch(() => {});
     api.getRadarBotConfig().then(setBotCfg).catch(() => {});
   }, []);
+
+  // Keep the table Min Exp display filter aligned with the bot's live
+  // minExpectedProfitBps until the user overrides it locally.
+  useEffect(() => {
+    if (!minExpTouched.current && botCfg && Number.isFinite(botCfg.minExpectedProfitBps)) {
+      setMinExpBps(String(botCfg.minExpectedProfitBps));
+    }
+  }, [botCfg]);
 
   const handleBotMode = useCallback(
     async (mode: RadarBotConfigDto["mode"]) => {
@@ -1339,8 +1350,11 @@ const OpportunityRadarInner: React.FC = () => {
             <span className="text-slate-400 font-medium">Min Exp</span>
             <input
               value={minExpBps}
-              onChange={(e) => setMinExpBps(e.target.value)}
-              placeholder="0"
+              onChange={(e) => {
+                minExpTouched.current = true;
+                setMinExpBps(e.target.value);
+              }}
+              placeholder={String(defaultRadarBotConfig().minExpectedProfitBps)}
               className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
             />
             <span className="text-slate-400 text-[11px] font-medium">BPS</span>

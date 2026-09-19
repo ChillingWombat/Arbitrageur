@@ -19,6 +19,7 @@ rust_decimal_macros = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 anyhow = { workspace = true }
+alloy = { version = "2", features = ["full"] }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }

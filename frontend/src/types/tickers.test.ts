@@ -33,12 +33,13 @@ test("getEnabledConnectedVenueCodes returns enabled supported venues in paper mo
     robinhood_enabled: true,
     arcus_enabled: true, // scaffold only, unsupported
     aster_enabled: true,
+    popdex_enabled: true,
     kraken_enabled: true, // admitted to paper read-only
     polymarket_enabled: true, // unsupported
     kalshi_enabled: true, // unsupported
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "HL", "KRK", "LGT", "RH", "VNT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "HL", "KRK", "LGT", "POP", "RH", "VNT"]);
 });
 
 test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, CB, DCB)", () => {
