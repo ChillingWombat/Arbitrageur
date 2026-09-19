@@ -301,7 +301,7 @@ export function getEnabledConnectedVenueCodes(
   if (settings.decibel_enabled === true) {
     active.add("DCB");
   }
-  // Long-tail perp venues: admitted set only (paper read-only, flag-gated).
+  // Long-tail perp venues: all admitted (paper read-only, flag-gated).
   if (settings.dydx_enabled === true) active.add("DYDX");
   if (settings.paradex_enabled === true) active.add("PRDX");
   if (settings.gmx_enabled === true) active.add("GMX");
@@ -311,6 +311,20 @@ export function getEnabledConnectedVenueCodes(
   if (settings.standx_enabled === true) active.add("STX");
   if (settings.helix_enabled === true) active.add("HLX");
   if (settings.aevo_enabled === true) active.add("AEVO");
+  if (settings.vest_enabled === true) active.add("VEST");
+  if (settings.antarctic_enabled === true) active.add("ANTC");
+  if (settings.evedex_enabled === true) active.add("EVE");
+  if (settings.bulk_enabled === true) active.add("BULK");
+  if (settings.qfex_enabled === true) active.add("QFEX");
+  if (settings.ostium_enabled === true) active.add("OST");
+  if (settings.sodex_enabled === true) active.add("SODX");
+  if (settings.alphax_enabled === true) active.add("ALX");
+  if (settings.pacifica_enabled === true) active.add("PCF");
+  if (settings.nado_enabled === true) active.add("NADO");
+  if (settings.iotrader_enabled === true) active.add("IOT");
+  if (settings.niza_enabled === true) active.add("NIZA");
+  if (settings.astros_enabled === true) active.add("ASTR");
+  if (settings.gatedex_enabled === true) active.add("GDEX");
 
   return active;
 }

@@ -329,20 +329,20 @@ named issue resolves.
 | Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Admitted (doc-shaped; harness sweep pending) |
 | StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Admitted (doc-shaped; harness sweep pending) |
 | Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Admitted (doc-shaped; harness sweep pending) |
-| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Modeled, not admitted (sweep pending) |
-| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
-| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Modeled, not admitted (sweep pending) |
-| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
-| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Modeled, not admitted (sweep pending) |
-| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Modeled, not admitted |
-| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Modeled, not admitted (sweep pending) |
-| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Modeled, not admitted |
-| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Modeled, not admitted |
-| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
-| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
-| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Modeled, not admitted (sweep pending) |
-| Astros | `astros` | LOW (onchain settlement) | No — user keeps keys (docs claim) | Modeled, not admitted (sweep pending) |
-| Gate DEX | `gatedex` | MEDIUM (hybrid, CEX-affiliated) | CEX-affiliate risk — size accordingly | Modeled, not admitted (sweep pending) |
+| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Admitted (doc-shaped; sweep pending) |
+| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
+| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (doc-shaped; sweep pending) |
+| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
+| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Admitted (doc-shaped; sweep pending) |
+| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Admitted (doc-shaped; sweep pending) |
+| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (doc-shaped; sweep pending) |
+| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Admitted (doc-shaped; sweep pending) |
+| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Admitted (doc-shaped; sweep pending) |
+| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
+| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
+| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (doc-shaped; sweep pending) |
+| Astros | `astros` | LOW (onchain settlement) | No — user keeps keys (docs claim) | Admitted (doc-shaped; sweep pending) |
+| Gate DEX | `gatedex` | MEDIUM (hybrid, CEX-affiliated) | CEX-affiliate risk — size accordingly | Admitted (doc-shaped; sweep pending) |
 
 **Deliberately not venues.** Orderly "Derivatives" is the same Orderly rails
 as Vanta — a second Orderly venue would double-count one orderbook, so use the
@@ -353,11 +353,11 @@ revisit after launch.
 `/v4/orderbooks/perpetualMarket/BTC-USD`), Paradex (`api.prod.paradex.trade`
 `/v1/markets` + `/v1/orderbook/BTC-USD-PERP`), Aevo (`api.aevo.xyz/markets` +
 `/orderbook`), and GMX (`arbitrum-api.gmxinfra.io/prices/tickers`) returned
-live payloads in this sandbox. The rest are shaped from public docs; each
-parser fails closed per entry (bad shapes skip entries, and empty books never
-masquerade as quotes), so a wrong doc guess degrades to venue errors, never
-bad data. Admit the remainder one by one after a harness sweep from full
-egress confirms markets + book + funding shapes.
+live payloads in this sandbox. All 23 venues are admitted paper-only per
+operator request; the 19 doc-shaped ones still deserve a harness sweep from
+full egress to confirm markets + book + funding shapes. Each parser fails
+closed per entry (bad shapes skip entries, and empty books never masquerade
+as quotes), so a wrong doc guess degrades to venue errors, never bad data.
 
 ---
 

@@ -1937,11 +1937,11 @@ impl AppEngineState {
             ));
         }
         // Long-tail perp venues (extended_venues.rs, paper read-only, no
-        // credentials). Only the harness-verified / doc-confident set is
-        // admitted; the rest stay modeled-but-not-admitted (PopDEX
-        // precedent) until a sweep confirms their payload shapes. GMX V2 is
-        // prices-only (GLV AMM has no orderbook) and is excluded from
-        // spread-monitor venue pairs downstream.
+        // credentials). All 23 are admitted per operator request; doc-shaped
+        // payloads fail closed per entry so a wrong doc guess degrades to
+        // venue errors, never bad data. GMX V2 is prices-only (GLV AMM has
+        // no orderbook) and is excluded from spread-monitor venue pairs
+        // downstream.
         if s.dydx_enabled || account_enabled("dydx") {
             list.push(("dydx", "dYdX Chain", self.live_dydx.clone()));
         }
@@ -1968,6 +1968,52 @@ impl AppEngineState {
         }
         if s.aevo_enabled || account_enabled("aevo") {
             list.push(("aevo", "Aevo", self.live_aevo.clone()));
+        }
+        // Remaining long-tail venues: admitted paper-only per operator
+        // request (doc-shaped payloads; parsers fail closed per entry).
+        // High-caution venues (Ostium, Pacifica, AlphaX, QFEX) stay
+        // paper-only regardless — see docs/EXCHANGES.md section 10.
+        if s.vest_enabled || account_enabled("vest") {
+            list.push(("vest", "Vest", self.live_vest.clone()));
+        }
+        if s.antarctic_enabled || account_enabled("antarctic") {
+            list.push(("antarctic", "Antarctic", self.live_antarctic.clone()));
+        }
+        if s.evedex_enabled || account_enabled("evedex") {
+            list.push(("evedex", "EVEDEX", self.live_evedex.clone()));
+        }
+        if s.bulk_enabled || account_enabled("bulk") {
+            list.push(("bulk", "BULK", self.live_bulk.clone()));
+        }
+        if s.qfex_enabled || account_enabled("qfex") {
+            list.push(("qfex", "QFEX", self.live_qfex.clone()));
+        }
+        if s.ostium_enabled || account_enabled("ostium") {
+            list.push(("ostium", "Ostium", self.live_ostium.clone()));
+        }
+        if s.sodex_enabled || account_enabled("sodex") {
+            list.push(("sodex", "SoDEX", self.live_sodex.clone()));
+        }
+        if s.alphax_enabled || account_enabled("alphax") {
+            list.push(("alphax", "AlphaX", self.live_alphax.clone()));
+        }
+        if s.pacifica_enabled || account_enabled("pacifica") {
+            list.push(("pacifica", "Pacifica", self.live_pacifica.clone()));
+        }
+        if s.nado_enabled || account_enabled("nado") {
+            list.push(("nado", "Nado", self.live_nado.clone()));
+        }
+        if s.iotrader_enabled || account_enabled("iotrader") {
+            list.push(("iotrader", "IO Trader", self.live_iotrader.clone()));
+        }
+        if s.niza_enabled || account_enabled("niza") {
+            list.push(("niza", "Niza", self.live_niza.clone()));
+        }
+        if s.astros_enabled || account_enabled("astros") {
+            list.push(("astros", "Astros", self.live_astros.clone()));
+        }
+        if s.gatedex_enabled || account_enabled("gatedex") {
+            list.push(("gatedex", "Gate DEX", self.live_gatedex.clone()));
         }
         list
     }

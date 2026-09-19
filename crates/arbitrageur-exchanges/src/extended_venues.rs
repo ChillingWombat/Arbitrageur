@@ -12,11 +12,11 @@
 //! # Verification status (2026-09-19, this sandbox)
 //! - LIVE-VERIFIED (curl returned real payloads): dYdX v4, Paradex, Aevo,
 //!   GMX V2 (prices/tickers only — the GLV AMM has no orderbook by design).
-//! - DOC-SHAPED (public docs + API references; needs a harness sweep from a
-//!   network with full egress before admission): ApeX Omni, Extended,
-//!   Derive, StandX, Helix/Injective, Vest, Antarctic, EVEDEX, BULK, QFEX,
-//!   Ostium, SoDEX, AlphaX, Pacifica, Nado, IO Trader, Niza.fun, Astros,
-//!   Gate DEX.
+//! - DOC-SHAPED (public docs + API references; admitted paper-only per
+//!   operator request — a harness sweep from full egress should still confirm
+//!   each shape): ApeX Omni, Extended, Derive, StandX, Helix/Injective, Vest,
+//!   Antarctic, EVEDEX, BULK, QFEX, Ostium, SoDEX, AlphaX, Pacifica, Nado,
+//!   IO Trader, Niza.fun, Astros, Gate DEX.
 //! - NOT ADMITTED as venues: Orderly "Derivatives" (same rails as Vanta —
 //!   enabling a second Orderly venue would double-count one orderbook; use
 //!   the Vanta venue instead) and RISEx (no live mainnet found — skipped).
@@ -205,9 +205,9 @@ pub enum BookKind {
 }
 
 /// Static per-venue wiring: identity, public hosts, URL builders, and fee.
-/// `admit` mirrors the verification section above — `false` means the struct
-/// exists (so credentials/flags/frontend stay uniform) but `get_venues`
-/// does not admit it until a harness sweep confirms the payload shape.
+/// `admit` mirrors the verification section above. All 23 specs currently
+/// admit (paper read-only); flipping one back to `false` returns it to
+/// modeled-but-not-admitted (PopDEX precedent) without touching call sites.
 pub struct VenueApiSpec {
     pub id: &'static str,
     pub name: &'static str,
@@ -297,90 +297,95 @@ fn spec_for(id: &str) -> Option<VenueApiSpec> {
             taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
             admit: true, verified: false,
         },
-        // ---- DOC-SHAPED, modeled but NOT admitted (sweep required) ----
+        // ---- DOC-SHAPED, admitted paper-only per operator request ----
+        // Shapes come from public docs; a harness sweep from full egress
+        // should still confirm each payload shape. Parsers fail closed per
+        // entry, so a wrong doc guess degrades to venue errors, never bad
+        // data. High-caution venues (Ostium, Pacifica, AlphaX, QFEX) stay
+        // paper-only regardless — see docs/EXCHANGES.md section 10.
         "vest" => VenueApiSpec {
             id: "vest", name: "Vest",
             base_url: "https://api.vest.exchange", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "antarctic" => VenueApiSpec {
             id: "antarctic", name: "Antarctic",
             base_url: "https://api.antarctic.exchange", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "evedex" => VenueApiSpec {
             id: "evedex", name: "EVEDEX",
             base_url: "https://api.evedex.com", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "bulk" => VenueApiSpec {
             id: "bulk", name: "BULK",
             base_url: "https://api.bulk.exchange", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "qfex" => VenueApiSpec {
             id: "qfex", name: "QFEX",
             base_url: "https://api.qfex.com", markets_path: "/v1/markets",
             taker_fee_bps: fee("4.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "ostium" => VenueApiSpec {
             id: "ostium", name: "Ostium",
             base_url: "https://api.ostium.io", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "sodex" => VenueApiSpec {
             id: "sodex", name: "SoDEX",
             base_url: "https://api.sodex.xyz", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "alphax" => VenueApiSpec {
             id: "alphax", name: "AlphaX",
             base_url: "https://api.alphax.exchange", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "pacifica" => VenueApiSpec {
             id: "pacifica", name: "Pacifica",
             base_url: "https://api.pacifica.fi", markets_path: "/api/v1/markets",
             taker_fee_bps: fee("2.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "nado" => VenueApiSpec {
             id: "nado", name: "Nado",
             base_url: "https://api.nado.xyz", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "iotrader" => VenueApiSpec {
             id: "iotrader", name: "IO Trader",
             base_url: "https://api.io-trader.com", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "niza" => VenueApiSpec {
             id: "niza", name: "Niza",
             base_url: "https://api.niza.fun", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "astros" => VenueApiSpec {
             id: "astros", name: "Astros",
             base_url: "https://api.astros.ag", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         "gatedex" => VenueApiSpec {
             id: "gatedex", name: "Gate DEX",
             base_url: "https://api.gate-dex.io", markets_path: "/v1/markets",
             taker_fee_bps: fee("3.0"), book_kind: BookKind::PairLevels,
-            admit: false, verified: false,
+            admit: true, verified: false,
         },
         _ => return None,
     };
@@ -395,12 +400,16 @@ pub const EXTENDED_VENUE_IDS: [&str; 23] = [
     "standx", "vest",
 ];
 
-/// Venue ids admitted to `get_venues` (paper read-only). Everything else in
-/// this module is modeled-but-not-admitted until a harness sweep confirms
-/// its payload shape (PopDEX precedent).
-pub const ADMITTED_EXTENDED_VENUE_IDS: [&str; 9] = [
-    "aevo", "apex", "derive", "dydx", "extended", "gmx", "helix", "paradex",
-    "standx",
+/// Venue ids admitted to `get_venues` (paper read-only). All 23 venues in
+/// this module are admitted: the 4 curl-verified plus 19 doc-shaped shapes.
+/// Doc-shaped venues still deserve a harness sweep from full egress, but the
+/// per-entry fail-closed parsers guarantee a wrong doc guess degrades to
+/// venue errors, never bad data.
+pub const ADMITTED_EXTENDED_VENUE_IDS: [&str; 23] = [
+    "aevo", "alphax", "antarctic", "apex", "astros", "bulk", "derive",
+    "dydx", "extended", "evedex", "gatedex", "gmx", "helix", "iotrader",
+    "nado", "niza", "ostium", "pacifica", "paradex", "qfex", "sodex",
+    "standx", "vest",
 ];
 
 // ---------------------------------------------------------------------------
@@ -930,16 +939,21 @@ mod tests {
 
     #[test]
     fn admitted_set_matches_spec_flags() {
+        // Every modeled venue is admitted (paper read-only); the admitted
+        // list and the spec table must agree exactly.
+        assert_eq!(ADMITTED_EXTENDED_VENUE_IDS.len(), EXTENDED_VENUE_IDS.len());
         for id in ADMITTED_EXTENDED_VENUE_IDS {
             let a = ExtendedVenueAdapter::for_venue(id, None).expect("admitted venue");
             assert!(a.is_admitted(), "{id} should be admitted");
+            let spec = spec_for(id).expect("spec");
+            assert!(spec.admit, "{id} spec flag must be admit");
         }
-        // High-caution / unverified venues stay modeled-but-not-admitted.
-        for id in ["ostium", "pacifica", "alphax", "qfex", "risex"] {
-            if let Some(a) = ExtendedVenueAdapter::for_venue(id, None) {
-                assert!(!a.is_admitted(), "{id} must not be admitted yet");
-            }
+        for id in EXTENDED_VENUE_IDS {
+            assert!(ADMITTED_EXTENDED_VENUE_IDS.contains(&id), "{id} missing from admitted list");
         }
+        // Non-venues still fail closed at construction time.
+        assert!(ExtendedVenueAdapter::for_venue("risex", None).is_none());
+        assert!(ExtendedVenueAdapter::for_venue("orderly", None).is_none());
     }
 
     #[test]
