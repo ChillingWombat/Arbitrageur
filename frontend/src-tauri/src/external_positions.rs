@@ -294,11 +294,14 @@ pub async fn get_external_positions_impl(
     })
 }
 
+/// Orderbook depth (bids, asks) plus the book timestamp.
+type DepthWithTs = (Vec<(f64, f64)>, Vec<(f64, f64)>, i64);
+
 fn hub_book_levels(
     state: &AppEngineState,
     venue: &str,
     symbol: &str,
-) -> Result<(Vec<(f64, f64)>, Vec<(f64, f64)>, i64), String> {
+) -> Result<DepthWithTs, String> {
     let book = state
         .market_data_hub
         .get_valid_orderbook(&VenueId::from(venue), symbol, None)
@@ -386,7 +389,7 @@ pub async fn recommend_external_close_impl(
         0.0
     };
     let fee_bps = match taker_fee_bps {
-        Some(f) if f.is_finite() && f >= 0.0 && f <= 1_000.0 => f,
+        Some(f) if f.is_finite() && (0.0..=1_000.0).contains(&f) => f,
         _ => 5.0,
     };
     let est_friction = slip_bps.max(0.0) + touch_spread_bps / 2.0 + fee_bps;

@@ -444,7 +444,7 @@ impl ExchangeAdapter for LighterAdapter {
         self.api_key_private_key
             .read()
             .as_ref()
-            .map_or(false, |k| !k.trim().is_empty())
+            .is_some_and(|k| !k.trim().is_empty())
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {

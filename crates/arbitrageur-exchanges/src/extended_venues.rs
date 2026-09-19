@@ -51,6 +51,7 @@
 //!   paused — trade only after audited relaunch), Pacifica (ex-FTX team,
 //!   invite-only beta), AlphaX (no proof-of-reserves published), QFEX
 //!   (6-person team, thin docs). Paper read-only until each case resolves.
+//!
 //! Full per-venue notes live in `docs/EXCHANGES.md`.
 
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ fn parse_obj_level(v: &serde_json::Value) -> Option<(Decimal, Decimal)> {
 /// `BTC-PERP`, `BTCUSDT`) to a bare uppercase base (`BTC`). Venue symbol
 /// builders below add the venue-specific suffix.
 fn to_base(symbol: &str) -> String {
-    let mut s = symbol.trim().to_uppercase().replace('/', "-").replace(':', "-");
+    let mut s = symbol.trim().to_uppercase().replace(['/', ':'], "-");
     for suffix in ["-PERP", "-PERPS", "-USDC", "-USDT", "-USD", "-USDP"] {
         if let Some(stripped) = s.strip_suffix(suffix) {
             s = stripped.to_string();

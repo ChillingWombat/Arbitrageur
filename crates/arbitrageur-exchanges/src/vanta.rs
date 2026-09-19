@@ -675,17 +675,17 @@ impl ExchangeAdapter for VantaAdapter {
             .account_id
             .read()
             .as_ref()
-            .map_or(false, |a| !a.trim().is_empty());
+            .is_some_and(|a| !a.trim().is_empty());
         let has_key = self
             .orderly_key
             .read()
             .as_ref()
-            .map_or(false, |k| !k.trim().is_empty());
+            .is_some_and(|k| !k.trim().is_empty());
         let has_sec = self
             .orderly_secret
             .read()
             .as_ref()
-            .map_or(false, |s| !s.trim().is_empty());
+            .is_some_and(|s| !s.trim().is_empty());
         has_acc && (has_key || has_sec)
     }
 }
@@ -833,7 +833,7 @@ mod tests {
         // 32-byte test key
         let raw_key = [7u8; 32];
         let base58_key = bs58::encode(&raw_key).into_string();
-        let hex_key = hex::encode(&raw_key);
+        let hex_key = hex::encode(raw_key);
 
         let decoded_b58 = decode_orderly_secret(&base58_key).expect("decode base58");
         assert_eq!(decoded_b58, raw_key);

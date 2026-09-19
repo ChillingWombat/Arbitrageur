@@ -341,8 +341,8 @@ impl ExchangeAdapter for VariationalAdapter {
         if book.bids.is_empty() && book.asks.is_empty() {
             anyhow::bail!("Variational RFQ quotes empty for {symbol}");
         }
-        book.bids.sort_by(|a, b| b.price.cmp(&a.price));
-        book.asks.sort_by(|a, b| a.price.cmp(&b.price));
+        book.bids.sort_by_key(|b| std::cmp::Reverse(b.price));
+        book.asks.sort_by_key(|a| a.price);
         book.timestamp = Self::quote_timestamp(quotes);
         Ok(book)
     }

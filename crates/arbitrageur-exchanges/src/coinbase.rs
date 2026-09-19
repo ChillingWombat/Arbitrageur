@@ -234,8 +234,8 @@ impl ExchangeAdapter for CoinbaseAdapter {
             }
         }
 
-        book.bids.sort_by(|a, b| b.price.cmp(&a.price));
-        book.asks.sort_by(|a, b| a.price.cmp(&b.price));
+        book.bids.sort_by_key(|b| std::cmp::Reverse(b.price));
+        book.asks.sort_by_key(|a| a.price);
         book.timestamp = Utc::now();
         Ok(book)
     }
@@ -289,12 +289,12 @@ impl ExchangeAdapter for CoinbaseAdapter {
         self.api_key
             .read()
             .as_ref()
-            .map_or(false, |k| !k.trim().is_empty())
+            .is_some_and(|k| !k.trim().is_empty())
             && self
                 .api_secret
                 .read()
                 .as_ref()
-                .map_or(false, |s| !s.trim().is_empty())
+                .is_some_and(|s| !s.trim().is_empty())
     }
 }
 

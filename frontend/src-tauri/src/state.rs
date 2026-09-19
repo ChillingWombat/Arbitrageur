@@ -2254,7 +2254,7 @@ mod tests {
         *state.is_live_mode.write() = true;
         // In live mode, enabled venues remain admitted for market data streaming,
         // while order execution is selectively gated by adapter capability & credentials.
-        assert!(state.get_venues().len() > 0);
+        assert!(!state.get_venues().is_empty());
         assert!(state.get_adapter("hyperliquid").unwrap().supports_live_execution());
         assert!(state.get_adapter("aster").unwrap().supports_live_execution());
         assert!(state.get_adapter("vanta").unwrap().supports_live_execution());

@@ -2543,6 +2543,9 @@ pub async fn execute_triangle_arbitrage_impl(
     })
 }
 
+/// Venue orderbook pair (bids, asks) keyed by venue id.
+type PerpBooks = std::collections::HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)>;
+
 async fn scan_funding_opportunities_for_symbol(
     symbol: &str,
     size_dec: Decimal,
@@ -2619,8 +2622,7 @@ async fn scan_funding_opportunities_for_symbol(
             })
             .collect::<Vec<_>>()
     };
-    let mut perp_books: std::collections::HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)> =
-        std::collections::HashMap::new();
+    let mut perp_books: PerpBooks = std::collections::HashMap::new();
     for (vid, _, _) in &rates {
         if perp_books.contains_key(*vid) {
             continue;
@@ -2746,17 +2748,17 @@ async fn scan_funding_opportunities_for_symbol(
                             rate / Decimal::from(interval.max(1))
                         };
                         let agrees = match (
-                            r_a.predicted_rate.clone(),
-                            r_b.predicted_rate.clone(),
+                            r_a.predicted_rate,
+                            r_b.predicted_rate,
                         ) {
                             (Some(pa), Some(pb)) => {
                                 let pa_h = hourly(pa, r_a.interval_hours);
                                 let pb_h = hourly(pb, r_b.interval_hours);
                                 Some(
                                     if hourly(
-                                        r_a.rate.clone(),
+                                        r_a.rate,
                                         r_a.interval_hours,
-                                    ) >= hourly(r_b.rate.clone(), r_b.interval_hours)
+                                    ) >= hourly(r_b.rate, r_b.interval_hours)
                                     {
                                         pa_h >= pb_h
                                     } else {
@@ -2920,11 +2922,8 @@ async fn scan_funding_opportunities_for_symbol(
                         &perp_bids,
                         &[size_f * 0.5, size_f, size_f * 2.0],
                     );
-                    let depth = rep.optimal_size_usd.and_then(|optimal| {
-                        rep.entry_spread_bps
-                            .map(|e| (-e).max(0.0))
-                            .map(|cost| (optimal, cost))
-                    });
+                    let depth = rep.optimal_size_usd.zip(rep.entry_spread_bps
+                            .map(|e| (-e).max(0.0)));
                     let venue_label = funding_rate.venue.to_string();
                     let spot_mid_f =
                         spot_mid.to_string().parse::<f64>().unwrap_or(0.0);
@@ -2994,14 +2993,14 @@ async fn scan_funding_opportunities_for_symbol(
                         // expected exit tailwind (convergence), and a
                         // positive predicted perp rate confirms the carry.
                         win_probability: funding_win_probability(
-                            eval.carry.net_rate_8h.clone(),
-                            eval.carry.round_trip_fee_bps.clone(),
+                            eval.carry.net_rate_8h,
+                            eval.carry.round_trip_fee_bps,
                             if eval.basis_bps > dec!(0) {
-                                Some(eval.basis_bps.clone())
+                                Some(eval.basis_bps)
                             } else {
                                 None
                             },
-                            funding_rate.predicted_rate.clone().map(|pr| pr > dec!(0)),
+                            funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
                         ),
                     });
                 }
@@ -4938,9 +4937,10 @@ async fn flatten_leg_on_paper(
         Some("emergency_market") => None,
         Some("non_emergency_limit") => {
             Some(passive_cfg_for(state, strategy_id).unwrap_or_else(|| {
-                let mut def = arbitrageur_execution::passive_unwind::PassiveUnwindConfig::default();
-                def.enabled = true;
-                def
+                arbitrageur_execution::passive_unwind::PassiveUnwindConfig {
+                    enabled: true,
+                    ..Default::default()
+                }
             }))
         }
         _ => passive_cfg_for(state, strategy_id),

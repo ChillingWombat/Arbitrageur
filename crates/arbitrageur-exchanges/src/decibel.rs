@@ -265,8 +265,8 @@ impl ExchangeAdapter for DecibelAdapter {
     }
 
     fn has_live_credentials(&self) -> bool {
-        self.api_key.read().as_ref().map_or(false, |k| !k.trim().is_empty())
-            || self.wallet_address.read().as_ref().map_or(false, |w| !w.trim().is_empty())
+        self.api_key.read().as_ref().is_some_and(|k| !k.trim().is_empty())
+            || self.wallet_address.read().as_ref().is_some_and(|w| !w.trim().is_empty())
     }
 }
 
