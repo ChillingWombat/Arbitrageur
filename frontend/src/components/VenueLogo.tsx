@@ -10,16 +10,20 @@ interface VenueLogoProps {
 }
 
 /**
- * Venues with no recoverable brand mark (parked domains / no public
- * logo found). They render the initials badge instead of an <img>.
+ * Venues with no verifiable official mark. alphax/iotrader/sodex resolve to
+ * parked domains; gatedex has no such venue (DNS-fails, unverified); niza
+ * points at a memecoin site with no futures product. They render the
+ * initials badge instead of an <img> rather than a fabricated logo.
  */
-const NO_LOGO_VENUES = new Set(["alphax", "iotrader", "sodex"]);
+const NO_LOGO_VENUES = new Set(["alphax", "iotrader", "sodex", "gatedex", "niza"]);
 
 /** Curated brand hues (0-360) for the initials fallback badges. */
 const BRAND_HUE: Record<string, number> = {
   alphax: 210,
   iotrader: 200,
   sodex: 190,
+  gatedex: 150,
+  niza: 45,
 };
 
 function hashHue(id: string): number {
@@ -67,6 +71,9 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
     justifyContent: "center",
     userSelect: "none",
     overflow: "hidden",
+    boxShadow: "inset 0 0 0 1px rgba(15, 23, 42, 0.08)",
+    border: "1px solid rgba(15, 23, 42, 0.06)",
+    backgroundColor: "#fff",
   };
 
   if (!failed && !NO_LOGO_VENUES.has(venueId)) {
@@ -75,25 +82,27 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
         src={`logos/${venueId}.png`}
         alt=""
         aria-hidden="true"
-        title={name}
+        title={`${name} — official brand mark`}
         width={size}
         height={size}
-        style={{ ...style, objectFit: "cover", backgroundColor: "#fff" }}
+        style={{ ...style, objectFit: "cover" }}
         onError={() => setFailed(true)}
         draggable={false}
       />
     );
   }
 
+  const noMark = NO_LOGO_VENUES.has(venueId);
   return (
     <span
       aria-hidden="true"
-      title={name}
+      title={noMark ? `${name} — no official mark published, initials badge` : name}
       className="font-semibold"
       style={{
         ...style,
-        fontSize: Math.max(8, Math.round(size * 0.42)),
+        fontSize: Math.max(8, Math.round(size * 0.4)),
         lineHeight: 1,
+        letterSpacing: "0.02em",
         backgroundColor: fallback.bg,
         color: fallback.fg,
         fontFamily: "Inter, system-ui, sans-serif",
