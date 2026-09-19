@@ -6,20 +6,14 @@ pub mod vanta;
 pub mod ws;
 pub mod robinhood;
 pub mod arcus;
-pub mod popdex;
 pub mod aster;
-pub mod edgex;
-pub mod grvt;
-pub mod ondoperps;
 pub mod binance;
 pub mod okx;
 pub mod coinbase;
 pub mod kraken;
 pub mod decibel;
-pub mod variational;
 pub mod prediction;
 pub mod simulated;
-pub mod extended_venues;
 
 pub use rate_limiter::*;
 pub use wallet::*;
@@ -29,20 +23,14 @@ pub use vanta::*;
 pub use ws::*;
 pub use robinhood::*;
 pub use arcus::*;
-pub use popdex::*;
 pub use aster::*;
-pub use edgex::*;
-pub use grvt::*;
-pub use ondoperps::*;
 pub use binance::*;
 pub use okx::*;
 pub use coinbase::*;
 pub use kraken::*;
 pub use decibel::*;
-pub use variational::*;
 pub use prediction::*;
 pub use simulated::*;
-pub use extended_venues::*;
 
 #[cfg(test)]
 mod tests {
@@ -424,19 +412,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_arcus_and_popdex_adapters() {        let arcus = ArcusAdapter::new(None, None, None);
+    async fn test_arcus_adapter() {
+        let arcus = ArcusAdapter::new(None, None, None);
         assert_eq!(arcus.name(), "Arcus");
         assert_eq!(arcus.venue_id(), VenueId::new("arcus"));
         assert!(arcus.fetch_orderbook("BTC-USDC").await.is_err());
-
-        let popdex = PopDexAdapter::new(None, None, None);
-        assert_eq!(popdex.name(), "PopDEX");
-        assert_eq!(popdex.venue_id(), VenueId::new("popdex"));
-        assert!(popdex.fetch_orderbook("BTC-USDC").await.is_err());
     }
 
     #[tokio::test]
-    async fn test_aster_and_ondoperps_adapters() {
+    async fn test_aster_adapter() {
         let aster = AsterAdapter::new(None, None, None);
         assert_eq!(aster.name(), "Aster");
         assert_eq!(aster.venue_id(), VenueId::new("aster"));
@@ -444,29 +428,6 @@ mod tests {
         assert!(aster.fetch_orderbook("ZZZNOTREAL").await.is_err());
         assert!(aster.fetch_account().await.is_err());
         assert!(aster.set_leverage("BTC-USDT", 5).await.is_err());
-
-        let ondo = OndoPerpsAdapter::new(None);
-        assert_eq!(ondo.name(), "Ondo Perps");
-        assert_eq!(ondo.venue_id(), VenueId::new("ondoperps"));
-        assert!(ondo.fetch_account().await.is_err());
-        assert!(ondo.set_leverage("BTC", 5).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_grvt_and_edgex_adapters_fail_closed() {
-        // Admitted to get_venues (paper read-only, see state.rs); the
-        // paper-only paths stay fail-closed here as a second assertion.
-        let grvt = GrvtAdapter::new(None);
-        assert_eq!(grvt.name(), "GRVT");
-        assert_eq!(grvt.venue_id(), VenueId::new("grvt"));
-        assert!(grvt.fetch_account().await.is_err());
-        assert!(grvt.set_leverage("BTC", 5).await.is_err());
-
-        let edgex = EdgeXAdapter::new(None);
-        assert_eq!(edgex.name(), "edgeX");
-        assert_eq!(edgex.venue_id(), VenueId::new("edgex"));
-        assert!(edgex.fetch_account().await.is_err());
-        assert!(edgex.set_leverage("BTC", 5).await.is_err());
     }
 
     #[tokio::test]
@@ -495,11 +456,6 @@ mod tests {
         assert_eq!(decibel.name(), "Decibel");
         assert_eq!(decibel.venue_id(), VenueId::new("decibel"));
         assert!(decibel.fetch_account().await.is_err());
-
-        let variational = VariationalAdapter::new(None, None, None);
-        assert_eq!(variational.name(), "Variational");
-        assert_eq!(variational.venue_id(), VenueId::new("variational"));
-        assert!(variational.fetch_account().await.is_err());
 
         let robinhood = RobinhoodAdapter::new(None, None, None, None);
         assert_eq!(robinhood.name(), "Robinhood");

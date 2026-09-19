@@ -12,7 +12,7 @@ import {
 
 test("fee table covers the venues the app trades on", () => {
   const venues = listRebalanceVenues();
-  for (const v of ["hyperliquid", "lighter", "variational", "vanta", "binance"]) {
+  for (const v of ["hyperliquid", "lighter", "vanta", "binance"]) {
     assert.ok(venues.includes(v), `missing ${v}`);
   }
 });
@@ -20,10 +20,6 @@ test("fee table covers the venues the app trades on", () => {
 test("hyperliquid encodes the verified $1 withdrawal fee", () => {
   assert.equal(getVenueProfile("HyperLiquid")?.withdrawFeeUsd, 1.0);
   assert.equal(getVenueProfile("hyperliquid")?.confidence, "verified");
-});
-
-test("beta venues fail closed with null fees", () => {
-  assert.equal(getVenueProfile("popdex")?.withdrawFeeUsd, null);
 });
 
 test("direct HL->Lighter move prices known legs", () => {
@@ -46,7 +42,7 @@ test("same venue costs nothing", () => {
 });
 
 test("unknown venue fails closed (null total, unknown verdict)", () => {
-  const r = estimateRebalance({ from: "popdex", to: "lighter", amountUsd: 500, viaDirect: true, swapNeeded: false });
+  const r = estimateRebalance({ from: "removedvenue", to: "lighter", amountUsd: 500, viaDirect: true, swapNeeded: false });
   assert.equal(r.totalCostUsd, null);
   assert.equal(r.verdict, "unknown");
   assert.ok(r.warnings.length > 0);

@@ -34,60 +34,21 @@ import { VenueAccountsSection } from "./ExchangeAccounts";
 
 export type SettingsTab = "execution" | "exchanges" | "network" | "about";
 export type ExchangeId =
-  | "aevo"
-  | "alphax"
-  | "antarctic"
-  | "apex"
   | "arcus"
   | "aster"
-  | "astros"
   | "binance"
-  | "bulk"
   | "coinbase"
   | "decibel"
-  | "derive"
-  | "dydx"
-  | "edgex"
-  | "evedex"
-  | "extended"
-  | "gatedex"
-  | "gmx"
-  | "grvt"
-  | "helix"
   | "hyperliquid"
   | "ibkr"
   | "ig"
-  | "iotrader"
   | "kalshi"
   | "kraken"
   | "lighter"
-  | "nado"
-  | "niza"
   | "okx"
-  | "ondoperps"
-  | "ostium"
-  | "pacifica"
-  | "paradex"
   | "polymarket"
-  | "popdex"
-  | "qfex"
   | "robinhood"
-  | "sodex"
-  | "standx"
-  | "vanta"
-  | "variational"
-  | "vest";
-
-// Long-tail perp venues served by the shared paper read-only adapter
-// (backend `extended_venues.rs`). Keyed map keeps 23 toggles in one state
-// object instead of 23 useState hooks; new venues only touch this list,
-// the flag helpers below, and the load/save mappings.
-export const EXTENDED_VENUE_IDS: ExchangeId[] = [
-  "aevo", "alphax", "antarctic", "apex", "astros", "bulk", "derive",
-  "dydx", "evedex", "extended", "gatedex", "gmx", "helix", "iotrader",
-  "nado", "niza", "ostium", "pacifica", "paradex", "qfex", "sodex",
-  "standx", "vest",
-];
+  | "vanta";
 
 export interface ExchangeMetadata {
   id: ExchangeId;
@@ -97,49 +58,21 @@ export interface ExchangeMetadata {
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
-  { id: "aevo", name: "Aevo", type: "Perp DEX", feeBps: 3.0 },
-  { id: "alphax", name: "AlphaX", type: "Perp DEX", feeBps: 3.0 },
-  { id: "antarctic", name: "Antarctic", type: "Perp DEX", feeBps: 3.0 },
-  { id: "apex", name: "ApeX Omni", type: "Perp DEX", feeBps: 2.0 },
   { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
   { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 },
-  { id: "astros", name: "Astros", type: "Perp DEX", feeBps: 3.0 },
   { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
-  { id: "bulk", name: "BULK", type: "Perp DEX", feeBps: 3.0 },
   { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
-  { id: "derive", name: "Derive", type: "Perp DEX", feeBps: 3.0 },
-  { id: "dydx", name: "dYdX Chain", type: "L1 Perp DEX", feeBps: 2.0 },
-  { id: "edgex", name: "edgeX", type: "StarkEx Perp DEX", feeBps: 4.5 },
-  { id: "evedex", name: "EVEDEX", type: "Perp DEX", feeBps: 3.0 },
-  { id: "extended", name: "Extended", type: "Perp DEX", feeBps: 2.0 },
-  { id: "gatedex", name: "Gate DEX", type: "Perp DEX", feeBps: 3.0 },
-  { id: "gmx", name: "GMX V2", type: "GLV AMM Perps", feeBps: 5.0 },
-  { id: "grvt", name: "GRVT", type: "Perp DEX", feeBps: 2.0 },
-  { id: "helix", name: "Helix", type: "Cosmos Perp DEX", feeBps: 2.0 },
   { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
   { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 },
   { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 },
-  { id: "iotrader", name: "IO Trader", type: "Perp DEX", feeBps: 3.0 },
   { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
   { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
   { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
-  { id: "nado", name: "Nado", type: "Perp DEX", feeBps: 3.0 },
-  { id: "niza", name: "Niza", type: "Perp DEX", feeBps: 3.0 },
   { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 },
-  { id: "ondoperps", name: "Ondo Perps", type: "Equity + Crypto Perps", feeBps: 3.5 },
-  { id: "ostium", name: "Ostium", type: "Oracle Perp DEX", feeBps: 3.0 },
-  { id: "pacifica", name: "Pacifica", type: "Perp DEX", feeBps: 2.0 },
-  { id: "paradex", name: "Paradex", type: "Starknet Perp DEX", feeBps: 2.0 },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
-  { id: "popdex", name: "PopDEX", type: "Arbitrage Protocol", feeBps: 2.0 },
-  { id: "qfex", name: "QFEX", type: "Perp DEX", feeBps: 4.0 },
   { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
-  { id: "sodex", name: "SoDEX", type: "Perp DEX", feeBps: 3.0 },
-  { id: "standx", name: "StandX", type: "Perp DEX", feeBps: 4.0 },
   { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
-  { id: "variational", name: "Variational", type: "Perp DEX (Read-Only)", feeBps: 0.0 },
-  { id: "vest", name: "Vest", type: "Perp DEX", feeBps: 3.0 },
 ];
 
 interface EngineSettingsProps {
@@ -225,29 +158,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Arcus CLOB DEX
   const [arcusEnabled, setArcusEnabled] = useState(false);
   const [asterEnabled, setAsterEnabled] = useState(false);
-  const [edgexEnabled, setEdgexEnabled] = useState(false);
-  const [grvtEnabled, setGrvtEnabled] = useState(false);
-  const [ondoperpsEnabled, setOndoperpsEnabled] = useState(false);
   const [binanceEnabled, setBinanceEnabled] = useState(false);
   const [coinbaseEnabled, setCoinbaseEnabled] = useState(false);
   const [decibelEnabled, setDecibelEnabled] = useState(false);
   const [ibkrEnabled, setIbkrEnabled] = useState(false);
   const [igEnabled, setIgEnabled] = useState(false);
   const [okxEnabled, setOkxEnabled] = useState(false);
-  const [variationalEnabled, setVariationalEnabled] = useState(false);
-  // Long-tail perp venues: one toggle map instead of 23 useStates.
-  const [extEnabled, setExtEnabled] = useState<Record<string, boolean>>({});
-  const setExtVenueEnabled = (id: string, enabled: boolean) =>
-    setExtEnabled((prev) => (prev[id] === enabled ? prev : { ...prev, [id]: enabled }));
   const [arcusApiKey, setArcusApiKey] = useState("");
   const [arcusSecret, setArcusSecret] = useState("");
   const [arcusUrl, setArcusUrl] = useState("https://api.arcus.exchange");
-
-  // PopDEX (Arbitrage Protocol)
-  const [popdexEnabled, setPopdexEnabled] = useState(false);
-  const [popdexAccountIndex, setPopdexAccountIndex] = useState("0");
-  const [popdexApiKey, setPopdexApiKey] = useState("");
-  const [popdexUrl, setPopdexUrl] = useState(""); // Closed beta: no public endpoint; paste the beta base URL when granted.
 
   // Kraken (Spot & Futures)
   const [krakenSpotApiKey, setKrakenSpotApiKey] = useState("");
@@ -347,15 +266,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [updateMsg, setUpdateMsg] = useState<string | null>(null);
 
   const venueFlagEnabled = (id: ExchangeId): boolean => {
-    if ((EXTENDED_VENUE_IDS as string[]).includes(id)) return extEnabled[id] ?? false;
     switch (id) {
       case "arcus": return arcusEnabled;
       case "aster": return asterEnabled;
       case "binance": return binanceEnabled;
       case "coinbase": return coinbaseEnabled;
       case "decibel": return decibelEnabled;
-      case "edgex": return edgexEnabled;
-      case "grvt": return grvtEnabled;
       case "hyperliquid": return hlEnabled;
       case "ibkr": return ibkrEnabled;
       case "ig": return igEnabled;
@@ -363,29 +279,20 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "kraken": return krakenEnabled;
       case "lighter": return lighterEnabled;
       case "okx": return okxEnabled;
-      case "ondoperps": return ondoperpsEnabled;
       case "polymarket": return polymarketEnabled;
-      case "popdex": return popdexEnabled;
       case "robinhood": return robinhoodEnabled;
       case "vanta": return vantaEnabled;
-      case "variational": return variationalEnabled;
       default: return false;
     }
   };
 
   const setVenueFlagEnabled = (id: ExchangeId, enabled: boolean) => {
-    if ((EXTENDED_VENUE_IDS as string[]).includes(id)) {
-      setExtVenueEnabled(id, enabled);
-      return;
-    }
     switch (id) {
       case "arcus": setArcusEnabled(enabled); break;
       case "aster": setAsterEnabled(enabled); break;
       case "binance": setBinanceEnabled(enabled); break;
       case "coinbase": setCoinbaseEnabled(enabled); break;
       case "decibel": setDecibelEnabled(enabled); break;
-      case "edgex": setEdgexEnabled(enabled); break;
-      case "grvt": setGrvtEnabled(enabled); break;
       case "hyperliquid": setHlEnabled(enabled); break;
       case "ibkr": setIbkrEnabled(enabled); break;
       case "ig": setIgEnabled(enabled); break;
@@ -393,12 +300,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "kraken": setKrakenEnabled(enabled); break;
       case "lighter": setLighterEnabled(enabled); break;
       case "okx": setOkxEnabled(enabled); break;
-      case "ondoperps": setOndoperpsEnabled(enabled); break;
       case "polymarket": setPolymarketEnabled(enabled); break;
-      case "popdex": setPopdexEnabled(enabled); break;
       case "robinhood": setRobinhoodEnabled(enabled); break;
       case "vanta": setVantaEnabled(enabled); break;
-      case "variational": setVariationalEnabled(enabled); break;
     }
   };
 
@@ -523,7 +427,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setVantaEnabled(s.vanta_enabled ?? false);
         setRobinhoodEnabled(s.robinhood_enabled ?? false);
         setArcusEnabled(s.arcus_enabled ?? false);
-        setPopdexEnabled(s.popdex_enabled ?? false);
         setKrakenEnabled(s.kraken_enabled ?? false);
         setKrakenSpotEnabled(s.kraken_spot_enabled ?? false);
         setKrakenFuturesEnabled(s.kraken_futures_enabled ?? false);
@@ -535,23 +438,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setBinanceEnabled(s.binance_enabled ?? false);
         setOkxEnabled(s.okx_enabled ?? false);
         setAsterEnabled(s.aster_enabled ?? false);
-        setEdgexEnabled(s.edgex_enabled ?? false);
-        setGrvtEnabled(s.grvt_enabled ?? false);
-        setOndoperpsEnabled(s.ondoperps_enabled ?? false);
-        setVariationalEnabled(s.variational_enabled ?? false);
-        // Long-tail venues: backend fields are `<id>_enabled`.
-        setExtEnabled(Object.fromEntries(
-          EXTENDED_VENUE_IDS.map((id) => [id, (s as unknown as Record<string, unknown>)[`${id}_enabled`] === true]),
-        ));
         setCoinbaseEnabled(s.coinbase_enabled ?? false);
 
         setArcusApiKey(s.arcus_api_key || "");
         setArcusSecret(s.arcus_secret || "");
         setArcusUrl(s.arcus_url || "https://api.arcus.exchange");
-
-        setPopdexAccountIndex(s.popdex_account_index || "0");
-        setPopdexApiKey(s.popdex_api_key || "");
-        setPopdexUrl(s.popdex_url || ""); // Dead parked-domain default removed; empty = unconfigured.
 
         setKrakenSpotApiKey(s.kraken_spot_api_key || "");
         setKrakenSpotSecret(s.kraken_spot_secret || "");
@@ -644,7 +535,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         vanta_enabled: vantaEnabled,
         robinhood_enabled: robinhoodEnabled,
         arcus_enabled: arcusEnabled,
-        popdex_enabled: popdexEnabled,
         kraken_enabled: krakenEnabled,
         kraken_spot_enabled: krakenSpotEnabled,
         kraken_futures_enabled: krakenFuturesEnabled,
@@ -656,20 +546,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         binance_enabled: binanceEnabled,
         okx_enabled: okxEnabled,
         aster_enabled: asterEnabled,
-        edgex_enabled: edgexEnabled,
-        grvt_enabled: grvtEnabled,
-        ondoperps_enabled: ondoperpsEnabled,
-        variational_enabled: variationalEnabled,
-        ...Object.fromEntries(
-          EXTENDED_VENUE_IDS.map((id) => [`${id}_enabled`, extEnabled[id] ?? false]),
-        ),
         coinbase_enabled: coinbaseEnabled,
         arcus_api_key: arcusApiKey.trim(),
         arcus_secret: arcusSecret.trim(),
         arcus_url: arcusUrl.trim(),
-        popdex_account_index: popdexAccountIndex.trim(),
-        popdex_api_key: popdexApiKey.trim(),
-        popdex_url: popdexUrl.trim(),
         kraken_spot_api_key: krakenSpotApiKey.trim(),
         kraken_spot_secret: krakenSpotSecret.trim(),
         kraken_spot_url: krakenSpotUrl.trim(),
@@ -751,8 +631,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     setRobinhoodSubaccountIndex("");
     setArcusApiKey("");
     setArcusSecret("");
-    setPopdexAccountIndex("0");
-    setPopdexApiKey("");
     setKrakenSpotApiKey("");
     setKrakenSpotSecret("");
     setKrakenFuturesApiKey("");
@@ -832,8 +710,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         return isExchangeEnabled("vanta") && (configured("vanta") || Boolean(vantaOrderlyKey || vantaAccountId) || hasConfiguredAccount("vanta"));
       case "arcus":
         return isExchangeEnabled("arcus") && (configured("arcus") || Boolean(arcusApiKey) || hasConfiguredAccount("arcus"));
-      case "popdex":
-        return isExchangeEnabled("popdex") && (configured("popdex") || Boolean(popdexApiKey || (popdexAccountIndex && popdexAccountIndex !== "0")) || hasConfiguredAccount("popdex"));
       case "robinhood":
         return isExchangeEnabled("robinhood") && (configured("robinhood") || Boolean(robinhoodWallet || robinhoodPrivateKey) || hasConfiguredAccount("robinhood"));
       case "kraken":
@@ -855,34 +731,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   };
 
   const configuredCount = [
-    isVenueConfigured("dydx"),
-    isVenueConfigured("paradex"),
-    isVenueConfigured("gmx"),
-    isVenueConfigured("apex"),
-    isVenueConfigured("extended"),
-    isVenueConfigured("derive"),
-    isVenueConfigured("standx"),
-    isVenueConfigured("helix"),
-    isVenueConfigured("aevo"),
-    isVenueConfigured("vest"),
-    isVenueConfigured("antarctic"),
-    isVenueConfigured("evedex"),
-    isVenueConfigured("bulk"),
-    isVenueConfigured("qfex"),
-    isVenueConfigured("ostium"),
-    isVenueConfigured("sodex"),
-    isVenueConfigured("alphax"),
-    isVenueConfigured("pacifica"),
-    isVenueConfigured("nado"),
-    isVenueConfigured("iotrader"),
-    isVenueConfigured("niza"),
-    isVenueConfigured("astros"),
-    isVenueConfigured("gatedex"),
     isVenueConfigured("hyperliquid"),
     isVenueConfigured("lighter"),
     isVenueConfigured("vanta"),
     isVenueConfigured("arcus"),
-    isVenueConfigured("popdex"),
     isVenueConfigured("robinhood"),
     isVenueConfigured("kraken"),
     isVenueConfigured("polymarket"),
@@ -1291,29 +1143,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     onChanged={handleAccountsChanged}
                   />
                 </div>
-              </div>
-            )}
-
-            {/* PopDEX beta base URL (venue-level: no public endpoint exists) */}
-            {selectedExchange === "popdex" && (
-              <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-2">
-                <label className="text-slate-800 font-bold block text-xs font-mono">
-                  Beta API Base URL
-                </label>
-                <p className="text-[11px] text-slate-500 font-sans leading-normal">
-                  PopDEX is in closed beta with no public market-data endpoint. Paste the beta
-                  API base URL from your grant here; it saves with the rest of this form.
-                  Empty means unconfigured — the venue stays inert and contributes no signals.
-                </p>
-                <input
-                  type="text"
-                  value={popdexUrl}
-                  onChange={(e) => setPopdexUrl(e.target.value)}
-                  placeholder="https://beta-api.popdex.example"
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
               </div>
             )}
 

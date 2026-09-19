@@ -93,39 +93,11 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   robinhood: "RH",
   arcus: "ARC",
   aster: "AST",
-  ondoperps: "ONDO",
-  grvt: "GRVT",
-  edgex: "EDGX",
-  popdex: "POP",
   kraken: "KRK",
   binance: "BNB",
   okx: "OKX",
   coinbase: "CB",
   decibel: "DCB",
-  variational: "VAR",
-  dydx: "DYDX",
-  paradex: "PRDX",
-  gmx: "GMX",
-  apex: "APEX",
-  extended: "EXT",
-  derive: "DRV",
-  standx: "STX",
-  helix: "HLX",
-  aevo: "AEVO",
-  vest: "VEST",
-  antarctic: "ANTC",
-  evedex: "EVE",
-  bulk: "BULK",
-  qfex: "QFEX",
-  ostium: "OST",
-  sodex: "SODX",
-  alphax: "ALX",
-  pacifica: "PCF",
-  nado: "NADO",
-  iotrader: "IOT",
-  niza: "NIZA",
-  astros: "ASTR",
-  gatedex: "GDEX",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -135,39 +107,11 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   RH: "robinhood",
   ARC: "arcus",
   AST: "aster",
-  ONDO: "ondoperps",
-  GRVT: "grvt",
-  EDGX: "edgex",
-  POP: "popdex",
   KRK: "kraken",
   BNB: "binance",
   OKX: "okx",
   CB: "coinbase",
   DCB: "decibel",
-  VAR: "variational",
-  DYDX: "dydx",
-  PRDX: "paradex",
-  GMX: "gmx",
-  APEX: "apex",
-  EXT: "extended",
-  DRV: "derive",
-  STX: "standx",
-  HLX: "helix",
-  AEVO: "aevo",
-  VEST: "vest",
-  ANTC: "antarctic",
-  EVE: "evedex",
-  BULK: "bulk",
-  QFEX: "qfex",
-  OST: "ostium",
-  SODX: "sodex",
-  ALX: "alphax",
-  PCF: "pacifica",
-  NADO: "nado",
-  IOT: "iotrader",
-  NIZA: "niza",
-  ASTR: "astros",
-  GDEX: "gatedex",
 };
 
 /**
@@ -190,11 +134,6 @@ export interface VenueSettingsFilter {
   arcus_enabled?: boolean;
   arcus_api_key?: string;
   aster_enabled?: boolean;
-  ondoperps_enabled?: boolean;
-  grvt_enabled?: boolean;
-  edgex_enabled?: boolean;
-  popdex_enabled?: boolean;
-  popdex_api_key?: string;
   kraken_enabled?: boolean;
   kraken_spot_enabled?: boolean;
   kraken_futures_enabled?: boolean;
@@ -204,30 +143,6 @@ export interface VenueSettingsFilter {
   okx_enabled?: boolean;
   coinbase_enabled?: boolean;
   decibel_enabled?: boolean;
-  variational_enabled?: boolean;
-  dydx_enabled?: boolean;
-  paradex_enabled?: boolean;
-  gmx_enabled?: boolean;
-  apex_enabled?: boolean;
-  extended_enabled?: boolean;
-  derive_enabled?: boolean;
-  standx_enabled?: boolean;
-  helix_enabled?: boolean;
-  aevo_enabled?: boolean;
-  vest_enabled?: boolean;
-  antarctic_enabled?: boolean;
-  evedex_enabled?: boolean;
-  bulk_enabled?: boolean;
-  qfex_enabled?: boolean;
-  ostium_enabled?: boolean;
-  sodex_enabled?: boolean;
-  alphax_enabled?: boolean;
-  pacifica_enabled?: boolean;
-  nado_enabled?: boolean;
-  iotrader_enabled?: boolean;
-  niza_enabled?: boolean;
-  astros_enabled?: boolean;
-  gatedex_enabled?: boolean;
   polymarket_enabled?: boolean;
   polymarket_api_key?: string;
   polymarket_secret?: string;
@@ -240,9 +155,8 @@ export interface VenueSettingsFilter {
 /**
  * Determines the set of natively connected venue codes from sanitized engine settings.
  * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), Vanta/Orderly
- * ("VNT"), Aster ("AST"), Ondo Perps ("ONDO"), GRVT ("GRVT"), and edgeX ("EDGX")
- * expose read-only native market-data adapters in this phase, and only outside
- * live trading mode.
+ * ("VNT") and Aster ("AST") expose native market-data adapters in this phase,
+ * and only outside live trading mode.
  * Public read-only feeds require the venue's enable toggle, not secrets; connectivity
  * is never inferred from credential-looking strings.
  *
@@ -273,15 +187,6 @@ export function getEnabledConnectedVenueCodes(
   if (settings.aster_enabled === true) {
     active.add("AST");
   }
-  if (settings.ondoperps_enabled === true) {
-    active.add("ONDO");
-  }
-  if (settings.grvt_enabled === true) {
-    active.add("GRVT");
-  }
-  if (settings.edgex_enabled === true) {
-    active.add("EDGX");
-  }
   if (settings.binance_enabled === true) {
     active.add("BNB");
   }
@@ -301,31 +206,6 @@ export function getEnabledConnectedVenueCodes(
   if (settings.decibel_enabled === true) {
     active.add("DCB");
   }
-  // Long-tail perp venues: all admitted (paper read-only, flag-gated).
-  if (settings.dydx_enabled === true) active.add("DYDX");
-  if (settings.paradex_enabled === true) active.add("PRDX");
-  if (settings.gmx_enabled === true) active.add("GMX");
-  if (settings.apex_enabled === true) active.add("APEX");
-  if (settings.extended_enabled === true) active.add("EXT");
-  if (settings.derive_enabled === true) active.add("DRV");
-  if (settings.standx_enabled === true) active.add("STX");
-  if (settings.helix_enabled === true) active.add("HLX");
-  if (settings.aevo_enabled === true) active.add("AEVO");
-  if (settings.vest_enabled === true) active.add("VEST");
-  if (settings.antarctic_enabled === true) active.add("ANTC");
-  if (settings.evedex_enabled === true) active.add("EVE");
-  if (settings.bulk_enabled === true) active.add("BULK");
-  if (settings.qfex_enabled === true) active.add("QFEX");
-  if (settings.ostium_enabled === true) active.add("OST");
-  if (settings.sodex_enabled === true) active.add("SODX");
-  if (settings.alphax_enabled === true) active.add("ALX");
-  if (settings.pacifica_enabled === true) active.add("PCF");
-  if (settings.nado_enabled === true) active.add("NADO");
-  if (settings.iotrader_enabled === true) active.add("IOT");
-  if (settings.niza_enabled === true) active.add("NIZA");
-  if (settings.astros_enabled === true) active.add("ASTR");
-  if (settings.gatedex_enabled === true) active.add("GDEX");
-
   return active;
 }
 

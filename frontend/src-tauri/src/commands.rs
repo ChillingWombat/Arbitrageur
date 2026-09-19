@@ -389,11 +389,7 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
         "vanta" => dec!(3.0),
         "robinhood" => dec!(2.5),
         "arcus" => dec!(1.5),
-        "popdex" => dec!(2.0),
         "aster" => dec!(3.5),
-        "ondoperps" => dec!(3.5),
-        "grvt" => dec!(2.0),
-        "edgex" => dec!(4.5),
         "polymarket" => dec!(0.0),
         "kalshi" => dec!(10.0),
         _ => dec!(2.0),
@@ -661,7 +657,6 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("robinhood", s.robinhood_enabled || account_enabled("robinhood"));
     push("vanta", s.vanta_enabled || account_enabled("vanta"));
     push("arcus", s.arcus_enabled || account_enabled("arcus"));
-    push("popdex", s.popdex_enabled || account_enabled("popdex"));
     push(
         "kraken",
         s.kraken_enabled
@@ -674,51 +669,17 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("kalshi", s.kalshi_enabled || account_enabled("kalshi"));
     push("decibel", s.decibel_enabled || account_enabled("decibel"));
     push("aster", s.aster_enabled || account_enabled("aster"));
-    push(
-        "ondoperps",
-        s.ondoperps_enabled || account_enabled("ondoperps"),
-    );
-    push("grvt", s.grvt_enabled || account_enabled("grvt"));
-    push("edgex", s.edgex_enabled || account_enabled("edgex"));
     push("binance", s.binance_enabled || account_enabled("binance"));
     push("coinbase", s.coinbase_enabled || account_enabled("coinbase"));
     push("okx", s.okx_enabled || account_enabled("okx"));
     push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
     push("ig", s.ig_enabled || account_enabled("ig"));
-    push("variational", s.variational_enabled || account_enabled("variational"));
-    // Long-tail perp venues (extended_venues.rs, paper read-only).
-    for vid in [
-        "dydx", "paradex", "gmx", "apex", "extended", "derive", "standx",
-        "helix", "aevo", "vest", "antarctic", "evedex", "bulk", "qfex",
-        "ostium", "sodex", "alphax", "pacifica", "nado", "iotrader", "niza",
-        "astros", "gatedex",
-    ] {
-        let flag = match vid {
-            "dydx" => s.dydx_enabled, "paradex" => s.paradex_enabled,
-            "gmx" => s.gmx_enabled, "apex" => s.apex_enabled,
-            "extended" => s.extended_enabled, "derive" => s.derive_enabled,
-            "standx" => s.standx_enabled, "helix" => s.helix_enabled,
-            "aevo" => s.aevo_enabled, "vest" => s.vest_enabled,
-            "antarctic" => s.antarctic_enabled, "evedex" => s.evedex_enabled,
-            "bulk" => s.bulk_enabled, "qfex" => s.qfex_enabled,
-            "ostium" => s.ostium_enabled, "sodex" => s.sodex_enabled,
-            "alphax" => s.alphax_enabled, "pacifica" => s.pacifica_enabled,
-            "nado" => s.nado_enabled, "iotrader" => s.iotrader_enabled,
-            "niza" => s.niza_enabled, "astros" => s.astros_enabled,
-            "gatedex" => s.gatedex_enabled,
-            _ => false,
-        };
-        push(vid, flag || account_enabled(vid));
-    }
     out
 }
 
 /// Verified public endpoint per venue for latency probes when no adapter
 /// exists. Every URL was curl-verified to return a real response — venues
-/// with no reachable public API (popdex: closed beta, no public routes —
-/// its app backend answers API-shaped errors only to signed session calls;
-/// ibkr: local TWS gateway) return None → honest N/A. Variational *does*
-/// expose a public read-only stats API and has its own arm below.
+/// with no reachable public API (ibkr: local TWS gateway) return None → honest N/A.
 ///
 /// `accept_4xx`: for endpoints that require auth, an application-level 4xx
 /// (e.g. IG's JSON `error.security.api-key-missing`) still proves the
@@ -758,25 +719,9 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
         "okx" => p("https://www.okx.com/api/v5/public/time", false),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
         "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
-        "ondoperps" => p("https://api.ondoperps.xyz/status", false),
-        "edgex" => p(
-            "https://edgex-prod-v2.edgex.exchange/api/v2/public/meta/getServerTime",
-            false,
-        ),
-        "grvt" => Some(PublicProbe {
-            url: "https://market-data.grvt.io/full/v1/all_instruments",
-            accept_4xx: false,
-            post_body: Some(r#"{"is_active":true,"kinds":["PERPETUAL"]}"#),
-        }),
         // IG has no public endpoint; the session route returns an
         // app-level JSON 400 that proves the API gateway responded.
         "ig" => p("https://api.ig.com/gateway/deal/session", true),
-        // Variational Omni public read-only stats (documented; ~550
-        // listings, RFQ quotes + funding + volumes, no auth).
-        "variational" => p(
-            "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats",
-            false,
-        ),
         _ => None,
     }
 }
@@ -992,14 +937,6 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             fee_bps: 1.5,
         },
         VenueStatusDto {
-            id: "popdex".into(),
-            name: "PopDEX".into(),
-            market_type: "Lighter Hybrid".into(),
-            status: venue_status("popdex", s.popdex_enabled || account_enabled("popdex")).into(),
-            latency_ms: probe_ms("popdex"),
-            fee_bps: 2.0,
-        },
-        VenueStatusDto {
             id: "robinhood".into(),
             name: "Robinhood EVM".into(),
             market_type: "EVM DEX Aggregator".into(),
@@ -1064,34 +1001,6 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             fee_bps: 3.5,
         },
         VenueStatusDto {
-            id: "ondoperps".into(),
-            name: "Ondo Perps".into(),
-            market_type: "Equity + Crypto Perps".into(),
-            status: venue_status(
-                "ondoperps",
-                s.ondoperps_enabled || account_enabled("ondoperps"),
-            )
-            .into(),
-            latency_ms: probe_ms("ondoperps"),
-            fee_bps: 3.5,
-        },
-        VenueStatusDto {
-            id: "grvt".into(),
-            name: "GRVT".into(),
-            market_type: "Perp DEX".into(),
-            status: venue_status("grvt", s.grvt_enabled || account_enabled("grvt")).into(),
-            latency_ms: probe_ms("grvt"),
-            fee_bps: 2.0,
-        },
-        VenueStatusDto {
-            id: "edgex".into(),
-            name: "edgeX".into(),
-            market_type: "StarkEx Perp DEX".into(),
-            status: venue_status("edgex", s.edgex_enabled || account_enabled("edgex")).into(),
-            latency_ms: probe_ms("edgex"),
-            fee_bps: 4.5,
-        },
-        VenueStatusDto {
             id: "binance".into(),
             name: "Binance".into(),
             market_type: "CEX Spot & Perp".into(),
@@ -1135,45 +1044,6 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             latency_ms: probe_ms("ig"),
             fee_bps: 5.0,
         },
-        VenueStatusDto {
-            id: "variational".into(),
-            name: "Variational".into(),
-            market_type: "Perp DEX (Read-Only)".into(),
-            status: venue_status(
-                "variational",
-                s.variational_enabled || account_enabled("variational"),
-            )
-            .into(),
-            latency_ms: probe_ms("variational"),
-            fee_bps: 0.0,
-        },
-        // Long-tail perp venues (extended_venues.rs, paper read-only).
-        // Status is authoritative: READ_ONLY iff get_venues admits the
-        // venue, UNSUPPORTED for modeled-but-not-admitted venues, OFFLINE
-        // when disabled. GMX V2 is prices-only (no orderbook by design).
-        VenueStatusDto { id: "dydx".into(), name: "dYdX Chain".into(), market_type: "L1 Perp DEX".into(), status: venue_status("dydx", s.dydx_enabled || account_enabled("dydx")).into(), latency_ms: probe_ms("dydx"), fee_bps: 2.0 },
-        VenueStatusDto { id: "paradex".into(), name: "Paradex".into(), market_type: "Starknet Perp DEX".into(), status: venue_status("paradex", s.paradex_enabled || account_enabled("paradex")).into(), latency_ms: probe_ms("paradex"), fee_bps: 2.0 },
-        VenueStatusDto { id: "gmx".into(), name: "GMX V2".into(), market_type: "GLV AMM Perps (Prices-Only)".into(), status: venue_status("gmx", s.gmx_enabled || account_enabled("gmx")).into(), latency_ms: probe_ms("gmx"), fee_bps: 5.0 },
-        VenueStatusDto { id: "apex".into(), name: "ApeX Omni".into(), market_type: "Perp DEX".into(), status: venue_status("apex", s.apex_enabled || account_enabled("apex")).into(), latency_ms: probe_ms("apex"), fee_bps: 2.0 },
-        VenueStatusDto { id: "extended".into(), name: "Extended".into(), market_type: "Perp DEX".into(), status: venue_status("extended", s.extended_enabled || account_enabled("extended")).into(), latency_ms: probe_ms("extended"), fee_bps: 2.0 },
-        VenueStatusDto { id: "derive".into(), name: "Derive".into(), market_type: "Perp DEX".into(), status: venue_status("derive", s.derive_enabled || account_enabled("derive")).into(), latency_ms: probe_ms("derive"), fee_bps: 2.0 },
-        VenueStatusDto { id: "standx".into(), name: "StandX".into(), market_type: "Perp DEX".into(), status: venue_status("standx", s.standx_enabled || account_enabled("standx")).into(), latency_ms: probe_ms("standx"), fee_bps: 3.0 },
-        VenueStatusDto { id: "helix".into(), name: "Helix".into(), market_type: "Cosmos Perp DEX".into(), status: venue_status("helix", s.helix_enabled || account_enabled("helix")).into(), latency_ms: probe_ms("helix"), fee_bps: 2.0 },
-        VenueStatusDto { id: "aevo".into(), name: "Aevo".into(), market_type: "Perp DEX".into(), status: venue_status("aevo", s.aevo_enabled || account_enabled("aevo")).into(), latency_ms: probe_ms("aevo"), fee_bps: 3.0 },
-        VenueStatusDto { id: "vest".into(), name: "Vest".into(), market_type: "Perp DEX".into(), status: venue_status("vest", s.vest_enabled || account_enabled("vest")).into(), latency_ms: probe_ms("vest"), fee_bps: 3.0 },
-        VenueStatusDto { id: "antarctic".into(), name: "Antarctic".into(), market_type: "Perp DEX".into(), status: venue_status("antarctic", s.antarctic_enabled || account_enabled("antarctic")).into(), latency_ms: probe_ms("antarctic"), fee_bps: 3.0 },
-        VenueStatusDto { id: "evedex".into(), name: "EVEDEX".into(), market_type: "Perp DEX".into(), status: venue_status("evedex", s.evedex_enabled || account_enabled("evedex")).into(), latency_ms: probe_ms("evedex"), fee_bps: 3.0 },
-        VenueStatusDto { id: "bulk".into(), name: "BULK".into(), market_type: "Perp DEX".into(), status: venue_status("bulk", s.bulk_enabled || account_enabled("bulk")).into(), latency_ms: probe_ms("bulk"), fee_bps: 3.0 },
-        VenueStatusDto { id: "qfex".into(), name: "QFEX".into(), market_type: "Perp DEX".into(), status: venue_status("qfex", s.qfex_enabled || account_enabled("qfex")).into(), latency_ms: probe_ms("qfex"), fee_bps: 4.0 },
-        VenueStatusDto { id: "ostium".into(), name: "Ostium".into(), market_type: "Oracle Perp DEX".into(), status: venue_status("ostium", s.ostium_enabled || account_enabled("ostium")).into(), latency_ms: probe_ms("ostium"), fee_bps: 3.0 },
-        VenueStatusDto { id: "sodex".into(), name: "SoDEX".into(), market_type: "Perp DEX".into(), status: venue_status("sodex", s.sodex_enabled || account_enabled("sodex")).into(), latency_ms: probe_ms("sodex"), fee_bps: 3.0 },
-        VenueStatusDto { id: "alphax".into(), name: "AlphaX".into(), market_type: "Perp DEX".into(), status: venue_status("alphax", s.alphax_enabled || account_enabled("alphax")).into(), latency_ms: probe_ms("alphax"), fee_bps: 3.0 },
-        VenueStatusDto { id: "pacifica".into(), name: "Pacifica".into(), market_type: "Perp DEX".into(), status: venue_status("pacifica", s.pacifica_enabled || account_enabled("pacifica")).into(), latency_ms: probe_ms("pacifica"), fee_bps: 2.0 },
-        VenueStatusDto { id: "nado".into(), name: "Nado".into(), market_type: "Perp DEX".into(), status: venue_status("nado", s.nado_enabled || account_enabled("nado")).into(), latency_ms: probe_ms("nado"), fee_bps: 3.0 },
-        VenueStatusDto { id: "iotrader".into(), name: "IO Trader".into(), market_type: "Perp DEX".into(), status: venue_status("iotrader", s.iotrader_enabled || account_enabled("iotrader")).into(), latency_ms: probe_ms("iotrader"), fee_bps: 3.0 },
-        VenueStatusDto { id: "niza".into(), name: "Niza".into(), market_type: "Perp DEX".into(), status: venue_status("niza", s.niza_enabled || account_enabled("niza")).into(), latency_ms: probe_ms("niza"), fee_bps: 3.0 },
-        VenueStatusDto { id: "astros".into(), name: "Astros".into(), market_type: "Perp DEX".into(), status: venue_status("astros", s.astros_enabled || account_enabled("astros")).into(), latency_ms: probe_ms("astros"), fee_bps: 3.0 },
-        VenueStatusDto { id: "gatedex".into(), name: "Gate DEX".into(), market_type: "Perp DEX".into(), status: venue_status("gatedex", s.gatedex_enabled || account_enabled("gatedex")).into(), latency_ms: probe_ms("gatedex"), fee_bps: 3.0 },
     ];
 
     let current_drawdown = cb
@@ -5905,10 +5775,6 @@ pub fn save_engine_settings_impl(
             settings.arcus_enabled || account_enabled("arcus"),
         ),
         (
-            "popdex".into(),
-            settings.popdex_enabled || account_enabled("popdex"),
-        ),
-        (
             "kraken".into(),
             settings.kraken_enabled
                 || settings.kraken_spot_enabled
@@ -5961,45 +5827,6 @@ pub fn save_engine_settings_impl(
             "ig".into(),
             settings.ig_enabled || account_enabled("ig"),
         ),
-        (
-            "ondoperps".into(),
-            settings.ondoperps_enabled || account_enabled("ondoperps"),
-        ),
-        (
-            "grvt".into(),
-            settings.grvt_enabled || account_enabled("grvt"),
-        ),
-        (
-            "edgex".into(),
-            settings.edgex_enabled || account_enabled("edgex"),
-        ),
-        (
-            "variational".into(),
-            settings.variational_enabled || account_enabled("variational"),
-        ),
-        ("dydx".into(), settings.dydx_enabled || account_enabled("dydx")),
-        ("paradex".into(), settings.paradex_enabled || account_enabled("paradex")),
-        ("gmx".into(), settings.gmx_enabled || account_enabled("gmx")),
-        ("apex".into(), settings.apex_enabled || account_enabled("apex")),
-        ("extended".into(), settings.extended_enabled || account_enabled("extended")),
-        ("derive".into(), settings.derive_enabled || account_enabled("derive")),
-        ("standx".into(), settings.standx_enabled || account_enabled("standx")),
-        ("helix".into(), settings.helix_enabled || account_enabled("helix")),
-        ("aevo".into(), settings.aevo_enabled || account_enabled("aevo")),
-        ("vest".into(), settings.vest_enabled || account_enabled("vest")),
-        ("antarctic".into(), settings.antarctic_enabled || account_enabled("antarctic")),
-        ("evedex".into(), settings.evedex_enabled || account_enabled("evedex")),
-        ("bulk".into(), settings.bulk_enabled || account_enabled("bulk")),
-        ("qfex".into(), settings.qfex_enabled || account_enabled("qfex")),
-        ("ostium".into(), settings.ostium_enabled || account_enabled("ostium")),
-        ("sodex".into(), settings.sodex_enabled || account_enabled("sodex")),
-        ("alphax".into(), settings.alphax_enabled || account_enabled("alphax")),
-        ("pacifica".into(), settings.pacifica_enabled || account_enabled("pacifica")),
-        ("nado".into(), settings.nado_enabled || account_enabled("nado")),
-        ("iotrader".into(), settings.iotrader_enabled || account_enabled("iotrader")),
-        ("niza".into(), settings.niza_enabled || account_enabled("niza")),
-        ("astros".into(), settings.astros_enabled || account_enabled("astros")),
-        ("gatedex".into(), settings.gatedex_enabled || account_enabled("gatedex")),
     ];
     {
         let mut vault = state.vault.write();
@@ -8175,7 +8002,6 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
     "vanta",
     "robinhood",
     "arcus",
-    "popdex",
     "kraken_spot",
     "kraken_futures",
     "polymarket",
@@ -10045,7 +9871,6 @@ mod tests {
             s.vanta_enabled = true;
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
-            s.popdex_enabled = true;
         }
         state
     }
@@ -10104,7 +9929,7 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        assert_eq!(status.active_venues.len(), 43);
+        assert_eq!(status.active_venues.len(), 15);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);
@@ -10661,8 +10486,8 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Eight seeded paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 800000.0);
+        // Five seeded paper accounts at 100k equity each
+        assert_eq!(risk.total_portfolio_value_usd, 500000.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
@@ -12345,7 +12170,6 @@ mod tests {
             s.vanta_enabled = false;
             s.robinhood_enabled = false;
             s.arcus_enabled = false;
-            s.popdex_enabled = false;
         }
         // The hub only honors books fresher than 350ms; seeds from an
         // earlier phase must never be reused by a later phase.
@@ -12976,7 +12800,6 @@ mod tests {
             s.aster_enabled = true;
             s.hyperliquid_enabled = true;
             s.vanta_enabled = true;
-            s.ondoperps_enabled = true;
         }
 
         // 1. Vault locked -> live mode rejected
@@ -13031,10 +12854,6 @@ mod tests {
         assert!(!vanta_cap.has_credentials);
         assert!(!vanta_cap.live_ready);
 
-        let ondo_cap = caps.iter().find(|c| c.venue == "ondoperps").expect("ondo cap");
-        assert!(!ondo_cap.supports_live);
-        assert!(!ondo_cap.live_ready);
-
         // 6. Live mode successfully enabled
         let live_ok = set_live_mode_impl(true, &state).expect("enable live mode");
         assert!(live_ok);
@@ -13059,11 +12878,11 @@ mod tests {
         assert!(sim_err.is_err());
         assert!(sim_err.unwrap_err().contains("unauthenticated live credentials"));
 
-        // 7b. Route involving true read-only venue (Ondo Perps) fails closed in live mode with read-only
-        let ondo_err = execute_spatial_arbitrage_inner(
+        // 7b. Route involving true read-only venue (Decibel) fails closed in live mode
+        let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC",
             "aster",
-            "ondoperps",
+            "decibel",
             100.0,
             None,
             None,
@@ -13075,8 +12894,7 @@ mod tests {
             "futures",
             &state,
         ).await;
-        assert!(ondo_err.is_err());
-        assert!(ondo_err.unwrap_err().contains("read-only"));
+        assert!(decibel_err.is_err());
 
         // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
         let flat_res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
@@ -14229,7 +14047,6 @@ mod tests {
             vanta_enabled: true,
             robinhood_enabled: true,
             arcus_enabled: true,
-            popdex_enabled: true,
             kraken_enabled: true,
             kraken_spot_enabled: true,
             kraken_futures_enabled: true,
@@ -14502,8 +14319,8 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 800000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 800000.0);
+        assert_eq!(before.total_portfolio_value_usd, 500000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 500000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -15288,8 +15105,8 @@ mod tests {
         assert_eq!(state.circuit_breaker.day_start_equity(), dec!(1000000.0));
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        assert_eq!(risk.current_drawdown_usd, 200000.0);
-        assert_eq!(risk.drawdown_pct, 20.0);
+        assert_eq!(risk.current_drawdown_usd, 500000.0);
+        assert_eq!(risk.drawdown_pct, 50.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();

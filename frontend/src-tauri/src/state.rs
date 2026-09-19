@@ -6,19 +6,13 @@ use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
-use arbitrageur_exchanges::extended_venues::ExtendedVenueAdapter;
-use arbitrageur_exchanges::edgex::EdgeXAdapter;
-use arbitrageur_exchanges::grvt::GrvtAdapter;
 use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
-use arbitrageur_exchanges::ondoperps::OndoPerpsAdapter;
-use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrageur_exchanges::simulated::SimulatedExchange;
 use arbitrageur_exchanges::vanta::VantaAdapter;
-use arbitrageur_exchanges::variational::VariationalAdapter;
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
@@ -396,15 +390,6 @@ fn default_kraken_futures_url() -> String {
 fn default_arcus_url() -> String {
     "https://api.arcus.exchange".into()
 }
-fn default_popdex_url() -> String {
-    // PopDEX is in closed beta with no public API (api.popdex.trade is a
-    // parked domain). Empty = unconfigured; the operator pastes the beta
-    // base URL in Exchange Accounts. See PopDexAdapter docs.
-    String::new()
-}
-fn default_popdex_account_index() -> String {
-    "0".into()
-}
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct VenueBalanceInfo {
@@ -461,8 +446,6 @@ pub struct EngineSettingsDto {
     pub robinhood_enabled: bool,
     #[serde(default = "default_true")]
     pub arcus_enabled: bool,
-    #[serde(default = "default_true")]
-    pub popdex_enabled: bool,
     #[serde(default)]
     pub kraken_enabled: bool,
     #[serde(default)]
@@ -486,64 +469,7 @@ pub struct EngineSettingsDto {
     #[serde(default)]
     pub aster_enabled: bool,
     #[serde(default)]
-    pub ondoperps_enabled: bool,
-    #[serde(default)]
-    pub grvt_enabled: bool,
-    #[serde(default)]
-    pub edgex_enabled: bool,
-    #[serde(default)]
-    pub variational_enabled: bool,
-    #[serde(default)]
     pub coinbase_enabled: bool,
-    // Long-tail perp venues (extended_venues.rs, paper read-only).
-    // All default off; only ADMITTED_EXTENDED_VENUE_IDS are admitted by
-    // get_venues until a harness sweep confirms each payload shape.
-    #[serde(default)]
-    pub dydx_enabled: bool,
-    #[serde(default)]
-    pub paradex_enabled: bool,
-    #[serde(default)]
-    pub gmx_enabled: bool,
-    #[serde(default)]
-    pub apex_enabled: bool,
-    #[serde(default)]
-    pub extended_enabled: bool,
-    #[serde(default)]
-    pub derive_enabled: bool,
-    #[serde(default)]
-    pub standx_enabled: bool,
-    #[serde(default)]
-    pub helix_enabled: bool,
-    #[serde(default)]
-    pub aevo_enabled: bool,
-    #[serde(default)]
-    pub vest_enabled: bool,
-    #[serde(default)]
-    pub antarctic_enabled: bool,
-    #[serde(default)]
-    pub evedex_enabled: bool,
-    #[serde(default)]
-    pub bulk_enabled: bool,
-    #[serde(default)]
-    pub qfex_enabled: bool,
-    #[serde(default)]
-    pub ostium_enabled: bool,
-    #[serde(default)]
-    pub sodex_enabled: bool,
-    #[serde(default)]
-    pub alphax_enabled: bool,
-    #[serde(default)]
-    pub pacifica_enabled: bool,
-    #[serde(default)]
-    pub nado_enabled: bool,
-    #[serde(default)]
-    pub iotrader_enabled: bool,
-    #[serde(default)]
-    pub niza_enabled: bool,
-    #[serde(default)]
-    pub astros_enabled: bool,
-    #[serde(default)]
-    pub gatedex_enabled: bool,
 
     // Kraken Spot & Futures
     #[serde(default)]
@@ -631,13 +557,6 @@ pub struct EngineSettingsDto {
     #[serde(default = "default_arcus_url")]
     pub arcus_url: String,
 
-    // PopDEX Protocol
-    #[serde(default = "default_popdex_account_index")]
-    pub popdex_account_index: String,
-    #[serde(default)]
-    pub popdex_api_key: String,
-    #[serde(default = "default_popdex_url")]
-    pub popdex_url: String,
 
     // Vault-derived credential configuration state (venue IDs only, no secrets)
     #[serde(default)]
@@ -684,34 +603,7 @@ impl Default for EngineSettingsDto {
             binance_enabled: false,
             okx_enabled: false,
             aster_enabled: false,
-            ondoperps_enabled: false,
-            grvt_enabled: false,
-            edgex_enabled: false,
-            variational_enabled: false,
             coinbase_enabled: false,
-            dydx_enabled: false,
-            paradex_enabled: false,
-            gmx_enabled: false,
-            apex_enabled: false,
-            extended_enabled: false,
-            derive_enabled: false,
-            standx_enabled: false,
-            helix_enabled: false,
-            aevo_enabled: false,
-            vest_enabled: false,
-            antarctic_enabled: false,
-            evedex_enabled: false,
-            bulk_enabled: false,
-            qfex_enabled: false,
-            ostium_enabled: false,
-            sodex_enabled: false,
-            alphax_enabled: false,
-            pacifica_enabled: false,
-            nado_enabled: false,
-            iotrader_enabled: false,
-            niza_enabled: false,
-            astros_enabled: false,
-            gatedex_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
             kraken_futures_enabled: false,
@@ -753,10 +645,6 @@ impl Default for EngineSettingsDto {
             arcus_api_key: "".into(),
             arcus_secret: "".into(),
             arcus_url: default_arcus_url(),
-            popdex_enabled: false,
-            popdex_account_index: default_popdex_account_index(),
-            popdex_api_key: "".into(),
-            popdex_url: default_popdex_url(),
             configured_venues: Vec::new(),
             spread_samples_max_days: None,
             spread_samples_max_gb: None,
@@ -915,23 +803,6 @@ impl EngineSettingsDto {
             });
         }
 
-        let popdex_account_index = self.popdex_account_index.trim().parse::<u64>().ok();
-        if has_secret_value(&self.popdex_api_key) || has_index_value(&self.popdex_account_index) {
-            out.push(ExchangeCredentials {
-                venue: "popdex".into(),
-                profile_id: None,
-                api_key: self.popdex_api_key.trim().to_string(),
-                api_secret: String::new(),
-                passphrase: None,
-                account_id: None,
-                wallet_address: None,
-                account_index: popdex_account_index,
-                subaccount_index: None,
-                api_key_index: None,
-                private_key: None,
-                enabled: self.popdex_enabled,
-            });
-        }
 
         if has_secret_value(&self.kraken_spot_api_key) || has_secret_value(&self.kraken_spot_secret)
         {
@@ -1038,8 +909,6 @@ impl EngineSettingsDto {
         self.robinhood_subaccount_index = None;
         self.arcus_api_key.zeroize();
         self.arcus_secret.zeroize();
-        self.popdex_account_index.zeroize();
-        self.popdex_api_key.zeroize();
         self.polymarket_api_key.zeroize();
         self.polymarket_secret.zeroize();
         self.polymarket_passphrase.zeroize();
@@ -1063,57 +932,24 @@ pub struct AppEngineState {
     pub ex_vanta: Arc<SimulatedExchange>,
     pub ex_robinhood: Arc<SimulatedExchange>,
     pub ex_arcus: Arc<SimulatedExchange>,
-    pub ex_popdex: Arc<SimulatedExchange>,
     pub ex_aster: Arc<SimulatedExchange>,
-    pub ex_ondoperps: Arc<SimulatedExchange>,
-    pub ex_grvt: Arc<SimulatedExchange>,
-    pub ex_edgex: Arc<SimulatedExchange>,
     pub ex_binance: Arc<SimulatedExchange>,
     pub ex_okx: Arc<SimulatedExchange>,
     pub ex_coinbase: Arc<SimulatedExchange>,
     pub ex_kraken: Arc<SimulatedExchange>,
     pub ex_decibel: Arc<SimulatedExchange>,
-    pub ex_variational: Arc<SimulatedExchange>,
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
     pub live_robinhood: Arc<LighterAdapter>,
     pub live_arcus: Arc<ArcusAdapter>,
-    pub live_popdex: Arc<PopDexAdapter>,
     pub live_aster: Arc<AsterAdapter>,
-    pub live_ondoperps: Arc<OndoPerpsAdapter>,
-    pub live_grvt: Arc<GrvtAdapter>,
-    pub live_edgex: Arc<EdgeXAdapter>,
     pub live_binance: Arc<BinanceAdapter>,
     pub live_okx: Arc<OkxAdapter>,
     pub live_coinbase: Arc<CoinbaseAdapter>,
     pub live_kraken: Arc<KrakenAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
-    pub live_variational: Arc<VariationalAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
-    pub live_dydx: Arc<ExtendedVenueAdapter>,
-    pub live_paradex: Arc<ExtendedVenueAdapter>,
-    pub live_gmx: Arc<ExtendedVenueAdapter>,
-    pub live_apex: Arc<ExtendedVenueAdapter>,
-    pub live_extended: Arc<ExtendedVenueAdapter>,
-    pub live_derive: Arc<ExtendedVenueAdapter>,
-    pub live_standx: Arc<ExtendedVenueAdapter>,
-    pub live_helix: Arc<ExtendedVenueAdapter>,
-    pub live_aevo: Arc<ExtendedVenueAdapter>,
-    pub live_vest: Arc<ExtendedVenueAdapter>,
-    pub live_antarctic: Arc<ExtendedVenueAdapter>,
-    pub live_evedex: Arc<ExtendedVenueAdapter>,
-    pub live_bulk: Arc<ExtendedVenueAdapter>,
-    pub live_qfex: Arc<ExtendedVenueAdapter>,
-    pub live_ostium: Arc<ExtendedVenueAdapter>,
-    pub live_sodex: Arc<ExtendedVenueAdapter>,
-    pub live_alphax: Arc<ExtendedVenueAdapter>,
-    pub live_pacifica: Arc<ExtendedVenueAdapter>,
-    pub live_nado: Arc<ExtendedVenueAdapter>,
-    pub live_iotrader: Arc<ExtendedVenueAdapter>,
-    pub live_niza: Arc<ExtendedVenueAdapter>,
-    pub live_astros: Arc<ExtendedVenueAdapter>,
-    pub live_gatedex: Arc<ExtendedVenueAdapter>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -1186,40 +1022,12 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
             Some("vanta")
         }
         "aster" | "ast" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
-        "ondo" | "ondoperps" | "ondo perps" | "ondo perps (read-only)" => Some("ondoperps"),
-        "grvt" | "grvt (perp dex)" | "grvt (perp dex, read-only)" => Some("grvt"),
-        "edgex" | "edgx" | "edge_x" | "edgex (starkex)" | "edgex (starkex, read-only)" => Some("edgex"),
         "arcus" | "arc" | "arcus dex" | "arcus (fast clob)" | "arcus (perp dex)" => Some("arcus"),
-        "popdex" | "pop" | "popdex (hybrid)" | "popdex (solana dex)" => Some("popdex"),
         "binance" | "bnb" | "bin" | "binance futures" | "binance (perp)" => Some("binance"),
         "okx" | "okx swaps" | "okx (perp)" => Some("okx"),
         "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
-        "variational" | "var" | "variational (omni-perp)" => Some("variational"),
-        "dydx" | "dydx chain" | "dydx v4" => Some("dydx"),
-        "paradex" | "paradex (starknet)" => Some("paradex"),
-        "gmx" | "gmx v2" | "gmx perps" => Some("gmx"),
-        "apex" | "apex omni" => Some("apex"),
-        "extended" | "extended exchange" => Some("extended"),
-        "derive" | "derive (perps)" => Some("derive"),
-        "standx" | "stand x" => Some("standx"),
-        "helix" | "helix (injective)" => Some("helix"),
-        "aevo" | "aevo (perps)" => Some("aevo"),
-        "vest" | "vest exchange" => Some("vest"),
-        "antarctic" => Some("antarctic"),
-        "evedex" | "evedex (perps)" => Some("evedex"),
-        "bulk" | "bulk exchange" => Some("bulk"),
-        "qfex" => Some("qfex"),
-        "ostium" => Some("ostium"),
-        "sodex" | "sodex (futures)" => Some("sodex"),
-        "alphax" | "alphax (futures)" => Some("alphax"),
-        "pacifica" => Some("pacifica"),
-        "nado" => Some("nado"),
-        "iotrader" | "io trader" => Some("iotrader"),
-        "niza" | "niza.fun" | "niza (futures)" => Some("niza"),
-        "astros" => Some("astros"),
-        "gatedex" | "gate dex" => Some("gatedex"),
         _ => None,
     }
 }
@@ -1314,39 +1122,11 @@ impl AppEngineState {
             dec!(1.5),
             dec!(100000.0),
         ));
-        let ex_popdex = Arc::new(SimulatedExchange::new(
-            "popdex",
-            "PopDEX",
-            4,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
         let ex_aster = Arc::new(SimulatedExchange::new(
             "aster",
             "Aster",
             3,
             dec!(3.5),
-            dec!(100000.0),
-        ));
-        let ex_ondoperps = Arc::new(SimulatedExchange::new(
-            "ondoperps",
-            "Ondo Perps",
-            4,
-            dec!(3.5),
-            dec!(100000.0),
-        ));
-        let ex_grvt = Arc::new(SimulatedExchange::new(
-            "grvt",
-            "GRVT",
-            4,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
-        let ex_edgex = Arc::new(SimulatedExchange::new(
-            "edgex",
-            "edgeX",
-            4,
-            dec!(4.5),
             dec!(100000.0),
         ));
         let ex_binance = Arc::new(SimulatedExchange::new(
@@ -1384,13 +1164,6 @@ impl AppEngineState {
             dec!(2.5),
             dec!(100000.0),
         ));
-        let ex_variational = Arc::new(SimulatedExchange::new(
-            "variational",
-            "Variational",
-            4,
-            dec!(0.0),
-            dec!(100000.0),
-        ));
 
         // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
         // from live venue APIs once API credentials are configured by the user.
@@ -1407,41 +1180,12 @@ impl AppEngineState {
             "robinhood",
         ));
         let live_arcus = Arc::new(ArcusAdapter::new(None, None, None));
-        let live_popdex = Arc::new(PopDexAdapter::new(None, None, None));
         let live_aster = Arc::new(AsterAdapter::new(None, None, None));
-        let live_ondoperps = Arc::new(OndoPerpsAdapter::new(None));
-        let live_grvt = Arc::new(GrvtAdapter::new(None));
-        let live_edgex = Arc::new(EdgeXAdapter::new(None));
         let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
         let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
         let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
         let live_kraken = Arc::new(KrakenAdapter::new(None, None, None, None));
         let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
-        let live_variational = Arc::new(VariationalAdapter::new(None, None, None));
-        // Long-tail perp venues: public REST only, no credentials.
-        let live_dydx = Arc::new(ExtendedVenueAdapter::dydx(None));
-        let live_paradex = Arc::new(ExtendedVenueAdapter::paradex(None));
-        let live_gmx = Arc::new(ExtendedVenueAdapter::gmx(None));
-        let live_apex = Arc::new(ExtendedVenueAdapter::apex(None));
-        let live_extended = Arc::new(ExtendedVenueAdapter::extended(None));
-        let live_derive = Arc::new(ExtendedVenueAdapter::derive(None));
-        let live_standx = Arc::new(ExtendedVenueAdapter::standx(None));
-        let live_helix = Arc::new(ExtendedVenueAdapter::helix(None));
-        let live_aevo = Arc::new(ExtendedVenueAdapter::aevo(None));
-        let live_vest = Arc::new(ExtendedVenueAdapter::vest(None));
-        let live_antarctic = Arc::new(ExtendedVenueAdapter::antarctic(None));
-        let live_evedex = Arc::new(ExtendedVenueAdapter::evedex(None));
-        let live_bulk = Arc::new(ExtendedVenueAdapter::bulk(None));
-        let live_qfex = Arc::new(ExtendedVenueAdapter::qfex(None));
-        let live_ostium = Arc::new(ExtendedVenueAdapter::ostium(None));
-        let live_sodex = Arc::new(ExtendedVenueAdapter::sodex(None));
-        let live_alphax = Arc::new(ExtendedVenueAdapter::alphax(None));
-        let live_pacifica = Arc::new(ExtendedVenueAdapter::pacifica(None));
-        let live_nado = Arc::new(ExtendedVenueAdapter::nado(None));
-        let live_iotrader = Arc::new(ExtendedVenueAdapter::iotrader(None));
-        let live_niza = Arc::new(ExtendedVenueAdapter::niza(None));
-        let live_astros = Arc::new(ExtendedVenueAdapter::astros(None));
-        let live_gatedex = Arc::new(ExtendedVenueAdapter::gatedex(None));
         let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
         let market_data_hub = MarketDataHub::new(1024, 400);
@@ -1492,56 +1236,23 @@ impl AppEngineState {
             ex_vanta,
             ex_robinhood,
             ex_arcus,
-            ex_popdex,
             ex_aster,
-            ex_ondoperps,
-            ex_grvt,
-            ex_edgex,
             ex_binance,
             ex_okx,
             ex_coinbase,
             ex_kraken,
             ex_decibel,
-            ex_variational,
             live_hl,
             live_lighter,
             live_vanta,
             live_robinhood,
             live_arcus,
-            live_popdex,
             live_aster,
-            live_ondoperps,
-            live_grvt,
-            live_edgex,
             live_binance,
             live_okx,
             live_coinbase,
             live_kraken,
             live_decibel,
-            live_variational,
-            live_dydx,
-            live_paradex,
-            live_gmx,
-            live_apex,
-            live_extended,
-            live_derive,
-            live_standx,
-            live_helix,
-            live_aevo,
-            live_vest,
-            live_antarctic,
-            live_evedex,
-            live_bulk,
-            live_qfex,
-            live_ostium,
-            live_sodex,
-            live_alphax,
-            live_pacifica,
-            live_nado,
-            live_iotrader,
-            live_niza,
-            live_astros,
-            live_gatedex,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1595,34 +1306,6 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
-            let _ = self.live_popdex.update_credentials(None, None, None, None, None);
-            let _ = self.live_variational.update_credentials(None, None);
-            let _ = self.live_edgex.update_credentials(None, None);
-            let _ = self.live_grvt.update_credentials(None, None);
-            let _ = self.live_ondoperps.update_credentials(None, None);
-            for a in [
-                &self.live_dydx, &self.live_paradex, &self.live_gmx, &self.live_apex,
-                &self.live_extended, &self.live_derive, &self.live_standx, &self.live_helix,
-                &self.live_aevo, &self.live_vest, &self.live_antarctic, &self.live_evedex,
-                &self.live_bulk, &self.live_qfex, &self.live_ostium, &self.live_sodex,
-                &self.live_alphax, &self.live_pacifica, &self.live_nado, &self.live_iotrader,
-                &self.live_niza, &self.live_astros, &self.live_gatedex,
-            ] {
-                let _ = a.update_credentials(None, None);
-            }
-            let _ = self.live_edgex.update_credentials(None, None);
-            let _ = self.live_grvt.update_credentials(None, None);
-            let _ = self.live_ondoperps.update_credentials(None, None);
-            for a in [
-                &self.live_dydx, &self.live_paradex, &self.live_gmx, &self.live_apex,
-                &self.live_extended, &self.live_derive, &self.live_standx, &self.live_helix,
-                &self.live_aevo, &self.live_vest, &self.live_antarctic, &self.live_evedex,
-                &self.live_bulk, &self.live_qfex, &self.live_ostium, &self.live_sodex,
-                &self.live_alphax, &self.live_pacifica, &self.live_nado, &self.live_iotrader,
-                &self.live_niza, &self.live_astros, &self.live_gatedex,
-            ] {
-                let _ = a.update_credentials(None, None);
-            }
             return;
         }
 
@@ -1782,118 +1465,8 @@ impl AppEngineState {
                 decibel_pk,
             );
 
-            // PopDEX (closed beta): base URL from settings, key/secret +
-            // optional EVM wallet from the vault. The adapter normalizes
-            // dead placeholder hosts to unconfigured.
-            let popdex_base = {
-                let guards = self.settings.read();
-                let b = guards.popdex_url.trim().to_string();
-                if b.is_empty() { None } else { Some(b) }
-            };
-            let mut popdex_key = None;
-            let mut popdex_sec = None;
-            let mut popdex_wallet = None;
-            let mut popdex_pk = None;
-            if let Some(cred) = get_active_cred(&["popdex", "pop"]) {
-                popdex_key = Some(cred.api_key.clone()).filter(|k| !k.trim().is_empty());
-                popdex_sec = Some(cred.api_secret.clone()).filter(|k| !k.trim().is_empty());
-                popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                popdex_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) = self.live_popdex.update_credentials(
-                popdex_base,
-                popdex_key,
-                popdex_sec,
-                popdex_wallet,
-                popdex_pk,
-            ) {
-                tracing::warn!("PopDEX credential sync refused: {e}");
-            }
 
-            // Variational: no API-key flow exists; only an EVM wallet for the
-            // future RFQ-signing path. A private key alone is accepted (the
-            // address is derived and cross-checked when both are supplied).
-            let mut variational_wallet = None;
-            let mut variational_pk = None;
-            if let Some(cred) = get_active_cred(&["variational", "var"]) {
-                variational_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                variational_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) = self.live_variational.update_credentials(
-                variational_wallet,
-                variational_pk,
-            ) {
-                tracing::warn!("Variational credential sync refused: {e}");
-            }
 
-            // Wallet-direct preparation for venues with no API trading yet
-            // (edgeX, GRVT, Ondo Perps + all 23 long-tail perp venues):
-            // optional EVM wallet from the vault, parsed into a zeroizing
-            // signer. Execution stays fail-closed until each venue's
-            // signing flow is implemented and audited.
-            let mut edgex_wallet = None;
-            let mut edgex_pk = None;
-            if let Some(cred) = get_active_cred(&["edgex", "edge_x"]) {
-                edgex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                edgex_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) = self.live_edgex.update_credentials(edgex_wallet, edgex_pk) {
-                tracing::warn!("edgeX credential sync refused: {e}");
-            }
-            let mut grvt_wallet = None;
-            let mut grvt_pk = None;
-            if let Some(cred) = get_active_cred(&["grvt"]) {
-                grvt_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                grvt_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) = self.live_grvt.update_credentials(grvt_wallet, grvt_pk) {
-                tracing::warn!("GRVT credential sync refused: {e}");
-            }
-            let mut ondo_wallet = None;
-            let mut ondo_pk = None;
-            if let Some(cred) = get_active_cred(&["ondoperps", "ondo", "ondo_perps"]) {
-                ondo_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                ondo_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) = self.live_ondoperps.update_credentials(ondo_wallet, ondo_pk) {
-                tracing::warn!("Ondo Perps credential sync refused: {e}");
-            }
-            let extended_adapters: [(&[&str], &std::sync::Arc<arbitrageur_exchanges::extended_venues::ExtendedVenueAdapter>); 23] = [
-                (&["dydx"], &self.live_dydx),
-                (&["paradex"], &self.live_paradex),
-                (&["gmx"], &self.live_gmx),
-                (&["apex"], &self.live_apex),
-                (&["extended"], &self.live_extended),
-                (&["derive"], &self.live_derive),
-                (&["standx"], &self.live_standx),
-                (&["helix"], &self.live_helix),
-                (&["aevo"], &self.live_aevo),
-                (&["vest"], &self.live_vest),
-                (&["antarctic"], &self.live_antarctic),
-                (&["evedex"], &self.live_evedex),
-                (&["bulk"], &self.live_bulk),
-                (&["qfex"], &self.live_qfex),
-                (&["ostium"], &self.live_ostium),
-                (&["sodex"], &self.live_sodex),
-                (&["alphax"], &self.live_alphax),
-                (&["pacifica"], &self.live_pacifica),
-                (&["nado"], &self.live_nado),
-                (&["iotrader"], &self.live_iotrader),
-                (&["niza"], &self.live_niza),
-                (&["astros"], &self.live_astros),
-                (&["gatedex"], &self.live_gatedex),
-            ];
-            for (aliases, adapter) in extended_adapters {
-                let mut wallet = None;
-                let mut pk = None;
-                if let Some(cred) = get_active_cred(aliases) {
-                    wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                    pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-                }
-                if let Err(e) = adapter.update_credentials(wallet, pk) {
-                    tracing::warn!("{} credential sync refused: {e}", aliases[0]);
-                }
-            }
         } else {
             self.live_aster.update_credentials(None, None);
             self.live_hl.update_credentials(None, None);
@@ -1905,8 +1478,6 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
-            let _ = self.live_popdex.update_credentials(None, None, None, None, None);
-            let _ = self.live_variational.update_credentials(None, None);
         }
     }
 
@@ -1968,27 +1539,6 @@ impl AppEngineState {
                 self.live_aster.clone(),
             ));
         }
-        if s.ondoperps_enabled || account_enabled("ondoperps") {
-            list.push((
-                "ondoperps",
-                "Ondo Perps",
-                self.live_ondoperps.clone(),
-            ));
-        }
-        if s.grvt_enabled || account_enabled("grvt") {
-            list.push((
-                "grvt",
-                "GRVT",
-                self.live_grvt.clone(),
-            ));
-        }
-        if s.edgex_enabled || account_enabled("edgex") {
-            list.push((
-                "edgex",
-                "edgeX",
-                self.live_edgex.clone(),
-            ));
-        }
         if s.binance_enabled || account_enabled("binance") {
             list.push((
                 "binance",
@@ -2023,94 +1573,6 @@ impl AppEngineState {
                 "Decibel",
                 self.live_decibel.clone(),
             ));
-        }
-        // Variational Omni: public read-only stats API, no secrets needed.
-        // Order paths fail closed (RFQ + on-chain settlement, wallet-gated).
-        if s.variational_enabled || account_enabled("variational") {
-            list.push((
-                "variational",
-                "Variational",
-                self.live_variational.clone(),
-            ));
-        }
-        // Long-tail perp venues (extended_venues.rs, paper read-only, no
-        // credentials). All 23 are admitted per operator request; doc-shaped
-        // payloads fail closed per entry so a wrong doc guess degrades to
-        // venue errors, never bad data. GMX V2 is prices-only (GLV AMM has
-        // no orderbook) and is excluded from spread-monitor venue pairs
-        // downstream.
-        if s.dydx_enabled || account_enabled("dydx") {
-            list.push(("dydx", "dYdX Chain", self.live_dydx.clone()));
-        }
-        if s.paradex_enabled || account_enabled("paradex") {
-            list.push(("paradex", "Paradex", self.live_paradex.clone()));
-        }
-        if s.gmx_enabled || account_enabled("gmx") {
-            list.push(("gmx", "GMX V2", self.live_gmx.clone()));
-        }
-        if s.apex_enabled || account_enabled("apex") {
-            list.push(("apex", "ApeX Omni", self.live_apex.clone()));
-        }
-        if s.extended_enabled || account_enabled("extended") {
-            list.push(("extended", "Extended", self.live_extended.clone()));
-        }
-        if s.derive_enabled || account_enabled("derive") {
-            list.push(("derive", "Derive", self.live_derive.clone()));
-        }
-        if s.standx_enabled || account_enabled("standx") {
-            list.push(("standx", "StandX", self.live_standx.clone()));
-        }
-        if s.helix_enabled || account_enabled("helix") {
-            list.push(("helix", "Helix", self.live_helix.clone()));
-        }
-        if s.aevo_enabled || account_enabled("aevo") {
-            list.push(("aevo", "Aevo", self.live_aevo.clone()));
-        }
-        // Remaining long-tail venues: admitted paper-only per operator
-        // request (doc-shaped payloads; parsers fail closed per entry).
-        // High-caution venues (Ostium, Pacifica, AlphaX, QFEX) stay
-        // paper-only regardless — see docs/EXCHANGES.md section 10.
-        if s.vest_enabled || account_enabled("vest") {
-            list.push(("vest", "Vest", self.live_vest.clone()));
-        }
-        if s.antarctic_enabled || account_enabled("antarctic") {
-            list.push(("antarctic", "Antarctic", self.live_antarctic.clone()));
-        }
-        if s.evedex_enabled || account_enabled("evedex") {
-            list.push(("evedex", "EVEDEX", self.live_evedex.clone()));
-        }
-        if s.bulk_enabled || account_enabled("bulk") {
-            list.push(("bulk", "BULK", self.live_bulk.clone()));
-        }
-        if s.qfex_enabled || account_enabled("qfex") {
-            list.push(("qfex", "QFEX", self.live_qfex.clone()));
-        }
-        if s.ostium_enabled || account_enabled("ostium") {
-            list.push(("ostium", "Ostium", self.live_ostium.clone()));
-        }
-        if s.sodex_enabled || account_enabled("sodex") {
-            list.push(("sodex", "SoDEX", self.live_sodex.clone()));
-        }
-        if s.alphax_enabled || account_enabled("alphax") {
-            list.push(("alphax", "AlphaX", self.live_alphax.clone()));
-        }
-        if s.pacifica_enabled || account_enabled("pacifica") {
-            list.push(("pacifica", "Pacifica", self.live_pacifica.clone()));
-        }
-        if s.nado_enabled || account_enabled("nado") {
-            list.push(("nado", "Nado", self.live_nado.clone()));
-        }
-        if s.iotrader_enabled || account_enabled("iotrader") {
-            list.push(("iotrader", "IO Trader", self.live_iotrader.clone()));
-        }
-        if s.niza_enabled || account_enabled("niza") {
-            list.push(("niza", "Niza", self.live_niza.clone()));
-        }
-        if s.astros_enabled || account_enabled("astros") {
-            list.push(("astros", "Astros", self.live_astros.clone()));
-        }
-        if s.gatedex_enabled || account_enabled("gatedex") {
-            list.push(("gatedex", "Gate DEX", self.live_gatedex.clone()));
         }
         list
     }
@@ -2148,15 +1610,11 @@ impl AppEngineState {
             "robinhood" => Some(self.ex_robinhood.clone()),
             "vanta" => Some(self.ex_vanta.clone()),
             "aster" => Some(self.ex_aster.clone()),
-            "ondoperps" => Some(self.ex_ondoperps.clone()),
-            "grvt" => Some(self.ex_grvt.clone()),
-            "edgex" => Some(self.ex_edgex.clone()),
             "binance" => Some(self.ex_binance.clone()),
             "okx" => Some(self.ex_okx.clone()),
             "coinbase" => Some(self.ex_coinbase.clone()),
             "kraken" => Some(self.ex_kraken.clone()),
             "decibel" => Some(self.ex_decibel.clone()),
-            "variational" => Some(self.ex_variational.clone()),
             _ => None,
         }
     }
@@ -2179,9 +1637,6 @@ impl AppEngineState {
             ("robinhood", self.ex_robinhood.clone()),
             ("vanta", self.ex_vanta.clone()),
             ("aster", self.ex_aster.clone()),
-            ("ondoperps", self.ex_ondoperps.clone()),
-            ("grvt", self.ex_grvt.clone()),
-            ("edgex", self.ex_edgex.clone()),
         ]
     }
 }
@@ -2301,52 +1756,39 @@ mod tests {
             s.vanta_enabled = true;
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
-            s.popdex_enabled = true;
             s.polymarket_enabled = true;
             s.kalshi_enabled = true;
             s.aster_enabled = true;
-            s.ondoperps_enabled = true;
-            s.grvt_enabled = true;
-            s.edgex_enabled = true;
         }
         let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 8);
+        assert_eq!(venues_paper.len(), 5);
         assert_eq!(venues_paper[0].0, "hyperliquid");
         assert_eq!(venues_paper[1].0, "lighter");
         assert_eq!(venues_paper[2].0, "robinhood");
         assert_eq!(venues_paper[3].0, "vanta");
         assert_eq!(venues_paper[4].0, "aster");
-        assert_eq!(venues_paper[5].0, "ondoperps");
-        assert_eq!(venues_paper[6].0, "grvt");
-        assert_eq!(venues_paper[6].1, "GRVT");
-        assert_eq!(venues_paper[7].0, "edgex");
-        assert_eq!(venues_paper[7].1, "edgeX");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
         assert!(state.get_adapter("robinhood").is_some());
         assert!(state.get_adapter("vanta").is_some());
         assert!(state.get_adapter("aster").is_some());
-        assert!(state.get_adapter("ondo").is_some());
-        assert!(state.get_adapter("ondoperps").is_some());
         assert!(state.get_adapter("arcus").is_none());
+        // Removed venues without native trading API stay unresolvable.
         assert!(state.get_adapter("popdex").is_none());
-        // GRVT + edgeX are admitted to paper read-only with live-verified
-        // parsing; every documented alias resolves to an adapter and a
-        // paper exchange.
-        assert!(state.get_adapter("grvt").is_some());
-        assert!(state.get_adapter("GRVT (Perp DEX, Read-Only)").is_some());
-        assert!(state.get_adapter("edgex").is_some());
-        assert!(state.get_adapter("edge_x").is_some());
-        assert!(state.get_adapter("edgeX (StarkEx, Read-Only)").is_some());
+        assert!(state.get_adapter("ondoperps").is_none());
+        assert!(state.get_adapter("ondo").is_none());
+        assert!(state.get_adapter("grvt").is_none());
+        assert!(state.get_adapter("edgex").is_none());
+        assert!(state.get_adapter("variational").is_none());
+        assert!(state.get_adapter("dydx").is_none());
         assert!(state.get_adapter("polymarket").is_none());
         assert!(state.get_adapter("kalshi").is_none());
         assert!(state.get_adapter("nonexistent").is_none());
         assert!(state.get_paper_exchange("aster").is_some());
-        assert!(state.get_paper_exchange("ondoperps").is_some());
-        assert!(state.get_paper_exchange("grvt").is_some());
-        assert!(state.get_paper_exchange("edgex").is_some());
-        assert!(state.get_paper_exchange("edge_x").is_some());
+        assert!(state.get_paper_exchange("ondoperps").is_none());
+        assert!(state.get_paper_exchange("grvt").is_none());
+        assert!(state.get_paper_exchange("edgex").is_none());
 
         *state.is_live_mode.write() = true;
         // In live mode, enabled venues remain admitted for market data streaming,
@@ -2355,7 +1797,6 @@ mod tests {
         assert!(state.get_adapter("hyperliquid").unwrap().supports_live_execution());
         assert!(state.get_adapter("aster").unwrap().supports_live_execution());
         assert!(state.get_adapter("vanta").unwrap().supports_live_execution());
-        assert!(!state.get_adapter("ondoperps").unwrap().supports_live_execution());
         assert!(!state.get_adapter("hyperliquid").unwrap().has_live_credentials());
     }
 

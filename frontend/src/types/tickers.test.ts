@@ -32,17 +32,13 @@ test("getEnabledConnectedVenueCodes returns enabled supported venues in paper mo
     vanta_orderly_key: "ed25519:validkey",
     robinhood_enabled: true,
     arcus_enabled: true, // scaffold only, unsupported
-    popdex_enabled: true, // parked domain, unsupported
     aster_enabled: true,
-    ondoperps_enabled: true,
-    grvt_enabled: true, // admitted to paper read-only
-    edgex_enabled: true, // admitted to paper read-only
     kraken_enabled: true, // admitted to paper read-only
     polymarket_enabled: true, // unsupported
     kalshi_enabled: true, // unsupported
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "EDGX", "GRVT", "HL", "KRK", "LGT", "ONDO", "RH", "VNT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "HL", "KRK", "LGT", "RH", "VNT"]);
 });
 
 test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, CB, DCB)", () => {

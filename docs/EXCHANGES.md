@@ -1,6 +1,15 @@
 # Exchange Integrations Guide
 
-> Living venue reference — includes no-API venues (Variational live market data, PopDEX beta model) and §6 transfer-rails/rebalance research. Re-check fee figures on venue pages before moving size.
+> Living venue reference — native-API venues only (2026-09-19 cleanup removed all
+> venues without native trading-API support: PopDEX closed beta, Variational RFQ-only,
+> edgeX, GRVT, Ondo Perps and the 23 long-tail paper venues). §6 transfer-rails/rebalance
+> research. Re-check fee figures on venue pages before moving size.
+
+> NOTE (2026-09-19): sections below mentioning PopDEX / Variational / edgeX / GRVT /
+> Ondo Perps / dYdX / Paradex / long-tail venues are historical research notes kept for
+> context. Those venues are no longer admitted, listed, or credentialed anywhere in the
+> system (backend adapters, EngineSettings, ExchangeAccounts, logos, fee tables all removed).
+> Restoring one means re-adding a native-API adapter — see git snapshot `102e40f` (pre-removal).
 
 
 This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrageur** platform.

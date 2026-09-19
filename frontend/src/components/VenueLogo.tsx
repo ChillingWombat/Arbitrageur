@@ -9,23 +9,6 @@ interface VenueLogoProps {
   size?: number;
 }
 
-/**
- * Venues with no verifiable official mark. alphax/iotrader/sodex resolve to
- * parked domains; gatedex has no such venue (DNS-fails, unverified); niza
- * points at a memecoin site with no futures product. They render the
- * initials badge instead of an <img> rather than a fabricated logo.
- */
-const NO_LOGO_VENUES = new Set(["alphax", "iotrader", "sodex", "gatedex", "niza"]);
-
-/** Curated brand hues (0-360) for the initials fallback badges. */
-const BRAND_HUE: Record<string, number> = {
-  alphax: 210,
-  iotrader: 200,
-  sodex: 190,
-  gatedex: 150,
-  niza: 45,
-};
-
 function hashHue(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) {
@@ -53,7 +36,7 @@ function initialsOf(name: string): string {
 export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }) => {
   const [failed, setFailed] = useState(false);
   const fallback = useMemo(() => {
-    const hue = BRAND_HUE[venueId] ?? hashHue(venueId);
+    const hue = hashHue(venueId);
     return {
       initials: initialsOf(name),
       bg: `hsl(${hue}, 45%, 88%)`,
@@ -76,7 +59,7 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
     backgroundColor: "#fff",
   };
 
-  if (!failed && !NO_LOGO_VENUES.has(venueId)) {
+  if (!failed) {
     // `contain` + inset padding keeps the mark centered, fully visible, and
     // clear of the round edge (gap = white bed). `cover` cropped edge-to-edge
     // marks and clipped oversized art — the source of the "too large / not
@@ -97,11 +80,10 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
     );
   }
 
-  const noMark = NO_LOGO_VENUES.has(venueId);
   return (
     <span
       aria-hidden="true"
-      title={noMark ? `${name} — no official mark published, initials badge` : name}
+      title={name}
       className="font-semibold"
       style={{
         ...style,

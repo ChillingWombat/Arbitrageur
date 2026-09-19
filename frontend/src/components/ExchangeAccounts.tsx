@@ -39,18 +39,6 @@ interface CredFieldSpec {
   hint?: string;
 }
 
-/**
- * Wallet-direct preparation fields for every venue with no API trading yet
- * (edgeX, GRVT, Ondo Perps + all long-tail perp venues). Both optional, so
- * the enable switch is never blocked — market data stays public read-only
- * and live execution stays disabled until each venue's signing flow is
- * implemented and audited. Keys are vault-encrypted and never leave host.
- */
-const WALLET_DIRECT_FIELDS: CredFieldSpec[] = [
-  { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", optional: true, hint: "Optional. Main funding address (public). Never paste its private key — only the agent key below." },
-  { key: "privateKey", label: "Agent Private Key Only (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. ONLY the delegated agent key. Vault-encrypted, never leaves this host. Execution stays off until audited." },
-];
-
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Arcus: Ed25519 keypair generated + registered via the exchange (docs.arcus.xyz)
   arcus: [
@@ -88,17 +76,6 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "API Key", secret: true },
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
-  ],
-  // PopDEX (closed beta on Morph): wallet-direct model. Main address = your PopDEX account;
-  // Private Key = your EVM key (or a separate agent/delegate key if your beta grant issued one —
-  // the agent signs instead of the main key, which stays in the vault). Optional API Token/Secret
-  // = beta REST pair if granted. Beta Base URL is set in the venue panel above (Engine Settings
-  // → Exchanges → PopDEX); market data has no public endpoint until beta creds exist.
-  popdex: [
-    { key: "walletAddress", label: "Trading Wallet Address (Morph)", placeholder: "0x...", hint: "Your PopDEX trading wallet on Morph (public 0x...). PopDEX has no agent/delegate system — use a dedicated trading wallet, never your main vault key." },
-    { key: "privateKey", label: "Trading Wallet Private Key (EVM)", secret: true, placeholder: "0x...", hint: "Key for the dedicated trading wallet above (address must match). Vault-encrypted, never leaves this host. There is no agent-key option on PopDEX — never paste a main vault key." },
-    { key: "apiKey", label: "API Token", secret: true, optional: true, hint: "Optional. Beta REST token if PopDEX granted you one. Leave blank for wallet-only mode." },
-    { key: "apiSecret", label: "API Secret", secret: true, optional: true, hint: "Optional. Beta API secret if issued alongside the token. Leave blank otherwise." },
   ],
   // Robinhood Chain is a Lighter deployment (apidocs.rh.lighter.xyz): same
   // credential scheme — account_index + api_key_index + API private key.
@@ -170,49 +147,6 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "V1 API Key", secret: true, optional: true },
     { key: "apiSecret", label: "V1 API Secret", secret: true, optional: true },
   ],
-  // edgeX / GRVT / Ondo Perps: public read-only feeds need no API credentials.
-  // Wallet-direct preparation (optional EVM key, vault-encrypted) is offered
-  // since these venues expose no API-key trading; execution stays off until
-  // each venue's signing flow is implemented and audited.
-  edgex: WALLET_DIRECT_FIELDS,
-  grvt: WALLET_DIRECT_FIELDS,
-  ondoperps: WALLET_DIRECT_FIELDS,
-  // Long-tail perp venues (extended_venues.rs): public read-only feeds need
-  // no API credentials. Same wallet-direct preparation pattern as above —
-  // optional EVM key, vault-encrypted; paper read-only until each venue's
-  // signing flow is implemented and audited.
-  dydx: WALLET_DIRECT_FIELDS,
-  paradex: WALLET_DIRECT_FIELDS,
-  gmx: WALLET_DIRECT_FIELDS,
-  apex: WALLET_DIRECT_FIELDS,
-  extended: WALLET_DIRECT_FIELDS,
-  derive: WALLET_DIRECT_FIELDS,
-  standx: WALLET_DIRECT_FIELDS,
-  helix: WALLET_DIRECT_FIELDS,
-  aevo: WALLET_DIRECT_FIELDS,
-  vest: WALLET_DIRECT_FIELDS,
-  antarctic: WALLET_DIRECT_FIELDS,
-  evedex: WALLET_DIRECT_FIELDS,
-  bulk: WALLET_DIRECT_FIELDS,
-  qfex: WALLET_DIRECT_FIELDS,
-  ostium: WALLET_DIRECT_FIELDS,
-  sodex: WALLET_DIRECT_FIELDS,
-  alphax: WALLET_DIRECT_FIELDS,
-  pacifica: WALLET_DIRECT_FIELDS,
-  nado: WALLET_DIRECT_FIELDS,
-  iotrader: WALLET_DIRECT_FIELDS,
-  niza: WALLET_DIRECT_FIELDS,
-  astros: WALLET_DIRECT_FIELDS,
-  gatedex: WALLET_DIRECT_FIELDS,
-  // Variational Omni: market data is public (no credentials needed).
-  // There is no API-token trading — orders are RFQ quotes settled on-chain
-  // on Arbitrum, signed by a locally-held EVM key (vault-encrypted, never
-  // leaves this host). Paste the wallet now to prepare; execution stays
-  // disabled until the RFQ flow is implemented and audited.
-  variational: [
-    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true, hint: "Optional. Dedicated Arbitrum trading EOA holding USDC (public). Omni has no agent system — just connect wallet in app. Leave blank for read-only." },
-    { key: "privateKey", label: "Trading Wallet Private Key (EVM)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. Key for the dedicated trading wallet above (address must match). Vault-encrypted, never leaves this host. Execution stays off until audited." },
-  ],
   // Coinbase Advanced Trade (CDP): API key name + EC private key (PEM)
   coinbase: [
     { key: "apiKey", label: "API Key Name", placeholder: "organizations/{org}/apiKeys/{keyId}" },
@@ -228,43 +162,15 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   kraken_futures: "Kraken Futures",
   lighter: "Lighter",
   polymarket: "Polymarket",
-  popdex: "PopDEX",
   robinhood: "Robinhood Lighter",
   vanta: "Vanta",
   decibel: "Decibel",
-  edgex: "edgeX",
-  grvt: "GRVT",
   ibkr: "Interactive Brokers",
   ig: "IG Trading",
   binance: "Binance",
   okx: "OKX",
-  ondoperps: "Ondo Perps",
   aster: "Aster",
-  variational: "Variational",
   coinbase: "Coinbase",
-  dydx: "dYdX Chain",
-  paradex: "Paradex",
-  gmx: "GMX V2",
-  apex: "ApeX Omni",
-  extended: "Extended",
-  derive: "Derive",
-  standx: "StandX",
-  helix: "Helix",
-  aevo: "Aevo",
-  vest: "Vest",
-  antarctic: "Antarctic",
-  evedex: "EVEDEX",
-  bulk: "BULK",
-  qfex: "QFEX",
-  ostium: "Ostium",
-  sodex: "SoDEX",
-  alphax: "AlphaX",
-  pacifica: "Pacifica",
-  nado: "Nado",
-  iotrader: "IO Trader",
-  niza: "Niza",
-  astros: "Astros",
-  gatedex: "Gate DEX",
 };
 
 const venueDisplay = (v: string) => ACCOUNT_VENUE_DISPLAY[v] ?? v;
@@ -276,8 +182,6 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   binance: "binance_enabled",
   coinbase: "coinbase_enabled",
   decibel: "decibel_enabled",
-  edgex: "edgex_enabled",
-  grvt: "grvt_enabled",
   hyperliquid: "hyperliquid_enabled",
   ibkr: "ibkr_enabled",
   ig: "ig_enabled",
@@ -286,35 +190,9 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   kraken_spot: "kraken_spot_enabled",
   lighter: "lighter_enabled",
   okx: "okx_enabled",
-  ondoperps: "ondoperps_enabled",
   polymarket: "polymarket_enabled",
-  popdex: "popdex_enabled",
   robinhood: "robinhood_enabled",
   vanta: "vanta_enabled",
-  variational: "variational_enabled",
-  dydx: "dydx_enabled",
-  paradex: "paradex_enabled",
-  gmx: "gmx_enabled",
-  apex: "apex_enabled",
-  extended: "extended_enabled",
-  derive: "derive_enabled",
-  standx: "standx_enabled",
-  helix: "helix_enabled",
-  aevo: "aevo_enabled",
-  vest: "vest_enabled",
-  antarctic: "antarctic_enabled",
-  evedex: "evedex_enabled",
-  bulk: "bulk_enabled",
-  qfex: "qfex_enabled",
-  ostium: "ostium_enabled",
-  sodex: "sodex_enabled",
-  alphax: "alphax_enabled",
-  pacifica: "pacifica_enabled",
-  nado: "nado_enabled",
-  iotrader: "iotrader_enabled",
-  niza: "niza_enabled",
-  astros: "astros_enabled",
-  gatedex: "gatedex_enabled",
 };
 
 /**

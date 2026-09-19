@@ -28,7 +28,7 @@ is disabled backend-wide and every adapter fails closed when unconfigured.
 | Order | Crate / file | What it does | Key symbol to read first |
 |---|---|---|---|
 | 1 | `crates/arbitrageur-math/src/` | Pure quant: funding APR/APY, capacity tiers, `book_gradient` (marginal bps/$1k), win probability | `book_gradient.rs::entry_gradient` |
-| 2 | `crates/arbitrageur-exchanges/src/` | One adapter per venue + `wallet.rs` (EVM signer) + `variational.rs` / `popdex.rs` (no-API venues) | `lib.rs` (adapter trait), `wallet.rs::EvmWalletSigner` |
+| 2 | `crates/arbitrageur-exchanges/src/` | One adapter per venue with native trading-API support (no-API venues removed 2026-09-19: popdex/variational/edgex/grvt/ondoperps/extended_venues) | `lib.rs` (adapter trait) |
 | 3 | `crates/arbitrageur-strategy/src/` | Spread / funding-carry / basis evaluators incl. capacity + win-prob wiring | `evaluate_funding_carry` |
 | 4 | `crates/arbitrageur-execution/src/` | Paper executor only (native fn returns "unavailable" refusal) | paper fill path |
 | 5 | `crates/arbitrageur-risk/src/` | Circuit breaker, margin health, DeltaGuard neutrality | breaker + margin fns |
