@@ -306,7 +306,13 @@ through only after metadata confirms they name a tradable contract.
 
 One shared paper read-only adapter serves 23 long-tail perp venues through a
 per-venue spec table (public REST only, no auth; account / order / leverage
-paths fail closed; `supports_live_execution = false`). The user asked for two
+paths fail closed; `supports_live_execution = false`). Since 2026-09-19 every
+no-API venue (these 23 plus edgeX, GRVT, Ondo Perps — and earlier PopDEX,
+Variational, Decibel) also accepts an optional vault-encrypted EVM wallet
+(`update_credentials`, zeroizing signer, address-must-match-key) as
+wallet-direct preparation: keys sync on vault unlock and clear on lock, but
+live execution stays fail-closed until each venue's signing flow is
+implemented and audited. The user asked for two
 things per venue: (a) a working market-data adapter, and (b) a custody
 verdict — "can they take my money away if they shutdown, skip town, or go
 bankrupt". The table below is (b); the adapter status column is (a).

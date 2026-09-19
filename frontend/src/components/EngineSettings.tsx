@@ -1294,6 +1294,29 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             )}
 
+            {/* PopDEX beta base URL (venue-level: no public endpoint exists) */}
+            {selectedExchange === "popdex" && (
+              <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-2">
+                <label className="text-slate-800 font-bold block text-xs font-mono">
+                  Beta API Base URL
+                </label>
+                <p className="text-[11px] text-slate-500 font-sans leading-normal">
+                  PopDEX is in closed beta with no public market-data endpoint. Paste the beta
+                  API base URL from your grant here; it saves with the rest of this form.
+                  Empty means unconfigured — the venue stays inert and contributes no signals.
+                </p>
+                <input
+                  type="text"
+                  value={popdexUrl}
+                  onChange={(e) => setPopdexUrl(e.target.value)}
+                  placeholder="https://beta-api.popdex.example"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                />
+              </div>
+            )}
+
             {/* Standard Exchanges */}
             {selectedExchange !== "kraken" && (
               <VenueAccountsSection

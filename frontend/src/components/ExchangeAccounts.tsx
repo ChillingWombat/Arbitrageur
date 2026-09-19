@@ -89,13 +89,14 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
   ],
-  // PopDEX (closed beta on Morph): delegated agent model. Main address = your PopDEX account;
-  // Agent Private Key = a separate agent/delegate wallet if your beta grant issued one (the agent signs,
-  // the main key never leaves the vault). Optional API Token = beta REST token if granted; base URL
-  // lives in Engine Settings → PopDEX. Market data has no public endpoint until beta creds exist.
+  // PopDEX (closed beta on Morph): wallet-direct model. Main address = your PopDEX account;
+  // Private Key = your EVM key (or a separate agent/delegate key if your beta grant issued one —
+  // the agent signs instead of the main key, which stays in the vault). Optional API Token/Secret
+  // = beta REST pair if granted. Beta Base URL is set in the venue panel above (Engine Settings
+  // → Exchanges → PopDEX); market data has no public endpoint until beta creds exist.
   popdex: [
     { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", hint: "Your PopDEX main account address on Morph (0x...). Must match the agent key below." },
-    { key: "privateKey", label: "Agent Private Key (Authorized)", secret: true, placeholder: "0x...", hint: "Private key of the agent/delegate wallet from your beta grant, if one was issued. Signs instead of the main key; the main key stays in the vault." },
+    { key: "privateKey", label: "Wallet / Agent Private Key", secret: true, placeholder: "0x...", hint: "Your EVM private key, or the agent/delegate key if your beta grant issued one. Signs locally; the main key stays in the vault." },
     { key: "apiKey", label: "API Token", secret: true, optional: true, hint: "Optional. Beta REST token if PopDEX granted you one. Leave blank for wallet-only mode." },
     { key: "apiSecret", label: "API Secret", secret: true, optional: true, hint: "Optional. Beta API secret if issued alongside the token. Leave blank otherwise." },
   ],
