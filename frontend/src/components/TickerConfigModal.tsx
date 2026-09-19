@@ -626,8 +626,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           </div>
           <SwitchToggle
             size="sm"
-            label={value.enabled ? "ON" : "OFF"}
             checked={value.enabled}
+            ariaLabel="Passive limit unwind enabled"
             onChange={(on) => set({ enabled: on })}
           />
         </div>
@@ -1090,8 +1090,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       >
         <SwitchToggle
           size="sm"
-          label={fundingEnableBasis ? "ON" : "OFF"}
           checked={fundingEnableBasis}
+          ariaLabel="Basis trades enabled"
           onChange={setFundingEnableBasis}
         />
       </SettingRow>
@@ -1184,8 +1184,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       >
         <SwitchToggle
           size="sm"
-          label={fundingAutoRebalance ? "ON" : "OFF"}
           checked={fundingAutoRebalance}
+          ariaLabel="Auto-rebalance to neutral enabled"
           onChange={setFundingAutoRebalance}
         />
       </SettingRow>

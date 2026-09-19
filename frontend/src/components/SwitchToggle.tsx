@@ -4,8 +4,12 @@ export interface SwitchToggleProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
+  /** Descriptive visible label (e.g. "Auto from history"). Never pass ON/OFF/Enabled status text here. */
   label?: string;
+  /** Accessible name for icon-only switches. Falls back to `label`. */
+  ariaLabel?: string;
   size?: "sm" | "md";
+  /** @deprecated Status text (ON/OFF) is no longer rendered. Kept for backwards compatibility; always ignored. */
   showStatusText?: boolean;
 }
 
@@ -14,10 +18,11 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
   onChange,
   disabled = false,
   label,
+  ariaLabel,
   size = "md",
-  showStatusText = false,
 }) => {
   const isSm = size === "sm";
+  const accessibleName = ariaLabel ?? label ?? "Toggle";
 
   return (
     <div className="inline-flex items-center space-x-2 select-none">
@@ -26,6 +31,7 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-label={accessibleName}
         disabled={disabled}
         onClick={(e) => {
           e.preventDefault();
@@ -41,7 +47,7 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
             ? "bg-accent border border-accent shadow-xs"
             : "bg-white border border-slate-300 hover:border-slate-400 shadow-xs"
         }`}
-        title={label ? `${label}: ${checked ? "ON" : "OFF"}` : checked ? "ON" : "OFF"}
+        title={accessibleName}
       >
         <span
           className={`inline-block rounded-full shadow-sm transform transition-transform duration-200 ease-in-out ${
@@ -57,15 +63,6 @@ export const SwitchToggle: React.FC<SwitchToggleProps> = ({
           }`}
         />
       </button>
-      {showStatusText && (
-        <span
-          className={`text-xs font-mono font-bold transition-colors ${
-            checked ? "text-accent" : "text-slate-400"
-          }`}
-        >
-          {checked ? "ON" : "OFF"}
-        </span>
-      )}
     </div>
   );
 };

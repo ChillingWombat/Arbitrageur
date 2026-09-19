@@ -77,6 +77,11 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
   };
 
   if (!failed && !NO_LOGO_VENUES.has(venueId)) {
+    // `contain` + inset padding keeps the mark centered, fully visible, and
+    // clear of the round edge (gap = white bed). `cover` cropped edge-to-edge
+    // marks and clipped oversized art — the source of the "too large / not
+    // centered" reports.
+    const pad = Math.max(2, Math.round(size * 0.18));
     return (
       <img
         src={`logos/${venueId}.png`}
@@ -85,7 +90,7 @@ export const VenueLogo: React.FC<VenueLogoProps> = ({ venueId, name, size = 22 }
         title={`${name} — official brand mark`}
         width={size}
         height={size}
-        style={{ ...style, objectFit: "cover" }}
+        style={{ ...style, objectFit: "contain", padding: pad, boxSizing: "border-box" }}
         onError={() => setFailed(true)}
         draggable={false}
       />

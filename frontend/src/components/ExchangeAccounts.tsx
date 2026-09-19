@@ -77,11 +77,15 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
   ],
-  // PopDEX: delegated agent — main account address + authorized agent private key (+ optional REST token)
+  // PopDEX (closed beta on Morph): delegated agent model. Main address = your PopDEX account;
+  // Agent Private Key = a separate agent wallet you authorize in app.popdex.xyz (the agent signs,
+  // the main key never leaves the vault). Optional API Token = beta REST token if granted; base URL
+  // lives in Engine Settings → PopDEX. Market data has no public endpoint until beta creds exist.
   popdex: [
-    { key: "walletAddress", label: "Main Account Address", placeholder: "0x..." },
-    { key: "privateKey", label: "Agent Private Key (Authorized)", secret: true, placeholder: "0x..." },
-    { key: "apiKey", label: "API Token", secret: true, optional: true },
+    { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", hint: "Your PopDEX main account address on Morph (0x...). Must match the agent key below." },
+    { key: "privateKey", label: "Agent Private Key (Authorized)", secret: true, placeholder: "0x...", hint: "Private key of the agent wallet you authorized on PopDEX. Signs via delegation; main key stays in the vault." },
+    { key: "apiKey", label: "API Token", secret: true, optional: true, hint: "Optional. Beta REST token if PopDEX granted you one. Leave blank for wallet-only mode." },
+    { key: "apiSecret", label: "API Secret", secret: true, optional: true, hint: "Optional. Beta API secret if issued alongside the token. Leave blank otherwise." },
   ],
   // Robinhood Chain is a Lighter deployment (apidocs.rh.lighter.xyz): same
   // credential scheme — account_index + api_key_index + API private key.
@@ -191,8 +195,8 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // leaves this host). Paste the wallet now to prepare; execution stays
   // disabled until the RFQ flow is implemented and audited.
   variational: [
-    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true },
-    { key: "privateKey", label: "Wallet Private Key (EVM, RFQ signing)", secret: true, placeholder: "0x...", optional: true },
+    { key: "walletAddress", label: "Trading Wallet Address (Arbitrum)", placeholder: "0x...", optional: true, hint: "Optional. Your Arbitrum EOA for future RFQ signing. Market data is public — leave both blank to track Variational read-only." },
+    { key: "privateKey", label: "Wallet Private Key (EVM, RFQ signing)", secret: true, placeholder: "0x...", optional: true, hint: "Optional. EVM key that will sign RFQ quotes on Arbitrum. Vault-encrypted, never leaves this host. Execution stays off until the RFQ flow is audited. Address is derived automatically when only the key is pasted." },
   ],
   // Coinbase Advanced Trade (CDP): API key name + EC private key (PEM)
   coinbase: [
@@ -635,6 +639,16 @@ export const AccountCard: React.FC<AccountCardProps> = ({
 
   const setValue = (key: string, v: string) => setDrafts((d) => ({ ...d, [key]: v }));
 
+  // Grey-out rule: the Enabled switch stays disabled (grey, unclickable) while
+  // any required account-card field is empty. Optional fields never block.
+  // A stored value (presence flag) or a non-empty draft/revealed value counts
+  // as filled. Empty-field venues (edgeX, long-tail paper venues) have no
+  // required fields and are always enableable. While the vault is locked the
+  // presence is unknowable, so gating is skipped (locked=false bypass above).
+  const requiredFilled = fields.every(
+    (f) => f.optional || (valueFor(f.key) ?? "").trim() !== "" || fieldIsSet(account, f.key),
+  );
+
   const buildCredentials = (): { creds?: AccountCredentialInput; error?: string } => {
     const creds: AccountCredentialInput = {};
     let any = false;
@@ -787,8 +801,13 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             size="sm"
             checked={account.enabled}
             onChange={() => void handleToggleEnabled()}
-            disabled={busy}
-            label={account.enabled ? "Enabled" : "OFF"}
+            disabled={busy || (!account.enabled && !requiredFilled && !locked)}
+            ariaLabel={`${venueDisplay(account.venue)} #${ordinal} enabled`}
+            title={
+              !account.enabled && !requiredFilled && !locked
+                ? "Fill required credential fields to enable"
+                : `${venueDisplay(account.venue)} #${ordinal} enabled`
+            }
           />
         </div>
       </div>
@@ -957,11 +976,16 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
         }
         any = true;
       }
-      persistVenueFlag(venue, true);
+      // New accounts with missing required fields are created disabled so the
+      // card's greyed-out Enabled switch matches (user must fill fields first).
+      const draftFilled = fields.every(
+        (f) => f.optional || (drafts[f.key] ?? "").trim() !== "",
+      );
+      persistVenueFlag(venue, draftFilled);
       await api.upsertAccount({
         venue,
         label: effectiveLabel,
-        enabled: true,
+        enabled: draftFilled,
         makeDefault: !hasDefault,
         maxLeverage: null,
         credentials: any ? creds : null,
@@ -1014,7 +1038,8 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               size="sm"
               checked={fallbackEnabled ?? true}
               onChange={(en) => onFallbackChange(en)}
-              label={(fallbackEnabled ?? true) ? "Enabled" : "OFF"}
+              ariaLabel={`${venueDisplay(venue)} venue enabled`}
+              title={`${venueDisplay(venue)} venue enabled`}
             />
           )}
         </div>
@@ -1435,13 +1460,24 @@ export const VenueAccountToggle: React.FC<{
   if (account === undefined) return null;
 
   const enabled = account ? account.enabled : fallbackEnabled;
+  const toggleFields = ACCOUNT_CREDENTIAL_FIELDS[venue] ?? [];
+  const toggleRequiredFilled =
+    !account ||
+    toggleFields.every((f) => f.optional || fieldIsSet(account, f.key));
+  const toggleDisabled =
+    busy || locked || (!enabled && !toggleRequiredFilled);
 
   return (
     <ToggleSwitch
       size="sm"
       checked={enabled}
-      disabled={busy || locked}
-      label={enabled ? "Enabled" : "OFF"}
+      disabled={toggleDisabled}
+      ariaLabel={`${venueDisplay(venue)} enabled`}
+      title={
+        !enabled && !toggleRequiredFilled
+          ? "Fill required credential fields to enable"
+          : `${venueDisplay(venue)} enabled`
+      }
       onChange={() => {
         const next = !enabled;
         persistVenueFlag(venue, next); // keep the venue flag in step
@@ -1682,7 +1718,8 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               checked={r.enabled}
               disabled={busy}
               onChange={() => void handleToggle(r)}
-              label={r.enabled ? "ON" : "OFF"}
+              ariaLabel={`Route ${r.label} enabled`}
+              title={`Route ${r.label} enabled`}
             />
             <button
               type="button"

@@ -4,7 +4,12 @@ interface ToggleSwitchProps {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
+  /** Visible text label (legacy). Prefer `ariaLabel` — switches render icon-only with no Enabled/ON/OFF text. */
   label?: string;
+  /** Accessible name announced by screen readers. Falls back to `label` when omitted. */
+  ariaLabel?: string;
+  /** Hover tooltip. Falls back to `ariaLabel`/`label`. Never includes ON/OFF status text. */
+  title?: string;
   size?: "sm" | "md";
 }
 
@@ -13,20 +18,27 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({
   onChange,
   disabled = false,
   label,
+  ariaLabel,
+  title,
   size = "md",
 }) => {
   const isSm = size === "sm";
+  const accessibleName = ariaLabel ?? label ?? (checked ? "Enabled" : "Disabled");
   return (
     <div className="inline-flex items-center space-x-2">
       <button
         type="button"
         role="switch"
         aria-checked={checked}
+        aria-label={accessibleName}
+        title={title ?? accessibleName}
         disabled={disabled}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
-          onChange(!checked);
+          if (!disabled) {
+            onChange(!checked);
+          }
         }}
         className={`relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${
           isSm ? "w-8 h-[18px]" : "w-10 h-[22px]"
