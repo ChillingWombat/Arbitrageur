@@ -19,6 +19,9 @@ use std::sync::Arc;
 use tauri::Manager;
 
 fn main() {
+    // Deterministic TLS: install ring as the process-wide rustls provider
+    // before any HTTPS client builds (alloy + reqwest otherwise disagree).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     #[cfg(target_os = "linux")]
     {
         // Native Wayland + GPU compositing is the fast path: scrolling

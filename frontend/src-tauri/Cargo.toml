@@ -38,6 +38,10 @@ argon2 = { workspace = true }
 zeroize = { workspace = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 reqwest = { workspace = true }
+# Single process-wide rustls crypto provider (alloy pulls providers that
+# otherwise leave auto-detection ambiguous → runtime panic on first TLS).
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 [dev-dependencies]
 tauri = { version = "2.1", features = ["test"] }
