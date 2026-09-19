@@ -27,6 +27,7 @@ import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, V
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
+import { VenueLogo } from "./VenueLogo";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { VenueAccountsSection } from "./ExchangeAccounts";
 
@@ -1128,6 +1129,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                                   : undefined
                               }
                             />
+                            <VenueLogo venueId={ex.id} name={ex.name} size={22} />
                             <span className={`font-semibold truncate ${isSelected ? "text-accent font-bold" : "text-slate-900"}`}>
                               {ex.name}
                             </span>
