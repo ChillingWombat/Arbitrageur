@@ -5,7 +5,7 @@
 //! `spread_samples` log, and qualifies opportunities through the
 //! half-life/variation gate before they are shown as executable.
 //!
-//! Design contract (SPEC_SPREAD_RANGE_MONITOR.md):
+//! Design contract (SPEC.md, Part 3 — Spread Range Monitor):
 //! - Default account per venue for reads; one venue adapter per venue lane.
 //! - Per-venue rolling request budgets driven by the lowest enabled account
 //!   tier on that venue (Lighter applies the lowest limit across accounts

@@ -1111,3 +1111,14 @@ overhaul pass committed as `23d4aed`).
   Radar threshold fields, so no field list went stale there.)
 - **Standing user actions** (unchanged): import test keys into the vault,
   shred the relocated keychain file, rotate the two exposed Lighter API keys.
+
+## 34. Session Handoff — 2026-09-19 (Docs consolidation)
+
+- **Merged 14 docs → 9 by category**: one `SPEC.md` (5 parts: core V2,
+  seasonality, spread monitor, terminal nav, WS/retention — each with a live
+  status line) plus `docs/{ARCHITECTURE,EXCHANGES,QUANT_RESEARCH,
+  REFERENCE_PROJECTS,RUNBOOK,STRATEGY_RESEARCH,REBUILD_GUIDE}.md`, each with a
+  status banner (implemented / partial / research-only). Session handoff log
+  kept append-only (history entries still cite old filenames — correct as
+  dated records). Old files `git rm`'d; pointers fixed in `monitor.rs` and
+  the README tree.

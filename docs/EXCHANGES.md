@@ -1,5 +1,8 @@
 # Exchange Integrations Guide
 
+> Living venue reference — includes no-API venues (Variational live market data, PopDEX beta model) and §6 transfer-rails/rebalance research. Re-check fee figures on venue pages before moving size.
+
+
 This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrageur** platform.
 
 ---

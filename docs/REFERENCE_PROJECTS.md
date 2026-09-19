@@ -1,5 +1,8 @@
 # Reference Projects Deep Dive & Reverse Engineering Analysis
 
+> Background research — reverse-engineering notes on external repos that shaped early design. Historical context, not build instructions.
+
+
 This document compiles the reverse-engineering discoveries, architectural comparisons, code patterns, and security insights extracted from the 10 target open-source repositories.
 
 ---

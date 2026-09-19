@@ -1,5 +1,8 @@
 # Code Walkthrough — Rebuild the System Yourself (Practice Guide)
 
+> Practice path — rebuild layers in the order given; new code follows the tutorial-comment pattern.
+
+
 > Purpose: the owner's request — "detailed comments so I can understand and
 > recreate the system to practice". This guide narrates the whole codebase
 > layer-by-layer: what each part does, which file to open first, and the

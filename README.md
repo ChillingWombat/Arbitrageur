@@ -64,11 +64,13 @@ Arbitrageur/
 ├── Cargo.toml                            # Cargo workspace manifest
 ├── README.md                             # System documentation
 ├── docs/
-│   ├── 01_QUANT_MATH_RESEARCH.md         # Comprehensive quantitative finance treatise
-│   ├── 02_REFERENCE_PROJECTS_ANALYSIS.md # Reverse-engineering audit of 10 open-source repos
-│   ├── 03_SYSTEM_ARCHITECTURE.md         # Concurrency, state machines & threat model
-│   ├── 04_EXCHANGE_INTEGRATIONS_GUIDE.md # Hyperliquid, Lighter, Vanta, Robinhood, Polymarket
-│   └── 05_BUGS_SOLUTIONS_AND_RUNBOOK.md  # Failure modes, mitigation strategies & runbook
+│   ├── QUANT_RESEARCH.md     # Quantitative finance theory (implements in arbitrageur-math)
+│   ├── REFERENCE_PROJECTS.md # Reverse-engineering audit of open-source repos (background)
+│   ├── ARCHITECTURE.md       # Workspace, crates, concurrency & threat model
+│   ├── EXCHANGES.md          # Venue integrations + transfer rails (living reference)
+│   ├── STRATEGY_RESEARCH.md  # MoB vaults / RWA carry (research only, not implemented)
+│   ├── REBUILD_GUIDE.md      # Practice rebuild path for learning the system
+│   └── RUNBOOK.md            # Failure modes, mitigation strategies & runbook
 └── crates/
     ├── arbitrageur-core/                  # Domain types, Decimal math, unified ExchangeAdapter trait
     ├── arbitrageur-math/                  # Kalman filter, OU MLE, Bertram thresholds, carry APY

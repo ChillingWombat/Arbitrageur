@@ -1,5 +1,8 @@
 # Failure Modes, Bugs, Solutions & Operational Runbook
 
+> Operational — failure modes, fixes, pre-flight checklist, incident response. Still the playbook for deploys and incidents.
+
+
 This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, our engineered solutions, and an operational runbook for live deployments.
 
 ---

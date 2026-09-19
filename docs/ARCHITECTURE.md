@@ -1,5 +1,8 @@
 # System Architecture & Modular Design
 
+> Current as of the Tauri workspace (`crates/*` + `frontend/src-tauri`). If crate list drifts (e.g. headless `arbitrageur-app`, `wallet.rs`, Variational/PopDEX adapters), update §2 first.
+
+
 The **Arbitrageur** system is engineered in Rust with high-performance concurrency, zero-cost abstractions, and strict modular separation across multiple financial market domains.
 
 ---

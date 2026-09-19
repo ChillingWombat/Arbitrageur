@@ -1,5 +1,8 @@
 # Quantitative Research: MoB Strategy Vaults, RWA Equity Carry & Productive Hold
 
+> Research only — MoB vaults / RWA carry are NOT implemented. Do not treat model parameters here as live strategy config.
+
+
 This document captures the quantitative mechanics, architectural patterns, and risk-management specifications of the **MoB (Mobius)** cross-venue arbitrage and automated strategy vault platform, reverse-engineered and adapted for the **Arbitrageur** high-frequency quantitative execution engine.
 
 ---

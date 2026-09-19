@@ -1,5 +1,8 @@
 # Quantitative Finance and Mathematical Foundations of Arbitrage
 
+> Theory foundation — implemented in `arbitrageur-math` (funding APR/APY, capacity ladders, book gradient, OU/Bertram tooling). Math that changes must change there first, with unit tests.
+
+
 This research document details the rigorous mathematical, probabilistic, and microstructural foundations of the **Arbitrageur** cross-market trading engine.
 
 ---
