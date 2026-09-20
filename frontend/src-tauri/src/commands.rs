@@ -1771,6 +1771,7 @@ pub async fn execute_spot_arbitrage_impl(
 /// each one blocks its symbol and unwinds through the existing symbol-scoped
 /// flatten path, exactly like any other open paper position.
 pub(crate) const TRIANGLE_STRATEGY_ID: &str = "triangle";
+pub(crate) const FUNDING_STRATEGY_ID: &str = "funding";
 /// Paper-dust tolerance for the triangle entry guard: f64/Decimal ledger
 /// conversions can strand sub-1e-9 base-unit residue after a flatten.
 /// Economically meaningless on every listed venue, so it must not block
@@ -4811,8 +4812,419 @@ pub async fn execute_funding_carry_impl(
                 .into(),
         );
     }
-    let _ = (symbol, long_venue, short_venue, trade_size_usd);
-    Err("Native 'funding' execution is disabled until authentic order submission and reconciliation are implemented".into())
+    if symbol.trim().is_empty() || symbol.len() > 64 {
+        return Err("funding symbol must be 1-64 characters".into());
+    }
+    if long_venue.trim().is_empty() || short_venue.trim().is_empty() {
+        return Err("funding long/short venues must be specified".into());
+    }
+    if !trade_size_usd.is_finite() || trade_size_usd <= 0.0 {
+        return Err("trade_size_usd must be a finite positive number".into());
+    }
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+
+    // Paper-only path (same discipline as the triangle executor): the
+    // caller-supplied pair is never trusted — rescan and match it against
+    // freshly resolved prints, then enforce the strategy min-APR hurdle.
+    let opps = scan_funding_opportunities_impl(symbol, trade_size_usd, state).await?;
+    let opp = opps
+        .into_iter()
+        .find(|o| {
+            o.symbol == symbol
+                && o.long_venue == long_venue
+                && o.short_venue == short_venue
+        })
+        .ok_or_else(|| {
+            "funding opportunity is no longer available (legs moved, books went stale, or hub is still warming)".to_string()
+        })?;
+    let hurdle = funding_min_apr(state);
+    if opp.net_apr_pct < hurdle {
+        return Err(format!(
+            "funding net {:.1}% APR is below the {:.1}% hurdle — not executed",
+            opp.net_apr_pct, hurdle
+        ));
+    }
+
+    let long_adapter = state.get_adapter(long_venue).ok_or_else(|| {
+        format!("Venue '{long_venue}' is not admitted for paper execution")
+    })?;
+    let short_adapter = state.get_adapter(short_venue).ok_or_else(|| {
+        format!("Venue '{short_venue}' is not admitted for paper execution")
+    })?;
+    let paper_long = state
+        .get_paper_exchange(long_venue)
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{long_venue}'"))?;
+    let paper_short = state
+        .get_paper_exchange(short_venue)
+        .ok_or_else(|| format!("No paper exchange admitted for venue '{short_venue}'"))?;
+
+    let _execution_guard = state.execution_lock.lock().await;
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!("Execution halted by Risk Circuit Breaker: {reason}"));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+    if *state.is_live_mode.read() {
+        return Err(LIVE_EXECUTION_DISABLED.into());
+    }
+
+    // Dispatch-time books for both legs: hub-first (120s), else a fresh
+    // read-only fetch through the admitted adapter. Either leg missing or
+    // invalid fails the dispatch — never priced off a half book.
+    let resolve_book = async |adapter: &Arc<dyn ExchangeAdapter>, venue: &str| -> Result<OrderBook, String> {
+        let vid = adapter.venue_id();
+        if let Some(book) =
+            state
+                .market_data_hub
+                .get_valid_orderbook(&vid, symbol, Some(std::time::Duration::from_secs(120)))
+        {
+            if validate_adapter_book(&book, &vid, symbol).is_ok() {
+                return Ok(book);
+            }
+        }
+        let book = adapter
+            .fetch_orderbook(symbol)
+            .await
+            .map_err(|e| format!("funding leg {symbol}@{venue} book unavailable: {e}"))?;
+        validate_adapter_book(&book, &vid, symbol)
+            .map_err(|e| format!("funding leg {symbol}@{venue} book invalid: {e}"))?;
+        state.market_data_hub.update_orderbook(book.clone());
+        Ok(book)
+    };
+    let long_book = resolve_book(&long_adapter, long_venue).await?;
+    let short_book = resolve_book(&short_adapter, short_venue).await?;
+    let long_ask = long_book
+        .best_ask_price()
+        .filter(|p| *p > dec!(0))
+        .ok_or_else(|| format!("no long ask for {symbol} on {long_venue}"))?;
+    let short_bid = short_book
+        .best_bid_price()
+        .filter(|p| *p > dec!(0))
+        .ok_or_else(|| format!("no short bid for {symbol} on {short_venue}"))?;
+    let long_ask_f = dec_to_f64(long_ask, "funding long ask")?;
+    let short_bid_f = dec_to_f64(short_bid, "funding short bid")?;
+    if !(long_ask_f.is_finite() && long_ask_f > 0.0 && short_bid_f.is_finite() && short_bid_f > 0.0) {
+        return Err("funding dispatch books are not priced".into());
+    }
+
+    // Blocking signals + existing paper positions refuse dispatch (same
+    // one-open-pair discipline as the triangle executor).
+    if let Some(blocker) = state
+        .state_store
+        .blocking_signals(symbol)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next()
+    {
+        return Err(format!(
+            "Symbol {symbol} is blocked by signal {} (status {}): awaiting leg reconciliation/delta-neutral confirmation",
+            blocker.id,
+            blocker.status.as_str()
+        ));
+    }
+    let dust = triangle_dust_qty();
+    for (paper, venue) in [(&paper_long, long_venue), (&paper_short, short_venue)] {
+        let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+        if acc.get_position(symbol).is_some_and(|pos| pos.quantity > dust) {
+            return Err(format!(
+                "An open paper position already exists for {symbol} on {venue}; flatten it before carrying"
+            ));
+        }
+    }
+
+    let (target_leverage, account_cap) = resolve_effective_leverage(
+        state, "funding", "funding", symbol, long_venue, short_venue, None,
+    )?;
+    for (paper, venue) in [(&paper_long, long_venue), (&paper_short, short_venue)] {
+        if paper.max_leverage_cap() != account_cap {
+            paper
+                .set_max_leverage_cap(account_cap)
+                .map_err(|e| e.to_string())?;
+        }
+        let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+        // One full-notional leg per venue against free margin.
+        let size_dec = Decimal::from_f64_retain(trade_size_usd)
+            .ok_or_else(|| "Invalid trade size".to_string())?;
+        let leg_im = size_dec / Decimal::from(target_leverage.max(1));
+        if leg_im > acc.free_margin {
+            return Err(format!(
+                "Insufficient free margin on {venue}: required {leg_im} > available {}",
+                acc.free_margin
+            ));
+        }
+        match margin_monitor_from_settings(state).evaluate_account(&acc) {
+            MarginHealthStatus::Empty => {
+                return Err(format!("Paper account {venue} has no funds; execution refused"));
+            }
+            MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
+                return Err(format!(
+                    "Paper account {venue} margin status is critical/breached; execution refused"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    paper_long
+        .replace_orderbook(long_book.clone())
+        .map_err(|e| e.to_string())?;
+    paper_short
+        .replace_orderbook(short_book.clone())
+        .map_err(|e| e.to_string())?;
+
+    let mut equity_before = dec!(0);
+    let mut equity_before_by_venue = HashMap::new();
+    for (vid, p) in state.paper_exchanges() {
+        let acc = p.fetch_account().await.map_err(|e| e.to_string())?;
+        equity_before += acc.equity;
+        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+            if f.is_finite() {
+                equity_before_by_venue.insert(vid.to_string(), f);
+            }
+        }
+    }
+
+    let cycle = {
+        let mut step = state.sim_step_counter.write();
+        *step += 1;
+        *step
+    };
+    let cycle_tag = format!(
+        "fund-{}-{:08x}",
+        Utc::now().timestamp_millis(),
+        rand::random::<u32>()
+    );
+    let started = std::time::Instant::now();
+
+    // Delta-neutral in base terms: lift the long ask, hit the short bid.
+    let qty_f64 = trade_size_usd / long_ask_f;
+    if !(qty_f64.is_finite() && qty_f64 > 0.0) {
+        return Err("funding carry quantity is not positive".into());
+    }
+    let qty = Decimal::from_str_exact(&qty_f64.to_string())
+        .ok()
+        .filter(|q| *q > dec!(0))
+        .ok_or_else(|| "funding carry quantity is not positive".to_string())?;
+    let mut fills: Vec<(Side, arbitrageur_core::order::OrderResponse)> = Vec::new();
+    let mut leg_error: Option<String> = None;
+    for (paper, order_side) in [(&paper_long, Side::Buy), (&paper_short, Side::Sell)] {
+        let order = arbitrageur_core::order::OrderRequest::new_market(
+            paper.venue_id(),
+            symbol,
+            order_side,
+            qty,
+        );
+        match paper.place_order(order).await {
+            Ok(resp)
+                if resp.filled_qty == qty
+                    && resp.remaining_qty == dec!(0)
+                    && resp.avg_fill_price.filter(|p| *p > dec!(0)).is_some() =>
+            {
+                fills.push((order_side, resp));
+            }
+            Ok(resp) => {
+                if resp.filled_qty > dec!(0) {
+                    fills.push((order_side, resp));
+                }
+                leg_error = Some(format!("funding {order_side:?} leg partially filled or rejected"));
+                break;
+            }
+            Err(e) => {
+                leg_error = Some(format!("funding {order_side:?} leg failed: {e}"));
+                break;
+            }
+        }
+    }
+    let latency_us = started.elapsed().as_micros() as u64;
+
+    let mut equity_after = dec!(0);
+    for (_, p) in state.paper_exchanges() {
+        equity_after += p
+            .fetch_account()
+            .await
+            .map_err(|e| e.to_string())?
+            .equity;
+    }
+    refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
+    let attempt_pnl_f = (equity_after - equity_before)
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let total_f = {
+        let mut total_pnl = state.total_realized_profit.write();
+        *total_pnl = equity_after - state.paper_baseline_equity();
+        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+    };
+    state.circuit_breaker.update_equity(equity_after);
+
+    let fee_total_f: f64 = fills
+        .iter()
+        .filter_map(|(_, r)| r.fee.to_string().parse::<f64>().ok())
+        .sum();
+    let path = format!("LONG {long_venue} / SHORT {short_venue}");
+    let carry_note = format!(
+        "funding carry {} 2/2 legs filled, net {:.2}% APR at scan",
+        symbol, opp.net_apr_pct
+    );
+
+    // One two-legged signal so the Funding dock aggregates a single open
+    // carry position (grouped by strategy + symbol + venue pair).
+    let mut record_errors = Vec::new();
+    if fills.len() == 2 {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+        let account_for = |venue: &str| {
+            state
+                .state_store
+                .default_account(venue)
+                .ok()
+                .flatten()
+                .map(|a| a.id)
+        };
+        let signal_id = format!("{cycle_tag}-carry");
+        let legs = vec![
+            NewSignalLeg {
+                account_id: account_for(long_venue),
+                venue: long_venue.to_string(),
+                side: LegSide::Long,
+                intended_qty: qty_f64,
+            },
+            NewSignalLeg {
+                account_id: account_for(short_venue),
+                venue: short_venue.to_string(),
+                side: LegSide::Short,
+                intended_qty: qty_f64,
+            },
+        ];
+        if let Err(e) = state.state_store.record_signal_execution(&NewSignalExecution {
+            id: signal_id.clone(),
+            strategy_id: FUNDING_STRATEGY_ID.to_string(),
+            symbol: symbol.to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some(format!("{carry_note}; {path}")),
+            legs,
+        }) {
+            record_errors.push(format!("Failed to persist funding carry record: {e}"));
+        } else {
+            for (side, resp) in &fills {
+                let leg_side = match side {
+                    Side::Buy => LegSide::Long,
+                    Side::Sell => LegSide::Short,
+                };
+                let px_f = resp
+                    .avg_fill_price
+                    .unwrap_or(dec!(0))
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let fee_f = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                if let Err(e) = state.state_store.apply_leg_fill(
+                    &signal_id,
+                    leg_side,
+                    qty_f64,
+                    px_f,
+                    fee_f,
+                    Some(resp.order_id.as_str()),
+                ) {
+                    record_errors.push(e.to_string());
+                }
+            }
+            if let Err(e) = state.state_store.update_signal_status(
+                &signal_id,
+                SignalStatus::Imbalanced,
+                Some(carry_note.as_str()),
+            ) {
+                record_errors.push(e.to_string());
+            }
+        }
+    }
+
+    let net_bps = opp.net_rate_8h_pct * 100.0;
+    if let Some(err) = leg_error {
+        state.execution_logs.write().push(ExecutionLogEntry {
+            id: format!("exec-funding-{cycle}"),
+            timestamp: Utc::now().to_rfc3339(),
+            trade_type: "Funding".into(),
+            strategy_id: crate::attribution::attribute_strategy_id(FUNDING_STRATEGY_ID),
+            symbol: symbol.to_string(),
+            venue_a: long_venue.to_string(),
+            venue_b: short_venue.to_string(),
+            leg_a_status: format!("{}/2 legs filled", fills.len()),
+            leg_b_status: err.clone(),
+            success: false,
+            gross_profit: 0.0,
+            fees: fee_total_f,
+            net_profit: attempt_pnl_f,
+            latency_us,
+            note: format!(
+                "Funding carry PARTIAL: {err}. {carry_note}. Residual legs recorded — flatten each leg symbol to unwind. Record errors: {}",
+                record_errors.join("; ")
+            ),
+            direction: Some(path.clone()),
+            trigger_spread_bps: Some(net_bps),
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: Some(hurdle),
+            is_live: false,
+        });
+        return Err(format!(
+            "Funding carry PARTIAL ({}/2 legs): {err}; residuals recorded — flatten each leg symbol to unwind",
+            fills.len()
+        ));
+    }
+
+    state.execution_logs.write().push(ExecutionLogEntry {
+        id: format!("exec-funding-{cycle}"),
+        timestamp: Utc::now().to_rfc3339(),
+        trade_type: "Funding".into(),
+        strategy_id: crate::attribution::attribute_strategy_id(FUNDING_STRATEGY_ID),
+        symbol: symbol.to_string(),
+        venue_a: long_venue.to_string(),
+        venue_b: short_venue.to_string(),
+        leg_a_status: "FILLED".into(),
+        leg_b_status: "FILLED".into(),
+        success: true,
+        gross_profit: 0.0,
+        fees: fee_total_f,
+        net_profit: attempt_pnl_f,
+        latency_us,
+        note: format!(
+            "Funding carry dispatched 2/2 paper legs ({carry_note}); carry position open — unwind each leg symbol via flatten. Record errors: {}",
+            record_errors.join("; ")
+        ),
+        direction: Some(path.clone()),
+        trigger_spread_bps: Some(net_bps),
+        baseline_mean_spread_bps: None,
+        position_step: None,
+        max_units: None,
+        nominal_hurdle_bps: Some(hurdle),
+        is_live: false,
+    });
+
+    maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
+
+    Ok(SimStepResultDto {
+        cycle,
+        opportunity_found: true,
+        execution_success: true,
+        trade_type: "Funding".into(),
+        direction: path.clone(),
+        venue_a: long_venue.to_string(),
+        venue_b: short_venue.to_string(),
+        spread_bps: net_bps,
+        realized_profit_usd: attempt_pnl_f,
+        total_cumulative_pnl_usd: total_f,
+        message: format!(
+            "Funding carry dispatched on {symbol} ({path}): 2/2 paper legs filled, realized P&L ${attempt_pnl_f:.2}; carry position open — flatten each leg to unwind"
+        ),
+    })
 }
 
 pub async fn execute_prediction_arbitrage_impl(
@@ -12234,6 +12646,84 @@ mod tests {
         .expect("spatial exec on dot");
         assert!(exec_res.execution_success);
         assert!(exec_res.realized_profit_usd < 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_funding_carry_paper_dispatch_opens_carry_position() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.40), dec!(4.42));
+        seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.47), dec!(4.49));
+        // Steep HL-vs-Lighter gap: short HL, long Lighter, APR far above hurdle.
+        state.market_data_hub.update_funding(
+            arbitrageur_core::quote::FundingRate {
+                venue: arbitrageur_core::types::VenueId::new("hyperliquid"),
+                symbol: "DOT-USDC".to_string(),
+                rate: dec!(0.0008),
+                predicted_rate: None,
+                interval_hours: 1,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            },
+        );
+        state.market_data_hub.update_funding(
+            arbitrageur_core::quote::FundingRate {
+                venue: arbitrageur_core::types::VenueId::new("lighter"),
+                symbol: "DOT-USDC".to_string(),
+                rate: dec!(0.0001),
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            },
+        );
+
+        // $20 notional fits the seeded 10-lot test books on both legs.
+        let res = execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 20.0, &state)
+            .await
+            .expect("paper funding carry should dispatch");
+        assert!(res.execution_success);
+        assert_eq!(res.trade_type, "Funding");
+
+        // One two-legged funding signal => a single open carry position.
+        let positions = state
+            .state_store
+            .list_signals(None, None)
+            .expect("signals readable");
+        let funding: Vec<_> = positions
+            .iter()
+            .filter(|s| s.strategy_id.eq_ignore_ascii_case("funding"))
+            .collect();
+        assert_eq!(funding.len(), 1, "expected one funding signal, got {funding:?}");
+        assert_eq!(funding[0].legs.len(), 2);
+        assert!(funding[0].status.counts_as_open());
+    }
+
+    #[tokio::test]
+    async fn test_funding_carry_rejects_below_hurdle_and_live() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.40), dec!(4.42));
+        seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.47), dec!(4.49));
+        // Dust gap (~3% APR): resolvable pair but below the min-APR hurdle.
+        for (venue, rate, interval) in [
+            ("hyperliquid", dec!(0.0000125), 1),
+            ("lighter", dec!(0.000096), 8),
+        ] {
+            state.market_data_hub.update_funding(
+                arbitrageur_core::quote::FundingRate {
+                    venue: arbitrageur_core::types::VenueId::new(venue),
+                    symbol: "DOT-USDC".to_string(),
+                    rate,
+                    predicted_rate: None,
+                    interval_hours: interval,
+                    next_funding_time: Utc::now(),
+                    timestamp: Utc::now(),
+                },
+            );
+        }
+        let err = execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 500.0, &state)
+            .await
+            .expect_err("dust carry must be refused");
+        assert!(err.contains("hurdle"), "unexpected err: {err}");
     }
 
     #[tokio::test]

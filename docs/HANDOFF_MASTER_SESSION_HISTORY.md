@@ -1384,3 +1384,11 @@ overhaul pass committed as `23d4aed`).
 - **UI (`TriangularArbitrage.tsx`):** header is now "Opportunity Scanner" (count dropped); row click selects AND opens a `TriangleDetailModal` (legs, prices/fees, gross/fees/net, est profit, latency, route, Fill Cycle with backdrop-blur/ESC/backdrop-close); `handleDeployCycle` refactored to `deployCycle(opp)` so modal and row fills share one path.
 - **Tree note:** stages only `popdex.rs`, `TriangularArbitrage.tsx`, SPEC + this entry; concurrent worker files untouched.
 - **Verification:** exchanges 100/0, tsc clean, `npm test` green; app rebuilt (FE+release clean) and relaunched. Live triangle-tab confirmation left to the operator (scan is click-triggered, no auto-scan in monitor).
+
+## 50. Session Handoff — 2026-09-20 (Paper funding carry execution)
+
+- **Ask:** "why blocked? i want to execute an opportunity" — the crash-screen banner said native funding execution is disabled.
+- **Why it was blocked:** `execute_funding_carry_impl` was an unconditional `Err` stub (same for prediction/cross-ticker). Triangle/spot/spatial already had paper execution; funding had no path at all, and the frontend had no catch, hence the full-screen crash (fixed in `2aca8ce` with inline banners).
+- **Fix (`commands.rs` only):** paper-only funding dispatch mirroring `execute_triangle_arbitrage_impl` — rescan+match, `funding_min_apr` hurdle, execution lock, live books per leg, signal/position/margin guards, full-fill paper Buy+Sell, equity + circuit-breaker accounting, one two-legged `funding` signal (FUNDING_STRATEGY_ID) so the dock shows a single open carry position, execution log + SimStepResultDto. Live mode refused via LIVE_EXECUTION_DISABLED.
+- **Tree note:** stages only the funding-impl/test/const hunks; concurrent worker hunks in the same file untouched.
+- **Verification:** desktop 312/0 (2 new: dispatch-opens-position, below-hurdle refusal), tsc clean, release rebuilt + relaunched. Frontend needed no changes (existing Open Carry path now succeeds on paper).
