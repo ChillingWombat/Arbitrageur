@@ -20,8 +20,9 @@ use arbitrageur_math::autotune::{
 use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
 use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
-    estimate_funding_hold_hours, evaluate_funding_carry, evaluate_spot_perp_basis,
-    expected_carry_return_usd, funding_entry_capacity, funding_win_probability, WinHoldContext,
+    backtest_gap_carry, estimate_funding_hold_hours, evaluate_funding_carry,
+    evaluate_spot_perp_basis, expected_carry_return_usd, funding_entry_capacity,
+    funding_win_probability, WinHoldContext,
 };
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
@@ -194,6 +195,16 @@ pub struct FundingOpportunityDto {
     /// projection, never invent one.
     #[serde(default)]
     pub expected_return_usd: Option<f64>,
+    /// Empirical backtest win rate over trailing gap history (fraction of
+    /// simulated entries covering costs). `None` below 20 trials.
+    #[serde(default)]
+    pub backtest_win_rate: Option<f64>,
+    /// Empirical backtest mean net USD per entry. `None` below 20 trials.
+    #[serde(default)]
+    pub backtest_expected_usd: Option<f64>,
+    /// Backtest entry trials behind the two figures above.
+    #[serde(default)]
+    pub backtest_trials: Option<u32>,
     /// Marginal entry-cost slope in bps per extra $1k notional, summed over
     /// both legs at the requested trade size. `None` when either leg's book
     /// is missing/thin. Informational: describes cost shape, never sizes.
@@ -2710,6 +2721,25 @@ async fn scan_funding_opportunities_for_symbol(
                     .unwrap_or(0.0);
                 let spread_cost_f: Option<f64> =
                     depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
+                let now_hold_ms = chrono::Utc::now().timestamp_millis();
+                // Resolve venue ids for history (fall back to names).
+                let long_vid_hold: &str = rates
+                    .iter()
+                    .find(|(_, _, r)| r.venue.as_str() == opp.long_venue.as_str())
+                    .map(|(vid, _, _)| *vid)
+                    .unwrap_or(opp.long_venue.as_str());
+                let short_vid_hold: &str = rates
+                    .iter()
+                    .find(|(_, _, r)| r.venue.as_str() == opp.short_venue.as_str())
+                    .map(|(vid, _, _)| *vid)
+                    .unwrap_or(opp.short_venue.as_str());
+                let hist = carry_gap_history(
+                    state,
+                    symbol,
+                    long_vid_hold,
+                    short_vid_hold,
+                    now_hold_ms,
+                );
                 let hold_estimate = {
                     let hourly = |rate: Decimal, interval: u32| {
                         rate / Decimal::from(interval.max(1))
@@ -2733,25 +2763,6 @@ async fn scan_funding_opportunities_for_symbol(
                         }
                         _ => None,
                     };
-                    let now_hold_ms = chrono::Utc::now().timestamp_millis();
-                    // Resolve venue ids for history (fall back to names).
-                    let long_vid_hold: &str = rates
-                        .iter()
-                        .find(|(_, _, r)| r.venue.as_str() == opp.long_venue.as_str())
-                        .map(|(vid, _, _)| *vid)
-                        .unwrap_or(opp.long_venue.as_str());
-                    let short_vid_hold: &str = rates
-                        .iter()
-                        .find(|(_, _, r)| r.venue.as_str() == opp.short_venue.as_str())
-                        .map(|(vid, _, _)| *vid)
-                        .unwrap_or(opp.short_venue.as_str());
-                    let hist = carry_gap_history(
-                        state,
-                        symbol,
-                        long_vid_hold,
-                        short_vid_hold,
-                        now_hold_ms,
-                    );
                     estimate_funding_hold_hours(
                         net_8h_f,
                         fee_bps_f,
@@ -2765,6 +2776,13 @@ async fn scan_funding_opportunities_for_symbol(
                 // Per-leg prints for the detail popup (before `opp` moves).
                 let long_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.long_venue);
                 let short_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.short_venue);
+                let (bt_win, bt_exp, bt_n) = backtest_stats(
+                    &hist,
+                    funding_min_apr(state),
+                    fee_bps_f,
+                    spread_cost_f,
+                    trade_size_usd,
+                );
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -2865,6 +2883,9 @@ async fn scan_funding_opportunities_for_symbol(
                         Some(funding_min_apr(state)),
                         trade_size_usd,
                     ),
+                    backtest_win_rate: bt_win,
+                    backtest_expected_usd: bt_exp,
+                    backtest_trials: bt_n,
                 });
             }
         }
@@ -3035,20 +3056,20 @@ async fn scan_funding_opportunities_for_symbol(
                         .unwrap_or(0.0);
                     let spread_cost_f: Option<f64> =
                         depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
+                    let now_basis_ms = chrono::Utc::now().timestamp_millis();
+                    let hist_basis: Vec<(i64, f64)> = state
+                        .state_store
+                        .funding_rate_series(
+                            &venue_id.to_string(),
+                            symbol,
+                            now_basis_ms.saturating_sub(7 * 24 * 3_600_000),
+                            now_basis_ms,
+                        )
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|(ts, r, _)| r.is_finite().then_some((ts, r)))
+                        .collect();
                     let basis_hold = {
-                        let now_basis_ms = chrono::Utc::now().timestamp_millis();
-                        let hist_basis: Vec<(i64, f64)> = state
-                            .state_store
-                            .funding_rate_series(
-                                &venue_id.to_string(),
-                                symbol,
-                                now_basis_ms.saturating_sub(7 * 24 * 3_600_000),
-                                now_basis_ms,
-                            )
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|(ts, r, _)| r.is_finite().then_some((ts, r)))
-                            .collect();
                         estimate_funding_hold_hours(
                             net_8h_f,
                             fee_bps_f,
@@ -3059,6 +3080,13 @@ async fn scan_funding_opportunities_for_symbol(
                             slope,
                         )
                     };
+                    let (bt_win, bt_exp, bt_n) = backtest_stats(
+                        &hist_basis,
+                        funding_min_apr(state),
+                        fee_bps_f,
+                        spread_cost_f,
+                        trade_size_usd,
+                    );
                     opps.push(FundingOpportunityDto {
                         id: format!("{symbol}-{venue_label}-BASIS"),
                         symbol: symbol.to_string(),
@@ -3151,6 +3179,9 @@ async fn scan_funding_opportunities_for_symbol(
                         expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
                         hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),
                         hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
+                        backtest_win_rate: bt_win,
+                        backtest_expected_usd: bt_exp,
+                        backtest_trials: bt_n,
                         expected_return_usd: expected_carry_return_usd(
                             net_8h_f,
                             fee_bps_f,
@@ -6611,6 +6642,25 @@ fn record_execution_failure(
             is_live: *state.is_live_mode.read(),
         },
     );
+}
+
+/// Empirical backtest stats for a funding opportunity, measured over the
+/// same trailing gap history the hold model uses. Returns
+/// `(win_rate, expected_usd, trials)` — all `None` below 20 trials.
+fn backtest_stats(
+    hist: &[(i64, f64)],
+    min_apr_pct: f64,
+    fee_bps: f64,
+    spread_bps: Option<f64>,
+    trade_size_usd: f64,
+) -> (Option<f64>, Option<f64>, Option<u32>) {
+    let threshold_8h = min_apr_pct.max(0.0) / 100.0 / 365.0 / 3.0;
+    let spread = spread_bps.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
+    let cost_ratio = (fee_bps.max(0.0) + spread) / 10_000.0;
+    match backtest_gap_carry(hist, threshold_8h, cost_ratio, trade_size_usd, 168.0, 20) {
+        Some(b) => (Some(b.win_rate), Some(b.expected_usd), Some(b.trials)),
+        None => (None, None, None),
+    }
 }
 
 pub fn get_execution_logs_by_mode_impl(

@@ -405,6 +405,12 @@ export interface FundingOpportunityDto {
   hold_reason?: string;
   /** Heuristic hold confidence 0..1. */
   hold_confidence?: number;
+  /** Empirical backtest win rate (fraction of simulated trailing-history entries covering costs). Absent below 20 trials. */
+  backtest_win_rate?: number;
+  /** Empirical backtest mean net USD per entry. Absent below 20 trials. */
+  backtest_expected_usd?: number;
+  /** Backtest entry trials behind the two figures above. */
+  backtest_trials?: number;
   /** Expected net carry in USD over the modelled hold with linear
    * funding-gap decay to the min-APR exit threshold, net of round-trip
    * fees + measured entry spread (signed). Absent on stale backends. */

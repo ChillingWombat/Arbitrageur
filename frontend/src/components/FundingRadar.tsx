@@ -42,15 +42,20 @@ const CarryDetailField: React.FC<{ label: string; value: React.ReactNode; title?
 /** Scanner card box: decay-aware expected net over the modelled hold
  * (backend value, flat fallback), replacing the unrealistic flat daily rate. */
 const CarryExpectedBox: React.FC<{ opp: FundingOpportunityDto }> = ({ opp }) => {
-  const v = expectedCarryUsd(opp);
+  // Real (backtested) expected net; "—" when history is too thin to measure.
+  // The model estimate lives in the popup details, not here.
+  const v =
+    opp.backtest_expected_usd != null && Number.isFinite(opp.backtest_expected_usd)
+      ? opp.backtest_expected_usd
+      : null;
   const holdH =
     opp.expected_hold_hours != null && Number.isFinite(opp.expected_hold_hours) && opp.expected_hold_hours > 0
       ? opp.expected_hold_hours
       : null;
   const title =
-    holdH != null
-      ? `Expected net over ~${holdH.toFixed(1)}h modelled hold with linear funding-gap decay to the min-APR exit, net of round-trip fees${opp.entry_spread_bps != null && opp.entry_spread_bps > 0 ? " + entry spread" : ""}`
-      : "Expected net unavailable — hold unknown";
+    v != null && opp.backtest_trials != null
+      ? `Mean net over ${opp.backtest_trials} trailing-history backtest entries${holdH != null ? ` (modelled hold ~${holdH.toFixed(1)}h)` : ""} — measured, not modelled`
+      : "Expected net unmeasurable — fewer than 20 scoreable history entries";
   return (
     <div
       className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border"
@@ -395,7 +400,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
               <CarryDetailField label="Compounded APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
               <CarryDetailField
-                label="Breakeven probability"
+                label="Breakeven (model)"
                 value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
                 title="Probability of covering costs over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)"
               />
@@ -470,11 +475,29 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 }
               />
               <CarryDetailField
-                label="Projected net carry"
+                label="Model Estimate"
                 value={
                   net != null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"
                 }
-                title="Projected carry over the expected hold at the current 8h rate, net of round-trip fees and entry spread. Negative = expected loss if the gap decays before breakeven."
+                title="Scenario point estimate along the expected (trend) gap path with linear decay to the min-APR exit, net of round-trip fees and entry spread. A model number, not a measurement — see Backtest rows for measured history."
+              />
+              <CarryDetailField
+                label="Backtest win"
+                value={
+                  opp.backtest_win_rate != null
+                    ? `${(opp.backtest_win_rate * 100).toFixed(0)}%${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
+                    : "—"
+                }
+                title="Measured fraction of trailing-history entries covering costs. Unmeasurable below 20 scoreable entries."
+              />
+              <CarryDetailField
+                label="Backtest expected"
+                value={
+                  opp.backtest_expected_usd != null
+                    ? `${opp.backtest_expected_usd >= 0 ? "+" : "-"}$${Math.abs(opp.backtest_expected_usd).toFixed(2)}${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
+                    : "—"
+                }
+                title="Measured mean net per trailing-history entry. Unmeasurable below 20 scoreable entries."
               />
             </div>
 
@@ -661,7 +684,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // Default mirrors the auto-carry bot's entry hurdle (Min APR %) converted
   // to 8h BPS: APR/100/365/3*10000 — the same 365d×3 convention the backend
   // uses both ways. Tracks the live minAprPct until the user overrides it.
-  // Min Breakeven has no bot-side gate (breakeven probability never gates execution),
+  // Min Win has no bot-side gate (measured win rate never gates execution),
   // so it defaults to off.
   // Filter inputs show at most 2 decimal places (bot-mirrored defaults are
   // normalized; user typing is never reformatted mid-edit).
@@ -699,7 +722,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       out = out.filter((o) => (o.net_rate_8h_pct ?? -Infinity) * 100 >= me);
     const mp = Number(minWinPct);
     if (minWinPct !== "" && Number.isFinite(mp))
-      out = out.filter((o) => ((o.win_probability ?? -Infinity) * 100) >= mp);
+      out = out.filter((o) => ((o.backtest_win_rate ?? -Infinity) * 100) >= mp);
     return out;
   }, [opportunities, venueFilters, minExpBps, minWinPct]);
   const clearFilters = () => {
@@ -924,9 +947,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-              title="Display filter — minimum breakeven probability. The bot does not gate on breakeven probability, so this defaults to off. Does not affect execution"
+              title="Display filter — minimum measured backtest win rate. The bot does not gate on win rate, so this defaults to off. Does not affect execution"
             >
-              <span className="text-slate-400 font-medium">Min Breakeven</span>
+              <span className="text-slate-400 font-medium">Min Win</span>
               <input
                 value={minWinPct}
                 onChange={(e) => setMinWinPct(e.target.value)}
@@ -1007,12 +1030,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         </div>
                       )}
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-slate-500">Breakeven:</span>
+                        <span className="text-slate-500">Win:</span>
                         <span
-                          className={`font-semibold tabular-nums ${opp.win_probability != null && opp.win_probability < 0.5 ? "text-loss" : "text-slate-900"}`}
-                          title="Probability the trade covers its costs over the modelled hold (informational only — never gates entries). Below 50% = more likely to lose than win, agreeing in sign with a negative Expected."
+                          className={`font-semibold tabular-nums ${opp.backtest_win_rate != null && opp.backtest_win_rate < 0.5 ? "text-loss" : "text-slate-900"}`}
+                          title={opp.backtest_trials != null ? `Measured over ${opp.backtest_trials} trailing-history backtest entries (informational only — never gates entries)` : "Win rate unmeasurable — fewer than 20 scoreable history entries"}
                         >
-                          {opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
+                          {opp.backtest_win_rate != null ? `${(opp.backtest_win_rate * 100).toFixed(0)}%` : "—"}
                         </span>
                       </div>
                     </div>

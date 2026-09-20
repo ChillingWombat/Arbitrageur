@@ -484,6 +484,135 @@ pub struct WinHoldContext {
     pub entry_spread_bps: Option<f64>,
 }
 
+/// Empirical backtest of a funding-carry entry rule over trailing gap
+/// history: the REAL win rate and expected net, measured — not modelled.
+///
+/// Rule (same economics as the live trade): enter at a print with the gap
+/// above `threshold_8h`, exit at the first print below it (or the
+/// `max_hold_hours` cap). Accrual uses the mean gap along the realized path;
+/// costs are today's round-trip fees + measured entry spread against
+/// `trade_size_usd` notional. Win = net > 0.
+///
+/// - `history`: ascending `(ts_ms, net_8h fraction)` in the CURRENT trade
+///   direction (same series the hold model uses).
+/// - Entries sampled at most every ~30 min (stride-capped to ~350 trials) so
+///   a scan over many pairs stays cheap; overlapping holds are fine — each
+///   trial is an independent entry decision.
+/// - Entries need 24h of forward data (else skipped): prints in the final
+///   day are still-open positions in reality and cannot be scored without
+///   inventing their endings.
+/// - Returns `None` below `min_trials` (default 20): no thin-history
+///   fabrication, mirroring the spread monitor's unverifiable-expectation
+///   `None`.
+///
+/// Win rate and mean net come from the SAME trials but need not agree in
+/// sign: a 40% win rate with a positive mean is a skewed book (small frequent
+/// losses, larger rare wins) — different statistics, both honest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GapBacktest {
+    /// Entry trials simulated.
+    pub trials: u32,
+    /// Trials with net > 0.
+    pub wins: u32,
+    /// `wins / trials`.
+    pub win_rate: f64,
+    /// Mean net USD per trial (signed).
+    pub expected_usd: f64,
+    /// Mean realized hold in hours.
+    pub mean_hold_hours: f64,
+}
+
+pub fn backtest_gap_carry(
+    history: &[(i64, f64)],
+    threshold_8h: f64,
+    cost_ratio: f64,
+    trade_size_usd: f64,
+    max_hold_hours: f64,
+    min_trials: u32,
+) -> Option<GapBacktest> {
+    if !(threshold_8h.is_finite() && threshold_8h >= 0.0) {
+        return None;
+    }
+    if !(cost_ratio.is_finite() && cost_ratio >= 0.0) {
+        return None;
+    }
+    if !(trade_size_usd.is_finite() && trade_size_usd > 0.0) {
+        return None;
+    }
+    if !(max_hold_hours.is_finite() && max_hold_hours > 0.0) {
+        return None;
+    }
+    // Finite in-direction prints only.
+    let pts: Vec<(f64, f64)> = history
+        .iter()
+        .filter(|(_, r)| r.is_finite())
+        .map(|(t, r)| (*t as f64 / 3_600_000.0, *r))
+        .collect();
+    if pts.len() < 10 {
+        return None;
+    }
+    let stride = (pts.len() / 350).max(1);
+    let mut trials = 0u32;
+    let mut wins = 0u32;
+    let mut sum_net = 0.0;
+    let mut sum_hold = 0.0;
+    let t_end = pts.last().map(|(t, _)| *t).unwrap_or(0.0);
+    let mut i = 0usize;
+    while i < pts.len() {
+        let (t0, g0) = pts[i];
+        // Only prints a live desk would enter on, with a scoreable future.
+        if !(g0 > threshold_8h) || t_end - t0 < 24.0 {
+            i += stride.max(1);
+            continue;
+        }
+        // Walk forward to exit: first sub-threshold print or the cap.
+        let mut j = i;
+        let mut sum_gap = 0.0;
+        let mut n_path = 0u32;
+        while j < pts.len() {
+            let (tj, gj) = pts[j];
+            if tj - t0 > max_hold_hours {
+                break;
+            }
+            sum_gap += gj;
+            n_path += 1;
+            if gj < threshold_8h {
+                break;
+            }
+            j += 1;
+        }
+        if n_path == 0 {
+            i += stride.max(1);
+            continue;
+        }
+        let hold_h = (pts[(j.min(pts.len() - 1))].0 - t0).max(0.0);
+        let mean_gap = sum_gap / (n_path as f64);
+        let accrual = trade_size_usd * mean_gap * (hold_h / 8.0);
+        let net = accrual - trade_size_usd * cost_ratio;
+        if !net.is_finite() {
+            i += stride.max(1);
+            continue;
+        }
+        trials += 1;
+        sum_net += net;
+        sum_hold += hold_h;
+        if net > 0.0 {
+            wins += 1;
+        }
+        i += stride.max(1);
+    }
+    if trials < min_trials.max(1) {
+        return None;
+    }
+    Some(GapBacktest {
+        trials,
+        wins,
+        win_rate: (wins as f64) / (trials as f64),
+        expected_usd: sum_net / (trials as f64),
+        mean_hold_hours: sum_hold / (trials as f64),
+    })
+}
+
 /// Informational win probability for a funding-carry / basis opportunity.
 ///
 /// Heuristic, NOT a calibrated forecast: under a memoryless assumption the
@@ -872,6 +1001,56 @@ mod funding_win_probability_tests {
         // Garbage hold refuses rather than inventing.
         assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(f64::NAN)).is_none());
         assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(0.0)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod gap_backtest_tests {
+    use super::*;
+
+    fn series(start_ms: i64, step_ms: i64, gaps: &[f64]) -> Vec<(i64, f64)> {
+        gaps.iter()
+            .enumerate()
+            .map(|(i, g)| (start_ms + i as i64 * step_ms, *g))
+            .collect()
+    }
+
+    #[test]
+    fn persistent_gap_wins_every_trial() {
+        // 7d of hourly prints pinned at 0.0008, threshold 8% APR (~7.3e-7):
+        // every entry covers 10 bps costs many times over.
+        let gaps = vec![0.0008; 168];
+        let h = series(0, 3_600_000, &gaps);
+        let b = backtest_gap_carry(&h, 8.0 / 100.0 / 365.0 / 3.0, 10.0 / 10_000.0, 50_000.0, 168.0, 20)
+            .expect("backtest");
+        assert!(b.trials >= 20, "trials={}", b.trials);
+        assert_eq!(b.wins, b.trials);
+        assert!((b.win_rate - 1.0).abs() < 1e-12);
+        assert!(b.expected_usd > 100.0, "expected={}", b.expected_usd);
+    }
+
+    #[test]
+    fn collapsing_gap_loses_with_short_holds() {
+        // Sawtooth: each hour alternates 0.0008 / 0.0 — entries exit almost
+        // immediately, costs dominate.
+        let gaps: Vec<f64> = (0..336).map(|i| if i % 2 == 0 { 0.0008 } else { 0.0 }).collect();
+        let h = series(0, 3_600_000, &gaps);
+        let b = backtest_gap_carry(&h, 8.0 / 100.0 / 365.0 / 3.0, 10.0 / 10_000.0, 50_000.0, 168.0, 20)
+            .expect("backtest");
+        assert!(b.win_rate < 0.5, "win_rate={}", b.win_rate);
+        assert!(b.expected_usd < 0.0, "expected={}", b.expected_usd);
+        assert!(b.mean_hold_hours < 24.0, "hold={}", b.mean_hold_hours);
+    }
+
+    #[test]
+    fn thin_or_garbage_history_refuses() {
+        assert!(backtest_gap_carry(&[], 1e-6, 0.001, 50_000.0, 168.0, 20).is_none());
+        let few = series(0, 3_600_000, &[0.0008; 5]);
+        assert!(backtest_gap_carry(&few, 1e-6, 0.001, 50_000.0, 168.0, 20).is_none());
+        // Never-enterable series (all below threshold) -> no trials -> None.
+        let flat = series(0, 3_600_000, &[0.0; 200]);
+        assert!(backtest_gap_carry(&flat, 1e-6, 0.001, 50_000.0, 168.0, 20).is_none());
+        assert!(backtest_gap_carry(&series(0, 3_600_000, &[0.0008; 200]), f64::NAN, 0.001, 50_000.0, 168.0, 20).is_none());
     }
 }
 
