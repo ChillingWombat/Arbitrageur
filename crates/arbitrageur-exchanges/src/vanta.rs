@@ -687,6 +687,28 @@ impl ExchangeAdapter for VantaAdapter {
             .collect())
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let data = self
+            .public_query(serde_json::json!({"type": "marketSummary"}))
+            .await?;
+        let markets = data
+            .get("markets")
+            .and_then(|m| m.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Vanta marketSummary response missing data.markets"))?;
+
+        let mut out = HashMap::new();
+        for market in markets {
+            let Some(symbol) = market.get("symbol").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(price) = dec_from_json(market.get("mark_price")).filter(|p| *p > dec!(0)) else {
+                continue;
+            };
+            out.insert(symbol.to_string(), price);
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let data = self

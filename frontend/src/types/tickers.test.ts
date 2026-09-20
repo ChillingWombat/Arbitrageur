@@ -303,7 +303,7 @@ test("applyMarketUniverse drops a ticker when only one venue really reports it",
   assert.strictEqual(out.length, 0);
 });
 
-test("applyMarketUniverse ignores unknown venue ids and non-catalog symbols", () => {
+test("applyMarketUniverse ignores unknown venue ids and single-venue non-catalog symbols", () => {
   const catalog: PerpTicker[] = [
     { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT"], basePrice: 70000 },
   ];
@@ -312,6 +312,34 @@ test("applyMarketUniverse ignores unknown venue ids and non-catalog symbols", ()
     { venue_id: "lighter", symbols: ["BTC-USDC", "NOTREAL-USDC"] },
   ]);
   assert.strictEqual(out.length, 0);
+});
+
+test("applyMarketUniverse discovers catalog-absent symbols and uses median live price", () => {
+  const out = applyMarketUniverse([], [
+    { venue_id: "hyperliquid", symbols: ["ZEC-USDC"], base_prices: { "ZEC-USDC": 1440 } },
+    { venue_id: "lighter", symbols: ["ZEC-USDC"], base_prices: { "ZEC-USDC": 1444 } },
+    { venue_id: "robinhood", symbols: ["ZEC-USDC"], base_prices: { "ZEC-USDC": 1443 } },
+  ]);
+
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].symbol, "ZEC-USDC");
+  assert.strictEqual(out[0].base, "ZEC");
+  assert.strictEqual(out[0].quote, "USDC");
+  assert.strictEqual(out[0].name, "ZEC");
+  assert.strictEqual(out[0].basePrice, 1443);
+  assert.deepStrictEqual(out[0].venues, ["HL", "LGT", "RH"]);
+});
+
+test("applyMarketUniverse keeps exact stablecoin quotes distinct", () => {
+  const out = applyMarketUniverse([], [
+    { venue_id: "binance", symbols: ["MSTR-USDT"], base_prices: { "MSTR-USDT": 151 } },
+    { venue_id: "okx", symbols: ["MSTR-USDT"], base_prices: { "MSTR-USDT": 151.5 } },
+    { venue_id: "aster", symbols: ["MSTR-USDT"], base_prices: { "MSTR-USDT": 151.2 } },
+    { venue_id: "lighter", symbols: ["MSTR-USDC"], base_prices: { "MSTR-USDC": 151.4 } },
+  ]);
+
+  assert.deepStrictEqual(out.map((ticker) => ticker.symbol), ["MSTR-USDT"]);
+  assert.deepStrictEqual(out[0].venues, ["AST", "BNB", "OKX"]);
 });
 
 test("applyMarketUniverse admits a ticker listed by two real venues", () => {

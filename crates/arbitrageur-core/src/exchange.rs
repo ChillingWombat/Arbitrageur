@@ -20,6 +20,15 @@ pub trait ExchangeAdapter: Send + Sync {
     /// List available markets and instrument metadata.
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>>;
 
+    /// Best-effort reference price per `MarketMetadata::venue_symbol`.
+    ///
+    /// This is used to seed the dynamic ticker universe, not for execution.
+    /// Adapters with a bulk mark/last-price endpoint should override it;
+    /// returning an empty map is valid and callers must never invent a price.
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        Ok(HashMap::new())
+    }
+
     /// Connectivity probe used for latency measurement. The request must
     /// reach the exchange — implementations must bypass local response
     /// caches and CDN edge caching so the round-trip is meaningful.

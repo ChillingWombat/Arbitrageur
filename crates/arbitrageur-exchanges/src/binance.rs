@@ -498,6 +498,25 @@ impl ExchangeAdapter for BinanceAdapter {
         Ok(out)
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let val = self.get_json("/fapi/v1/premiumIndex").await?;
+        let rows = val
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Binance premiumIndex response is not an array"))?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let Some(symbol) = row.get("symbol").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(price) = dec_from_json(row.get("markPrice")).filter(|p| *p > dec!(0)) else {
+                continue;
+            };
+            out.insert(symbol.to_string(), price);
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let (venue_sym, is_1000x) = Self::to_venue_symbol(symbol)?;
         let path = format!("/fapi/v1/depth?symbol={}&limit={}", venue_sym, ORDERBOOK_LIMIT);

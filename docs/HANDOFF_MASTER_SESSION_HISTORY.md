@@ -2,8 +2,8 @@
 
 > **Historical record.** This document captures the development history as it happened. Some feature claims below describe aspirational or since-disabled functionality; for the current, accurate safety and capability status, see `README.md` → *Current Safety Status*.
 
-**Document Version**: 2.3.0  
-**Generated At**: 2026-09-18  
+**Document Version**: 2.4.0
+**Generated At**: 2026-09-20
 **Repository**: `/mnt/Data/Projects/Arbitrageur`  
 **Application**: Arbitrageur (High-Frequency Multi-Venue Arbitrage & Quantitative Terminal)  
 **Primary Stack**: Rust (Cargo Workspace), Tauri v2, Pixi, React 18, TypeScript, Tailwind CSS
@@ -1582,3 +1582,15 @@ overhaul pass committed as `23d4aed`).
 - **Shipped:** `backtest_gap_carry` now also returns ascending net deciles (P0…P100); `prob_net_above_target` interpolates P(net ≥ $X) (≈, 11-point grid); deciles ride the DTO on both scan paths (negligible size); popup gets a Target-$ input (default $100) with live P(target) + P10/P50/P90 summary. No new IPC, no scan-latency change (popup solves locally). Math 102/0 (decile + interpolation + counted-share tests), desktop 317/0, tsc/vite green, app relaunched (PID 600528) clean. Committed `38f4d81`, pushed. Worker files untouched.
 - **Also fixed:** the triangle flatten book-TTL flake (re-seed before flatten in-test; production timing untouched).
 - **Requirement sweep (session):** all actionable items shipped — Decibel reads/orders (§55,64), PopDEX tickers (§56), US100/TECH100 merge + HL diagnostics (§57), passive-unwind paper-only answer (§58), Risk Control + 10x ceiling (§59), failure logging v21 (§60), funding filters + bot-mirror defaults + 2dp (§61,63,65), decay Expected (§62), hold-aligned Win (§66), breakeven rename (§70), backtest Win/Expected (§71), P(target) (§72). Pending only on user input: HL missing-position confirmation (venue note now self-reports), Decibel subaccount creation, passive-unwind live loop (offered, not requested), Arcus (no public API exists).
+
+## 73. Session Handoff — 2026-09-20 (dynamic ticker universe)
+
+- **Ask:** Why are tickers such as `ZEC` and `MSTR` absent when their prices/volumes are not obviously below the auto-filter floors? Replace the static-catalog behavior with a dynamic universal fix.
+- **Root cause:** `PERP_TICKERS` was a hardcoded 52-row allowlist. `get_market_universe` returned live venue symbols, but frontend `applyMarketUniverse` only intersected those symbols with the catalog, so venue-listed markets absent from the catalog could never enter the explorer. The backend auto-filter's price fallback was also still USDC/benchmark-centric.
+- **Shipped:** The static catalog is now metadata and benchmark fallback only. `applyMarketUniverse` discovers the union of venue-reported active perpetuals and admits every exact `BASE-QUOTE` symbol reported by ≥2 admitted venues, including symbols absent from `PERP_TICKERS`. Dynamic rows are enriched with a median positive bulk venue mark price; catalog names/prices are fallback only. The strategy configurator receives the live ticker catalog so dynamic symbols no longer fall back to fake `$100` metadata.
+- **Bulk reference prices:** New `ExchangeAdapter::fetch_market_prices()` (default empty/fail-closed) is implemented for Hyperliquid `metaAndAssetCtxs.markPx`, Lighter `orderBookDetails.mark_price`, Vanta `marketSummary.mark_price`, Binance `premiumIndex.markPrice`, OKX `mark-price.markPx`, Aster `premiumIndex.markPrice`, and Kraken `tickers.markPrice` (last fallback). `get_market_universe` now returns `base_prices` keyed by canonical symbol alongside `symbols`.
+- **Auto-filter fix:** Price evaluation now uses live hub mid → venue bulk mark price → static benchmark. Hub lookup checks `BASE`, `BASE-USDC`, `BASE-USDT`, and `BASE-USD`; this prevents dynamically discovered USDT markets from being blocked solely by a USDC-only lookup.
+- **Instrument semantics (deliberate):** Exact quote identity is preserved. `MSTR-USDC` and `MSTR-USDT` are separate instruments; they are not silently merged. Orderly/Vanta `PERP_MSTR_USDC_mythos` remains rejected because the adapter cannot prove it is routable as the same canonical instrument as Lighter `MSTR-USDC`. `ZEC-USDC` now appears when its HL/Lighter/Robinhood/Vanta venues are admitted; `MSTR-USDT` appears when ≥2 of Binance/OKX/Aster are admitted.
+- **Verification:** `node --experimental-strip-types --test src/types/tickers.test.ts` 25/25; `npm run build` green; `cargo check --manifest-path frontend/src-tauri/Cargo.toml` green; `cargo test -p arbitrageur-exchanges --lib` 133/133; targeted strategy-filter and new `base_mark_prices` Tauri tests green.
+- **Files:** `frontend/src/types/tickers.ts`, `frontend/src/types/tickers.test.ts`, `frontend/src/types/index.ts`, `frontend/src/App.tsx`, `frontend/src/components/TickerConfigModal.tsx`, `frontend/src/components/TickerStrategyBar.tsx`, `frontend/src-tauri/src/commands.rs`, `crates/arbitrageur-core/src/exchange.rs`, `crates/arbitrageur-exchanges/src/{hyperliquid,lighter,vanta,binance,okx,aster,kraken}.rs`, `README.md`, `SPEC.md`.
+- **Commit:** dynamic ticker universe feature, committed and pushed in this session.

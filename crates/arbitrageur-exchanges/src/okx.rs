@@ -485,6 +485,28 @@ impl ExchangeAdapter for OkxAdapter {
         Ok(out)
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let val = self
+            .get_json("/api/v5/public/mark-price?instType=SWAP")
+            .await?;
+        let rows = val
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow::anyhow!("OKX mark-price response missing data"))?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let Some(inst_id) = row.get("instId").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(price) = dec_from_json(row.get("markPx")).filter(|p| *p > dec!(0)) else {
+                continue;
+            };
+            out.insert(inst_id.to_string(), price);
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let inst_id = Self::to_venue_symbol(symbol)?;
         let path = format!("/api/v5/market/books?instId={}&sz={}", inst_id, ORDERBOOK_LIMIT);

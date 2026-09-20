@@ -511,6 +511,29 @@ impl ExchangeAdapter for KrakenAdapter {
         Ok(out)
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let val = self.get_futures_json("/tickers").await?;
+        let tickers = val
+            .get("tickers")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken tickers missing array"))?;
+
+        let mut out = HashMap::new();
+        for ticker in tickers {
+            let Some(symbol) = ticker.get("symbol").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(price) = dec_from_json(ticker.get("markPrice"))
+                .or_else(|| dec_from_json(ticker.get("last")))
+                .filter(|p| *p > dec!(0))
+            else {
+                continue;
+            };
+            out.insert(symbol.to_string(), price);
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let venue_sym = Self::to_futures_symbol(symbol)?;
         let path = format!("/orderbook?symbol={}", venue_sym);

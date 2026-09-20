@@ -5,6 +5,8 @@
 > Session 41 (2026-09-20): settings save UX — saved-success banner removed (button shows transient `Succeed!`), `Save Configuration`→`Save Changes` (fixed `w-36`), `System Setting`→`System Settings` everywhere; button labels audited to Title Case (`Halt Trading`, `By Ticker/Venue`, `Via Wallet`).
 >
 > Session 40 (2026-09-20): Safety settings are now operator-controllable (System Setting → Safety tab: circuit-breaker halt limits, DeltaGuard exposure cap, margin thresholds; live-applied + kv-persisted). Breaker baseline re-anchors on paper↔live switches / paper resets instead of false-tripping (fixes recurring -$196k flat-book halt). Portfolio Monitor is the single reset control; Header/sidebar resets removed; CB-tripped vs halted wording unified to Halted / circuit breaker tripped. One spec, five parts — newest decisions win on conflict. Per-part status reflects the live tree; the session handoff log (`docs/HANDOFF_MASTER_SESSION_HISTORY.md`) is the day-to-day record.
+>
+> Session 73 (2026-09-20): the ticker universe is now discovered from live venue-reported perpetual markets; `PERP_TICKERS` is metadata/benchmark fallback only, not an allowlist. Exact `BASE-QUOTE` markets need ≥2 admitted reporting venues. Bulk venue mark prices seed dynamic sizing and auto-filter evaluation. USDC and USDT listings remain distinct instruments.
 ## Parts & status
 1. **Core engine (V2)** — ✅ Implemented — paper-only; native execution disabled backend-wide, fail-closed.
 2. **Session-aware seasonality layer** — 🟡 Partially implemented — session profiles + `get_session_profile` IPC exist; full phased rollout pending.
@@ -115,6 +117,11 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 50. As an AI Copilot user, I want duplicate Gemini API entries removed from settings, so that AI assistant configuration is clean and unambiguous.
     STATUS 2026-09-18 audit: NOT APPLICABLE — no Copilot settings surface exists anywhere in this tree (no `CopilotSettingsModal.tsx`, zero `Copilot`/`Gemini` references in frontend or backend). The 2026-09-18 session-16 handoff entry appears to describe a different project (see handoff errata).
 
+#### Dynamic Ticker Universe
+51. As a multi-venue trader, I want the ticker list to be discovered from live venue-reported perpetual markets rather than a hardcoded allowlist, so that newly listed or previously omitted instruments such as `ZEC-USDC` and `MSTR-USDT` appear without a code change.
+52. As an operator, I want the static `PERP_TICKERS` catalog to remain available only as display metadata and benchmark-price fallback, so that a stale catalog can never hide a venue market that is actually live and executable.
+53. As a risk manager, I want exact `BASE-QUOTE` identity preserved across venues, so that `MSTR-USDC` and `MSTR-USDT` are never silently merged into one instrument without an explicit cross-stablecoin basis model.
+
 ---
 
 ### Implementation Decisions
@@ -202,14 +209,30 @@ pub struct TickerStrategyConfigDto {
     trade size) is the headline size.
 9. **Orderbook Gradient**: VWAP walks already price level-gaps into every capacity tier, and the new `book_gradient::entry_gradient` makes the MARGINAL cost explicit — bps per extra $1k summed over both legs (fixed fractional 10-step walk, level-lump independent), plus top-5 imbalance and microprice. Reported per funding/basis opp as `depth_slope_bps_per_1k` (None when thin — never a fabricated zero). Still point-in-time: no replenishment, impact beyond the visible book, or time decay.
 
+#### Dynamic Market Universe & Reference Prices (2026-09-20)
+1. **Venue-Discovered Universe**:
+   - `get_market_universe` fans out to every admitted adapter and returns active `MarketType::Perpetual` symbols as canonical `BASE-QUOTE`.
+   - Frontend `applyMarketUniverse(catalog, universe)` builds the union of venue-reported symbols; the static `PERP_TICKERS` rows are used only to enrich known names and as a fallback benchmark price.
+   - A symbol is admitted when the **exact** canonical symbol is reported by at least two admitted venues. The catalog can no longer subtract or gate a live venue market.
+2. **Exact Quote Semantics**:
+   - `MSTR-USDC`, `MSTR-USDT`, and other quote variants remain separate instruments. Cross-stablecoin merging requires an explicit basis/FX model and per-venue symbol routing; it is never inferred from a shared base ticker.
+   - Broker-suffixed Orderly markets such as `PERP_MSTR_USDC_mythos` remain rejected unless an adapter can prove the canonical alias and route orders to the exact venue symbol.
+3. **Bulk Reference-Price Seeding**:
+   - New `ExchangeAdapter::fetch_market_prices()` returns a best-effort map keyed by `MarketMetadata::venue_symbol`; it is not an execution price and missing entries are never fabricated.
+   - Implemented bulk mark/last-price feeds: Hyperliquid `metaAndAssetCtxs.markPx`, Lighter `orderBookDetails.mark_price`, Vanta `marketSummary.mark_price`, Binance `premiumIndex.markPrice`, OKX `mark-price.markPx`, Aster `premiumIndex.markPrice`, Kraken `tickers.markPrice` (last-price fallback).
+   - The frontend uses the median positive venue price for `PerpTicker.basePrice`, falling back to the static benchmark only when no live price is available.
+4. **Auto-Filter Integration**:
+   - The strategy filter's price resolution now consumes the same bulk venue prices: live hub mid → venue mark price → benchmark catalog fallback.
+   - Hub lookup probes `BASE`, `BASE-USDC`, `BASE-USDT`, and `BASE-USD`, so dynamically discovered USDT-quoted markets are not blocked solely because the legacy catalog was USDC-centric.
+
 #### Strategy Auto-Filters & Price Resolution Architecture
 1. **Real Exchange 24h Volume Aggregation**:
    - Queries authentic exchange 24h quote volume endpoints: Hyperliquid `dayNtlVlm`, Lighter `daily_quote_token_volume`, Vanta `marketSummary` (`24h_amount`), Binance `quoteVolume`, OKX `volCcy24h`, and Kraken `vol24h`.
    - Evaluates the minimum volume across venues that **actively report volume** (`min_reported >= floor`). Venues lacking volume endpoints (or experiencing temporary rate-limits) contribute nothing to aggregates without failing closed or locking out high-volume assets.
 2. **3-Tier Price Resolution**:
    - Resolves mid prices using a strict 3-tier hierarchy:
-     1. Live orderbook mid from `market_data_hub` (`hub_mid_usd`).
-     2. Cached exchange mark/last price from 24h market feeds.
+     1. Live orderbook mid from `market_data_hub` (`hub_mid_usd`; `BASE`, `BASE-USDC`, `BASE-USDT`, `BASE-USD`).
+     2. Bulk venue mark/last price from `ExchangeAdapter::fetch_market_prices()`.
      3. Authoritative benchmark catalog price (`benchmark_base_price` in Rust, `getTickerBenchmarkPrice` in TypeScript).
    - This ensures background tickers not currently polled in the hub orderbook cache are evaluated against their true market price rather than being blocked as missing data.
    - Setting `Auto Min Mid Price = 0.5` reliably filters sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) while keeping major assets (BTC, ETH, SOL) visible.
@@ -246,10 +269,11 @@ pub struct TickerStrategyConfigDto {
    - `test_ticker_strategy_config_crud_and_validation`: Verifies saving, retrieving, and validating strategy configuration with sliding window parameters.
    - `test_unconfigured_state_returns_zero_synthetic_data`: Verifies that unconfigured venues return zero synthetic orderbooks or fabricated prices.
    - `test_vault_initialize_unlock_lock`: Verifies encryption, password verification, memory lock, and status reporting.
+   - `test_base_mark_prices_use_venue_symbol_and_min_across_quotes`: Verifies bulk venue prices resolve through the exact `MarketMetadata::venue_symbol` and collapse to the conservative minimum base price per venue.
 2. **Frontend Quant & Service Layer** (`matrixQuant.ts`, `contractSpecs.ts`, `tickers.ts`):
    - Contract spec calculation for lot sizes and leverage safety across Hyperliquid, Lighter, Vanta, and Robinhood.
    - 2D matrix calculation incorporating taker fees, closing spread friction, and rolling sliding window delta.
-   - Filtering of available tickers based on 2+ active, connected venues.
+   - Dynamic ticker discovery: catalog-absent symbols appear when two real venues report them; single-venue symbols stay hidden; live median prices seed base-price fallback; and exact stablecoin quotes remain distinct.
 
 ---
 

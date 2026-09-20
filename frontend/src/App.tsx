@@ -282,7 +282,7 @@ export const App: React.FC = () => {
     };
   }, [filterStrategyId, strategyParamsVersion]);
 
-  // Pre-exemption intersection — needed so the empty-state copy can tell
+  // Pre-exemption live universe — needed so the empty-state copy can tell
   // "no overlapping markets" apart from "everything hidden".
   const universeTickers: PerpTicker[] = useMemo(
     () => applyMarketUniverse(PERP_TICKERS, marketUniverse),
@@ -929,6 +929,7 @@ export const App: React.FC = () => {
         isOpen={tickerConfigModal.isOpen}
         onClose={handleTickerConfigModalClose}
         tickerSymbol={tickerConfigModal.symbol}
+        tickerCatalog={availableTickers}
         initialStrategy={tickerConfigModal.strategy}
         onSaveConfig={handleSaveStrategyParams}
       />

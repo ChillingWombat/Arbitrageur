@@ -120,6 +120,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           isOpen={internalModalOpen}
           onClose={() => setInternalModalOpen(false)}
           tickerSymbol={ticker.symbol}
+          tickerCatalog={[ticker]}
           onSaveConfig={onChangeConfig}
           initialStrategy="futures"
         />

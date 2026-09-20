@@ -287,6 +287,8 @@ export interface CrossTickerExecutionParams {
 export interface VenueMarketUniverseDto {
   venue_id: string;
   symbols: string[];
+  /** Best-effort reference price keyed by canonical BASE-QUOTE symbol. */
+  base_prices?: Record<string, number>;
 }
 
 export interface PairBaselineDto {

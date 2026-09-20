@@ -68,6 +68,8 @@ export interface TickerConfigModalProps {
   /** Reference ticker for contract-spec previews (min lot, margin, grid state).
    * The strategy parameters themselves are universal across tickers. */
   tickerSymbol: string;
+  /** Live universe rows; dynamic symbols may not exist in PERP_TICKERS. */
+  tickerCatalog?: PerpTicker[];
   initialStrategy?: "futures" | "funding" | "spot" | "triangle" | string;
   onSaveConfig?: (params: StrategyParamsDto) => Promise<void> | void;
 }
@@ -201,6 +203,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   isOpen,
   onClose,
   tickerSymbol,
+  tickerCatalog,
   initialStrategy = "futures",
   onSaveConfig,
 }) => {
@@ -230,6 +233,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // Find ticker metadata
   const ticker: PerpTicker = useMemo(() => {
     return (
+      tickerCatalog?.find((t) => t.symbol === tickerSymbol) ||
       PERP_TICKERS.find((t) => t.symbol === tickerSymbol) || {
         symbol: tickerSymbol || "—",
         base: tickerSymbol.split(/[-_/]/)[0] || "BTC",
@@ -239,7 +243,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         basePrice: 100,
       }
     );
-  }, [tickerSymbol]);
+  }, [tickerCatalog, tickerSymbol]);
 
   // Form State for Futures Basis Strategy
   const [targetProfitBps, setTargetProfitBps] = useState<number>(1.0);

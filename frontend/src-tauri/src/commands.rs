@@ -75,10 +75,14 @@ pub struct VenueVolumesDto {
     pub volumes: HashMap<String, f64>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct VenueMarketUniverseDto {
     pub venue_id: String,
     pub symbols: Vec<String>,
+    /// Best-effort reference price keyed by canonical `BASE-QUOTE` symbol.
+    /// Missing entries are honest unknowns; consumers must not fabricate one.
+    #[serde(default)]
+    pub base_prices: HashMap<String, f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1211,11 +1215,18 @@ pub async fn get_market_universe_impl(
     let mut tasks = Vec::new();
     for (vid, _, adapter) in state.get_venues() {
         let vid = vid.to_string();
-        tasks.push(tokio::spawn(async move { (vid, adapter.fetch_markets().await) }));
+        tasks.push(tokio::spawn(async move {
+            let (markets, prices) = tokio::join!(
+                adapter.fetch_markets(),
+                adapter.fetch_market_prices()
+            );
+            let prices = prices.unwrap_or_default();
+            (vid, markets, prices)
+        }));
     }
     let mut out = Vec::new();
     for h in tasks {
-        if let Ok((vid, Ok(markets))) = h.await {
+        if let Ok((vid, Ok(markets), prices)) = h.await {
             let mut symbols: Vec<String> = markets
                 .iter()
                 .filter(|m| {
@@ -1233,9 +1244,27 @@ pub async fn get_market_universe_impl(
                 .collect();
             symbols.sort();
             symbols.dedup();
+
+            let mut base_prices = HashMap::new();
+            for market in &markets {
+                if !market.is_active
+                    || market.symbol.market_type
+                        != arbitrageur_core::market::MarketType::Perpetual
+                {
+                    continue;
+                }
+                let Some(price) = prices.get(&market.venue_symbol) else {
+                    continue;
+                };
+                let price = price.to_string().parse::<f64>().ok();
+                if let Some(price) = price.filter(|p| p.is_finite() && *p > 0.0) {
+                    base_prices.insert(market.symbol.canonical(), price);
+                }
+            }
             out.push(VenueMarketUniverseDto {
                 venue_id: vid,
                 symbols,
+                base_prices,
             });
         }
     }
@@ -8252,10 +8281,18 @@ fn resolve_ticker_mids(
     state: &AppEngineState,
     base: &str,
     in_scope_venues: &[String],
+    mark_prices_by_venue: &HashMap<String, HashMap<String, f64>>,
 ) -> HashMap<String, f64> {
     let mut mids = HashMap::new();
     for v in in_scope_venues {
         if let Some(m) = hub_mid_usd(state, base, v) {
+            mids.insert(v.clone(), m);
+        } else if let Some(m) = mark_prices_by_venue
+            .get(v)
+            .and_then(|prices| prices.get(base))
+            .copied()
+            .filter(|price| price.is_finite() && *price > 0.0)
+        {
             mids.insert(v.clone(), m);
         }
     }
@@ -8272,7 +8309,12 @@ fn resolve_ticker_mids(
 }
 
 fn hub_mid_usd(state: &AppEngineState, base: &str, venue: &str) -> Option<f64> {
-    for key in [base.to_string(), format!("{base}-USDC")] {
+    for key in [
+        base.to_string(),
+        format!("{base}-USDC"),
+        format!("{base}-USDT"),
+        format!("{base}-USD"),
+    ] {
         if let Some(book) = state.market_data_hub.get_valid_orderbook(
             &VenueId::from(venue),
             &key,
@@ -8290,6 +8332,68 @@ fn hub_mid_usd(state: &AppEngineState, base: &str, venue: &str) -> Option<f64> {
     None
 }
 
+fn base_mark_prices(
+    markets: &[arbitrageur_core::market::MarketMetadata],
+    venue_prices: &HashMap<String, Decimal>,
+) -> HashMap<String, f64> {
+    let mut by_base = HashMap::new();
+    for market in markets.iter().filter(|market| {
+        market.is_active
+            && market.symbol.market_type == arbitrageur_core::market::MarketType::Perpetual
+    }) {
+        let Some(price) = venue_prices.get(&market.venue_symbol) else {
+            continue;
+        };
+        let Ok(price) = price.to_string().parse::<f64>() else {
+            continue;
+        };
+        if !price.is_finite() || price <= 0.0 {
+            continue;
+        }
+        let base = crate::monitor::canonical_base(&market.symbol.base);
+        by_base
+            .entry(base)
+            .and_modify(|existing: &mut f64| *existing = existing.min(price))
+            .or_insert(price);
+    }
+    by_base
+}
+
+#[derive(Default)]
+struct StrategyVenueUniverse {
+    bases_by_venue: HashMap<String, Vec<String>>,
+    mark_prices_by_venue: HashMap<String, HashMap<String, f64>>,
+}
+
+async fn scan_strategy_venue_universe(
+    state: &AppEngineState,
+    include_prices: bool,
+) -> StrategyVenueUniverse {
+    let mut scan = StrategyVenueUniverse::default();
+    for (vid, _, adapter) in state.get_venues() {
+        let markets = match adapter.fetch_markets().await {
+            Ok(markets) => markets,
+            Err(_) => continue,
+        };
+        let mut bases: Vec<String> = markets
+            .iter()
+            .filter(|market| market.is_active)
+            .map(|market| crate::monitor::canonical_base(&market.symbol.base))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        bases.sort();
+        scan.bases_by_venue.insert(vid.to_string(), bases);
+
+        if include_prices {
+            let prices = adapter.fetch_market_prices().await.unwrap_or_default();
+            scan.mark_prices_by_venue
+                .insert(vid.to_string(), base_mark_prices(&markets, &prices));
+        }
+    }
+    scan
+}
+
 /// Shared fail-closed gate for bot/scan targeting and radar Execute: when
 /// the strategy's auto-filters are off this is a no-op; otherwise the
 /// ticker must pass MIN aggregation across `in_scope_venues`.
@@ -8304,7 +8408,20 @@ pub(crate) async fn reject_if_strategy_filtered(
         return Ok(());
     }
     let volumes = cached_venue_volumes(state).await;
-    let mids = resolve_ticker_mids(state, base, in_scope_venues);
+    let include_prices = crate::strategy_filters::threshold_active(filters.min_price_usd);
+    let mark_prices_by_venue = if include_prices {
+        scan_strategy_venue_universe(state, true)
+            .await
+            .mark_prices_by_venue
+    } else {
+        HashMap::new()
+    };
+    let mids = resolve_ticker_mids(
+        state,
+        base,
+        in_scope_venues,
+        &mark_prices_by_venue,
+    );
     let (ok, reason) = crate::strategy_filters::ticker_passes_strategy_filters(
         base,
         in_scope_venues,
@@ -8324,20 +8441,9 @@ pub async fn get_strategy_tickers_impl(
     strategy_id: &str,
 ) -> Result<Vec<StrategyTickerDto>, String> {
     let filters = strategy_auto_filters(state, strategy_id)?;
-    let mut venue_bases: HashMap<String, Vec<String>> = HashMap::new();
-    for (vid, _, adapter) in state.get_venues() {
-        if let Ok(markets) = adapter.fetch_markets().await {
-            let mut bases: Vec<String> = markets
-                .iter()
-                .filter(|m| m.is_active)
-                .map(|m| crate::monitor::canonical_base(&m.symbol.base))
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            bases.sort();
-            venue_bases.insert(vid.to_string(), bases);
-        }
-    }
+    let include_prices = crate::strategy_filters::threshold_active(filters.min_price_usd);
+    let scan = scan_strategy_venue_universe(state, include_prices).await;
+    let venue_bases = scan.bases_by_venue;
     let mut counts: HashMap<String, usize> = HashMap::new();
     for bases in venue_bases.values() {
         for b in bases {
@@ -8364,7 +8470,7 @@ pub async fn get_strategy_tickers_impl(
             .collect();
         scope.sort();
         let mids = if auto_filters_active(filters) {
-            resolve_ticker_mids(state, &base, &scope)
+            resolve_ticker_mids(state, &base, &scope, &scan.mark_prices_by_venue)
         } else {
             HashMap::new()
         };
@@ -14889,6 +14995,45 @@ mod tests {
         .expect("disabled filters must not fetch or block");
     }
 
+    #[test]
+    fn test_base_mark_prices_use_venue_symbol_and_min_across_quotes() {
+        fn market(
+            base: &str,
+            quote: &str,
+            venue_symbol: &str,
+            venue_id: &str,
+        ) -> arbitrageur_core::market::MarketMetadata {
+            arbitrageur_core::market::MarketMetadata {
+                symbol: arbitrageur_core::market::Symbol::perp(base, quote),
+                venue: arbitrageur_core::types::VenueId::new(venue_id),
+                venue_symbol: venue_symbol.to_string(),
+                price_decimals: 2,
+                size_decimals: 2,
+                min_order_size: dec!(0.01),
+                min_notional: dec!(5.0),
+                maker_fee_bps: dec!(2.0),
+                taker_fee_bps: dec!(5.0),
+                contract_size: dec!(1.0),
+                is_active: true,
+            }
+        }
+
+        let markets = vec![
+            market("ZEC", "USDC", "ZEC", "hyperliquid"),
+            market("MSTR", "USDT", "MSTRUSDT", "binance"),
+            market("MSTR", "USDC", "MSTR-USDC-SWAP", "okx"),
+        ];
+        let prices = HashMap::from([
+            ("ZEC".to_string(), dec!(1443.0)),
+            ("MSTRUSDT".to_string(), dec!(151.5)),
+            ("MSTR-USDC-SWAP".to_string(), dec!(151.2)),
+        ]);
+
+        let by_base = base_mark_prices(&markets, &prices);
+        assert_eq!(by_base.get("ZEC"), Some(&1443.0));
+        assert_eq!(by_base.get("MSTR"), Some(&151.2));
+    }
+
     #[tokio::test]
     async fn test_upsert_account_max_leverage_ipc_roundtrip() {
         let state = AppEngineState::new();
@@ -18555,5 +18700,3 @@ pub async fn sign_popdex_approve_with_main(
         tx_hash,
     })
 }
-
-

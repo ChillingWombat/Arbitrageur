@@ -281,6 +281,35 @@ impl ExchangeAdapter for LighterAdapter {
         Ok(markets)
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let res = self.get_json("/api/v1/orderBookDetails").await?;
+        let details = res
+            .get("order_book_details")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
+
+        let mut out = HashMap::new();
+        for item in details {
+            let market_id = item
+                .get("market_id")
+                .and_then(|m| m.as_u64())
+                .map(|id| id.to_string());
+            let Some(market_id) = market_id else {
+                continue;
+            };
+            let price = item.get("mark_price").and_then(|value| {
+                value
+                    .as_str()
+                    .and_then(|s| Decimal::from_str(s).ok())
+                    .or_else(|| value.as_f64().and_then(Decimal::from_f64_retain))
+            });
+            if let Some(price) = price.filter(|p| *p > dec!(0)) {
+                out.insert(market_id, price);
+            }
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let details = self.get_json("/api/v1/orderBookDetails").await?;
         let market_id = resolve_market_id(&details, symbol)?;

@@ -320,33 +320,88 @@ export function tickerUnavailabilityReason(
   return "Enabled venues are not providing an overlapping market universe yet.";
 }
 
+function canonicalMarketParts(
+  raw: string
+): { symbol: string; base: string; quote: string } | null {
+  const symbol = raw.trim().toUpperCase();
+  const parts = symbol.split("-");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) return null;
+  return { symbol, base: parts[0], quote: parts[1] };
+}
+
+function medianPositive(prices: number[]): number | undefined {
+  const valid = prices
+    .filter((price) => Number.isFinite(price) && price > 0)
+    .sort((a, b) => a - b);
+  if (valid.length === 0) return undefined;
+  const middle = Math.floor(valid.length / 2);
+  return valid.length % 2 === 1
+    ? valid[middle]
+    : (valid[middle - 1] + valid[middle]) / 2;
+}
+
 /**
- * Filters the static catalog against the venues' actual reported market
- * universes: a ticker is available only when at least 2 venues really list
- * its symbol. Each surviving row's `venues` is replaced by the venue codes
- * that report the market — the catalog's static venue claims are ignored.
+ * Builds the live ticker universe from the venues' actual reported markets.
+ * The static catalog is metadata/price fallback only; it is no longer an
+ * allowlist. Any active perpetual listed by at least 2 admitted venues is
+ * admitted, including symbols absent from the catalog.
+ *
+ * Exact `BASE-QUOTE` equality is intentional: USDC and USDT listings remain
+ * distinct instruments unless a future canonicalisation layer explicitly
+ * models the cross-stablecoin basis and venue symbol mapping.
  */
 export function applyMarketUniverse(
   catalog: PerpTicker[],
   universe: VenueMarketUniverseDto[]
 ): PerpTicker[] {
-  const symbolVenues = new Map<string, string[]>();
+  const catalogBySymbol = new Map(
+    catalog.map((ticker) => [ticker.symbol.toUpperCase(), ticker])
+  );
+  const symbolVenues = new Map<string, Set<string>>();
+  const symbolPrices = new Map<string, number[]>();
+
   for (const entry of universe) {
     const code = VENUE_ID_TO_CODE[entry.venue_id.toLowerCase()];
     if (!code) continue;
-    for (const sym of entry.symbols) {
-      const key = sym.toUpperCase();
-      const list = symbolVenues.get(key) ?? [];
-      if (!list.includes(code)) list.push(code);
-      symbolVenues.set(key, list);
+
+    for (const rawSymbol of entry.symbols) {
+      const parts = canonicalMarketParts(rawSymbol);
+      if (!parts) continue;
+
+      const venues = symbolVenues.get(parts.symbol) ?? new Set<string>();
+      venues.add(code);
+      symbolVenues.set(parts.symbol, venues);
+
+      const rawPrice = entry.base_prices?.[rawSymbol] ?? entry.base_prices?.[parts.symbol];
+      const price = Number(rawPrice);
+      if (Number.isFinite(price) && price > 0) {
+        const prices = symbolPrices.get(parts.symbol) ?? [];
+        prices.push(price);
+        symbolPrices.set(parts.symbol, prices);
+      }
     }
   }
-  return catalog
-    .map((t) => ({
-      ...t,
-      venues: symbolVenues.get(t.symbol.toUpperCase()) ?? [],
-    }))
-    .filter((t) => t.venues.length >= 2);
+
+  const discovered: PerpTicker[] = [];
+  for (const [symbol, venues] of symbolVenues) {
+    if (venues.size < 2) continue;
+    const parts = canonicalMarketParts(symbol);
+    if (!parts) continue;
+    const known = catalogBySymbol.get(symbol);
+    const livePrice = medianPositive(symbolPrices.get(symbol) ?? []);
+    const fallbackPrice = known?.basePrice && known.basePrice > 0 ? known.basePrice : 0;
+    discovered.push({
+      symbol,
+      base: parts.base,
+      quote: parts.quote,
+      name: known?.name ?? parts.base,
+      venues: Array.from(venues).sort(),
+      basePrice: livePrice ?? fallbackPrice,
+    });
+  }
+
+  discovered.sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return discovered;
 }
 
 /**
@@ -516,8 +571,10 @@ export function applyTickerVisibility<T extends { symbol: string; base: string }
   });
 }
 
-// Complete list of the union of available tickers across perp DEXes (Hyperliquid, Lighter, Vanta, Robinhood, Kraken)
-// Every ticker is available on at least 2 exchanges (52 tickers total, exceeding the >40 requirement).
+// Curated metadata and benchmark-price fallback for well-known perpetuals.
+// This is NOT the runtime allowlist: applyMarketUniverse() discovers the live
+// universe from venue-reported markets and uses these rows only to enrich
+// names and prices when a symbol is present.
 export const PERP_TICKERS: PerpTicker[] = [
   { symbol: "BTC-USDC", base: "BTC", quote: "USDC", name: "Bitcoin", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 78550.0 },
   { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT", "VNT", "RH", "KRK"], basePrice: 2470.0 },

@@ -475,6 +475,25 @@ impl ExchangeAdapter for AsterAdapter {
             .collect())
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let rows = self.get_json("/fapi/v3/premiumIndex").await?;
+        let rows = rows
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Aster premiumIndex response is not an array"))?;
+
+        let mut out = HashMap::new();
+        for row in rows {
+            let Some(symbol) = row.get("symbol").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(price) = dec_from_json(row.get("markPrice")).filter(|p| *p > dec!(0)) else {
+                continue;
+            };
+            out.insert(symbol.to_string(), price);
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         if !VALID_DEPTH_LIMITS.contains(&ORDERBOOK_LIMIT) {
             anyhow::bail!("Aster ORDERBOOK_LIMIT {ORDERBOOK_LIMIT} is not a venue-valid depth");

@@ -324,6 +324,46 @@ impl ExchangeAdapter for HyperliquidAdapter {
         Ok(markets)
     }
 
+    async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
+        let res = self.post_info(json!({"type": "metaAndAssetCtxs"})).await?;
+        let arr = res
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs response is not an array"))?;
+        if arr.len() < 2 {
+            anyhow::bail!("Hyperliquid metaAndAssetCtxs response is incomplete");
+        }
+        let universe = arr[0]
+            .get("universe")
+            .and_then(|u| u.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs missing universe"))?;
+        let contexts = arr[1]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs missing asset contexts"))?;
+
+        let mut out = HashMap::new();
+        for (index, item) in universe.iter().enumerate() {
+            let Some(name) = item.get("name").and_then(|n| n.as_str()) else {
+                continue;
+            };
+            let Some(mark) = contexts
+                .get(index)
+                .and_then(|ctx| ctx.get("markPx"))
+                .and_then(|value| {
+                    value
+                        .as_str()
+                        .and_then(|s| Decimal::from_str(s).ok())
+                        .or_else(|| value.as_f64().and_then(Decimal::from_f64_retain))
+                })
+            else {
+                continue;
+            };
+            if mark > dec!(0) {
+                out.insert(name.to_string(), mark);
+            }
+        }
+        Ok(out)
+    }
+
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let coin = perp_coin(symbol)?;
         let res = self.post_info(json!({"type": "l2Book", "coin": coin})).await?;
@@ -904,4 +944,3 @@ mod tests {
         assert!(!adapter.has_live_credentials());
     }
 }
-
