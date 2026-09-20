@@ -1115,6 +1115,10 @@ impl ExchangeAdapter for PopDexAdapter {
         true
     }
 
+    fn live_order_submission_implemented(&self) -> bool {
+        true
+    }
+
     fn has_live_credentials(&self) -> bool {
         self.agent_key.read().is_some()
     }

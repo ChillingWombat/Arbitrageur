@@ -809,6 +809,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
         true
     }
 
+    fn live_order_submission_implemented(&self) -> bool {
+        true
+    }
+
     fn has_live_credentials(&self) -> bool {
         self.has_credentials()
     }

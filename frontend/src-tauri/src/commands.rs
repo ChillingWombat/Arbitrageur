@@ -4793,6 +4793,23 @@ pub async fn execute_cross_ticker_arbitrage_impl(
     Err("Native 'cross-ticker' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
+/// Live-readiness verdict for one funding leg. `None` = submittable.
+/// Reports the honest submission state (`live_order_submission_implemented`,
+/// not the aspirational `supports_live_execution` flag) plus credential
+/// presence, so live-mode refusals name the missing piece per leg.
+fn funding_leg_live_issue(adapter: &Arc<dyn ExchangeAdapter>) -> Option<String> {
+    let name = adapter.name().to_string();
+    if !adapter.live_order_submission_implemented() {
+        return Some(format!("{name}: live order submission is not implemented yet"));
+    }
+    if !adapter.has_live_credentials() {
+        return Some(format!(
+            "{name}: submittable, but no live credentials loaded (add them in Exchange Accounts and unlock the vault)"
+        ));
+    }
+    None
+}
+
 pub async fn execute_funding_carry_impl(
     symbol: &str,
     long_venue: &str,
@@ -4822,7 +4839,29 @@ pub async fn execute_funding_carry_impl(
         return Err("trade_size_usd must be a finite positive number".into());
     }
     if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+        // Paper-only until two-leg live dispatch + reconciliation exists.
+        // Refuse with per-leg reasons so the operator sees exactly what is
+        // missing instead of a blanket denial.
+        let mut issues = Vec::new();
+        for (venue, label) in [(long_venue, "LONG"), (short_venue, "SHORT")] {
+            match state.get_adapter(venue) {
+                Some(adapter) => {
+                    if let Some(issue) = funding_leg_live_issue(&adapter) {
+                        issues.push(format!("{label} leg — {issue}"));
+                    }
+                }
+                None => issues.push(format!(
+                    "{label} leg — venue '{venue}' is not admitted"
+                )),
+            }
+        }
+        issues.push(
+            "two-leg live fills need atomic dispatch + reconciliation, which is not built yet".to_string(),
+        );
+        return Err(format!(
+            "Live funding execution is not available for {symbol} (LONG {long_venue} / SHORT {short_venue}): {}. Switch to Paper Trading to execute this pair on the simulator.",
+            issues.join("; ")
+        ));
     }
 
     // Paper-only path (same discipline as the triangle executor): the
@@ -12696,6 +12735,21 @@ mod tests {
         assert_eq!(funding.len(), 1, "expected one funding signal, got {funding:?}");
         assert_eq!(funding[0].legs.len(), 2);
         assert!(funding[0].status.counts_as_open());
+    }
+
+    #[tokio::test]
+    async fn test_funding_carry_live_refusal_names_missing_leg() {
+        let state = setup_test_state_with_venues();
+        *state.is_live_mode.write() = true;
+        let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
+            .await
+            .expect_err("live funding must refuse without two-leg reconciliation");
+        assert!(
+            err.contains("lighter") && err.contains("not implemented"),
+            "refusal must name the unimplemented leg: {err}"
+        );
+        assert!(err.contains("Paper Trading"), "refusal must point at paper: {err}");
+        *state.is_live_mode.write() = false;
     }
 
     #[tokio::test]

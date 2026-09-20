@@ -83,6 +83,14 @@ pub trait ExchangeAdapter: Send + Sync {
         false
     }
 
+    /// Whether `place_order` genuinely submits to the venue. Several adapters
+    /// report `supports_live_execution() == true` while their `place_order`
+    /// is still a fail-closed stub, so live preflights must consult THIS,
+    /// not that flag, before promising anything submittable.
+    fn live_order_submission_implemented(&self) -> bool {
+        false
+    }
+
     /// Whether authenticated live trading credentials are loaded in memory for this adapter.
     fn has_live_credentials(&self) -> bool {
         false

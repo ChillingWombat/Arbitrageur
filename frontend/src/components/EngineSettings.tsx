@@ -1348,10 +1348,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   type="number"
                   min="1"
                   step="any"
-                  disabled={loading}
+                  disabled={loading || tradingMode === "real"}
+                  title={tradingMode === "real" ? "Paper balance applies to Paper Trading mode only" : undefined}
                   value={paperStartingBalance}
                   onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
-                  className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+                  className={`w-28 shrink-0 px-3 py-1.5 border rounded-lg focus:outline-none focus:ring-1 focus:ring-accent ${
+                    tradingMode === "real"
+                      ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                      : "bg-surface-raised border-surface-border text-slate-900"
+                  }`}
                   />
                 </div>
                 <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">

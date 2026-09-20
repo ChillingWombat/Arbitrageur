@@ -1392,3 +1392,11 @@ overhaul pass committed as `23d4aed`).
 - **Fix (`commands.rs` only):** paper-only funding dispatch mirroring `execute_triangle_arbitrage_impl` — rescan+match, `funding_min_apr` hurdle, execution lock, live books per leg, signal/position/margin guards, full-fill paper Buy+Sell, equity + circuit-breaker accounting, one two-legged `funding` signal (FUNDING_STRATEGY_ID) so the dock shows a single open carry position, execution log + SimStepResultDto. Live mode refused via LIVE_EXECUTION_DISABLED.
 - **Tree note:** stages only the funding-impl/test/const hunks; concurrent worker hunks in the same file untouched.
 - **Verification:** desktop 312/0 (2 new: dispatch-opens-position, below-hurdle refusal), tsc clean, release rebuilt + relaunched. Frontend needed no changes (existing Open Carry path now succeeds on paper).
+
+## 51. Session Handoff — 2026-09-20 (Live-mode honesty: grey-out + per-leg refusal)
+
+- **Ask:** operator is in Live Trading; paper balance field should grey out in live mode; "why blocked, i want to execute".
+- **Live submission audit:** Hyperliquid (L1-signed), Aster (signed), PopDEX (agent-signed) genuinely submit. Lighter/Robinhood, Vanta, Binance, OKX are fail-closed stubs — so HL-vs-Lighter pairs (nearly every funding opp) cannot go live. Even fully-submittable pairs still need atomic two-leg dispatch + reconciliation, which is unbuilt — wiring that with real money is refused deliberately (a stubbed leg would strand a naked position).
+- **Fix:** `live_order_submission_implemented` trait method (default false; true for HL/Aster/PopDEX); funding live refusal now names per-leg state (not implemented vs no credentials) + reconciliation caveat + paper pointer. Paper balance input disabled + greyed with tooltip in Live mode.
+- **Tree note:** stages only the trait/override/preflight/test/grey-out hunks; concurrent worker hunks untouched.
+- **Verification:** desktop 313/0, exchanges 100/0, tsc clean, release rebuilt + relaunched.
