@@ -49,7 +49,7 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use reqwest::Client;
 use serde::Deserialize;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
@@ -1261,6 +1261,97 @@ impl PopDexAdapter {
     }
 }
 
+// ----- Agent-setup toolkit (local generation + approval helpers) -----
+
+alloy::sol! {
+    interface IAccountSetup {
+        function approveAgent(address agent, address delegator, bytes32 name, uint64 expiresAt, uint64 initialNonce, bool isGlobal) external;
+    }
+}
+
+/// Generate a fresh agent keypair locally (OS RNG). The address has never
+/// been approved anywhere, so it carries no replay risk. NEVER re-approve a
+/// revoked address — always generate a new one.
+pub fn generate_agent_keypair() -> anyhow::Result<(String, Zeroizing<String>)> {
+    use rand::RngCore;
+    for _ in 0..8 {
+        let mut b = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut b);
+        let hex_key = format!("0x{}", hex::encode(b));
+        b.zeroize();
+        if let Ok(signer) = crate::wallet::EvmWalletSigner::from_hex(&hex_key) {
+            let addr = signer.address_hex();
+            drop(signer);
+            return Ok((addr, Zeroizing::new(hex_key)));
+        }
+    }
+    anyhow::bail!("RNG failed to produce a valid secp256k1 key after 8 tries")
+}
+
+/// Build the `approveAgent` calldata for an externally-signed approval
+/// transaction (agent, delegator=main, default name, never expires).
+/// Returns `0x`-hex calldata; the signature must come from the MAIN wallet
+/// in the user's own wallet app — the bot never holds the main key.
+pub fn build_approve_agent_calldata(
+    agent: &str,
+    main: &str,
+    initial_nonce_ms: u64,
+) -> anyhow::Result<String> {
+    let agent_addr: Address = agent
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad agent address: {e}"))?;
+    let main_addr: Address = main
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
+    let call = IAccountSetup::approveAgentCall {
+        agent: agent_addr,
+        delegator: main_addr,
+        name: B256::ZERO,
+        expiresAt: 0,
+        initialNonce: initial_nonce_ms,
+        isGlobal: false,
+    };
+    Ok(format!("0x{}", hex::encode(call.abi_encode())))
+}
+
+/// EIP-681 request URI for the approval call (paste into a wallet app that
+/// accepts contract-interaction URIs, or scan if it renders QR elsewhere).
+pub fn approve_agent_eip681(main: &str, agent: &str, nonce_ms: u64, chain_id: u64) -> String {
+    format!(
+        "ethereum:{}@{}/approveAgent?address={}&address={}&bytes32=0x0000000000000000000000000000000000000000000000000000000000000000&uint256=0&uint256={}&bool=false",
+        POPDEX_ACCOUNT_PRECOMPILE, chain_id, agent.trim(), main.trim(), nonce_ms,
+    )
+}
+
+/// Check whether `agent` is currently approved and unexpired for `main`
+/// (public REST, no credentials).
+pub async fn check_agent_approval(
+    network: PopDexNetwork,
+    main: &str,
+    agent: &str,
+) -> anyhow::Result<(bool, usize)> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let url = format!("{}/api/v1/account/{}/agents", network.rest_base(), main.trim());
+    let resp = client.get(&url).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("PopDEX REST error: {}", resp.status());
+    }
+    let env: Envelope<Vec<AgentRow>> = resp.json().await?;
+    if env.code.trim() != "200" {
+        anyhow::bail!("PopDEX API error {}: {}", env.code, env.msg);
+    }
+    let agents = env.data.unwrap_or_default();
+    let ok = agents
+        .iter()
+        .any(|a| !a.is_expired && a.agent.eq_ignore_ascii_case(agent.trim()));
+    Ok((ok, agents.len()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1419,6 +1510,47 @@ mod tests {
         let n2 = a.next_agent_nonce();
         assert!(n2 > n1);
         assert!(n1 > 1_700_000_000_000u64); // ms-scale timestamp nonce
+    }
+
+    #[test]
+    fn agent_keygen_fresh_and_valid() {
+        let (addr, key) = generate_agent_keypair().unwrap();
+        assert!(is_valid_evm_address(&addr));
+        let k = key.trim();
+        assert!(k.len() == 66 && k.starts_with("0x") && k[2..].chars().all(|c| c.is_ascii_hexdigit()));
+        // Two generations must differ (fresh randomness).
+        let (addr2, _) = generate_agent_keypair().unwrap();
+        assert_ne!(addr, addr2);
+    }
+
+    #[test]
+    fn approve_calldata_shape() {
+        let data = build_approve_agent_calldata(
+            "0x0000000000000000000000000000000000000002",
+            "0x0000000000000000000000000000000000000001",
+            1_789_816_000_000,
+        )
+        .unwrap();
+        assert!(data.starts_with("0x"));
+        // selector(4) + 6 args × 32 bytes
+        assert_eq!(data.len(), 2 + 8 + 6 * 64);
+        // selector must equal keccak("approveAgent(address,address,bytes32,uint64,uint64,bool)")[..4]
+        let sel = &data[2..10];
+        let expect = &hex::encode(alloy::primitives::keccak256(
+            b"approveAgent(address,address,bytes32,uint64,uint64,bool)",
+        ))[..8];
+        assert_eq!(sel, expect);
+        // agent + delegator addresses land in arg slots 0 and 1.
+        assert!(data[10..74].ends_with("0000000000000000000000000000000000000002"));
+        assert!(data[74..138].ends_with("0000000000000000000000000000000000000001"));
+        assert!(build_approve_agent_calldata("nope", "0x01", 1).is_err());
+    }
+
+    #[test]
+    fn approve_eip681_shape() {
+        let u = approve_agent_eip681("0xMAIN", "0xAGENT", 42, 2184);
+        assert!(u.starts_with("ethereum:0x0000000000000000000000000000000000001008@2184/approveAgent?"));
+        assert!(u.contains("uint256=42"));
     }
 
     #[test]

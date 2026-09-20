@@ -16865,3 +16865,243 @@ mod tests {
             .is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// PopDEX agent-setup toolkit (local keygen + approval helpers + verify).
+// The main private key never enters the app: approval is signed in the
+// user's own wallet app from data built here.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedAgentDto {
+    pub address: String,
+    pub private_key: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproveTxDto {
+    pub to: String,
+    pub chain_id: u64,
+    pub rpc_url: String,
+    pub explorer_url: String,
+    pub data: String,
+    pub initial_nonce_ms: u64,
+    pub eip681_uri: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCheckDto {
+    pub approved: bool,
+    pub agent_count: usize,
+}
+
+fn popdex_toolkit_network(network: &str) -> Result<arbitrageur_exchanges::popdex::PopDexNetwork, String> {
+    use arbitrageur_exchanges::popdex::PopDexNetwork;
+    match network.trim().to_lowercase().as_str() {
+        "mainnet" | "main" | "prod" | "" => Ok(PopDexNetwork::Mainnet),
+        "testnet" | "test" => Ok(PopDexNetwork::Testnet),
+        other => Err(format!("unknown PopDEX network '{other}' (want mainnet|testnet)")),
+    }
+}
+
+/// Generate a fresh PopDEX agent keypair locally. Returns the private key
+/// ONCE — the UI must place it straight into the vault-backed account field.
+#[tauri::command]
+pub async fn generate_popdex_agent() -> Result<GeneratedAgentDto, String> {
+    use arbitrageur_exchanges::popdex::generate_agent_keypair;
+    let (address, key) = generate_agent_keypair().map_err(|e| e.to_string())?;
+    Ok(GeneratedAgentDto {
+        address,
+        private_key: key.to_string(),
+    })
+}
+
+/// Build the one-time `approveAgent` transaction payload for external
+/// signing (main wallet signs in the user's own wallet app).
+#[tauri::command]
+pub async fn build_popdex_approve_tx(
+    main: String,
+    agent: String,
+    network: String,
+) -> Result<ApproveTxDto, String> {
+    use arbitrageur_exchanges::popdex::{approve_agent_eip681, build_approve_agent_calldata};
+    let net = popdex_toolkit_network(&network)?;
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let data = build_approve_agent_calldata(&agent, &main, now_ms).map_err(|e| e.to_string())?;
+    // Sanity: agent must not be the main address itself (build_approve_agent_calldata
+    // takes addresses; equality is refused at credential-bind time in the adapter).
+    if agent.trim().eq_ignore_ascii_case(main.trim()) {
+        return Err("agent address equals the main address — generate a fresh agent key instead".to_string());
+    }
+    Ok(ApproveTxDto {
+        to: arbitrageur_exchanges::popdex::POPDEX_ACCOUNT_PRECOMPILE.to_string(),
+        chain_id: match net {
+            arbitrageur_exchanges::popdex::PopDexNetwork::Mainnet => {
+                arbitrageur_exchanges::popdex::POPDEX_MAINNET_CHAIN_ID
+            }
+            arbitrageur_exchanges::popdex::PopDexNetwork::Testnet => {
+                arbitrageur_exchanges::popdex::POPDEX_TESTNET_CHAIN_ID
+            }
+        },
+        rpc_url: match net {
+            arbitrageur_exchanges::popdex::PopDexNetwork::Mainnet => {
+                arbitrageur_exchanges::popdex::POPDEX_MAINNET_RPC.to_string()
+            }
+            arbitrageur_exchanges::popdex::PopDexNetwork::Testnet => {
+                arbitrageur_exchanges::popdex::POPDEX_TESTNET_RPC.to_string()
+            }
+        },
+        explorer_url: match net {
+            arbitrageur_exchanges::popdex::PopDexNetwork::Mainnet => {
+                "https://app.popdex.xyz/explorer".to_string()
+            }
+            arbitrageur_exchanges::popdex::PopDexNetwork::Testnet => {
+                "https://testnet-app.popdex.xyz/explorer".to_string()
+            }
+        },
+        eip681_uri: approve_agent_eip681(&main, &agent, now_ms, match net {
+            arbitrageur_exchanges::popdex::PopDexNetwork::Mainnet => {
+                arbitrageur_exchanges::popdex::POPDEX_MAINNET_CHAIN_ID
+            }
+            arbitrageur_exchanges::popdex::PopDexNetwork::Testnet => {
+                arbitrageur_exchanges::popdex::POPDEX_TESTNET_CHAIN_ID
+            }
+        }),
+        data,
+        initial_nonce_ms: now_ms,
+    })
+}
+
+/// Verify on-chain (via public REST) that `agent` is approved for `main`.
+#[tauri::command]
+pub async fn check_popdex_agent(
+    main: String,
+    agent: String,
+    network: String,
+) -> Result<AgentCheckDto, String> {
+    use arbitrageur_exchanges::popdex::check_agent_approval;
+    let net = popdex_toolkit_network(&network)?;
+    let (approved, agent_count) = check_agent_approval(net, &main, &agent)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(AgentCheckDto {
+        approved,
+        agent_count,
+    })
+}
+
+/// Write a self-contained wallet-signer page (pre-filled approveAgent call)
+/// to the OS temp dir and open it in the system browser, where the user's
+/// wallet extension/app signs with the MAIN key. Returns the file path.
+#[tauri::command]
+pub async fn open_popdex_signer_page(
+    main: String,
+    agent: String,
+    network: String,
+) -> Result<String, String> {
+    use arbitrageur_exchanges::popdex::{
+        build_approve_agent_calldata, PopDexNetwork,
+    };
+    let net = popdex_toolkit_network(&network)?;
+    let (rpc_url, chain_id, explorer, app_host) = match net {
+        PopDexNetwork::Mainnet => (
+            arbitrageur_exchanges::popdex::POPDEX_MAINNET_RPC,
+            arbitrageur_exchanges::popdex::POPDEX_MAINNET_CHAIN_ID,
+            "https://app.popdex.xyz/explorer",
+            "https://app.popdex.xyz",
+        ),
+        PopDexNetwork::Testnet => (
+            arbitrageur_exchanges::popdex::POPDEX_TESTNET_RPC,
+            arbitrageur_exchanges::popdex::POPDEX_TESTNET_CHAIN_ID,
+            "https://testnet-app.popdex.xyz/explorer",
+            "https://testnet-app.popdex.xyz",
+        ),
+    };
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let data = build_approve_agent_calldata(&agent, &main, now_ms).map_err(|e| e.to_string())?;
+    let to = arbitrageur_exchanges::popdex::POPDEX_ACCOUNT_PRECOMPILE;
+    // JSON-escape every injected value so the page cannot break out.
+    let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
+    let html = format!(
+        r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PopDEX Agent Approval (local signer page)</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#1e293b}}code{{background:#f1f5f9;padding:2px 6px;border-radius:6px;word-break:break-all}}.card{{border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:12px 0}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer}}button:disabled{{opacity:.5}}.warn{{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 14px;font-size:13px}}</style>
+</head><body>
+<h2>PopDEX Agent Approval</h2>
+<p class="warn"><b>Check before signing:</b> this page was generated locally by Arbitrageur. It only ever proposes the official <code>approveAgent</code> call from the <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a> (Step 4). Your main key never leaves your wallet.</p>
+<div class="card"><div>Main (delegator): <code id="main"></code></div>
+<div>Agent: <code id="agent"></code></div>
+<div>Contract: <code id="to"></code></div>
+<div>Chain: <code id="chain"></code> · RPC: <code id="rpc"></code></div></div>
+<button id="go">1 · Connect wallet &amp; sign approval</button>
+<p id="out"></p>
+<p>After the transaction confirms, return to Arbitrageur → Agent Setup Toolkit → <b>Verify</b>, then Save Account.</p>
+<script>
+const MAIN={main_js}, AGENT={agent_js}, TO={to_js}, DATA={data_js};
+const RPC={rpc_js}, CHAIN={chain_id}, EXPLORER={explorer_js}, APP={app_js};
+main.textContent=MAIN; agent.textContent=AGENT; to.textContent=TO; chain.textContent=CHAIN; rpc.textContent=RPC;
+go.onclick = async () => {{
+  out.textContent = "";
+  try {{
+    if (!window.ethereum) {{ out.textContent = "No wallet found in this browser — install MetaMask/Rabby (or open this file in a wallet browser) and retry."; return; }}
+    const provider = new ethers.BrowserProvider(window.ethereum);
+    await provider.send("eth_requestAccounts", []);
+    const net = await provider.getNetwork();
+    if (Number(net.chainId) !== CHAIN) {{
+      try {{ await window.ethereum.request({{method:"wallet_switchEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16)}}]}}); }}
+      catch(e) {{
+        await window.ethereum.request({{method:"wallet_addEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16),chainName:CHAIN===2184?"Morph Tachyon":"Morph Tachyon Testnet",rpcUrls:[RPC],nativeCurrency:{{name:"Gas",symbol:"GAS",decimals:18}},blockExplorerUrls:[EXPLORER]}}]}});
+      }}
+    }}
+    const signer = await provider.getSigner();
+    if ((await signer.getAddress()).toLowerCase() !== MAIN.toLowerCase()) {{ out.textContent = "Connected wallet is not the main account " + MAIN; return; }}
+    go.disabled = true; out.textContent = "Sending approveAgent… confirm in your wallet.";
+    const tx = await signer.sendTransaction({{to: TO, data: DATA}});
+    out.textContent = "Submitted: " + tx.hash + " — waiting for confirmation…";
+    await tx.wait();
+    out.textContent = "Approved ✓ (" + tx.hash + "). Return to Arbitrageur and press Verify.";
+  }} catch(e) {{ go.disabled = false; out.textContent = "Failed: " + (e.info?.error?.message || e.message || e); }}
+}};
+</script></body></html>"#,
+        main_js = js(main.trim()),
+        agent_js = js(agent.trim()),
+        to_js = js(to),
+        data_js = js(&data),
+        rpc_js = js(rpc_url),
+        chain_id = chain_id,
+        explorer_js = js(explorer),
+        app_js = js(app_host),
+    );
+    let mut path = std::env::temp_dir();
+    path.push(format!("arbitrageur-popdex-approve-{}.html", chrono::Utc::now().timestamp_millis()));
+    std::fs::write(&path, html).map_err(|e| format!("cannot write signer page: {e}"))?;
+    #[cfg(target_os = "linux")]
+    let opener = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let opener = "open";
+    #[cfg(target_os = "windows")]
+    let opener = "cmd";
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new(opener)
+        .args(["/c", "start", "", &path.to_string_lossy().to_string()])
+        .status()
+        .map_err(|e| format!("cannot open browser: {e}"))?;
+    #[cfg(not(target_os = "windows"))]
+    let status = std::process::Command::new(opener)
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("cannot open browser ({opener}): {e}"))?;
+    if !status.success() {
+        return Err(format!(
+            "browser did not open — file saved at {} (open it manually)",
+            path.to_string_lossy()
+        ));
+    }
+    Ok(path.to_string_lossy().to_string())
+}

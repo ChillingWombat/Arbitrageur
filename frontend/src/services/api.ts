@@ -54,6 +54,9 @@ import type {
   MonitorConfigDto,
   RadarBotConfigDto,
   RadarBotStatusDto,
+  GeneratedAgentDto,
+  ApproveTxDto,
+  AgentCheckDto,
   SessionProfileDto,
   VenueCapabilityDto,
 } from "../types/index.ts";
@@ -940,6 +943,23 @@ export const api = {
 
   async getRadarBotStatus(): Promise<RadarBotStatusDto> {
     return invokeDesktop<RadarBotStatusDto>("get_radar_bot_status");
+  },
+
+  // ---- PopDEX agent-setup toolkit (desktop only) ----
+  async generatePopdexAgent(): Promise<GeneratedAgentDto> {
+    return invokeDesktop<GeneratedAgentDto>("generate_popdex_agent");
+  },
+
+  async buildPopdexApproveTx(main: string, agent: string, network: string): Promise<ApproveTxDto> {
+    return invokeDesktop<ApproveTxDto>("build_popdex_approve_tx", { main, agent, network });
+  },
+
+  async checkPopdexAgent(main: string, agent: string, network: string): Promise<AgentCheckDto> {
+    return invokeDesktop<AgentCheckDto>("check_popdex_agent", { main, agent, network });
+  },
+
+  async openPopdexSignerPage(main: string, agent: string, network: string): Promise<string> {
+    return invokeDesktop<string>("open_popdex_signer_page", { main, agent, network });
   },
 
   // ---- Session seasonality (Phase 1, display only) ----

@@ -397,6 +397,14 @@ export interface FundingOpportunityDto {
   win_probability?: number;
   /** Marginal entry-cost slope in bps per extra $1k notional (both legs). Absent = book missing/thin. Informational only. */
   depth_slope_bps_per_1k?: number;
+  /** Modelled expected holding horizon in hours (funding-gap persistence to
+   * min-APR threshold + fee+spread breakeven). Absent on stale backends —
+   * clients fall back to break_even_hours. */
+  expected_hold_hours?: number;
+  /** Human-readable hold basis (decay slope, threshold, spread inclusion). */
+  hold_reason?: string;
+  /** Heuristic hold confidence 0..1. */
+  hold_confidence?: number;
 }
 
 export interface PredictionOpportunityDto {
@@ -608,6 +616,16 @@ export interface EngineSettingsDto {
   trading_mode: "paper" | "real";
   paper_starting_balance_usd?: number;
   fast_warmup_enabled: boolean;
+
+  // Overall circuit-breaker + safety-net limits (Safety settings section)
+  cb_max_daily_drawdown_usd?: number;
+  cb_max_daily_drawdown_pct?: number;
+  cb_max_consecutive_errors?: number;
+  cb_max_spread_divergence_bps?: number;
+  delta_max_unhedged_usd_per_asset?: number;
+  margin_warning_usage_pct?: number;
+  margin_critical_usage_pct?: number;
+  margin_min_liquidation_distance_pct?: number;
 
   // Subaccount mappings
   hyperliquid_account_index?: number;
@@ -1082,7 +1100,12 @@ export interface MonitorRowDto {
   baselineBps: number | null;
   deviationBps: number | null;
   netCaptureBps: number | null;
+  /** Deprecated alias of reversionProbability (old backend). Prefer winProbability. */
   pWin: number | null;
+  /** Direction-insensitive mean-reversion P(|dev| reverts). Detail-only as "Reversion Probability". */
+  reversionProbability?: number | null;
+  /** Directional trade win probability after all gates. Table "Win %" column. */
+  winProbability?: number | null;
   expectedProfitBps: number | null;
   expectedProfitUsd: number | null;
   optimalSizeUsd: number | null;
@@ -1228,6 +1251,24 @@ export interface SeasonalityRunSummaryDto {
 
 /** Autonomous convergence bot config (get/set_radar_bot_config). Opt-in:
  * entries only when enabled && mode === "auto". Ships inert. */
+/** PopDEX agent toolkit (ExchangeAccounts modal, desktop only). */
+export interface GeneratedAgentDto {
+  address: string;
+  privateKey: string;
+}
+export interface ApproveTxDto {
+  to: string;
+  chainId: number;
+  rpcUrl: string;
+  explorerUrl: string;
+  data: string;
+  initialNonceMs: number;
+  eip681Uri: string;
+}
+export interface AgentCheckDto {
+  approved: boolean;
+  agentCount: number;
+}
 export interface RadarBotConfigDto {
   enabled: boolean;
   mode: "off" | "auto" | "paused" | "reduce_only";

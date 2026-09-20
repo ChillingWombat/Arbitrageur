@@ -175,6 +175,10 @@ fn main() {
             auto_exec::get_radar_bot_config,
             auto_exec::set_radar_bot_config,
             auto_exec::get_radar_bot_status,
+            commands::generate_popdex_agent,
+            commands::build_popdex_approve_tx,
+            commands::check_popdex_agent,
+            commands::open_popdex_signer_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrageur Tauri desktop application");
