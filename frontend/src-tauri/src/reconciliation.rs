@@ -956,6 +956,8 @@ mod tests {
         responses: std::sync::Mutex<std::collections::VecDeque<Result<OrderResponse, String>>>,
         cancels: std::sync::Mutex<Vec<String>>,
         cancel_error: std::sync::Mutex<Option<String>>,
+        placed: std::sync::Mutex<Vec<OrderRequest>>,
+        place_response: std::sync::Mutex<Option<OrderResponse>>,
     }
 
     impl MockVenue {
@@ -965,6 +967,8 @@ mod tests {
                 responses: std::sync::Mutex::new(responses.into()),
                 cancels: std::sync::Mutex::new(Vec::new()),
                 cancel_error: std::sync::Mutex::new(None),
+                placed: std::sync::Mutex::new(Vec::new()),
+                place_response: std::sync::Mutex::new(None),
             }
         }
     }
@@ -1002,8 +1006,18 @@ mod tests {
         ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
             unimplemented!()
         }
-        async fn place_order(&self, _o: OrderRequest) -> anyhow::Result<OrderResponse> {
-            unimplemented!()
+        async fn place_order(&self, o: OrderRequest) -> anyhow::Result<OrderResponse> {
+            self.placed.lock().unwrap().push(o);
+            match self.place_response.lock().unwrap().clone() {
+                Some(mut r) => {
+                    r.venue = VenueId::new(self.venue);
+                    Ok(r)
+                }
+                None => anyhow::bail!("no scripted place response"),
+            }
+        }
+        fn live_order_submission_implemented(&self) -> bool {
+            true
         }
         async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
             self.cancels
@@ -1270,5 +1284,87 @@ mod tests {
         let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(sig.status, SignalStatus::InFlight);
         assert_eq!(sig.legs[0].filled_qty, 0.0);
+    }
+
+    #[tokio::test]
+    async fn e2e_imbalanced_dispatches_residual_flatten_and_parent_closes() {
+        // Entry: kraken long fills, aster short ends cancelled-empty →
+        // imbalanced. With auto-resolve on, the reconciler submits a
+        // reduce-only flatten for the kraken residual; when that child
+        // resolves filled, the parent closes.
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state.settings.write().auto_resolve_residual_exposure = true;
+
+        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
+        let mut place = mock_filled();
+        place.order_id = "flat-oid-1".into();
+        *kraken.place_response.lock().unwrap() = Some(place);
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), kraken.clone());
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+
+        // Pass 1: entry imbalanced → residual flatten dispatched + filled.
+        reconcile_pending_orders(&state).await;
+        let placed = kraken.placed.lock().unwrap().clone();
+        assert_eq!(placed.len(), 1);
+        assert!(placed[0].reduce_only);
+        assert_eq!(placed[0].side, Side::Sell);
+        assert_eq!(placed[0].quantity, dec!(1));
+
+        let signals = state.state_store.list_signals(None, None).unwrap();
+        let child = signals
+            .iter()
+            .find(|s| crate::state_store::is_flatten_child_id(s.id.as_str(), &sid))
+            .expect("flatten child persisted");
+        let child = state.state_store.get_signal(&child.id).unwrap().unwrap();
+        assert_eq!(child.legs[0].venue_order_id.as_deref(), Some("flat-oid-1"));
+        assert_eq!(child.legs[0].filled_qty, 1.0);
+
+        // Pass 2: the fully-filled child resolves closed without a venue
+        // call, which resolves the parent.
+        reconcile_pending_orders(&state).await;
+        let child = state.state_store.get_signal(&child.id).unwrap().unwrap();
+        assert_eq!(child.status, SignalStatus::Closed);
+        let parent = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(parent.status, SignalStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn e2e_residual_flatten_disabled_by_default() {
+        // Without the opt-in flag an imbalanced entry stays imbalanced —
+        // no order is dispatched.
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), kraken.clone());
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+        reconcile_pending_orders(&state).await;
+        assert!(kraken.placed.lock().unwrap().is_empty());
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Imbalanced);
     }
 }
