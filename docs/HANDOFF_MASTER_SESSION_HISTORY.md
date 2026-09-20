@@ -1510,3 +1510,12 @@ overhaul pass committed as `23d4aed`).
 - **Ask:** funding rate monitor needs the spread monitor's filter set (Venue ALL / Min Exp BPS / Min Win %).
 - **Shipped (`FundingRadar.tsx`, committed `dc89bb8`, pushed):** scanner-header strip mirroring `OpportunityRadar` styling/behavior — venue multi-select dropdown (ALL default, either-leg match, logo chips), Min Exp (min net 8h edge in BPS over `net_rate_8h_pct * 100`), Min Win (% over `win_probability * 100`, absent prob fails an active filter like the spread side), live `N/M` count + Clear, filtered-empty state with clear affordance. Display-only by construction: detail modal, auto-carry loop, and execution all keep using the full list.
 - **Verification:** tsc 0, frontend suite pass, vite 0, release rebuilt, app relaunched (PID 541970) clean. Worker files untouched.
+
+## 62. Session Handoff — 2026-09-20 (decay-aware expected carry replaces flat Daily)
+
+- **Ask (screenshot):** card "Daily +$77" is unrealistic — show expected return over a realistic hold with funding-gap decay.
+- **Shipped:**
+  - `arbitrageur-math::funding_carry::expected_carry_return_usd` (pure, tested): linear decay of the 8h net print to the min-APR exit threshold over the modelled hold (same story as the hold model + popup dashed projection), accrual on the endpoint average, minus round-trip fees + measured entry spread; signed (early-exit holds report losses); `None` on unknown hold/garbage — no flat extrapolation disguised as expectation.
+  - Scan wires it into a new `expected_return_usd` DTO field on both carry + basis paths (hoisted shared lets out of the hold blocks for scope).
+  - Card: "Daily" box → "Expected" box (signed $ whole, profit/loss coloring, tooltip with hold + model basis); backend-first with the modal's flat math as stale-backend fallback via shared `expectedCarryUsd`. Detail modal "Projected net carry" upgraded to the same helper (one number everywhere); "Daily income" row kept as informational.
+- **Verification:** math 96/0 (3 new), desktop 317/0, tsc 0, vite 0, release rebuilt, app relaunched (PID 549270) clean. Committed `16de7db`, pushed. Worker files untouched.
