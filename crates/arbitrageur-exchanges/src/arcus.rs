@@ -170,7 +170,11 @@ impl ExchangeAdapter for ArcusAdapter {
         let clean_sym = symbol.replace('/', "-").to_uppercase();
         let path = format!("/api/v1/funding?symbol={}", clean_sym);
         let res = self.get_json(&path).await?;
-        let rate_f = res.get("funding_rate").and_then(|r| r.as_f64()).unwrap_or(0.0);
+        // Fail-closed: a missing print is an outage, not a 0% print — a
+        // silent zero would mint phantom carry against any nonzero leg.
+        let rate_f = res.get("funding_rate").and_then(|r| r.as_f64()).ok_or_else(|| {
+            anyhow::anyhow!("Arcus funding response missing funding_rate for {symbol}")
+        })?;
         let rate_dec = Decimal::from_f64_retain(rate_f).unwrap_or(dec!(0));
         Ok(FundingRate {
             venue: self.venue_id.clone(),

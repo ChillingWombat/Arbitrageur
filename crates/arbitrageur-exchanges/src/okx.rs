@@ -358,6 +358,59 @@ impl OkxAdapter {
         }
         anyhow::bail!("OKX order {ord_id} fill state unknown after polling")
     }
+
+    /// Pure parse of an `/account/balance` `data[0]` envelope into an
+    /// [`AccountSnapshot`] with no positions (filled in by the caller).
+    /// Split out for unit testing (no network).
+    fn parse_balance_envelope(
+        &self,
+        acct: &serde_json::Value,
+    ) -> anyhow::Result<AccountSnapshot> {
+        let equity = dec_from_json(acct.get("totalEq")).unwrap_or_default();
+        let free_margin = dec_from_json(acct.get("availEq"))
+            .or_else(|| dec_from_json(acct.get("availBal")))
+            .unwrap_or_default();
+        let maint_margin = dec_from_json(acct.get("mmr")).unwrap_or_default();
+        let initial_margin = dec_from_json(acct.get("imr")).unwrap_or_default();
+        let margin_usage_pct = if equity > dec!(0) {
+            (initial_margin / equity) * dec!(100)
+        } else {
+            dec!(0)
+        };
+        let mut balances = Vec::new();
+        if let Some(details) = acct.get("details").and_then(|d| d.as_array()) {
+            for b in details {
+                let ccy = b.get("ccy").and_then(|c| c.as_str()).unwrap_or_default();
+                if ccy.is_empty() {
+                    continue;
+                }
+                let total = dec_from_json(b.get("eq")).unwrap_or_default();
+                let free = dec_from_json(b.get("availBal")).unwrap_or_default();
+                let frozen = dec_from_json(b.get("frozenBal"))
+                    .unwrap_or_else(|| total.saturating_sub(free));
+                if total.is_zero() && free.is_zero() && frozen.is_zero() {
+                    continue;
+                }
+                balances.push(arbitrageur_core::position::Balance {
+                    venue: self.venue_id.clone(),
+                    currency: ccy.to_string(),
+                    total,
+                    free,
+                    locked: frozen,
+                });
+            }
+        }
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin,
+            maintenance_margin: maint_margin,
+            margin_usage_pct,
+            balances,
+            positions: Vec::new(),
+            timestamp: Utc::now(),
+        })
+    }
 }
 
 #[async_trait]
@@ -549,7 +602,86 @@ impl ExchangeAdapter for OkxAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!("Live account query not configured for OKX; refusing to fabricate")
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch live account on OKX: API credentials are not configured or vault is locked");
+        }
+        // Wallet-level balances + margin (cross/imr/mmr are account-wide).
+        let bal = self
+            .signed_request("GET", "/api/v5/account/balance", None)
+            .await?;
+        let acct = bal
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow::anyhow!("OKX account balance response missing data"))?;
+        let snap = self.parse_balance_envelope(acct)?;
+
+        // Open swap positions (separate endpoint). Fail-closed: a leg whose
+        // contract face value cannot be resolved aborts the read rather than
+        // reporting a silently understated exposure.
+        let pos_v = self
+            .signed_request("GET", "/api/v5/account/positions", None)
+            .await?;
+        let mut positions = Vec::new();
+        if let Some(arr) = pos_v.get("data").and_then(|d| d.as_array()) {
+            for leg in arr {
+                let inst_id = leg.get("instId").and_then(|s| s.as_str()).unwrap_or_default();
+                if inst_id.is_empty() {
+                    continue;
+                }
+                let contracts = dec_from_json(leg.get("pos")).unwrap_or_default();
+                if contracts.is_zero() {
+                    continue;
+                }
+                let ct_val = self.contract_face_value(inst_id).await.map_err(|e| {
+                    anyhow::anyhow!("OKX position {inst_id} face value unresolvable, aborting account read: {e}")
+                })?;
+                let qty = (contracts.abs() * ct_val).abs();
+                if qty <= dec!(0) {
+                    continue;
+                }
+                let entry_px = dec_from_json(leg.get("avgPx")).unwrap_or_default();
+                let upnl = dec_from_json(leg.get("upl")).unwrap_or_default();
+                let liq_px = dec_from_json(leg.get("liqPx")).filter(|x| *x > dec!(0));
+                let lev = leg
+                    .get("lever")
+                    .and_then(|l| match l {
+                        serde_json::Value::Number(n) => {
+                            n.as_f64().and_then(Decimal::from_f64_retain)
+                        }
+                        serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(dec!(1));
+                let side = if contracts > dec!(0) {
+                    arbitrageur_core::types::Side::Buy
+                } else {
+                    arbitrageur_core::types::Side::Sell
+                };
+                let notional = qty * entry_px;
+                let im = if lev > dec!(0) { notional / lev } else { notional };
+                positions.push(arbitrageur_core::position::Position {
+                    venue: self.venue_id.clone(),
+                    symbol: inst_id.to_string(),
+                    side,
+                    quantity: qty,
+                    entry_price: entry_px,
+                    mark_price: entry_px,
+                    unrealized_pnl: upnl,
+                    realized_pnl: dec!(0),
+                    liquidation_price: liq_px,
+                    leverage: lev,
+                    initial_margin: im,
+                    maintenance_margin: im * dec!(0.5),
+                    updated_at: Utc::now(),
+                });
+            }
+        }
+
+        Ok(AccountSnapshot {
+            positions,
+            ..snap
+        })
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -755,6 +887,29 @@ mod tests {
         assert!(err.to_string().contains("51000"), "unexpected: {err}");
     }
 
+    #[test]
+    fn parse_balance_envelope_maps_equity_and_balances() {
+        let adapter = OkxAdapter::new(None, None, None, None);
+        let acct: serde_json::Value = serde_json::json!({
+            "totalEq": "10120.5", "availEq": "9000.0",
+            "imr": "1120.0", "mmr": "56.0",
+            "details": [
+                {"ccy": "USDT", "eq": "10000.0", "availBal": "8900.0", "frozenBal": "1100.0"},
+                {"ccy": "BTC", "eq": "0", "availBal": "0", "frozenBal": "0"}
+            ]
+        });
+        let snap = adapter.parse_balance_envelope(&acct).unwrap();
+        assert_eq!(snap.equity, dec!(10120.5));
+        assert_eq!(snap.free_margin, dec!(9000.0));
+        assert_eq!(snap.maintenance_margin, dec!(56.0));
+        assert!((snap.margin_usage_pct - dec!(11.07)).abs() < dec!(0.01));
+        assert_eq!(snap.balances.len(), 1);
+        assert_eq!(snap.balances[0].currency, "USDT");
+        assert_eq!(snap.balances[0].locked, dec!(1100.0));
+        assert!(snap.positions.is_empty());
+    }
+
+    #[test]
     fn to_venue_symbol_normalizes_and_rejects_cross() {
         assert_eq!(
             OkxAdapter::to_venue_symbol("BTC-USDT").unwrap(),

@@ -128,6 +128,160 @@ impl CoinbaseAdapter {
         Ok(data)
     }
 
+    fn credentials(
+        &self,
+    ) -> anyhow::Result<(
+        Zeroizing<String>,
+        Zeroizing<String>,
+        Zeroizing<String>,
+    )> {
+        let api_key = self
+            .api_key
+            .read()
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase API key not configured or empty"))?;
+        let api_secret = self
+            .api_secret
+            .read()
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase API secret not configured or empty"))?;
+        let passphrase = self
+            .passphrase
+            .read()
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase API passphrase not configured or empty"))?;
+        Ok((api_key, api_secret, passphrase))
+    }
+
+    fn has_credentials(&self) -> bool {
+        self.credentials().is_ok()
+    }
+
+    /// Coinbase Exchange (legacy) signature:
+    /// `base64(HMAC-SHA256(timestamp + method + request_path + body,
+    /// base64_decode(secret)))`.
+    fn sign_exchange(
+        secret: &Zeroizing<String>,
+        timestamp: &str,
+        method: &str,
+        request_path: &str,
+        body: &str,
+    ) -> anyhow::Result<String> {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(secret.trim().as_bytes())
+            .map_err(|e| anyhow::anyhow!("Invalid Coinbase base64 API secret: {e}"))?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&decoded)
+            .map_err(|e| anyhow::anyhow!("Invalid Coinbase HMAC key: {e}"))?;
+        mac.update(timestamp.as_bytes());
+        mac.update(method.as_bytes());
+        mac.update(request_path.as_bytes());
+        mac.update(body.as_bytes());
+        Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
+    }
+
+    /// Authenticated Coinbase Exchange request. `path` includes any query
+    /// string (which is part of the signed payload); `body` is the exact JSON
+    /// string sent (empty for GET/DELETE).
+    async fn authed(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (api_key, api_secret, passphrase) = self.credentials()?;
+        let ts = format!("{:.3}", Utc::now().timestamp_millis() as f64 / 1000.0);
+        let body_str = body.clone().unwrap_or_default();
+        let sign = Self::sign_exchange(&api_secret, &ts, method, path, &body_str)?;
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = match method {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            "DELETE" => self.client.delete(&url),
+            _ => anyhow::bail!("Coinbase unsupported signed method {method}"),
+        };
+        req = req
+            .header("CB-ACCESS-KEY", api_key.to_string())
+            .header("CB-ACCESS-SIGN", sign)
+            .header("CB-ACCESS-TIMESTAMP", ts)
+            .header("CB-ACCESS-PASSPHRASE", passphrase.to_string())
+            .header("Content-Type", "application/json");
+        if let Some(b) = body {
+            req = req.body(b);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Coinbase {method} {path} transport failure: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Coinbase {method} {path} failed (HTTP {status}): {text}");
+        }
+        if text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Coinbase {path} response: {e}; body: {text}"))
+    }
+
+    /// Pure parse of a `GET /accounts` array into a snapshot. `marks_usd`
+    /// maps currencies to USD marks (caller seeds stables at 1 and majors via
+    /// cached product tickers); unknown codes count 0 toward equity
+    /// (conservative lower bound) but stay listed raw in `balances`.
+    fn parse_accounts_response(
+        &self,
+        v: &serde_json::Value,
+        marks_usd: &std::collections::HashMap<String, Decimal>,
+    ) -> anyhow::Result<AccountSnapshot> {
+        let arr = v
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Coinbase accounts response not an array"))?;
+        let mut balances = Vec::new();
+        let mut equity = dec!(0);
+        for a in arr {
+            let ccy = a.get("currency").and_then(|c| c.as_str()).unwrap_or_default();
+            if ccy.is_empty() {
+                continue;
+            }
+            let total = dec_from_json(a.get("balance")).unwrap_or_default();
+            let free = dec_from_json(a.get("available")).unwrap_or(total);
+            let hold = dec_from_json(a.get("hold")).unwrap_or_else(|| total.saturating_sub(free));
+            if total.is_zero() && free.is_zero() && hold.is_zero() {
+                continue;
+            }
+            let code = ccy.to_uppercase();
+            let mark = if ["USD", "USDT", "USDC", "DAI"].contains(&code.as_str()) {
+                dec!(1)
+            } else {
+                marks_usd.get(&code).copied().unwrap_or(dec!(0))
+            };
+            equity += total * mark;
+            balances.push(arbitrageur_core::position::Balance {
+                venue: self.venue_id.clone(),
+                currency: code,
+                total,
+                free,
+                locked: hold,
+            });
+        }
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin: equity,
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances,
+            positions: Vec::new(),
+            timestamp: Utc::now(),
+        })
+    }
+
     fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
         let sym = symbol.trim().to_uppercase();
         if sym.contains('-') {
@@ -270,15 +424,157 @@ impl ExchangeAdapter for CoinbaseAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!("Live account query not configured for Coinbase; refusing to fabricate")
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch live account on Coinbase: API credentials are not configured or vault is locked");
+        }
+        let v = self.authed("GET", "/accounts", None).await?;
+        // USD marks for nonzero crypto balances via cached product tickers
+        // (best-effort: unresolvable codes stay 0 in the equity roll-up).
+        let mut marks = std::collections::HashMap::new();
+        if let Some(arr) = v.as_array() {
+            for a in arr {
+                let ccy = a.get("currency").and_then(|c| c.as_str()).unwrap_or("");
+                let total = dec_from_json(a.get("balance")).unwrap_or_default();
+                if ccy.is_empty()
+                    || total.is_zero()
+                    || ["USD", "USDT", "USDC", "DAI"].contains(&ccy.to_uppercase().as_str())
+                    || marks.contains_key(&ccy.to_uppercase())
+                {
+                    continue;
+                }
+                let path = format!("/products/{}-USD/ticker", ccy.to_uppercase());
+                if let Ok(t) = self.get_json(&path).await {
+                    if let Some(px) = dec_from_json(t.get("price")).filter(|x| *x > dec!(0)) {
+                        marks.insert(ccy.to_uppercase(), px);
+                    }
+                }
+            }
+        }
+        self.parse_accounts_response(&v, &marks)
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live trading execution not configured for Coinbase")
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot place live order on Coinbase: API credentials are not configured or vault is locked");
+        }
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("Coinbase order quantity must be positive");
+        }
+        let product_id = Self::to_venue_symbol(&order.symbol)?;
+        let side_str = match order.side {
+            arbitrageur_core::types::Side::Buy => "buy",
+            arbitrageur_core::types::Side::Sell => "sell",
+        };
+        let is_market = order.order_type == arbitrageur_core::types::OrderType::Market;
+        let mut req = serde_json::json!({
+            "side": side_str,
+            "product_id": product_id,
+        });
+        if !order.client_order_id.is_empty() {
+            req["client_oid"] = serde_json::Value::String(order.client_order_id.clone());
+        }
+        if is_market {
+            req["type"] = serde_json::Value::String("market".to_string());
+            match order.side {
+                arbitrageur_core::types::Side::Sell => {
+                    req["size"] = serde_json::Value::String(order.quantity.normalize().to_string());
+                }
+                arbitrageur_core::types::Side::Buy => {
+                    // Market buys are quote-funded: size the spend from the
+                    // live ask so the full base quantity fills.
+                    let t = self.get_json(&format!("/products/{product_id}/ticker")).await?;
+                    let ask = dec_from_json(t.get("ask"))
+                        .or_else(|| dec_from_json(t.get("price")))
+                        .filter(|x| *x > dec!(0))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Coinbase market buy needs a live ask for {product_id}")
+                        })?;
+                    let funds = (order.quantity * ask).normalize();
+                    req["funds"] = serde_json::Value::String(funds.to_string());
+                }
+            }
+        } else {
+            let px = order.price.filter(|x| *x > dec!(0)).ok_or_else(|| {
+                anyhow::anyhow!("Coinbase limit order requires a positive limit price")
+            })?;
+            req["type"] = serde_json::Value::String("limit".to_string());
+            req["price"] = serde_json::Value::String(px.normalize().to_string());
+            req["size"] = serde_json::Value::String(order.quantity.normalize().to_string());
+            if order.post_only
+                || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
+            {
+                req["post_only"] = serde_json::Value::Bool(true);
+            }
+            match order.time_in_force {
+                arbitrageur_core::types::TimeInForce::ImmediateOrCancel => {
+                    req["time_in_force"] = serde_json::Value::String("IOC".to_string())
+                }
+                arbitrageur_core::types::TimeInForce::FillOrKill => {
+                    req["time_in_force"] = serde_json::Value::String("FOK".to_string())
+                }
+                _ => {}
+            }
+        }
+        if order.reduce_only {
+            // Spot has no shorts: reduce-only is a no-op guard — refusing
+            // rather than pretending it constrains anything.
+            anyhow::bail!("Coinbase spot does not support reduce-only orders");
+        }
+        let body = serde_json::to_string(&req)?;
+        let v = self
+            .authed("POST", "/orders", Some(body))
+            .await?;
+        let order_id = v
+            .get("id")
+            .and_then(|o| o.as_str())
+            .unwrap_or("")
+            .to_string();
+        if order_id.is_empty() {
+            anyhow::bail!("Coinbase order returned no id: {v}");
+        }
+        let status = match v.get("status").and_then(|s| s.as_str()).unwrap_or("pending") {
+            "done" | "settled" => OrderStatus::Filled,
+            "rejected" => OrderStatus::Rejected,
+            "open" | "active" => OrderStatus::New,
+            _ => OrderStatus::New,
+        };
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: order.client_order_id.clone(),
+            venue: VenueId::new("coinbase"),
+            symbol: order.symbol.clone(),
+            status,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USD".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live trading cancellation not configured for Coinbase")
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot cancel live order on Coinbase: API credentials are not configured or vault is locked");
+        }
+        // Order-id cancels hit /orders/{id}; client-oid cancels hit
+        // /orders/client:{oid} (both DELETE, empty body).
+        let path = if let Some(id) = req.order_id {
+            format!("/orders/{}", id.trim())
+        } else if let Some(cid) = req.client_order_id {
+            format!("/orders/client:{}", cid.trim())
+        } else {
+            anyhow::bail!("Coinbase cancel requires an order_id or client_order_id");
+        };
+        self.authed("DELETE", &path, None).await?;
+        Ok(())
+    }
+
+    fn live_order_submission_implemented(&self) -> bool {
+        true
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -301,6 +597,51 @@ impl ExchangeAdapter for CoinbaseAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_exchange_matches_independent_vectors() {
+        // Cross-checked with Python hmac/hashlib/base64.
+        let secret = Zeroizing::new(
+            "c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string(),
+        );
+        let get_sig = CoinbaseAdapter::sign_exchange(
+            &secret,
+            "1700000000.000",
+            "GET",
+            "/accounts",
+            "",
+        )
+        .unwrap();
+        assert_eq!(get_sig, "vF6wthHYf+8Vv2p0sA95y4IpxGmVU/QBbIM4DuvKsBs=");
+        let body = r#"{"client_oid":"abc-123","side":"buy","product_id":"BTC-USD","type":"limit","price":"60000.00","size":"0.001"}"#;
+        let post_sig = CoinbaseAdapter::sign_exchange(
+            &secret,
+            "1700000000.000",
+            "POST",
+            "/orders",
+            body,
+        )
+        .unwrap();
+        assert_eq!(post_sig, "bVeJS8x7MOeCJlcRdZFTx8XrL7ERjEcuq+N88Hb7blk=");
+    }
+
+    #[test]
+    fn parse_accounts_response_maps_balances_and_equity() {
+        use std::collections::HashMap;
+        let adapter = CoinbaseAdapter::new(None, None, None, None);
+        let v: serde_json::Value = serde_json::json!([
+            {"currency": "USD", "balance": "5000.0", "available": "4500.0", "hold": "500.0"},
+            {"currency": "BTC", "balance": "0.5", "available": "0.5", "hold": "0"},
+            {"currency": "DUST", "balance": "0", "available": "0", "hold": "0"}
+        ]);
+        let mut marks = HashMap::new();
+        marks.insert("BTC".to_string(), dec!(60000));
+        let snap = adapter.parse_accounts_response(&v, &marks).unwrap();
+        assert_eq!(snap.equity, dec!(35000));
+        assert_eq!(snap.balances.len(), 2);
+        assert_eq!(snap.balances[0].locked, dec!(500));
+        assert!(snap.positions.is_empty());
+    }
 
     #[test]
     fn to_venue_symbol_normalizes_and_rejects_cross() {

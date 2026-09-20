@@ -212,15 +212,12 @@ impl ExchangeAdapter for DecibelAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        Ok(FundingRate {
-            venue: self.venue_id.clone(),
-            symbol: symbol.to_string(),
-            rate: dec!(0.0001),
-            predicted_rate: None,
-            interval_hours: 8,
-            next_funding_time: Utc::now(),
-            timestamp: Utc::now(),
-        })
+        // Fail-closed: the venue exposes no public funding endpoint and this
+        // adapter must not invent a print. A hardcoded 0.01% fabricated
+        // phantom carry on every Decibel leg, so Decibel contributes no legs
+        // to funding scans until a real funding feed is wired.
+        let _ = symbol;
+        anyhow::bail!("Decibel exposes no public funding-rate endpoint; refusing to fabricate a print")
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {

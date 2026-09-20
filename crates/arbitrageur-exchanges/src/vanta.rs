@@ -448,6 +448,178 @@ impl VantaAdapter {
             .replace('_', "-")
     }
 
+    fn clean_account_id(&self) -> anyhow::Result<String> {
+        let acc = self.account_id.read().clone().unwrap_or_default();
+        let clean = acc.trim().trim_matches('"').trim_matches('\'').trim();
+        if clean.is_empty() {
+            anyhow::bail!("Vanta live trading requires an Orderly Account ID configured in credentials");
+        }
+        Ok(clean.to_string())
+    }
+
+    fn orderly_secret(&self) -> anyhow::Result<String> {
+        let sec = self.orderly_secret.read().clone().unwrap_or_default();
+        if sec.trim().is_empty() {
+            anyhow::bail!("Vanta live trading requires the Orderly Secret configured in credentials");
+        }
+        Ok(sec)
+    }
+
+    /// Candidate `orderly-key` header values: the configured key first, then
+    /// the key derived from the secret (which is mathematically guaranteed to
+    /// match the signing key). Mirrors the /v1/positions fallback.
+    fn orderly_key_candidates(&self, secret: &str) -> anyhow::Result<Vec<String>> {
+        let derived = match decode_orderly_secret(secret) {
+            Ok(bytes) => {
+                let sk = SigningKey::from_bytes(&bytes);
+                Some(bs58::encode(sk.verifying_key().to_bytes()).into_string())
+            }
+            Err(_) => None,
+        };
+        let configured = self
+            .orderly_key
+            .read()
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .strip_prefix("ed25519:")
+            .unwrap_or(
+                self.orderly_key
+                    .read()
+                    .clone()
+                    .unwrap_or_default()
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\''),
+            )
+            .trim()
+            .to_string();
+        let mut out = Vec::new();
+        if !configured.is_empty() {
+            out.push(format!("ed25519:{configured}"));
+        }
+        if let Some(d) = derived {
+            let full = format!("ed25519:{d}");
+            if !out.contains(&full) {
+                out.push(full);
+            }
+        }
+        if out.is_empty() {
+            anyhow::bail!("Cannot determine Orderly Key from credentials");
+        }
+        Ok(out)
+    }
+
+    /// Signed private Orderly call with -1004 key fallback across candidates.
+    /// `sign_path` is the exact path+query string covered by the signature
+    /// (e.g. `/v1/order` for POST, `/v1/order?symbol=..&order_id=..` for
+    /// DELETE); `body` is the exact JSON bytes sent (empty for DELETE).
+    async fn signed_orderly(
+        &self,
+        method: &str,
+        sign_path: &str,
+        body: &str,
+    ) -> anyhow::Result<serde_json::Value> {
+        let account_id = self.clean_account_id()?;
+        let secret = self.orderly_secret()?;
+        let candidates = self.orderly_key_candidates(&secret)?;
+        let ts = Utc::now().timestamp_millis();
+        let message = format!("{ts}{method}{sign_path}{body}");
+        let sig = sign_orderly_message(&secret, &message)?;
+        let url = format!("{}{}", self.base_url, sign_path);
+        let mut last_err = String::new();
+        for key in candidates {
+            let mut req = match method {
+                "POST" => self.client.post(&url),
+                "DELETE" => self.client.delete(&url),
+                "GET" => self.client.get(&url),
+                _ => anyhow::bail!("Vanta unsupported signed method {method}"),
+            };
+            req = req
+                .header("Content-Type", "application/json")
+                .header("orderly-account-id", &account_id)
+                .header("orderly-key", &key)
+                .header("orderly-timestamp", ts.to_string())
+                .header("orderly-signature", &sig);
+            if !body.is_empty() {
+                req = req.body(body.to_string());
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("Vanta {method} {sign_path} transport failure: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                last_err = format!("Vanta {method} {sign_path} HTTP {status}: {text}");
+                if text.contains("-1004") || text.contains("orderly key error") {
+                    continue;
+                }
+                anyhow::bail!("{last_err}");
+            }
+            let v: serde_json::Value = resp.json().await.map_err(|e| {
+                anyhow::anyhow!("Vanta {method} {sign_path} bad JSON: {e}")
+            })?;
+            if v.get("success").and_then(|s| s.as_bool()) != Some(true) {
+                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                last_err = format!("Vanta {method} {sign_path} error: {msg} ({v})");
+                if v.to_string().contains("-1004") {
+                    continue;
+                }
+                anyhow::bail!("{last_err}");
+            }
+            return Ok(v);
+        }
+        anyhow::bail!("{last_err}")
+    }
+
+    /// Pure build of a POST /v1/order body (no network) — unit-tested.
+    fn build_order_body(order: &OrderRequest, venue_symbol: &str) -> anyhow::Result<String> {
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("Vanta order quantity must be positive");
+        }
+        let side_str = match order.side {
+            Side::Buy => "BUY",
+            Side::Sell => "SELL",
+        };
+        let is_market = order.order_type == arbitrageur_core::types::OrderType::Market;
+        let order_type = if is_market {
+            "MARKET"
+        } else if order.post_only
+            || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
+        {
+            "POST_ONLY"
+        } else if order.time_in_force == arbitrageur_core::types::TimeInForce::ImmediateOrCancel {
+            "IOC"
+        } else if order.time_in_force == arbitrageur_core::types::TimeInForce::FillOrKill {
+            "FOK"
+        } else {
+            "LIMIT"
+        };
+        let mut req = serde_json::json!({
+            "symbol": venue_symbol,
+            "order_type": order_type,
+            "side": side_str,
+            "order_quantity": order.quantity.normalize().to_string(),
+        });
+        if !is_market {
+            let px = order.price.filter(|x| *x > dec!(0)).ok_or_else(|| {
+                anyhow::anyhow!("Vanta {order_type} order requires a positive limit price")
+            })?;
+            req["order_price"] = serde_json::Value::String(px.normalize().to_string());
+        }
+        if order.reduce_only {
+            req["reduce_only"] = serde_json::Value::Bool(true);
+        }
+        if !order.client_order_id.is_empty() {
+            req["client_order_id"] = serde_json::Value::String(order.client_order_id.clone());
+        }
+        serde_json::to_string(&req)
+            .map_err(|e| anyhow::anyhow!("Vanta order body serialization failed: {e}"))
+    }
+
     /// POST /v1/public/query — the documented public read-only endpoint.
     /// Returns the `data` payload; requires HTTP success and `success: true`.
     async fn public_query(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -658,12 +830,65 @@ impl ExchangeAdapter for VantaAdapter {
         anyhow::bail!("Vanta live balance requires Orderly Secret configured in credentials")
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let venue_symbol = Self::to_vanta_symbol(&order.symbol)?;
+        let body = Self::build_order_body(&order, &venue_symbol)?;
+        let v = self.signed_orderly("POST", "/v1/order", &body).await?;
+        let data = v
+            .get("data")
+            .ok_or_else(|| anyhow::anyhow!("Vanta order response missing data: {v}"))?;
+        let order_id = data
+            .get("order_id")
+            .and_then(|o| o.as_i64())
+            .map(|o| o.to_string())
+            .or_else(|| {
+                data.get("order_id")
+                    .and_then(|o| o.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_default();
+        if order_id.is_empty() || order_id == "0" {
+            anyhow::bail!("Vanta order returned no order_id: {v}");
+        }
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: order.client_order_id.clone(),
+            venue: VenueId::new("vanta"),
+            symbol: order.symbol.clone(),
+            status: OrderStatus::New,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if let Some(id) = req.order_id {
+            let venue_symbol = Self::to_vanta_symbol(&req.symbol)?;
+            let sign_path = format!("/v1/order?symbol={venue_symbol}&order_id={}", id.trim());
+            self.signed_orderly("DELETE", &sign_path, "").await?;
+            return Ok(());
+        }
+        if let Some(cid) = req.client_order_id {
+            let venue_symbol = Self::to_vanta_symbol(&req.symbol)?;
+            let sign_path = format!(
+                "/v1/client/order?client_order_id={}&symbol={venue_symbol}",
+                cid.trim()
+            );
+            self.signed_orderly("DELETE", &sign_path, "").await?;
+            return Ok(());
+        }
+        anyhow::bail!("Vanta cancel requires an order_id or client_order_id")
+    }
+
+    fn live_order_submission_implemented(&self) -> bool {
+        true
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -707,6 +932,74 @@ mod tests {
             "quote_tick": "0.5",
             "base_tick": "0.0001"
         })
+    }
+
+    #[test]
+    fn sign_orderly_message_matches_pynacl_vector() {
+        // Independent vector from PyNaCl over the same seed + message.
+        let secret_hex = "9d61b19deffd5a60ba844af492ec2cc4449c5697b326919703bac031cae7f109";
+        let message = r#"1750000000000POST/v1/order{"symbol":"PERP_BTC_USDC","order_type":"LIMIT","side":"BUY","order_quantity":"0.01","order_price":"60000"}"#;
+        let sig = sign_orderly_message(secret_hex, message).unwrap();
+        assert_eq!(
+            sig,
+            "ERIix5e553nVkMGutNozsbihkMCBGkNk0c4Dv-9qXv2LfSdx7WDGxYY7djH5DC1pKOsil9pAyOqe5w1j7bfiDg"
+        );
+    }
+
+    #[test]
+    fn build_order_body_maps_types_and_fields() {
+        use arbitrageur_core::order::OrderRequest;
+        use arbitrageur_core::types::{Side, TimeInForce};
+        let mk = |t: arbitrageur_core::types::OrderType, tif: TimeInForce, px: Option<Decimal>| {
+            let mut o = OrderRequest::new_market(
+                VenueId::new("vanta"),
+                "BTC-USDC",
+                Side::Buy,
+                dec!(0.01),
+            );
+            o.order_type = t;
+            o.time_in_force = tif;
+            o.price = px;
+            o
+        };
+        let v: serde_json::Value = serde_json::from_str(
+            &VantaAdapter::build_order_body(
+                &mk(
+                    arbitrageur_core::types::OrderType::Limit,
+                    TimeInForce::GoodTilCancelled,
+                    Some(dec!(60000)),
+                ),
+                "PERP_BTC_USDC",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["order_type"], "LIMIT");
+        assert_eq!(v["order_price"], "60000");
+        let v: serde_json::Value = serde_json::from_str(
+            &VantaAdapter::build_order_body(
+                &mk(
+                    arbitrageur_core::types::OrderType::Market,
+                    TimeInForce::ImmediateOrCancel,
+                    None,
+                ),
+                "PERP_BTC_USDC",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["order_type"], "MARKET");
+        assert!(v.get("order_price").is_none());
+        // Limit without price fails closed.
+        assert!(VantaAdapter::build_order_body(
+            &mk(
+                arbitrageur_core::types::OrderType::Limit,
+                TimeInForce::GoodTilCancelled,
+                None,
+            ),
+            "PERP_BTC_USDC",
+        )
+        .is_err());
     }
 
     #[test]

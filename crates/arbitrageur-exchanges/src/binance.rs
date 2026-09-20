@@ -142,7 +142,17 @@ impl BinanceAdapter {
         if !quote.is_empty() && quote != "USDT" && quote != "USDC" && quote != "USD" {
             anyhow::bail!("Binance futures markets are quoted in USDT/USDC; '{symbol}' is not supported");
         }
-        let res = match base {
+        // Canonical inputs may already carry the venue's 1000x prefix
+        // (universe spells it `1000PEPE-USDT` from exchangeInfo baseAsset);
+        // normalize onto the same scaled venue contract.
+        let base_norm = base
+            .strip_prefix("1000")
+            .filter(|r| {
+                ["PEPE", "BONK", "SHIB", "FLOKI", "LUNC", "XEC", "RATS", "SATS", "CAT", "CHEEMS"]
+                    .contains(r)
+            })
+            .unwrap_or(base);
+        let res = match base_norm {
             "PEPE" => ("1000PEPEUSDT".to_string(), true),
             "BONK" => ("1000BONKUSDT".to_string(), true),
             "SHIB" => ("1000SHIBUSDT".to_string(), true),
@@ -293,6 +303,112 @@ impl BinanceAdapter {
         }
         serde_json::from_str::<serde_json::Value>(&text)
             .map_err(|e| anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}"))
+    }
+
+    async fn signed_get(&self, path: &str, params: &BTreeMap<&str, String>) -> anyhow::Result<serde_json::Value> {
+        let (api_key, query_string) = self.sign_params(params)?;
+        let url = format!("{}{}?{}", self.base_url, path, query_string);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await
+            .map_err(|e| {
+                self.rate_limiter.record_failure(false);
+                anyhow::anyhow!("Binance GET {path} transport failure: {e}")
+            })?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
+            anyhow::bail!("Binance GET {path} failed (HTTP {status}): {text}");
+        }
+        serde_json::from_str::<serde_json::Value>(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}"))
+    }
+
+    /// Pure parse of a USDT-M `GET /fapi/v2/account` envelope into an
+    /// [`AccountSnapshot`]. Split out for unit testing (no network).
+    fn parse_account_response(&self, v: &serde_json::Value) -> anyhow::Result<AccountSnapshot> {
+        let wallet_balance = dec_from_json(v.get("totalWalletBalance")).unwrap_or_default();
+        let unrealized_pnl = dec_from_json(v.get("totalUnrealizedProfit")).unwrap_or_default();
+        let equity =
+            dec_from_json(v.get("totalMarginBalance")).unwrap_or(wallet_balance + unrealized_pnl);
+        let free_margin = dec_from_json(v.get("availableBalance")).unwrap_or_default();
+        let maint_margin = dec_from_json(v.get("totalMaintMargin")).unwrap_or_default();
+        let initial_margin = dec_from_json(v.get("totalInitialMargin")).unwrap_or_default();
+
+        let margin_usage_pct = if equity > dec!(0) {
+            (initial_margin / equity) * dec!(100)
+        } else {
+            dec!(0)
+        };
+
+        let mut positions = Vec::new();
+        if let Some(pos_arr) = v.get("positions").and_then(|p| p.as_array()) {
+            for p in pos_arr {
+                let amt = dec_from_json(p.get("positionAmt")).unwrap_or_default();
+                if amt.is_zero() {
+                    continue;
+                }
+                let sym = p.get("symbol").and_then(|s| s.as_str()).unwrap_or_default();
+                let entry_px = dec_from_json(p.get("entryPrice")).unwrap_or_default();
+                let upnl = dec_from_json(p.get("unrealizedProfit")).unwrap_or_default();
+                let liq_px = dec_from_json(p.get("liquidationPrice")).filter(|x| *x > dec!(0));
+                let lev = p
+                    .get("leverage")
+                    .and_then(|l| match l {
+                        serde_json::Value::Number(n) => {
+                            n.as_f64().and_then(Decimal::from_f64_retain)
+                        }
+                        serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(dec!(1));
+
+                let side = if amt > dec!(0) { Side::Buy } else { Side::Sell };
+                let qty = amt.abs();
+                let notional = qty * entry_px;
+                let im = if lev > dec!(0) { notional / lev } else { notional };
+
+                positions.push(arbitrageur_core::position::Position {
+                    venue: self.venue_id.clone(),
+                    symbol: sym.to_string(),
+                    side,
+                    quantity: qty,
+                    entry_price: entry_px,
+                    mark_price: entry_px,
+                    unrealized_pnl: upnl,
+                    realized_pnl: dec!(0),
+                    liquidation_price: liq_px,
+                    leverage: lev,
+                    initial_margin: im,
+                    maintenance_margin: im * dec!(0.5),
+                    updated_at: Utc::now(),
+                });
+            }
+        }
+
+        let balances = vec![arbitrageur_core::position::Balance {
+            venue: self.venue_id.clone(),
+            currency: "USDT".to_string(),
+            total: wallet_balance,
+            free: free_margin,
+            locked: wallet_balance.saturating_sub(free_margin),
+        }];
+
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin,
+            maintenance_margin: maint_margin,
+            margin_usage_pct,
+            balances,
+            positions,
+            timestamp: Utc::now(),
+        })
     }
 }
 
@@ -458,6 +574,32 @@ impl ExchangeAdapter for BinanceAdapter {
     }
 
     async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
+        // Join to exchangeInfo so hub keys are canonical BASE-QUOTE — the
+        // exact spelling the market universe advertises and scanners query.
+        // Raw venue symbols (BTCUSDT) never match a hub lookup, so without
+        // this join the bulk sweep feeds only the EMA and every scan falls
+        // back to per-symbol fetches.
+        let info = self.get_json("/fapi/v1/exchangeInfo").await?;
+        let canon_of: HashMap<String, String> = info
+            .get("symbols")
+            .and_then(|s| s.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|s| {
+                        let vsym = s.get("symbol")?.as_str()?.to_uppercase();
+                        let base = s.get("baseAsset")?.as_str()?;
+                        let quote = s.get("quoteAsset")?.as_str()?;
+                        if base.is_empty() || quote.is_empty() {
+                            return None;
+                        }
+                        Some((
+                            vsym,
+                            format!("{}-{}", base.to_uppercase(), quote.to_uppercase()),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let val = self.get_json("/fapi/v1/premiumIndex").await?;
         let arr = val
             .as_array()
@@ -465,9 +607,12 @@ impl ExchangeAdapter for BinanceAdapter {
 
         let mut out = Vec::new();
         for item in arr {
-            let symbol = match item.get("symbol").and_then(|s| s.as_str()) {
-                Some(s) if !s.is_empty() => s.to_string(),
+            let venue_sym = match item.get("symbol").and_then(|s| s.as_str()) {
+                Some(s) if !s.is_empty() => s.to_uppercase(),
                 _ => continue,
+            };
+            let Some(symbol) = canon_of.get(&venue_sym).cloned() else {
+                continue;
             };
             if let Some(rate) = dec_from_json(item.get("lastFundingRate")) {
                 let next_time_ms = item.get("nextFundingTime").and_then(|n| n.as_i64()).unwrap_or(0);
@@ -505,7 +650,14 @@ impl ExchangeAdapter for BinanceAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!("Live account query not configured for Binance; refusing to fabricate")
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch live account on Binance: API credentials are not configured or vault is locked");
+        }
+        let mut params = BTreeMap::new();
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+        let v = self.signed_get("/fapi/v2/account", &params).await?;
+        self.parse_account_response(&v)
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -698,6 +850,49 @@ mod tests {
         let resp = BinanceAdapter::parse_order_response(&rej, &order).unwrap();
         assert_eq!(resp.status, OrderStatus::Rejected);
         assert_eq!(resp.filled_qty, dec!(0));
+    }
+
+    #[test]
+    fn parse_account_response_maps_balances_and_positions() {
+        let adapter = BinanceAdapter::new(None, None, None);
+        let v: serde_json::Value = serde_json::json!({
+            "totalWalletBalance": "10000.0",
+            "totalUnrealizedProfit": "120.0",
+            "totalMarginBalance": "10120.0",
+            "availableBalance": "9000.0",
+            "totalInitialMargin": "1120.0",
+            "totalMaintMargin": "56.0",
+            "positions": [
+                {"symbol": "BTCUSDT", "positionAmt": "0.500", "entryPrice": "80000.0",
+                 "unrealizedProfit": "100.0", "liquidationPrice": "40000.0", "leverage": "10"},
+                {"symbol": "ETHUSDT", "positionAmt": "0.000", "entryPrice": "0",
+                 "unrealizedProfit": "0", "leverage": "10"}
+            ]
+        });
+        let acc = adapter.parse_account_response(&v).unwrap();
+        assert_eq!(acc.equity, dec!(10120.0));
+        assert_eq!(acc.free_margin, dec!(9000.0));
+        assert_eq!(acc.maintenance_margin, dec!(56.0));
+        // 1120 / 10120 * 100 ~= 11.067%.
+        assert!((acc.margin_usage_pct - dec!(11.067)).abs() < dec!(0.01));
+        assert_eq!(acc.positions.len(), 1);
+        assert_eq!(acc.positions[0].symbol, "BTCUSDT");
+        assert_eq!(acc.positions[0].quantity, dec!(0.5));
+        assert_eq!(acc.balances.len(), 1);
+        assert_eq!(acc.balances[0].currency, "USDT");
+    }
+
+    #[test]
+    fn to_venue_symbol_accepts_1000x_canonical_spelling() {
+        // Universe spells the venue baseAsset verbatim (`1000PEPE-USDT`).
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("1000PEPE-USDT").unwrap(),
+            ("1000PEPEUSDT".to_string(), true)
+        );
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("PEPE-USDT").unwrap(),
+            ("1000PEPEUSDT".to_string(), true)
+        );
     }
 
     #[test]

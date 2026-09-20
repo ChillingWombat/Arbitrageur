@@ -124,6 +124,303 @@ impl KrakenAdapter {
         Ok(data)
     }
 
+    fn credentials(&self) -> anyhow::Result<(Zeroizing<String>, Zeroizing<String>)> {
+        let api_key = self
+            .api_key
+            .read()
+            .clone()
+            .filter(|k| !k.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Kraken API key not configured or empty"))?;
+        let api_secret = self
+            .api_secret
+            .read()
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Kraken API secret not configured or empty"))?;
+        Ok((api_key, api_secret))
+    }
+
+    fn has_credentials(&self) -> bool {
+        self.credentials().is_ok()
+    }
+
+    /// Kraken Futures private-API signature.
+    ///
+    /// `Authent = base64(HMAC-SHA512(endpoint_path + SHA256(nonce + post_data),
+    /// base64_decode(api_secret)))` where `endpoint_path` is the `/api/v3/...`
+    /// form (the `/derivatives` URL prefix is NOT signed) and `post_data` is
+    /// the raw url-encoded body the server will receive.
+    fn sign_futures(
+        secret: &Zeroizing<String>,
+        endpoint_path: &str,
+        nonce: &str,
+        post_data: &str,
+    ) -> anyhow::Result<String> {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256, Sha512};
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(secret.trim().as_bytes())
+            .map_err(|e| anyhow::anyhow!("Invalid Kraken base64 API secret: {e}"))?;
+        let mut sha = Sha256::new();
+        sha.update(format!("{nonce}{post_data}").as_bytes());
+        let sha_digest = sha.finalize();
+        let mut message = Vec::with_capacity(endpoint_path.len() + sha_digest.len());
+        message.extend_from_slice(endpoint_path.as_bytes());
+        message.extend_from_slice(&sha_digest);
+        let mut mac = Hmac::<Sha512>::new_from_slice(&decoded)
+            .map_err(|e| anyhow::anyhow!("Invalid Kraken HMAC key: {e}"))?;
+        mac.update(&message);
+        Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
+    }
+
+    /// Authenticated POST to a Kraken Futures private endpoint.
+    /// `path` is the full `/derivatives/api/v3/...` URL path; only the
+    /// `/api/v3/...` suffix is signed.
+    async fn authed_post(
+        &self,
+        path: &str,
+        params: &std::collections::BTreeMap<&str, String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        use std::fmt::Write;
+        let (api_key, api_secret) = self.credentials()?;
+        let nonce = Utc::now().timestamp_millis().to_string();
+        let mut post_data = String::from("nonce=");
+        post_data.push_str(&nonce);
+        for (k, v) in params {
+            let _ = write!(post_data, "&{k}={v}");
+        }
+        let endpoint = path
+            .strip_prefix("/derivatives")
+            .unwrap_or(path);
+        let authent = Self::sign_futures(&api_secret, endpoint, &nonce, &post_data)?;
+        let url = format!("{}{}", self.futures_base_url, path);
+        let resp = self
+            .client
+            .post(&url)
+            .header("APIKey", api_key.to_string())
+            .header("Nonce", nonce)
+            .header("Authent", authent)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(post_data)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Kraken POST {path} transport failure: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Kraken POST {path} failed (HTTP {status}): {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}"))?;
+        if v.get("result").and_then(|r| r.as_str()) != Some("success") {
+            anyhow::bail!("Kraken POST {path} error response: {text}");
+        }
+        Ok(v)
+    }
+
+    /// Authenticated GET to a Kraken Futures private endpoint (nonce travels
+    /// as a query param and inside the signed payload).
+    async fn authed_get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        let (api_key, api_secret) = self.credentials()?;
+        let nonce = Utc::now().timestamp_millis().to_string();
+        let post_data = format!("nonce={nonce}");
+        let endpoint = path
+            .strip_prefix("/derivatives")
+            .unwrap_or(path);
+        let authent = Self::sign_futures(&api_secret, endpoint, &nonce, &post_data)?;
+        let url = format!("{}{}?nonce={}", self.futures_base_url, path, nonce);
+        let resp = self
+            .client
+            .get(&url)
+            .header("APIKey", api_key.to_string())
+            .header("Nonce", nonce)
+            .header("Authent", authent)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Kraken GET {path} transport failure: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Kraken GET {path} failed (HTTP {status}): {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}"))?;
+        if v.get("result").and_then(|r| r.as_str()) != Some("success") {
+            anyhow::bail!("Kraken GET {path} error response: {text}");
+        }
+        Ok(v)
+    }
+
+    /// Contracts per engine base unit for a canonical symbol (from the public
+    /// instrument list; cached upstream by the rate limiter).
+    async fn contract_size_for(&self, symbol: &str) -> anyhow::Result<Decimal> {
+        let venue_sym = Self::to_futures_symbol(symbol)?;
+        let val = self.get_futures_json("/instruments").await?;
+        let instruments = val
+            .get("instruments")
+            .and_then(|i| i.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken instruments missing array"))?;
+        for item in instruments {
+            if item.get("symbol").and_then(|s| s.as_str()) == Some(venue_sym.as_str()) {
+                let size = dec_from_json(item.get("contractSize")).unwrap_or(dec!(1));
+                if size > dec!(0) {
+                    return Ok(size);
+                }
+            }
+        }
+        anyhow::bail!("Kraken contract size unknown for {symbol} ({venue_sym})")
+    }
+
+    /// Pure parse of `/accounts` + `/openpositions` envelopes into a snapshot.
+    /// `marks_usd` maps collateral codes (XBT, ETH, ...) to USD marks for the
+    /// equity roll-up; unknown codes count 0 toward equity (conservative lower
+    /// bound) but are still listed raw in `balances` — never fabricated.
+    fn parse_account_response(
+        &self,
+        accounts_v: &serde_json::Value,
+        positions_v: &serde_json::Value,
+        marks_usd: &HashMap<String, Decimal>,
+    ) -> anyhow::Result<AccountSnapshot> {
+        let mut balances = Vec::new();
+        let mut equity = dec!(0);
+        let mut free_margin = dec!(0);
+        let mut maint_margin = dec!(0);
+        let mut saw_avail = false;
+        if let Some(accounts) = accounts_v.get("accounts").and_then(|a| a.as_object()) {
+            for (_name, acct) in accounts {
+                if let Some(bals) = acct.get("balances").and_then(|b| b.as_object()) {
+                    for (ccy, amt_v) in bals {
+                        let amt = dec_from_json(Some(amt_v)).unwrap_or_default();
+                        if amt.is_zero() {
+                            continue;
+                        }
+                        let code = ccy.to_uppercase();
+                        let mark = if ["USD", "USDT", "USDC", "DAI", "ZUSD"].contains(&code.as_str()) {
+                            dec!(1)
+                        } else {
+                            marks_usd.get(&code).copied().unwrap_or(dec!(0))
+                        };
+                        equity += amt * mark;
+                        if let Some(entry) = balances.iter_mut().find(|b: &&mut arbitrageur_core::position::Balance| b.currency == code) {
+                            entry.total += amt;
+                            entry.free += amt;
+                        } else {
+                            balances.push(arbitrageur_core::position::Balance {
+                                venue: self.venue_id.clone(),
+                                currency: code,
+                                total: amt,
+                                free: amt,
+                                locked: dec!(0),
+                            });
+                        }
+                    }
+                }
+                if let Some(mr) = acct.get("marginRequirements") {
+                    maint_margin += dec_from_json(mr.get("maintenanceMargin")).unwrap_or_default();
+                    let avail = dec_from_json(mr.get("availableMargin")).unwrap_or_default();
+                    if avail > dec!(0) {
+                        saw_avail = true;
+                    }
+                    free_margin += avail;
+                }
+            }
+        }
+        if !saw_avail {
+            // Venue did not quote available margin: fall back to USD-par cash
+            // (conservative — crypto collateral stays out of "free").
+            free_margin = balances
+                .iter()
+                .filter(|b| ["USD", "USDT", "USDC", "DAI", "ZUSD"].contains(&b.currency.as_str()))
+                .map(|b| b.free)
+                .fold(dec!(0), |a, x| a + x);
+        }
+
+        let mut positions = Vec::new();
+        if let Some(arr) = positions_v.get("openPositions").and_then(|p| p.as_array()) {
+            for leg in arr {
+                let sym = leg.get("symbol").and_then(|s| s.as_str()).unwrap_or_default();
+                if sym.is_empty() {
+                    continue;
+                }
+                // Size is in contracts; scale to base units via the venue
+                // symbol's contract size carried in `marks_usd` under
+                // `CT:<venue-symbol>` (populated by the caller).
+                let ct_key = format!("CT:{sym}");
+                let ct = marks_usd.get(&ct_key).copied().unwrap_or(dec!(1));
+                let size_ct = dec_from_json(leg.get("size")).unwrap_or_default();
+                if size_ct.is_zero() {
+                    continue;
+                }
+                let qty = (size_ct * ct).abs();
+                let entry_px = dec_from_json(leg.get("entryPrice"))
+                    .or_else(|| dec_from_json(leg.get("price")))
+                    .unwrap_or_default();
+                let mark_px = dec_from_json(leg.get("markPrice")).unwrap_or(entry_px);
+                let upnl = dec_from_json(leg.get("unrealizedPnl"))
+                    .or_else(|| dec_from_json(leg.get("unrealisedPnl")))
+                    .unwrap_or_default();
+                let side = match leg.get("side").and_then(|s| s.as_str()).unwrap_or("") {
+                    "short" => arbitrageur_core::types::Side::Sell,
+                    _ => arbitrageur_core::types::Side::Buy,
+                };
+                let notional = qty * mark_px;
+                equity += upnl;
+                positions.push(arbitrageur_core::position::Position {
+                    venue: self.venue_id.clone(),
+                    symbol: sym.to_string(),
+                    side,
+                    quantity: qty,
+                    entry_price: entry_px,
+                    mark_price: mark_px,
+                    unrealized_pnl: upnl,
+                    realized_pnl: dec!(0),
+                    liquidation_price: None,
+                    leverage: dec!(1),
+                    initial_margin: dec!(0),
+                    maintenance_margin: dec!(0),
+                    updated_at: Utc::now(),
+                });
+                let _ = notional;
+            }
+        }
+
+        let margin_usage_pct = if equity > dec!(0) {
+            // Initial margin is locked inside positions here; usage derives
+            // from maintenance cover instead of a borrowed figure.
+            ((maint_margin / equity) * dec!(100)).min(dec!(100))
+        } else {
+            dec!(0)
+        };
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin,
+            maintenance_margin: maint_margin,
+            margin_usage_pct,
+            balances,
+            positions,
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// Canonical linear-perp symbol for a Kraken Futures venue symbol
+    /// (`PF_XBTUSD` -> `BTC-USD`). Inverse (`PI_*`) prints are excluded:
+    /// this adapter quotes, sizes, and settles the linear book, so mixing
+    /// inverse funding into the hub would corrupt carry math.
+    fn canonical_linear_symbol(venue_sym: &str) -> Option<String> {
+        let core = venue_sym.strip_prefix("PF_")?;
+        let base = core
+            .strip_suffix("USD")
+            .or_else(|| core.strip_suffix("USDT"))
+            .or_else(|| core.strip_suffix("USDC"))?;
+        if base.is_empty() {
+            return None;
+        }
+        let canonical_base = if base == "XBT" { "BTC" } else { base };
+        Some(format!("{canonical_base}-USD"))
+    }
+
     fn to_futures_symbol(symbol: &str) -> anyhow::Result<String> {
         let sym = symbol.trim().to_uppercase();
         if sym.starts_with("PF_") || sym.starts_with("PI_") {
@@ -306,10 +603,15 @@ impl ExchangeAdapter for KrakenAdapter {
                 item.get("symbol").and_then(|s| s.as_str()),
                 dec_from_json(item.get("fundingRate")),
             ) {
+                // Hub keys are canonical symbols; raw venue symbols never
+                // match a scan. Inverse legs are excluded (see above).
+                let Some(canonical) = Self::canonical_linear_symbol(sym) else {
+                    continue;
+                };
                 let pred = dec_from_json(item.get("fundingRatePrediction"));
                 out.push(FundingRate {
                     venue: self.venue_id.clone(),
-                    symbol: sym.to_string(),
+                    symbol: canonical,
                     rate,
                     predicted_rate: pred,
                     interval_hours: 8,
@@ -338,15 +640,160 @@ impl ExchangeAdapter for KrakenAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!("Live account query not configured for Kraken; refusing to fabricate")
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch live account on Kraken: API credentials are not configured or vault is locked");
+        }
+        let accounts_v = self.authed_get("/derivatives/api/v3/accounts").await?;
+        let positions_v = self.authed_get("/derivatives/api/v3/openpositions").await?;
+        // USD marks for major collateral + contract sizes for open legs.
+        // Best-effort: a mark failure only degrades the equity roll-up to a
+        // conservative lower bound (raw balances are still exact).
+        let mut marks: HashMap<String, Decimal> = HashMap::new();
+        if let Ok(tickers) = self.get_futures_json("/tickers").await {
+            if let Some(arr) = tickers.get("tickers").and_then(|t| t.as_array()) {
+                for t in arr {
+                    let vsym = t.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                    let last = dec_from_json(t.get("last")).unwrap_or_default();
+                    if vsym.is_empty() || last <= dec!(0) {
+                        continue;
+                    }
+                    // PF_XBTUSD -> XBT, PF_ETHUSD -> ETH, ...
+                    if let Some(core) = vsym.strip_prefix("PF_").and_then(|s| s.strip_suffix("USD")) {
+                        marks.insert(core.to_string(), last);
+                    }
+                    if let Some(ct) = t.get("contractSize").and_then(|c| c.as_str()) {
+                        // tickers carry no contractSize; sizes resolve below.
+                        let _ = ct;
+                    }
+                }
+            }
+        }
+        if let Ok(instruments) = self.get_futures_json("/instruments").await {
+            if let Some(arr) = instruments.get("instruments").and_then(|i| i.as_array()) {
+                for item in arr {
+                    if let (Some(sym), Some(ct)) = (
+                        item.get("symbol").and_then(|s| s.as_str()),
+                        dec_from_json(item.get("contractSize")),
+                    ) {
+                        if ct > dec!(0) {
+                            marks.insert(format!("CT:{sym}"), ct);
+                        }
+                    }
+                }
+            }
+        }
+        self.parse_account_response(&accounts_v, &positions_v, &marks)
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live trading execution not configured for Kraken")
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot place live order on Kraken: API credentials are not configured or vault is locked");
+        }
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("Kraken order quantity must be positive");
+        }
+        let venue_symbol = Self::to_futures_symbol(&order.symbol)?;
+        let ct = self.contract_size_for(&order.symbol).await?;
+        let contracts = (order.quantity / ct).trunc();
+        if contracts <= dec!(0) {
+            anyhow::bail!(
+                "Kraken order {qty} {sym} is below one contract ({ct} base units)",
+                qty = order.quantity,
+                sym = order.symbol,
+                ct = ct
+            );
+        }
+        let side_str = match order.side {
+            arbitrageur_core::types::Side::Buy => "buy",
+            arbitrageur_core::types::Side::Sell => "sell",
+        };
+        // Engine PostOnly/IOC map onto Kraken order types; plain Limit rests.
+        let order_type = if order.order_type == arbitrageur_core::types::OrderType::Market {
+            "mkt"
+        } else if order.post_only
+            || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
+        {
+            "post"
+        } else if order.time_in_force == arbitrageur_core::types::TimeInForce::ImmediateOrCancel {
+            "ioc"
+        } else {
+            "lmt"
+        };
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("orderType", order_type.to_string());
+        params.insert("symbol", venue_symbol.clone());
+        params.insert("side", side_str.to_string());
+        params.insert("size", contracts.normalize().to_string());
+        if order_type != "mkt" {
+            let px = order.price.filter(|x| *x > dec!(0)).ok_or_else(|| {
+                anyhow::anyhow!("Kraken {order_type} order requires a positive limit price")
+            })?;
+            params.insert("limitPrice", px.normalize().to_string());
+        }
+        if order.reduce_only {
+            params.insert("reduceOnly", "true".to_string());
+        }
+        if !order.client_order_id.is_empty() {
+            params.insert("cliOrdId", order.client_order_id.clone());
+        }
+        let v = self.authed_post("/derivatives/api/v3/sendorder", &params).await?;
+        let st = v
+            .get("sendStatus")
+            .ok_or_else(|| anyhow::anyhow!("Kraken sendorder missing sendStatus: {v}"))?;
+        let order_id = st
+            .get("order_id")
+            .and_then(|o| o.as_str())
+            .unwrap_or("")
+            .to_string();
+        if order_id.is_empty() {
+            anyhow::bail!("Kraken sendorder returned no order_id: {v}");
+        }
+        let status = match st.get("status").and_then(|s| s.as_str()).unwrap_or("placed") {
+            "filled" => OrderStatus::Filled,
+            "cancelled" | "rejected" | "expired" => OrderStatus::Rejected,
+            "partiallyFilled" => OrderStatus::PartiallyFilled,
+            _ => OrderStatus::New,
+        };
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: order.client_order_id.clone(),
+            venue: VenueId::new("kraken"),
+            symbol: order.symbol.clone(),
+            status,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USD".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live trading cancellation not configured for Kraken")
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot cancel live order on Kraken: API credentials are not configured or vault is locked");
+        }
+        let mut params = std::collections::BTreeMap::new();
+        if let Some(id) = req.order_id {
+            params.insert("order_id", id);
+        } else if let Some(cid) = req.client_order_id {
+            params.insert("cliOrdId", cid);
+        } else {
+            anyhow::bail!("Kraken cancel requires an order_id or cliOrdId");
+        }
+        // Symbol scoping is optional venue-side; include when resolvable.
+        if let Ok(vsym) = Self::to_futures_symbol(&req.symbol) {
+            params.insert("symbol", vsym);
+        }
+        self.authed_post("/derivatives/api/v3/cancelorder", &params).await?;
+        Ok(())
+    }
+
+    fn live_order_submission_implemented(&self) -> bool {
+        true
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -369,6 +816,72 @@ impl ExchangeAdapter for KrakenAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_account_response_rolls_up_balances_and_positions() {
+        let adapter = KrakenAdapter::new(None, None, None, None);
+        let accounts_v: serde_json::Value = serde_json::json!({
+            "result": "success",
+            "accounts": {
+                "cash": {
+                    "balances": {"usd": 5000.0, "usdt": 1000.0, "xbt": 0.5},
+                    "marginRequirements": {"initialMargin": "200.0", "maintenanceMargin": "100.0", "availableMargin": "4500.0"}
+                },
+                "flex": {"balances": {}, "marginRequirements": {}}
+            }
+        });
+        let positions_v: serde_json::Value = serde_json::json!({
+            "result": "success",
+            "openPositions": [
+                {"symbol": "PF_XBTUSD", "side": "long", "size": 1000, "entryPrice": "60000",
+                 "markPrice": "61000", "unrealizedPnl": "50.0"}
+            ]
+        });
+        let mut marks = HashMap::new();
+        marks.insert("XBT".to_string(), dec!(60000));
+        marks.insert("CT:PF_XBTUSD".to_string(), dec!(0.001));
+        let snap = adapter
+            .parse_account_response(&accounts_v, &positions_v, &marks)
+            .unwrap();
+        // equity = 5000 + 1000 + 0.5*60000 + 50 uPnL = 36050
+        assert_eq!(snap.equity, dec!(36050));
+        assert_eq!(snap.free_margin, dec!(4500));
+        assert_eq!(snap.maintenance_margin, dec!(100));
+        assert_eq!(snap.positions.len(), 1);
+        assert_eq!(snap.positions[0].quantity, dec!(1));
+        assert_eq!(snap.balances.len(), 3);
+    }
+
+    #[test]
+    fn sign_futures_matches_independent_hmac_vector() {
+        // Cross-checked with Python hmac/hashlib/base64 over the same
+        // endpoint + nonce + body (see commit message for the script).
+        let secret = Zeroizing::new(
+            "c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string(),
+        );
+        let authent = KrakenAdapter::sign_futures(
+            &secret,
+            "/api/v3/sendorder",
+            "1700000000000",
+            "nonce=1700000000000&orderType=lmt&symbol=PF_XBTUSD&side=buy&size=10&limitPrice=60000",
+        )
+        .unwrap();
+        assert_eq!(authent, "I7U4L8ldFZE+jjZv4JDtMFNJbYnSXSxqclINxdYzMcfULHT2g89T7SLoa2r72JiP+bf8qC4Wpo9sE/GBu9fkPQ==");
+    }
+
+    #[test]
+    fn canonical_linear_symbol_maps_pf_and_skips_inverse() {
+        assert_eq!(
+            KrakenAdapter::canonical_linear_symbol("PF_XBTUSD"),
+            Some("BTC-USD".to_string())
+        );
+        assert_eq!(
+            KrakenAdapter::canonical_linear_symbol("PF_ETHUSD"),
+            Some("ETH-USD".to_string())
+        );
+        assert_eq!(KrakenAdapter::canonical_linear_symbol("PI_XBTUSD"), None);
+        assert_eq!(KrakenAdapter::canonical_linear_symbol("BTC-USD"), None);
+    }
 
     #[test]
     fn to_futures_symbol_normalizes_and_rejects_cross() {

@@ -1407,3 +1407,19 @@ overhaul pass committed as `23d4aed`).
 - **Shipped:** Binance USDT-M place/cancel/set-leverage (signed fapi, 1000x memecoin scaling, VIP0 5 BPS fees) and OKX swap place/cancel/set-leverage (signed api/v5, ctVal contract conversion, fill polling, isolated margin) + `live_order_submission_implemented() == true` for both. HMAC vectors cross-checked with openssl/python; no network in tests. Vault key/secret/passphrase plumbing already covered both.
 - **Deliberately next:** Kraken (needs inverse-vs-linear margin care), Vanta/Orderly (EIP-712), Lighter (Starknet signer), Decibel (Aptos), Arcus scoping; then the atomic two-leg live dispatcher with reconciliation (refusing to strand naked legs).
 - **Verification:** exchanges 106/0, desktop 313/0, tsc clean, release rebuilt + relaunched.
+
+## 53. Session Handoff — 2026-09-20 (Full-venue push: Kraken/Coinbase/Vanta live + account reads + funding canonicalization)
+
+- **Ask:** "keep doing, dont stop, until we properly have full support for all exchanges included in our system."
+- **Funding verification first:** the 3-part funding request (wrong values / popup trend / blur) was already shipped in `fbae7c2` + verified live in this session — LINK math 305%→47.7% APR after the Lighter 8h fix, placeholder-floor rows 73.1%→0.44% (below hurdle, vanish), `long/short_rate_8h_pct` + `FundingTrendGraph` + `backdrop-blur-sm` all present in `frontend/dist`.
+- **Shipped (all in `crates/arbitrageur-exchanges/src/`, unit-tested, no network):**
+  - Binance `fetch_account` (signed `GET /fapi/v2/account`, Aster-shaped parse) + bulk funding canonicalized to BASE-QUOTE via exchangeInfo join (raw `BTCUSDT` hub keys never matched scans) + 1000x canonical-input scaling fix (`1000PEPE-USDT` now scales).
+  - OKX `fetch_account` (signed `/account/balance` + `/account/positions` with ctVal sizing; unresolvable face value aborts the read rather than understating exposure) + missing `#[test]` restored.
+  - Kraken Futures `fetch_account` (signed `/accounts` + `/openpositions`, conservative equity roll-up: stables at 1, XBT/ETH via cached marks, unknown collateral 0 but listed raw) + `place_order`/`cancel_order` (HMAC-SHA512 `/api/v3` signing path confirmed against web docs; contracts via instrument sizes; linear PF_ only) + bulk funding canonicalized (`PF_XBTUSD`→`BTC-USD`, `PI_*` inverse excluded so inverse prints can't corrupt linear carry).
+  - Coinbase Exchange spot `fetch_account` (`/accounts` + per-ccy USD marks via cached tickers) + `place_order`/`cancel_order` (legacy key/secret/passphrase HMAC; market buys sized from live ask via `funds`; reduce-only refused — spot has no shorts).
+  - Vanta/Orderly `place_order`/`cancel_order` (Ed25519 `orderly-*` headers with -1004 key fallback, `POST /v1/order`, `DELETE /v1/order` + `/v1/client/order`). Correction to §52: Orderly auth is Ed25519, not EIP-712 — implementation + PyNaCl cross-checked vector prove it.
+  - Decibel `fetch_funding_rate` now fails closed (was a hardcoded `0.0001` fabricating phantom carry on every Decibel leg); Arcus missing funding field now bails instead of reporting 0%.
+- **Signing vectors:** Kraken HMAC-SHA512, Coinbase HMAC-SHA256, Orderly Ed25519 all cross-checked against independent Python implementations; Binance/OKX vectors pre-existing.
+- **Still fail-closed (documented, not attempted):** Lighter/Robinhood orders (need the native Starknet/Poseidon signer lib per EXCHANGES §2.3 — pure-Rust fabrication refused), Decibel orders (Aptos entry-function/BCS research outstanding), Arcus account+orders (private API undocumented in-repo; market data itself is a hardcoded list + key-gated books).
+- **Tree note:** stages only the six adapter files + this entry; concurrent worker hunks (commands.rs, state.rs, EngineSettings/ExchangeAccounts/PortfolioMonitor, types) untouched.
+- **Verification:** exchanges 117/0, clippy clean (2 pre-existing okx nonminimal_bool warnings untouched).
