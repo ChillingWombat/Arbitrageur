@@ -21,9 +21,12 @@
 //! and then every `POLL_INTERVAL_SECS`.
 
 use crate::state::AppEngineState;
-use crate::state_store::SignalStatus;
-use arbitrageur_core::order::OrderResponse;
-use arbitrageur_core::types::OrderStatus;
+use crate::state_store::{
+    LegSide, NewSignalExecution, NewSignalLeg, SignalExecution, SignalLeg, SignalStatus,
+};
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,6 +38,14 @@ const NON_FINAL_DEADLINE_SECS: i64 = 15 * 60;
 
 /// Supervisor cadence.
 const POLL_INTERVAL_SECS: u64 = 5;
+
+/// Bounded cancel attempts for an order still working past the deadline —
+/// a venue that rejects every cancel gets escalated, not spammed.
+const MAX_CANCEL_ATTEMPTS: u32 = 3;
+
+/// Maximum flatten children auto-dispatched for one imbalanced signal —
+/// beyond this the residual is left for the operator.
+const MAX_RESIDUAL_ATTEMPTS: usize = 3;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ReconcileSummary {
@@ -118,6 +129,9 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
     // Aggregate per-signal outcomes for the status pass below.
     let mut outcomes: HashMap<String, Vec<LegPoll>> = HashMap::new();
     let mut signal_meta: HashMap<String, (String, usize, i64)> = HashMap::new();
+    // Cancel attempts made this pass, keyed by signal — merged into the
+    // escalation note so the operator sees what was tried.
+    let mut cancel_notes: HashMap<String, Vec<String>> = HashMap::new();
 
     for (exec, leg) in &pending {
         let age = signal_age_secs(&exec.created_at);
@@ -223,7 +237,21 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                         }
                     }
                 }
-                legs_out.push(classify_response(&resp));
+                let poll = classify_response(&resp);
+                // A still-working order past the deadline is anomalous —
+                // try a bounded cancel so the next poll sees a terminal
+                // state instead of hanging forever.
+                if poll == LegPoll::Working && age > NON_FINAL_DEADLINE_SECS {
+                    attempt_deadline_cancel(
+                        state,
+                        adapter.as_ref(),
+                        leg,
+                        order_id,
+                        cancel_notes.entry(exec.id.clone()).or_default(),
+                    )
+                    .await;
+                }
+                legs_out.push(poll);
             }
             Err(e) => {
                 summary.poll_errors += 1;
@@ -258,13 +286,17 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 // Still working or unproven: hold current state until the
                 // deadline, then escalate — never assume terminal.
                 if *age > NON_FINAL_DEADLINE_SECS {
-                    (
-                        Some(SignalStatus::Unresolved),
-                        Some(format!(
+                    let mut note = format!(
                         "Order state not fully resolved within {}s; manual reconciliation required",
                         NON_FINAL_DEADLINE_SECS
-                    )),
-                    )
+                    );
+                    if let Some(cn) = cancel_notes.get(signal_id) {
+                        if !cn.is_empty() {
+                            note.push_str("; cancel: ");
+                            note.push_str(&cn.join(", "));
+                        }
+                    }
+                    (Some(SignalStatus::Unresolved), Some(note))
                 } else {
                     (None, None)
                 }
@@ -316,6 +348,17 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 } else {
                     summary.resolved += 1;
                 }
+                // Opt-in auto-compensation: an ENTRY signal that lands
+                // imbalanced holds naked one-sided exposure. When the
+                // operator enabled it, submit reduce-only flattens for the
+                // residual — persisted as `flat-{id}-*` children this same
+                // supervisor then reconciles to terminal state.
+                if status == SignalStatus::Imbalanced
+                    && !is_close_signal
+                    && state.settings.read().auto_resolve_residual_exposure
+                {
+                    dispatch_residual_flatten(state, signal_id).await;
+                }
                 // A `flat-{parent}-*` close that just resolved filled means
                 // the residual it was dispatched to cover is gone. When ALL
                 // of a parent's flatten children are Closed, the parent can
@@ -346,13 +389,12 @@ fn resolve_flattened_parent(state: &AppEngineState, parent_id: &str) {
     if matches!(parent.status, SignalStatus::Closed | SignalStatus::Failed) {
         return;
     }
-    let prefix = format!("flat-{parent_id}-");
     let Ok(signals) = state.state_store.list_signals(None, None) else {
         return;
     };
     let children: Vec<_> = signals
         .iter()
-        .filter(|s| s.id.starts_with(&prefix))
+        .filter(|s| crate::state_store::is_flatten_child_id(&s.id, parent_id))
         .collect();
     if children.is_empty() || !children.iter().all(|c| c.status == SignalStatus::Closed) {
         return;
@@ -365,6 +407,219 @@ fn resolve_flattened_parent(state: &AppEngineState, parent_id: &str) {
         tracing::warn!("reconcile: failed to close flattened parent {parent_id}: {e}");
     } else {
         tracing::info!("reconcile: parent {parent_id} closed — all flatten children resolved");
+    }
+}
+
+/// Bounded cancel for a stale working order, persisted in the kv store so
+/// retries survive restart. The cancel result is observed on the NEXT poll —
+/// this pass only records the attempt for the escalation note.
+async fn attempt_deadline_cancel(
+    state: &AppEngineState,
+    adapter: &dyn ExchangeAdapter,
+    leg: &SignalLeg,
+    order_id: &str,
+    notes: &mut Vec<String>,
+) {
+    let key = format!("recon_cancel:{}:{order_id}", leg.venue);
+    let attempts = state
+        .state_store
+        .kv_get(&key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0);
+    if attempts >= MAX_CANCEL_ATTEMPTS {
+        notes.push("cancel retry budget exhausted".to_string());
+        return;
+    }
+    let _ = state.state_store.kv_set(&key, &(attempts + 1).to_string());
+    let req = CancelRequest {
+        venue: adapter.venue_id(),
+        symbol: leg.symbol.clone(),
+        order_id: Some(order_id.to_string()),
+        client_order_id: leg.client_order_id.clone(),
+    };
+    match adapter.cancel_order(req).await {
+        Ok(()) => notes.push(format!(
+            "cancel attempt {} accepted on {}",
+            attempts + 1,
+            leg.venue
+        )),
+        Err(e) => notes.push(format!(
+            "cancel attempt {} on {} failed: {e}",
+            attempts + 1,
+            leg.venue
+        )),
+    }
+}
+
+/// Residual exposure per leg of `exec`: recorded fills not yet covered by
+/// flatten-child fills on the same venue in the closing direction. Pure —
+/// unit-tested without adapters.
+fn residual_leg_quantities(
+    exec: &SignalExecution,
+    children: &[SignalExecution],
+) -> Vec<(SignalLeg, f64)> {
+    exec.legs
+        .iter()
+        .filter(|l| l.filled_qty > 0.0)
+        .filter_map(|l| {
+            let close_side = match l.side {
+                LegSide::Long => LegSide::Short,
+                LegSide::Short => LegSide::Long,
+            };
+            let covered: f64 = children
+                .iter()
+                .flat_map(|c| c.legs.iter())
+                .filter(|cl| cl.side == close_side && cl.venue.eq_ignore_ascii_case(&l.venue))
+                .map(|cl| cl.filled_qty)
+                .sum();
+            let residual = l.filled_qty - covered;
+            (residual > 1e-9).then(|| (l.clone(), residual))
+        })
+        .collect()
+}
+
+/// Auto-compensation for an `imbalanced` entry: persist a `flat-{id}-*`
+/// child signal (durable intent BEFORE any submission), then submit
+/// reduce-only market orders for each residual leg. The child joins the
+/// pending poll set on the next pass — an accepted-but-working flatten is
+/// reconciled like every other live order. Dedup: skips while any child is
+/// still open; bounded by `MAX_RESIDUAL_ATTEMPTS` total children.
+async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
+    let exec = match state.state_store.get_signal(signal_id) {
+        Ok(Some(e)) => e,
+        _ => return,
+    };
+    let children: Vec<SignalExecution> = state
+        .state_store
+        .list_signals(None, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| crate::state_store::is_flatten_child_id(&s.id, signal_id))
+        .collect();
+    // A still-open child is already working the residual — never double-submit.
+    if children.iter().any(|c| c.status.counts_as_open()) {
+        return;
+    }
+    if children.len() >= MAX_RESIDUAL_ATTEMPTS {
+        tracing::error!(
+            "reconcile: {signal_id} residual persists after {MAX_RESIDUAL_ATTEMPTS} flatten attempts — manual resolution required"
+        );
+        let _ = state.state_store.update_signal_status(
+            signal_id,
+            SignalStatus::Unresolved,
+            Some("residual exposure persists after bounded auto-flatten attempts"),
+        );
+        return;
+    }
+    let residuals = residual_leg_quantities(&exec, &children);
+    if residuals.is_empty() {
+        return;
+    }
+
+    let close_id = format!("flat-{}-{:04x}", signal_id, rand::random::<u16>());
+    let legs: Vec<NewSignalLeg> = residuals
+        .iter()
+        .map(|(l, qty)| NewSignalLeg {
+            account_id: l.account_id.clone(),
+            venue: l.venue.clone(),
+            side: match l.side {
+                LegSide::Long => LegSide::Short,
+                LegSide::Short => LegSide::Long,
+            },
+            symbol: (!l.symbol.is_empty()).then(|| l.symbol.clone()),
+            intended_qty: *qty,
+        })
+        .collect();
+    if let Err(e) = state
+        .state_store
+        .record_signal_execution(&NewSignalExecution {
+            id: close_id.clone(),
+            strategy_id: exec.strategy_id.clone(),
+            symbol: exec.symbol.clone(),
+            route_id: exec.route_id.clone(),
+            expected_net_usd: None,
+            note: Some(format!("auto residual flatten of {signal_id}")),
+            legs,
+        })
+    {
+        tracing::error!("reconcile: failed to persist residual flatten {close_id}: {e}");
+        return;
+    }
+    tracing::warn!("reconcile: {signal_id} imbalanced — dispatching residual flatten {close_id}");
+
+    for (leg, qty) in &residuals {
+        let child_side = match leg.side {
+            LegSide::Long => LegSide::Short,
+            LegSide::Short => LegSide::Long,
+        };
+        if leg.symbol.is_empty() {
+            tracing::error!(
+                "reconcile: residual leg on {} carries no symbol — cannot flatten",
+                leg.venue
+            );
+            continue;
+        }
+        let Some(adapter) = state.get_adapter(&leg.venue) else {
+            tracing::error!(
+                "reconcile: no adapter admitted for residual leg on {}",
+                leg.venue
+            );
+            continue;
+        };
+        if !adapter.live_order_submission_implemented() || !adapter.has_live_credentials() {
+            tracing::error!(
+                "reconcile: {} not live-submission ready — residual leg not flattened",
+                leg.venue
+            );
+            continue;
+        }
+        let Some(qty_dec) = Decimal::from_f64_retain(*qty).filter(|q| *q > dec!(0)) else {
+            continue;
+        };
+        let order_side = match leg.side {
+            LegSide::Long => Side::Sell,
+            LegSide::Short => Side::Buy,
+        };
+        let mut req =
+            OrderRequest::new_market(adapter.venue_id(), leg.symbol.clone(), order_side, qty_dec);
+        req.reduce_only = true;
+        let client_order_id = req.client_order_id.clone();
+        match adapter.place_order(req).await {
+            Ok(resp) => {
+                if !resp.order_id.trim().is_empty() {
+                    if let Err(e) = state.state_store.record_leg_order_id(
+                        &close_id,
+                        child_side,
+                        &resp.order_id,
+                        Some(&client_order_id),
+                    ) {
+                        tracing::error!("reconcile: persist order id for {close_id} failed: {e}");
+                    }
+                }
+                if resp.filled_qty > dec!(0) {
+                    let qty_f = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                    let fee_f = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    let px_f = resp
+                        .avg_fill_price
+                        .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    let oid = (!resp.order_id.trim().is_empty()).then_some(resp.order_id.as_str());
+                    if qty_f > 0.0 && px_f > 0.0 {
+                        let _ = state
+                            .state_store
+                            .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "reconcile: residual flatten order on {} rejected: {e}",
+                    leg.venue
+                );
+            }
+        }
     }
 }
 
@@ -473,5 +728,87 @@ mod tests {
         let old =
             (Utc::now() - chrono::Duration::seconds(NON_FINAL_DEADLINE_SECS + 60)).to_rfc3339();
         assert!(signal_age_secs(&old) > NON_FINAL_DEADLINE_SECS);
+    }
+
+    fn leg(venue: &str, side: LegSide, filled: f64) -> SignalLeg {
+        SignalLeg {
+            id: "l".into(),
+            signal_id: "s".into(),
+            account_id: None,
+            venue: venue.into(),
+            side,
+            symbol: "BTC-USD".into(),
+            intended_qty: 1.0,
+            filled_qty: filled,
+            fill_price: Some(100.0),
+            fee_usd: 0.0,
+            venue_order_id: Some("o".into()),
+            client_order_id: None,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn exec_with_legs(legs: Vec<SignalLeg>) -> SignalExecution {
+        SignalExecution {
+            id: "s".into(),
+            strategy_id: "strat".into(),
+            symbol: "BTC-USD".into(),
+            status: SignalStatus::Imbalanced,
+            route_id: None,
+            account_long_id: None,
+            account_short_id: None,
+            expected_net_usd: None,
+            fees_usd: 0.0,
+            note: None,
+            legs,
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            closed_at: None,
+        }
+    }
+
+    #[test]
+    fn residual_quantities_uncovered_then_covered() {
+        let exec = exec_with_legs(vec![
+            leg("kraken", LegSide::Long, 1.0),
+            leg("hyperliquid", LegSide::Short, 0.0),
+        ]);
+        // No children: the filled long leg is fully residual; the empty leg
+        // contributes nothing.
+        let r = residual_leg_quantities(&exec, &[]);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, 1.0);
+        assert_eq!(r[0].0.venue, "kraken");
+
+        // A flatten child that closed 0.4 of the long leg (recorded as a
+        // Short leg on the same venue) leaves 0.6 residual.
+        let mut child = exec_with_legs(vec![leg("kraken", LegSide::Short, 0.4)]);
+        child.id = "flat-s-0001".into();
+        let r = residual_leg_quantities(&exec, &[child]);
+        assert_eq!(r.len(), 1);
+        assert!((r[0].1 - 0.6).abs() < 1e-9);
+
+        // Full coverage: nothing left to flatten.
+        let mut child2 = exec_with_legs(vec![leg("kraken", LegSide::Short, 1.0)]);
+        child2.id = "flat-s-0002".into();
+        assert!(residual_leg_quantities(&exec, &[child2]).is_empty());
+    }
+
+    #[test]
+    fn residual_quantities_require_matching_venue_and_closing_side() {
+        let exec = exec_with_legs(vec![leg("kraken", LegSide::Long, 1.0)]);
+        // A child on a DIFFERENT venue must not cover this leg's residual.
+        let mut wrong_venue = exec_with_legs(vec![leg("aster", LegSide::Short, 1.0)]);
+        wrong_venue.id = "flat-s-0001".into();
+        let r = residual_leg_quantities(&exec, &[wrong_venue]);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, 1.0);
+        // A child in the SAME direction (re-buy) must not cover either.
+        let mut same_side = exec_with_legs(vec![leg("kraken", LegSide::Long, 1.0)]);
+        same_side.id = "flat-s-0002".into();
+        let r = residual_leg_quantities(&exec, &[same_side]);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].1, 1.0);
     }
 }

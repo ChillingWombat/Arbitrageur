@@ -125,6 +125,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
+  const [autoResolveResidual, setAutoResolveResidual] = useState(false);
   const [staleWarnSecs, setStaleWarnSecs] = useState(300);
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
@@ -424,6 +425,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginCritPct(s.margin_critical_usage_pct ?? 85);
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
         setMaxLeverage(s.max_leverage ?? 10);
+        setAutoResolveResidual(s.auto_resolve_residual_exposure ?? false);
         setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
@@ -574,6 +576,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         margin_critical_usage_pct: Number(marginCritPct) || 0,
         margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
         max_leverage: Math.trunc(Number(maxLeverage)) || 0,
+        auto_resolve_residual_exposure: autoResolveResidual,
         balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
         spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
         spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
@@ -1597,6 +1600,24 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
                 Caps every strategy (Risk Control default 10x). Per-strategy targets in the configurators can only lower it — never exceed it. Applies live on save.
               </p>
+            </div>
+
+            <div className="flex items-start gap-2.5 pt-1">
+              <input type="checkbox" id="auto-resolve-residual" disabled={loading}
+                checked={autoResolveResidual}
+                onChange={(e) => setAutoResolveResidual(e.target.checked)}
+                className="mt-0.5 accent-accent" />
+              <label htmlFor="auto-resolve-residual" className="text-xs text-slate-700 leading-snug">
+                <span className="font-bold">Auto-flatten residual exposure.</span>{" "}
+                When a live entry ends imbalanced (one leg filled, the other
+                terminal-empty), automatically submit a reduce-only market
+                order to flatten the residual leg — persisted as a flat-*
+                signal the reconciliation supervisor then tracks to terminal
+                state. Off by default: imbalances are always detected and
+                block the ticker; this only controls whether the engine also
+                acts on them. Takes effect once live strategy entries are
+                enabled (currently disabled pending venue canary evidence).
+              </label>
             </div>
           </div>
         )}

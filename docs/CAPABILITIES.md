@@ -18,7 +18,7 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 
 | Strategy / path | Authentic scan | Paper execution | Live entry | Exit / reconciliation | Current operator meaning |
 |---|---|---|---|---|---|
-| Cross-venue perpetual spatial | Yes | Yes | **Disabled** | Paper convergence/stop/timeout; live orders now poll to terminal state and restart-recover, but automated residual-leg resolution and cancel retry are not implemented | Use Paper Trading for entries |
+| Cross-venue perpetual spatial | Yes | Yes | **Disabled** | Live orders poll to terminal state and restart-recover; opt-in auto residual-flatten + bounded cancel retry exist, pending venue evidence | Use Paper Trading for entries |
 | Spread Radar manual entry | Yes | Yes | **Disabled** | Paper bot-managed exits | Paper only |
 | Spread Radar autonomous bot | Yes | Yes, opt-in | **Disabled** | Paper bot-managed exits with audit | Paper only |
 | Perp/perp funding carry | Yes where both funding and books exist | Yes | **Disabled** | Manual paper flatten; no automated live lifecycle | Paper only |
@@ -80,8 +80,8 @@ A venue/strategy pair can move to live entry only after all of these have eviden
 - Leverage/margin-mode confirmation or an explicit no-change invariant
 - Durable accepted-order record before submission
 - Restart recovery and reconciliation (implemented via the reconciliation supervisor)
-- Automated residual-exposure resolution: a mixed-terminal entry (one leg filled, one cancelled) must have a decided, tested resolution path — currently it is durably marked `imbalanced` and blocks the ticker, but nothing closes the residual leg automatically
-- Cancel-failure retry: a venue-rejected cancel leaves a working order; the supervisor reports it but does not re-issue the cancel
+- Automated residual-exposure resolution: implemented behind opt-in `auto_resolve_residual_exposure` — an imbalanced entry auto-submits reduce-only flattens (max 3 attempts) persisted as `flat-*` children the supervisor reconciles; requires venue evidence before it can be trusted live
+- Cancel-failure retry: implemented — orders working past the 15-minute deadline get up to 3 cancel attempts (kv-persisted across restarts) before escalation; needs venue evidence
 - Sandbox tests for success, partial fill, one-leg failure, timeout, cancel race, and process restart
 - Small-notional owner-approved live canary
 - Updated capability row and release notes

@@ -460,6 +460,12 @@ pub struct EngineSettingsDto {
     /// takes min(strategy target, account max, venue max, this).
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
+    /// Opt-in: when a live entry lands `imbalanced` (one leg filled, the
+    /// other terminal-empty), submit a reduce-only flatten for the residual
+    /// leg automatically. Off by default — detection and ticker blocking
+    /// always happen; auto-compensation is an explicit operator decision.
+    #[serde(default)]
+    pub auto_resolve_residual_exposure: bool,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -632,6 +638,7 @@ impl Default for EngineSettingsDto {
             margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
             max_leverage: default_max_leverage(),
+            auto_resolve_residual_exposure: false,
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,

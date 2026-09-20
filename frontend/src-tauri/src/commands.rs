@@ -3718,11 +3718,11 @@ fn reconcile_signal_legs(
         // Persist accepted order identity even on a zero-fill (working) leg —
         // the reconciliation supervisor needs it to reach terminal state.
         if !leg.order_id.is_empty() {
-            let cid = (!leg.client_order_id.is_empty())
-                .then_some(leg.client_order_id.as_str());
-            let _ = state
-                .state_store
-                .record_leg_order_id(signal_id, side, leg.order_id.as_str(), cid);
+            let cid = (!leg.client_order_id.is_empty()).then_some(leg.client_order_id.as_str());
+            let _ =
+                state
+                    .state_store
+                    .record_leg_order_id(signal_id, side, leg.order_id.as_str(), cid);
         }
         if filled > 0.0 {
             let px = leg
@@ -4546,8 +4546,8 @@ async fn execute_spatial_arbitrage_inner(
                     // accepted but unfilled — reconciliation polls it to
                     // terminal state instead of losing the exposure.
                     if !f.order_id.is_empty() {
-                        let cid = (!f.client_order_id.is_empty())
-                            .then_some(f.client_order_id.as_str());
+                        let cid =
+                            (!f.client_order_id.is_empty()).then_some(f.client_order_id.as_str());
                         let _ = state.state_store.record_leg_order_id(
                             &signal_id,
                             side,
@@ -5611,8 +5611,8 @@ pub async fn execute_funding_carry_impl(
                     // accepted but unfilled — reconciliation polls it to
                     // terminal state instead of losing the exposure.
                     if !f.order_id.is_empty() {
-                        let cid = (!f.client_order_id.is_empty())
-                            .then_some(f.client_order_id.as_str());
+                        let cid =
+                            (!f.client_order_id.is_empty()).then_some(f.client_order_id.as_str());
                         let _ = state.state_store.record_leg_order_id(
                             &signal_id,
                             side,
@@ -6557,10 +6557,9 @@ pub async fn flatten_ticker_positions_with_type_impl(
     };
 
     for sig in roots {
-        let family_prefix = format!("flat-{}-", sig.id);
         let family: Vec<crate::state_store::SignalExecution> = all_signals
             .iter()
-            .filter(|s| s.id.starts_with(&family_prefix))
+            .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &sig.id))
             .cloned()
             .collect();
 
@@ -6742,7 +6741,10 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .list_signals(None, None)
                 .map_err(|e| e.to_string())?
                 .into_iter()
-                .filter(|s| s.id.starts_with(&family_prefix) && s.status.counts_as_open())
+                .filter(|s| {
+                    crate::state_store::is_flatten_child_id(&s.id, &sig.id)
+                        && s.status.counts_as_open()
+                })
             {
                 state
                     .state_store
@@ -6867,7 +6869,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
             .list_signals(None, None)
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|s| s.id.starts_with(&family_prefix))
+            .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &sig.id))
             .collect();
 
         let mut fully_flat = true;
@@ -10938,10 +10940,12 @@ pub fn get_strategy_fill_pnl_impl(
             }
             continue;
         }
-        let prefix = format!("flat-{}-", root.id);
         let mut fills = Vec::new();
-        for sig in std::iter::once(root).chain(signals.iter().filter(|s| s.id.starts_with(&prefix)))
-        {
+        for sig in std::iter::once(root).chain(
+            signals
+                .iter()
+                .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &root.id)),
+        ) {
             for leg in &sig.legs {
                 fills.push(crate::attribution::LegFill {
                     is_short: leg.side == LegSide::Short,

@@ -681,6 +681,7 @@ export interface EngineSettingsDto {
   margin_critical_usage_pct?: number;
   margin_min_liquidation_distance_pct?: number;
   max_leverage?: number;
+  auto_resolve_residual_exposure?: boolean;
   balance_stale_warn_secs?: number;
 
   // Subaccount mappings

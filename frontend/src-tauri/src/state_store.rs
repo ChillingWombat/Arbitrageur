@@ -267,6 +267,17 @@ pub struct SignalExecution {
     pub closed_at: Option<String>,
 }
 
+/// True when `child_id` is a `flat-{parent_id}-XXXX` flatten child: the
+/// trailing segment must be exactly the 4-hex sequence suffix, so nested
+/// parents never collide (`flat-s-foo-0001` is a child of `s-foo`, not `s`).
+pub fn is_flatten_child_id(child_id: &str, parent_id: &str) -> bool {
+    child_id
+        .strip_prefix("flat-")
+        .and_then(|rest| rest.strip_prefix(parent_id))
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|suf| suf.len() == 4 && suf.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 /// Candidate persisted before dispatch; legs carry account attribution.
 pub struct NewSignalLeg {
     pub account_id: Option<String>,

@@ -27,7 +27,7 @@ Accordingly, the safe current product boundary is:
 
 The system should not be called production-ready until the P0/P1 items below are closed and tested with venue-specific sandbox credentials.
 
-- **Post-remediation position:** the fail-closed boundary is now internally coherent and reconciled. Live strategy entries are disabled; capability semantics distinguish submission from polling from strategy-entry readiness; credential IPC and vault lifecycle gaps are closed; paper basis executes exact spot/perp legs; funding dispatch is durable before concurrent execution; close workflows preserve unresolved working orders and venue order IDs; every live-submission adapter exposes validated `fetch_order` polling and a startup+5s supervisor reconciles durable working orders to terminal state with monotonic accounting; signer provenance is functionally verified from pinned upstream source; CI/deployment/security controls exist. The remaining blockers to any live-entry claim are automated residual-leg resolution + cancel retry, and venue sandbox/canary evidence.
+- **Post-remediation position:** the fail-closed boundary is now internally coherent and reconciled. Live strategy entries are disabled; capability semantics distinguish submission from polling from strategy-entry readiness; credential IPC and vault lifecycle gaps are closed; paper basis executes exact spot/perp legs; funding dispatch is durable before concurrent execution; close workflows preserve unresolved working orders and venue order IDs; every live-submission adapter exposes validated `fetch_order` polling and a startup+5s supervisor reconciles durable working orders to terminal state with monotonic accounting; signer provenance is functionally verified from pinned upstream source; CI/deployment/security controls exist. Automated residual-leg resolution (opt-in `auto_resolve_residual_exposure`, max 3 bounded flatten attempts) and cancel-retry at the working-order deadline (3 kv-persisted attempts) are now implemented; the remaining blockers to any live-entry claim are operator opt-in and venue sandbox/canary evidence.
 
 ---
 
@@ -129,7 +129,7 @@ A real venue can accept and later fill an order after the engine has declared th
 - Every emergency compensation order is reduce-only where the venue supports that semantic.
 
 **Initial status:** OPEN\
-**Remediation status:** ENTRY-SAFE CLOSURE + RECONCILIATION LANDED. New live strategy entries still fail closed globally; `submission_ready`, `strategy_entry_ready`, `live_ready`, and `order_polling_ready` are distinct DTO fields. Every live-submission adapter (Binance, Aster, OKX, Kraken, Vanta, Coinbase, Hyperliquid, Lighter, Robinhood-via-Lighter, Decibel, PopDEX) now implements a validated `fetch_order`, and the desktop reconciliation supervisor polls durable working orders every 5s, re-scans them at startup, applies monotonic fill/fee updates with venue/symbol/order-id response validation, escalates orders working past 15 minutes to `unresolved`, and keeps `in_flight`/`imbalanced`/`unresolved` signals blocking the ticker (a mixed fill+empty-cancel entry maps to `imbalanced`, never `failed`). Kraken's nonzero-execution acknowledgement is resolved through `openorders` + `/fills` aggregation instead of being trusted. Emergency unwind orders are reduce-only, and the live leverage branch propagates failures. Still open for live entry: automated residual-leg resolution and cancel-failure retry, sandbox/canary evidence per venue.
+**Remediation status:** ENTRY-SAFE CLOSURE + RECONCILIATION LANDED. New live strategy entries still fail closed globally; `submission_ready`, `strategy_entry_ready`, `live_ready`, and `order_polling_ready` are distinct DTO fields. Every live-submission adapter (Binance, Aster, OKX, Kraken, Vanta, Coinbase, Hyperliquid, Lighter, Robinhood-via-Lighter, Decibel, PopDEX) now implements a validated `fetch_order`, and the desktop reconciliation supervisor polls durable working orders every 5s, re-scans them at startup, applies monotonic fill/fee updates with venue/symbol/order-id response validation, escalates orders working past 15 minutes to `unresolved`, and keeps `in_flight`/`imbalanced`/`unresolved` signals blocking the ticker (a mixed fill+empty-cancel entry maps to `imbalanced`, never `failed`). Kraken's nonzero-execution acknowledgement is resolved through `openorders` + `/fills` aggregation instead of being trusted. Emergency unwind orders are reduce-only, and the live leverage branch propagates failures. Still open for live entry: operator opt-in for automated residual-leg resolution (`auto_resolve_residual_exposure` — implemented, max 3 bounded attempts) and cancel-failure retry (implemented, 3 kv-persisted attempts at the 15-min deadline), plus sandbox/canary evidence per venue.
 
 ---
 
@@ -368,7 +368,7 @@ Return a clear unavailable-data error when any required real quote is missing. K
 Classify these operations as submission workflows, persist venue/client IDs before returning, and add reconciliation or provide an explicit operator resolution path. Do not label an acknowledgement as a confirmed close.
 
 **Initial status:** OPEN\
-**Remediation status:** CLOSED (detection layer) / OPEN (auto-resolution). External closes persist intent before dispatch (the generated client order ID is the durable signal ID), validate venue/symbol/client/order/quantity/status/price/fee consistency, store venue order IDs on the durable leg, distinguish filled/partial/working/not-filled/unverified, and mark `Closed` only after a fresh account reread confirms flatness. Generic flatten legs preserve accepted zero-fill and terminal zero-fill order IDs instead of collapsing them to “empty book.” Live account reads resolve venue-native position symbols through adapter-owned normalization (`BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, Lighter `market_id` mappings, and Binance/Aster scaled contracts kept in venue-native `1000PEPE` units); unknown or ambiguous mappings remain unresolved rather than treated as flat. Continuous venue polling and restart-time reconciliation are now implemented: the `reconciliation` supervisor runs an immediate pass at startup plus a 5s poll over durable nonterminal legs, validates venue/symbol/order-id identity and USD-stable fee currency, applies monotonic cumulative updates, and escalates orders working past 15 minutes to `unresolved`. Order identity is persisted on every submission path — generic flatten legs, `reconcile_signal_legs`, and both `UnresolvedExposure` handlers now record venue and client order ids even for accepted-but-unfilled (working) orders, so no live submission can orphan its pollable handle. Synthetic `sim-*` paper order ids are excluded from the live poll set. Still open: automatic resolution of a working/imbalanced order (cancel-and-retry or residual-leg flatten) — the system detects and durably blocks, it does not yet act.
+**Remediation status:** CLOSED (detection layer) / OPEN (auto-resolution). External closes persist intent before dispatch (the generated client order ID is the durable signal ID), validate venue/symbol/client/order/quantity/status/price/fee consistency, store venue order IDs on the durable leg, distinguish filled/partial/working/not-filled/unverified, and mark `Closed` only after a fresh account reread confirms flatness. Generic flatten legs preserve accepted zero-fill and terminal zero-fill order IDs instead of collapsing them to “empty book.” Live account reads resolve venue-native position symbols through adapter-owned normalization (`BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, Lighter `market_id` mappings, and Binance/Aster scaled contracts kept in venue-native `1000PEPE` units); unknown or ambiguous mappings remain unresolved rather than treated as flat. Continuous venue polling and restart-time reconciliation are now implemented: the `reconciliation` supervisor runs an immediate pass at startup plus a 5s poll over durable nonterminal legs, validates venue/symbol/order-id identity and USD-stable fee currency, applies monotonic cumulative updates, and escalates orders working past 15 minutes to `unresolved`. Order identity is persisted on every submission path — generic flatten legs, `reconcile_signal_legs`, and both `UnresolvedExposure` handlers now record venue and client order ids even for accepted-but-unfilled (working) orders, so no live submission can orphan its pollable handle. Synthetic `sim-*` paper order ids are excluded from the live poll set. Automatic resolution is now implemented as an opt-in: `auto_resolve_residual_exposure` dispatches reduce-only residual flattens (persisted `flat-*` children, deduplicated against open children, bounded to 3 attempts), and stale working orders get up to 3 kv-persisted cancel attempts before escalation. The mechanism is untested against real venues — sandbox/canary evidence remains the gate.
 
 ---
 
@@ -522,7 +522,7 @@ This is a maintainability finding, not a justification for a risky behavior-neut
 | Statistical arbitrage | Research tooling | Explicitly research tooling |
 | Live adapter signing/submission | Implemented for many venues | Transport capability only; not strategy readiness |
 | Live order polling/restart reconciliation | Missing | Implemented: per-adapter `fetch_order` on all 11 live-submission venues plus a startup+5s supervisor with monotonic updates, identity validation, and 15-minute unresolved escalation |
-| Live strategy execution | Unsafe/incomplete | Safely blocked pending automated residual-leg resolution, cancel retry, and sandbox/canary evidence |
+| Live strategy execution | Unsafe/incomplete | Safely blocked pending operator opt-in for the implemented residual-resolution/cancel-retry mechanisms, plus sandbox/canary evidence |
 | Credential vault crypto/file permissions | Implemented | Aligned after bulk IPC removal and lifecycle fixes |
 | 60-second settings-exit lock | Missing | Aligned |
 | Field-scoped credential reveal | UI uses it, legacy bulk IPC remains | Aligned after bulk IPC removal |
@@ -562,7 +562,7 @@ Local-first desktop research and paper execution, with direct venue connections 
 
 ### Security
 
-- **Risk:** CEX custody, local signing keys, asynchronous fills, venue-specific leverage/reduce-only semantics, and the absence of automated residual-exposure resolution can cause loss or lockout.
+- **Risk:** CEX custody, local signing keys, asynchronous fills, venue-specific leverage/reduce-only semantics, and and residual-exposure auto-resolution (now implemented but opt-in and venue-unevidenced) can cause loss or lockout.
 - **Mitigation:** Least-privilege keys, encrypted vault, explicit capability matrix, digest + provenance verification, fail-closed live entry, durable in-flight state with startup/5s reconciliation, circuit breaker, and tested compensation.
 - **User escape:** Direct venue access remains the ultimate recovery path; the app must never be the only way to close or withdraw.
 
@@ -579,7 +579,7 @@ Local-first desktop research and paper execution, with direct venue connections 
 ### Phase A — Immediate safety
 
 1. **Closed:** Removed bulk credential IPC and added a registration test that names it.
-2. **Closed at the entry boundary:** Submission readiness and strategy-entry readiness are separate; new live strategy entries fail closed globally. Terminal/restart reconciliation is implemented for all live-submission venues (order polling + startup scan + monotonic ledger updates); what remains gated is automated resolution of mixed-terminal/imbalanced outcomes and cancel-failure retry.
+2. **Closed at the entry boundary:** Submission readiness and strategy-entry readiness are separate; new live strategy entries fail closed globally. Terminal/restart reconciliation is implemented for all live-submission venues (order polling + startup scan + monotonic ledger updates); what remains gated is venue evidence for the now-implemented residual-resolution and cancel-retry mechanisms (opt-in via `auto_resolve_residual_exposure`).
 3. **Closed:** Hyperliquid and close/flatten response handling no longer fabricate fills or treat acknowledgements as terminal facts.
 4. **Closed:** Emergency compensation and flatten paths use reduce-only orders; live leverage failures now propagate if a future entry path reaches them.
 5. **Closed:** Manual lock and the 60-second settings-exit lock are restored and tested.
@@ -628,8 +628,8 @@ Independent post-remediation verification produced:
 | `git diff --check` | PASS | No whitespace errors |
 | `cargo check --workspace` | PASS | Clean |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS | All targets checked with warnings denied |
-| `cargo test --workspace --locked` | PASS | 716 tests total: desktop 332, exchanges 154, math 102+52+16, execution 40, others 20 |
-| `cargo test -p arbitrageur-desktop` | PASS | 332/332 tests |
+| `cargo test --workspace --locked` | PASS | 718 tests total: desktop 334, exchanges 154, math 102+52+16, execution 40, others 20 |
+| `cargo test -p arbitrageur-desktop` | PASS | 334/334 tests |
 | `cargo test -p arbitrageur-exchanges` | PASS | 154/154 tests |
 | `npm test` | PASS | 210 frontend tests |
 | `npm run build` | PASS | TypeScript typecheck + Vite production build |
@@ -641,7 +641,7 @@ Independent post-remediation verification produced:
 | Secret scan (gitleaks, 154 commits) | PASS | 0 leaks after fingerprint-scoped allowlist of 7 confirmed test fixtures/dev sentinels in `.gitleaks.toml` |
 | File modes | PASS | Index modes normalized (644 configs/docs, 755 `backup-sqlite.sh`); NTFS working-tree 777 display is filesystem mapping, not committed |
 
-The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are automated residual-leg resolution and cancel-failure retry (the reconciliation supervisor detects, blocks, and escalates but does not act), venue sandbox/canary evidence, evidence-backed presets, deeper AutoTune feedback joins/WFO, and the staged Tauri-module refactor.
+The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are venue sandbox/canary evidence for the opt-in residual-resolution/cancel-retry mechanisms, evidence-backed presets, deeper AutoTune feedback joins/WFO, and the staged Tauri-module refactor.
 
 ---
 
