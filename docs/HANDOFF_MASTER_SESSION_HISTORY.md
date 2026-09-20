@@ -1555,3 +1555,9 @@ overhaul pass committed as `23d4aed`).
 
 - **Ask (screenshot):** remove the `1/3` counter and `Clear` button from the funding filter-strip header.
 - **Shipped:** header counter + Clear removed (`FundingRadar.tsx`, committed `779bc14`, pushed). The empty-state "Clear filters" affordance stays (only visible when filters hide everything — otherwise a filtered-to-zero list is a dead end). Unused `filtersActive` removed. tsc/vite/release green, app relaunched (PID 577443) clean. Worker files untouched.
+
+## 69. Session Handoff — 2026-09-20 (sub-50% win renders red)
+
+- **Ask (screenshot):** BCH-USDC card Win 41% vs Expected −$2 — "why is winning probability greater than 0?"
+- **Answer verified against the card's own math:** consistent, not contradictory. Fees ≈ $17.75, modelled hold ≈ 18.5h, decayed accrual ≈ $15.75 → Expected −$2; coverage 0.887 → p ≈ 47% ×0.9 predicted-disagree ≈ 41%. 41% means "41% odds the trade covers its costs" — i.e. more likely to lose than win, agreeing in sign with −$2 (guaranteed since §66: p ≥ 0.5 ⟺ Expected ≥ 0). Never 0% because the clamp floor is 2% — even bad trades have nonzero odds.
+- **Shipped:** sub-50% Win renders loss-red (≥50% unchanged slate), tooltip rewritten. Committed `ed401f7`, pushed; app relaunched clean. Worker files untouched.
