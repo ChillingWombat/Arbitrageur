@@ -10201,7 +10201,8 @@ mod tests {
         let main = "0x1111111111111111111111111111111111111111";
         let agent = "0x2222222222222222222222222222222222222222";
         let html = render_popdex_signer_page(main, agent, PopDexNetwork::Testnet).unwrap();
-        // Flow elements present.
+        // Flow elements present: wallet signing happens in MetaMask/Rabby
+        // on the page — never inside the app (no main-key handling).
         for marker in [
             "ethers",
             "approveAgent",
@@ -10209,6 +10210,14 @@ mod tests {
             "wallet_switchEthereumChain",
             "34952",
             "testnet-app.popdex.xyz",
+            "MetaMask",
+            "Rabby",
+            "isMetaMask",
+            "isRabby",
+            "eip6963",
+            "netPill",
+            "connWallet",
+            "View on explorer",
             main,
             agent,
         ] {
@@ -17363,85 +17372,215 @@ fn render_popdex_signer_page(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PopDEX Agent Setup (local signer page)</title>
+<title>PopDEX Agent Setup — approve in your wallet</title>
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
-<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#1e293b}}code{{background:#f1f5f9;padding:2px 6px;border-radius:6px;word-break:break-all}}input{{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-family:monospace;font-size:12px}}.card{{border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:12px 0}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer;margin:4px 8px 4px 0}}button:disabled{{opacity:.5}}button.ghost{{background:#f1f5f9;color:#334155}}.warn{{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 14px;font-size:13px}}.ok{{background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:10px 14px;font-size:13px}}.step{{font-weight:700;margin:0 0 4px}}.keybox{{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px 12px;word-break:break-all;font-family:monospace;font-size:12px}}</style>
+<style>
+:root{{color-scheme:light;--ink:#0f172a;--mut:#64748b;--line:#e2e8f0;--brand:#2563eb;--brand2:#1e3a8a;--ok:#15803d;--err:#b91c1c;--bg:#f1f5f9}}
+*{{box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;max-width:760px;margin:0 auto;padding:24px 18px 70px;color:var(--ink);background:var(--bg);line-height:1.5}}
+.topbar{{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}}
+.brand{{display:flex;align-items:center;gap:9px;font-weight:800;font-size:14px;letter-spacing:.1px}}
+.brand .dot{{width:30px;height:30px;border-radius:10px;background:linear-gradient(135deg,#1e3a8a,#3b82f6);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-size:16px;font-weight:900}}
+.badges{{display:flex;gap:8px;align-items:center;flex-wrap:wrap}}
+.pill{{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 12px;font-size:12px;font-weight:800;border:1px solid transparent}}
+.pill.net-main{{background:#dbeafe;color:#1e40af;border-color:#bfdbfe}}
+.pill.net-test{{background:#fef3c7;color:#92400e;border-color:#fde68a}}
+.pill.local{{background:#fff;color:#475569;border-color:var(--line);font-weight:600}}
+.hero{{background:linear-gradient(135deg,#172554 0%,#1e3a8a 45%,#2563eb 100%);color:#fff;border-radius:18px;padding:24px 24px 20px;margin-bottom:14px;box-shadow:0 10px 30px rgba(30,58,138,.25)}}
+.hero h1{{margin:0 0 6px;font-size:24px;letter-spacing:-.2px}}
+.hero p{{margin:0;font-size:13.5px;opacity:.9;max-width:60ch}}
+.steps{{display:flex;gap:8px;margin-top:14px;flex-wrap:wrap}}
+.step-pill{{display:inline-flex;align-items:center;gap:7px;background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.3);border-radius:999px;padding:4px 12px 4px 5px;font-size:12px;font-weight:700}}
+.step-pill .n{{width:20px;height:20px;border-radius:50%;background:#fff;color:#1e3a8a;font-size:11.5px;display:inline-flex;align-items:center;justify-content:center;font-weight:900}}
+.warn{{background:#fffbeb;border:1px solid #fcd34d;border-radius:14px;padding:13px 16px;font-size:13px;line-height:1.55;box-shadow:0 1px 2px rgba(15,23,42,.05)}}
+.warn code,.card code,.mono{{background:#f1f5f9;padding:2px 7px;border-radius:7px;word-break:break-all;font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}}
+.card{{background:#fff;border:1px solid var(--line);border-radius:16px;padding:20px;margin:14px 0;box-shadow:0 2px 8px rgba(15,23,42,.05)}}
+.card h2{{display:flex;align-items:center;gap:10px;margin:0 0 6px;font-size:16px;font-weight:800}}
+.num{{width:28px;height:28px;border-radius:50%;background:var(--brand);color:#fff;font-size:13.5px;display:inline-flex;align-items:center;justify-content:center;flex:none;font-weight:900}}
+.muted{{font-size:13px;color:var(--mut);line-height:1.55;margin:4px 0 10px}}
+input.addr{{width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;margin-top:8px;background:#f8fafc}}
+input.addr:focus{{outline:2px solid #bfdbfe;border-color:var(--brand)}}
+button{{background:var(--brand);color:#fff;border:0;border-radius:10px;padding:11px 18px;font-weight:800;font-size:14px;cursor:pointer;margin:6px 8px 6px 0;transition:transform .05s ease,box-shadow .15s ease,background .15s ease}}
+button:hover:not(:disabled){{background:#1d4ed8;box-shadow:0 4px 14px rgba(37,99,235,.3)}}
+button:active:not(:disabled){{transform:translateY(1px)}}
+button:disabled{{opacity:.45;cursor:default;box-shadow:none}}
+button.ghost{{background:#f1f5f9;color:#334155;font-weight:700}}
+button.ghost:hover:not(:disabled){{background:#e2e8f0;box-shadow:none}}
+button.big{{width:100%;padding:14px;font-size:15px;border-radius:12px;margin-top:10px}}
+.wallet-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0}}
+@media(max-width:560px){{.wallet-grid{{grid-template-columns:1fr}}}}
+button.wallet{{background:#fff;color:var(--ink);border:1.5px solid #cbd5e1;display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;font-size:14px;margin:0;text-align:left}}
+button.wallet:hover:not(:disabled){{background:#f8fafc;box-shadow:0 2px 8px rgba(15,23,42,.08)}}
+button.wallet.sel{{border-color:var(--brand);box-shadow:0 0 0 3px #bfdbfe;background:#eff6ff}}
+button.wallet img{{width:26px;height:26px;border-radius:7px;flex:none}}
+button.wallet .sub{{display:block;font-size:11.5px;color:var(--mut);font-weight:500}}
+.keybox{{background:#0f172a;color:#e2e8f0;border-radius:10px;padding:12px 14px;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;margin:8px 0;border:1px solid #1e293b}}
+.kv{{display:grid;grid-template-columns:132px 1fr;gap:6px 12px;font-size:12.5px;margin:12px 0;background:#f8fafc;border:1px solid var(--line);border-radius:10px;padding:12px 14px}}
+.kv dt{{color:var(--mut)}}
+.kv dd{{margin:0;word-break:break-all;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}}
+.status{{border-radius:10px;padding:10px 13px;font-size:13px;min-height:22px;margin-top:10px;background:#f8fafc;border:1px solid var(--line)}}
+.status.ok{{background:#f0fdf4;border-color:#bbf7d0;color:var(--ok);font-weight:700}}
+.status.err{{background:#fef2f2;border-color:#fecaca;color:var(--err);font-weight:700}}
+.status.busy{{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}}
+.status:empty{{display:none}}
+.conn{{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0}}
+.conn .tag{{font-size:11.5px;font-weight:700;border-radius:999px;padding:3px 11px;border:1px solid var(--line);background:#f8fafc;color:#475569}}
+.conn .tag.good{{background:#f0fdf4;border-color:#bbf7d0;color:#15803d}}
+.conn .tag.bad{{background:#fef2f2;border-color:#fecaca;color:#b91c1c}}
+.txhash{{font-family:ui-monospace,Menlo,monospace;font-size:12px;word-break:break-all}}
+.foot{{font-size:12px;color:#94a3b8;text-align:center;margin-top:24px}}
+.foot a{{color:#64748b}}
+.divider{{height:1px;background:var(--line);margin:12px 0}}
+.hint{{font-size:12px;color:#94a3b8}}
+</style>
 </head><body>
-<h2>PopDEX Agent Setup</h2>
-<p class="warn"><b>Check before signing:</b> this page was generated locally by Arbitrageur. It only ever proposes the official <code>approveAgent</code> call from the <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a> (Step 4). Your main key never leaves your wallet. Main account: <code id="main"></code></p>
+<div class="topbar">
+<div class="brand"><span class="dot">◈</span> Arbitrageur · PopDEX Agent Setup</div>
+<div class="badges"><span class="pill local">local file · no server</span><span class="pill net-test" id="netPill">…</span></div>
+</div>
+<div class="hero"><h1>Approve a trading agent with your own wallet</h1>
+<p>Your <b>main private key never leaves your wallet app</b> (MetaMask / Rabby). This page only proposes the official <code style="background:rgba(255,255,255,.18)">approveAgent</code> call — you review it and sign it in your wallet. Arbitrageur only ever holds the limited agent key.</p>
+<div class="steps"><span class="step-pill"><span class="n">1</span> Generate agent</span><span class="step-pill"><span class="n">2</span> Connect wallet</span><span class="step-pill"><span class="n">3</span> Sign approval</span><span class="step-pill"><span class="n">4</span> Finish in app</span></div>
+</div>
+<p class="warn"><b>🔒 Check before signing:</b> this page was generated <b>locally</b> by Arbitrageur on your machine. It only ever proposes the official <code>approveAgent</code> call from the <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a> (Step 4). Main account: <code id="main"></code></p>
 
-<div class="card"><p class="step">1 · Generate the agent key (here, in your browser)</p>
-<p style="font-size:13px">Fresh randomness, never reused — a revoked address must never be re-approved (replay risk).</p>
-<button id="gen">Generate new agent key</button>
+<div class="card"><h2><span class="num">1</span> Generate the agent key — here, in your browser</h2>
+<p class="muted">Fresh randomness via <code>ethers.Wallet.createRandom()</code>, created on this page only — never sent anywhere. A revoked address must never be re-approved (replay risk). Save the private key <b>once</b>; you will paste it into Arbitrageur (never the main key).</p>
+<button id="gen">✨ Generate new agent key</button>
 <div id="agentBox" style="display:none">
-<div>Agent address: <code id="agentAddr"></code> <button class="ghost" id="copyAddr">Copy</button></div>
-<div>Agent private key (shown once — save it now):</div>
+<div style="font-size:13px">Agent address: <code id="agentAddr"></code> <button class="ghost" id="copyAddr" style="padding:6px 12px;font-size:12px">Copy</button></div>
+<div style="font-size:13px;margin-top:8px">Agent private key — <b>shown once, save it now</b>:</div>
 <div class="keybox" id="agentKey"></div>
 <button class="ghost" id="copyKey">Copy private key</button>
 </div>
-<p style="font-size:13px">Or paste an existing fresh agent address: <input id="agentIn" placeholder="0x…"></p>
+<div class="divider"></div>
+<p class="muted" style="margin-bottom:2px">Or paste an existing <b>fresh, never-used</b> agent address:</p>
+<input class="addr" id="agentIn" placeholder="0x…" autocomplete="off" spellcheck="false">
 </div>
 
-<div class="card"><p class="step">2 · Approve it with your main wallet</p>
-<div style="font-size:13px">Contract: <code id="to"></code> · Chain: <code id="chain"></code></div>
-<button id="go">Connect wallet &amp; sign approval</button>
-<p id="out" style="font-size:13px"></p>
+<div class="card"><h2><span class="num">2</span> Connect with MetaMask or Rabby</h2>
+<p class="muted">Pick your wallet below — signing happens <b>inside your wallet app</b> with the <b>main</b> account. No private key is ever typed into this page or into Arbitrageur.</p>
+<div class="wallet-grid">
+<button class="wallet" id="wMeta"><span style="font-size:22px">🦊</span><span>MetaMask<span class="sub">Extension / mobile in-app browser</span></span></button>
+<button class="wallet" id="wRabby"><span style="font-size:22px">🌀</span><span>Rabby<span class="sub">Desktop / extension</span></span></button>
+</div>
+<div id="wallets"><p class="muted">Looking for wallets…</p></div>
+<div id="noWallet" style="display:none"><p class="muted">No wallet detected in this browser. Install one, then reload this page:</p>
+<p><a href="https://metamask.io/download/" target="_blank" rel="noopener">MetaMask</a> · <a href="https://rabby.io/" target="_blank" rel="noopener">Rabby</a></p></div>
+<div class="conn"><span class="tag" id="connWallet">wallet: —</span><span class="tag" id="connAcct">account: —</span><span class="tag" id="connChain">chain: —</span></div>
+<dl class="kv">
+<dt>Contract</dt><dd id="to"></dd>
+<dt>Agent</dt><dd id="agentSum">—</dd>
+<dt>Delegator (main)</dt><dd id="mainSum"></dd>
+<dt>Expiry</dt><dd>never (0)</dd>
+<dt>Chain / RPC</dt><dd><span id="chain"></span> · <span id="rpc"></span></dd>
+</dl>
+<button id="go" class="big" disabled>Connect &amp; sign approval in wallet</button>
+<div class="status" id="out"></div>
+<p class="hint">After you confirm in the wallet popup, wait for on-chain confirmation — the transaction hash appears above with an explorer link.</p>
 </div>
 
-<div class="card"><p class="step">3 · Finish in Arbitrageur</p>
-<p style="font-size:13px">Copy the agent private key into the PopDEX account card → <b>Save Account</b> → Agent Setup Toolkit → <b>Verify</b> → enable.</p></div>
+<div class="card"><h2><span class="num">3</span> Finish in Arbitrageur</h2>
+<p class="muted">Copy the <b>agent private key</b> (step 1) into the PopDEX account card → <b>Save Account</b> → Agent Setup Toolkit → <b>Verify approval</b> → enable. Approval itself is <b>only</b> valid once the wallet transaction above confirms.</p></div>
+<p class="foot">Local file generated by Arbitrageur · values prefilled from your account card · <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a></p>
 
 <script>
 const MAIN={main_js}, PREFILL_AGENT={agent_js}, TO={to_js};
 const RPC={rpc_js}, CHAIN={chain_id}, EXPLORER={explorer_js};
 const AGENT_ABI = ["function approveAgent(address agent, address delegator, bytes32 name, uint64 expiresAt, uint64 initialNonce, bool isGlobal) external"];
 let agentAddr = PREFILL_AGENT || "", agentKey = "";
-main.textContent=MAIN; to.textContent=TO; chain.textContent=CHAIN+" · "+RPC; agentIn.value=PREFILL_AGENT || "";
-function copyText(txt, done) {{
-  (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject())
-    .then(()=>{{done.textContent="Copied ✓";setTimeout(()=>done.textContent=done.dataset.label,1500);}})
-    .catch(()=>{{done.textContent="Select & copy manually";}});
+let chosen = null;
+const $ = (id) => document.getElementById(id);
+main.textContent=MAIN; mainSum.textContent=MAIN; to.textContent=TO;
+chain.textContent=CHAIN; rpc.textContent=RPC;
+(function(){{const p=$("netPill");const isMain=CHAIN===2184;p.textContent=isMain?"Morph Tachyon · Mainnet":"Morph Tachyon · Testnet";p.className="pill "+(isMain?"net-main":"net-test");}})();
+if (PREFILL_AGENT) {{ agentIn.value = PREFILL_AGENT; agentSum.textContent = PREFILL_AGENT; }}
+function say(msg, cls) {{ out.textContent = msg; out.className = "status" + (cls ? " " + cls : ""); }}
+function copyText(t, btn, label) {{ if(!t) return; const done=()=>{{const o=btn.textContent;btn.textContent="Copied ✓";setTimeout(()=>btn.textContent=label||o,1400);}}; if(navigator.clipboard&&navigator.clipboard.writeText){{navigator.clipboard.writeText(t).then(done).catch(()=>say("Copy blocked — select the text manually.","err"));}} else {{ const ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();try{{document.execCommand("copy");done();}}catch(e){{say("Copy blocked — select the text manually.","err");}}ta.remove(); }} }}
+gen.onclick = async () => {{ say(""); try {{ if(typeof ethers==="undefined"){{say("Wallet library failed to load (need internet for CDN). Check connection and reload.","err");return;}} const w = ethers.Wallet.createRandom(); agentAddr = w.address; agentKey = w.privateKey; agentIn.value = agentAddr; agentSum.textContent = agentAddr; agentAddrEl().textContent = agentAddr; agentKeyEl().textContent = agentKey; $("agentBox").style.display="block"; copyKey.textContent="Copy private key"; say("Fresh agent generated — back it up now. It is shown only once.","busy"); }} catch(e){{say("Key generation failed: "+(e.message||e),"err");}} }};
+function agentAddrEl(){{return $("agentAddr");}}
+function agentKeyEl(){{return $("agentKey");}}
+copyAddr.onclick = (e) => copyText(agentAddr, e.target, "Copy");
+copyAddr.textContent = "Copy";
+copyKey.onclick = (e) => copyText(agentKey, e.target, "Copy private key");
+agentIn.oninput = () => {{ agentAddr = agentIn.value.trim(); agentSum.textContent = agentAddr || "—"; }};
+function allProviders() {{ const out = []; const eth = window.ethereum; if (!eth) return out; if (Array.isArray(eth.providers)) out.push(...eth.providers); out.push(eth); return out; }}
+function pickProvider(kind) {{ const ps = allProviders(); if (kind === "metamask") return ps.find((p)=>p && p.isMetaMask) || window.ethereum || null; if (kind === "rabby") return ps.find((p)=>p && p.isRabby) || null; return null; }}
+function markSelected(name) {{ chosen = chosen || {{}}; chosen.name = name; document.querySelectorAll("button.wallet").forEach((b)=>b.classList.remove("sel")); if (name==="MetaMask"&&$("wMeta")) $("wMeta").classList.add("sel"); if (name==="Rabby"&&$("wRabby")) $("wRabby").classList.add("sel"); $("connWallet").textContent = "wallet: " + name; $("connWallet").className = "tag good"; $("go").disabled = !chosen.provider; }}
+if ($("wMeta")) $("wMeta").onclick = () => {{ const pv = pickProvider("metamask"); if (!pv) {{ say("MetaMask not detected in this browser. Install it, then reload.", "err"); return; }} chosen = {{name:"MetaMask", provider:pv}}; markSelected("MetaMask"); say("MetaMask selected — press Connect & sign approval."); }};
+if ($("wRabby")) $("wRabby").onclick = () => {{ const pv = pickProvider("rabby"); if (!pv) {{ say("Rabby not detected in this browser. Install it (or use Rabby browser), then reload.", "err"); return; }} chosen = {{name:"Rabby", provider:pv}}; markSelected("Rabby"); say("Rabby selected — press Connect & sign approval."); }};
+const found = new Map();
+function renderWallets() {{
+  const box = $("wallets"); box.innerHTML = "";
+  const hasInjected = !!(window.ethereum || found.size > 0);
+  if (!hasInjected) {{ $("noWallet").style.display = "block"; return; }}
+  $("noWallet").style.display = "none";
+  const add = (name, icon, provider) => {{
+    if ([...box.querySelectorAll("button")].some((b)=>b.dataset.w===name)) return;
+    const b = document.createElement("button");
+    b.className = "wallet"; b.dataset.w = name;
+    if (icon) {{ const img = document.createElement("img"); img.src = icon; img.alt = ""; b.appendChild(img); }}
+    const label = document.createElement("span"); label.textContent = name; b.appendChild(label);
+    b.onclick = () => {{ chosen = {{name, provider}}; document.querySelectorAll("button.wallet").forEach((x)=>x.classList.remove("sel")); b.classList.add("sel"); $("connWallet").textContent = "wallet: " + name; $("connWallet").className = "tag good"; say("Selected " + name + " — press Connect & sign approval."); $("go").disabled = false; }};
+    box.appendChild(b);
+  }};
+  found.forEach((p, rdns) => add(p.info.name || rdns, p.info.icon, p.provider));
+  const ps = allProviders();
+  if (ps.some((p)=>p&&p.isMetaMask)) add("MetaMask (injected)", "", ps.find((p)=>p&&p.isMetaMask));
+  if (ps.some((p)=>p&&p.isRabby)) add("Rabby (injected)", "", ps.find((p)=>p&&p.isRabby));
+  if (found.size === 0 && box.children.length <= 1 && window.ethereum) add("Browser wallet", "", window.ethereum);
+  if (!chosen && found.size > 0) {{ const first = found.values().next().value; chosen = {{name: first.info.name || "wallet", provider: first.provider}}; renderWallets(); return; }}
+  if (chosen && chosen.provider) $("go").disabled = false;
 }}
-gen.onclick = async () => {{
-  try {{
-    const w = ethers.Wallet.createRandom();
-    agentAddr = w.address; agentKey = w.privateKey;
-    agentAddrEl().textContent = agentAddr; agentKeyEl().textContent = agentKey;
-    agentIn.value = agentAddr; agentBox.style.display = "block";
-    out.textContent = "";
-  }} catch(e) {{ out.textContent = "Generation failed (ethers could not load — check connection): " + e; }}
-}};
-function agentAddrEl(){{return document.getElementById("agentAddr");}}
-function agentKeyEl(){{return document.getElementById("agentKey");}}
-copyAddr.onclick = () => copyText(agentAddr, copyAddr);
-copyAddr.dataset.label = "Copy"; copyKey.dataset.label = "Copy private key";
-copyKey.onclick = () => copyText(agentKey, copyKey);
-agentIn.oninput = () => {{ agentAddr = agentIn.value.trim(); }};
+window.addEventListener("eip6963:announceProvider", (e) => {{
+  if (e.detail && e.detail.info) {{ found.set(e.detail.info.rdns, e.detail); renderWallets(); }}
+}});
+window.dispatchEvent(new Event("eip6963:requestProvider"));
+setTimeout(renderWallets, 900);
+setTimeout(renderWallets, 2500);
 go.onclick = async () => {{
-  out.textContent = "";
+  say("", "");
   try {{
     agentAddr = (agentIn.value || agentAddr).trim();
-    if (!/^0x[0-9a-fA-F]{{40}}$/.test(agentAddr)) {{ out.textContent = "Generate or paste a valid agent address first."; return; }}
-    if (!window.ethereum) {{ out.textContent = "No wallet found in this browser — install MetaMask/Rabby (or open this file in a wallet browser) and retry."; return; }}
-    const provider = new ethers.BrowserProvider(window.ethereum);
+    if (!/^0x[0-9a-fA-F]{{40}}$/.test(agentAddr)) {{ say("Generate or paste a valid agent address first.", "err"); return; }}
+    if (typeof ethers === "undefined") {{ say("Wallet library failed to load (need internet for CDN). Reload and retry.", "err"); return; }}
+    const eth = chosen ? chosen.provider : window.ethereum;
+    if (!eth) {{ say("No wallet selected — install MetaMask or Rabby first.", "err"); return; }}
+    say("Connecting to " + (chosen ? chosen.name : "wallet") + "…", "busy");
+    const provider = new ethers.BrowserProvider(eth);
     await provider.send("eth_requestAccounts", []);
-    const net = await provider.getNetwork();
+    let net = await provider.getNetwork();
+    $("connChain").textContent = "chain: " + Number(net.chainId);
     if (Number(net.chainId) !== CHAIN) {{
-      try {{ await window.ethereum.request({{method:"wallet_switchEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16)}}]}}); }}
+      say("Switching to Morph Tachyon (chain " + CHAIN + ") — confirm in wallet…", "busy");
+      try {{ await eth.request({{method:"wallet_switchEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16)}}]}}); }}
       catch(e) {{
-        await window.ethereum.request({{method:"wallet_addEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16),chainName:CHAIN===2184?"Morph Tachyon":"Morph Tachyon Testnet",rpcUrls:[RPC],nativeCurrency:{{name:"Gas",symbol:"GAS",decimals:18}},blockExplorerUrls:[EXPLORER]}}]}});
+        await eth.request({{method:"wallet_addEthereumChain",params:[{{chainId:"0x"+CHAIN.toString(16),chainName:CHAIN===2184?"Morph Tachyon":"Morph Tachyon Testnet",rpcUrls:[RPC],nativeCurrency:{{name:"Gas",symbol:"GAS",decimals:18}},blockExplorerUrls:[EXPLORER]}}]}});
       }}
+      net = await provider.getNetwork();
+      $("connChain").textContent = "chain: " + Number(net.chainId);
     }}
+    if (Number(net.chainId) !== CHAIN) {{ say("Still on the wrong chain — please switch to chain " + CHAIN + " in your wallet and retry.", "err"); return; }}
+    $("connChain").className = "tag good";
     const signer = await provider.getSigner();
-    if ((await signer.getAddress()).toLowerCase() !== MAIN.toLowerCase()) {{ out.textContent = "Connected wallet is not the main account " + MAIN; return; }}
+    const who = await signer.getAddress();
+    $("connAcct").textContent = "account: " + who.slice(0,6) + "…" + who.slice(-4);
+    if (who.toLowerCase() !== MAIN.toLowerCase()) {{ $("connAcct").className = "tag bad"; say("Connected wallet " + who + " is not the main account " + MAIN + ". Switch accounts and retry.", "err"); return; }}
+    $("connAcct").className = "tag good";
     const iface = new ethers.Interface(AGENT_ABI);
     const data = iface.encodeFunctionData("approveAgent", [agentAddr, MAIN, ethers.ZeroHash, 0, Date.now(), false]);
-    go.disabled = true; out.textContent = "Sending approveAgent… confirm in your wallet.";
+    go.disabled = true; say("Sending approveAgent… confirm in " + (chosen ? chosen.name : "your wallet") + ".", "busy");
     const tx = await signer.sendTransaction({{to: TO, data}});
-    out.textContent = "Submitted: " + tx.hash + " — waiting for confirmation…";
+    say("Submitted: " + tx.hash + " — waiting for on-chain confirmation…", "busy");
     await tx.wait();
-    out.innerHTML = "Approved ✓ (" + tx.hash + "). Copy the agent private key above into Arbitrageur, then Verify + Save.";
-  }} catch(e) {{ go.disabled = false; out.textContent = "Failed: " + (e.info?.error?.message || e.message || e); }}
+    out.innerHTML = "";
+    const a = document.createElement("a"); a.href = EXPLORER + "/tx/" + tx.hash; a.target = "_blank"; a.rel = "noopener";
+    out.appendChild(document.createTextNode("Approved ✓ (" + tx.hash + "). "));
+    out.appendChild(a); a.textContent = "View on explorer";
+    out.appendChild(document.createTextNode(" — copy the agent private key (step 1) into Arbitrageur, then Verify + Save."));
+    out.className = "status ok";
+    go.disabled = false;
+  }} catch(e) {{ go.disabled = false; say("Failed: " + (e.info?.error?.message || e.message || e), "err"); }}
 }};
 </script></body></html>"#,
         main_js = js(main.trim()),

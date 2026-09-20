@@ -5,14 +5,12 @@ import {
   ArrowLeftRight,
   Check,
   CheckCircle2,
-  Copy,
   ExternalLink,
   Eye,
   EyeOff,
   KeyRound,
   Plus,
   RefreshCw,
-  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
@@ -20,7 +18,6 @@ import type {
   AccountCredentialInput,
   AccountDto,
   AgentCheckDto,
-  ApproveTxDto,
   EngineSettingsDto,
   StrategyAccountRouteDto,
   VenueBalanceInfo,
@@ -481,12 +478,10 @@ const PopdexAgentToolkit: React.FC<{
   const [main, setMain] = useState(initialMain);
   const [agentAddr, setAgentAddr] = useState("");
   const [agentKey, setAgentKey] = useState("");
-  const [approve, setApprove] = useState<ApproveTxDto | null>(null);
   const [check, setCheck] = useState<AgentCheckDto | null>(null);
   const [signerPath, setSignerPath] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
   const [keyUsed, setKeyUsed] = useState(false);
 
   const run = async (what: string, fn: () => Promise<void>) => {
@@ -498,16 +493,6 @@ const PopdexAgentToolkit: React.FC<{
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
-    }
-  };
-
-  const copy = async (id: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(id);
-      setTimeout(() => setCopied((c) => (c === id ? null : c)), 1500);
-    } catch {
-      setError("Clipboard blocked — select the text manually.");
     }
   };
 
@@ -546,7 +531,7 @@ const PopdexAgentToolkit: React.FC<{
             <button
               key={n}
               type="button"
-              onClick={() => { setNetwork(n); setApprove(null); setCheck(null); setSignerPath(null); }}
+              onClick={() => { setNetwork(n); setCheck(null); setSignerPath(null); }}
               aria-pressed={network === n}
               className={`px-2.5 py-1 rounded-lg font-bold border transition cursor-pointer ${
                 network === n ? "bg-accent text-white border-accent" : "text-slate-500 border-surface-border hover:bg-slate-100/70"
@@ -564,7 +549,7 @@ const PopdexAgentToolkit: React.FC<{
           <div className="text-xs font-mono font-bold text-slate-800">1 · Main account (holds funds, public)</div>
           <input
             value={main}
-            onChange={(e) => { setMain(e.target.value); setApprove(null); setCheck(null); }}
+            onChange={(e) => { setMain(e.target.value); setCheck(null); }}
             placeholder="0x..."
             autoComplete="off"
             spellCheck={false}
@@ -581,7 +566,6 @@ const PopdexAgentToolkit: React.FC<{
               setAgentAddr(g.address);
               setAgentKey(g.privateKey);
               setKeyUsed(false);
-              setApprove(null);
               setCheck(null);
             })} className={btnAccent}>
               <KeyRound className="w-3.5 h-3.5" /> {busy === "gen" ? "Generating…" : "Generate fresh agent key"}
@@ -599,7 +583,6 @@ const PopdexAgentToolkit: React.FC<{
                   setAgentAddr(g.address);
                   setAgentKey(g.privateKey);
                   setKeyUsed(false);
-                  setApprove(null);
                   setCheck(null);
                 })} className={btnGhost}>Regenerate</button>
               </div>
@@ -609,35 +592,20 @@ const PopdexAgentToolkit: React.FC<{
         </div>
 
         <div className={stepCard}>
-          <div className="text-xs font-mono font-bold text-slate-800">3 · Approve in your own wallet</div>
-          <p className="text-[10px] font-sans text-slate-400">The signer page can generate the agent key too — or build the approval here and sign it with the MAIN key in MetaMask/Rabby. Never paste the main key here.</p>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" disabled={busy !== null || !main || !agentAddr} onClick={() => void run("build", async () => {
-              setApprove(await api.buildPopdexApproveTx(main.trim(), agentAddr, network));
-            })} className={btnAccent}>
-              <ShieldCheck className="w-3.5 h-3.5" /> {busy === "build" ? "Building…" : "Build approval"}
-            </button>
-            <button type="button" disabled={busy !== null || !main} onClick={() => void run("open", async () => {
+          <div className="text-xs font-mono font-bold text-slate-800">3 · Approve in MetaMask / Rabby (external wallet page)</div>
+          <p className="text-[10px] font-sans text-slate-500 leading-normal">
+            Approval <b>cannot</b> happen inside this app — we never hold your main private key.
+            Press the button below to open a locally-generated signer page, connect <b>MetaMask</b> or <b>Rabby</b>
+            with your <b>main</b> account, review the official <span className="font-mono">approveAgent</span> call,
+            and sign it there. Never paste your main key anywhere.
+          </p>
+          <button type="button" disabled={busy !== null || !main} onClick={() => void run("open", async () => {
               setSignerPath(await api.openPopdexSignerPage(main.trim(), agentAddr, network));
-            })} className={btnGhost} title="Opens a locally-generated page: generate the agent key there if needed, then sign with your wallet">
-              <ExternalLink className="w-3.5 h-3.5" /> Open wallet signer
+            })} className={`${btnAccent} w-full justify-center !text-[13px] !py-2.5`} title="Opens a locally-generated page: generate the agent key there if needed, then sign with MetaMask or Rabby">
+              <ExternalLink className="w-4 h-4" /> {busy === "open" ? "Opening…" : "Open wallet signer — sign with MetaMask / Rabby"}
             </button>
-          </div>
           {signerPath && <p className="text-[10px] font-mono text-slate-500 break-all">Signer page: {signerPath}</p>}
-          {approve && (
-            <div className="space-y-1.5 text-[11px] font-mono">
-              <div className="break-all"><span className="text-slate-400">To: </span>{approve.to}</div>
-              <div className="break-all"><span className="text-slate-400">Data: </span>{approve.data.slice(0, 74)}…</div>
-              <div className="flex flex-wrap gap-2 pt-1">
-                <button type="button" onClick={() => void copy("data", approve.data)} className={btnGhost}>
-                  {copied === "data" ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} Calldata
-                </button>
-                <button type="button" onClick={() => void copy("eip", approve.eip681Uri)} className={btnGhost} title="EIP-681 request URI for wallets that accept it">
-                  {copied === "eip" ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} EIP-681 URI
-                </button>
-              </div>
-            </div>
-          )}
+          {!agentAddr && <p className="text-[10px] font-sans text-slate-400">Tip: no agent yet? The signer page can generate one for you (step 1 there).</p>}
         </div>
 
         <div className={stepCard}>
