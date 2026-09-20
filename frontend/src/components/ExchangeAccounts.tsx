@@ -788,6 +788,22 @@ export const AccountCard: React.FC<AccountCardProps> = ({
     }
   }, [locked]);
 
+  // Public identifiers (wallet addresses, account IDs, non-secret API keys)
+  // are always shown, never hidden behind the "(stored — leave blank to
+  // keep)" placeholder: auto-fetch them while unlocked. Secrets stay masked
+  // until the eye toggle. Numeric indexes are prefilled from the DTO.
+  useEffect(() => {
+    if (locked || !api.isTauri) return;
+    for (const f of fields) {
+      if (f.secret) continue;
+      const k = f.key;
+      if (k === "accountIndex" || k === "subaccountIndex" || k === "apiKeyIndex") continue;
+      if (!fieldIsSet(account, k)) continue;
+      if (drafts[k] !== undefined || revealed[k] !== undefined || requested[k]) continue;
+      revealField(k);
+    }
+  }, [locked, account, fields, drafts, revealed, requested, revealField]);
+
   const storedValueFor = (key: CredFieldKey): string => revealed[key] ?? "";
 
   const valueFor = (key: CredFieldKey): string => {

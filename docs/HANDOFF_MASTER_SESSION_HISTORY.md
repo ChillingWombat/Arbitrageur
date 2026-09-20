@@ -1352,3 +1352,9 @@ overhaul pass committed as `23d4aed`).
 - **Fix (`popdex.rs` only):** tx nonce now comes from `get_transaction_count(main)`; calldata `initialNonce` still the timestamp. Split the error mapper: REST preflight still gives definitive fund-first guidance, but a post-preflight -32000 is reported raw as a submission problem (wrong toolkit network / stuck tx / node hiccup) instead of misdiagnosing "not funded".
 - **Tree note:** concurrent worker stream active in this checkout (margin `Empty` status across `margin_monitor.rs`, `commands.rs`, `state.rs`, `PortfolioMonitor.tsx`, `ExchangeAccounts.tsx` hunk @418). This commit stages ONLY `popdex.rs` + this handoff entry; their files untouched.
 - **Verification:** exchanges 98/0, clippy clean, tsc clean. Desktop suite unaffected (no desktop code changed; last full run 308/0).
+
+## 46. Session Handoff — 2026-09-20 (Always show wallet addresses / public keys)
+
+- **Ask:** wallet addresses and public keys in account cards must always be shown, not hidden behind "(stored — leave blank to keep)".
+- **Fix (`ExchangeAccounts.tsx`, AccountCard only):** new effect auto-fetches every stored non-secret field (walletAddress, accountId, non-secret apiKey) via the existing field-scoped `getAccountCredentialField` IPC while unlocked, so the values render directly in the inputs. Secrets stay masked until the eye toggle; numeric indexes were already prefilled; locked state still shows the placeholder (nothing decryptable). Staged only this hunk — concurrent worker hunks in the same file + margin/hyperliquid streams left untouched.
+- **Verification:** tsc clean, full `npm test` shards 0 fail.
