@@ -1450,8 +1450,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       }, 400);
     } catch (err) {
       console.error("Failed to save strategy params:", err);
+      // Tauri command rejections arrive as plain strings (not Error
+      // instances) — render them verbatim so the backend's field-level
+      // reason (e.g. which bound failed) is visible instead of a dead-end
+      // generic message.
       setSaveError(
-        err instanceof Error ? err.message : "Save failed — parameters were not written."
+        err instanceof Error
+          ? err.message
+          : typeof err === "string" && err.trim() !== ""
+            ? err
+            : "Save failed — parameters were not written."
       );
     } finally {
       setIsSaving(false);
