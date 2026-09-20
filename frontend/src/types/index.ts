@@ -405,6 +405,10 @@ export interface FundingOpportunityDto {
   hold_reason?: string;
   /** Heuristic hold confidence 0..1. */
   hold_confidence?: number;
+  /** Expected net carry in USD over the modelled hold with linear
+   * funding-gap decay to the min-APR exit threshold, net of round-trip
+   * fees + measured entry spread (signed). Absent on stale backends. */
+  expected_return_usd?: number;
   /** Current funding print of the LONG leg, 8h-normalized percent.
    *  Basis opps: long leg is spot (pays none) so 0. Absent on stale backends. */
   long_rate_8h_pct?: number;

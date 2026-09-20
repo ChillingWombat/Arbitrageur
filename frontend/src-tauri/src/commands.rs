@@ -21,7 +21,7 @@ use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidS
 use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
     estimate_funding_hold_hours, evaluate_funding_carry, evaluate_spot_perp_basis,
-    funding_entry_capacity, funding_win_probability,
+    expected_carry_return_usd, funding_entry_capacity, funding_win_probability,
 };
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
@@ -185,6 +185,13 @@ pub struct FundingOpportunityDto {
     /// Heuristic hold confidence 0..1 (never 0/1).
     #[serde(default)]
     pub hold_confidence: Option<f64>,
+    /// Expected net carry in USD over the modelled hold with linear
+    /// funding-gap decay to the min-APR exit threshold, net of round-trip
+    /// fees + measured entry spread (signed; negative = expected loss).
+    /// `None` when the hold is unknown — clients fall back to a flat
+    /// projection, never invent one.
+    #[serde(default)]
+    pub expected_return_usd: Option<f64>,
     /// Marginal entry-cost slope in bps per extra $1k notional, summed over
     /// both legs at the requested trade size. `None` when either leg's book
     /// is missing/thin. Informational: describes cost shape, never sizes.
@@ -2689,19 +2696,19 @@ async fn scan_funding_opportunities_for_symbol(
                 // threshold + fee+spread breakeven + spread-drift disclosure.
                 // History is the minute-bucketed training substrate (7d); thin
                 // history falls back to breakeven with low confidence.
+                let net_8h_f: f64 = opp
+                    .net_rate_8h
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let fee_bps_f: f64 = opp
+                    .round_trip_fee_bps
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let spread_cost_f: Option<f64> =
+                    depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
                 let hold_estimate = {
-                    let net_8h_f: f64 = opp
-                        .net_rate_8h
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
-                    let fee_bps_f: f64 = opp
-                        .round_trip_fee_bps
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
-                    let spread_cost_f: Option<f64> =
-                        depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
                     let hourly = |rate: Decimal, interval: u32| {
                         rate / Decimal::from(interval.max(1))
                     };
@@ -2843,6 +2850,14 @@ async fn scan_funding_opportunities_for_symbol(
                     expected_hold_hours: hold_estimate.as_ref().map(|h| h.hours),
                     hold_reason: hold_estimate.as_ref().map(|h| h.reason.clone()),
                     hold_confidence: hold_estimate.as_ref().map(|h| h.confidence),
+                    expected_return_usd: expected_carry_return_usd(
+                        net_8h_f,
+                        fee_bps_f,
+                        spread_cost_f,
+                        hold_estimate.as_ref().map(|h| h.hours),
+                        Some(funding_min_apr(state)),
+                        trade_size_usd,
+                    ),
                 });
             }
         }
@@ -2999,21 +3014,21 @@ async fn scan_funding_opportunities_for_symbol(
                         perp_mid.to_string().parse::<f64>().unwrap_or(0.0);
                     // Expected hold for basis: single-venue perp funding history
                     // (spot pays none). Same decay-to-threshold model as carry.
+                    let net_8h_f: f64 = eval
+                        .carry
+                        .net_rate_8h
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let fee_bps_f: f64 = eval
+                        .carry
+                        .round_trip_fee_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let spread_cost_f: Option<f64> =
+                        depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
                     let basis_hold = {
-                        let net_8h_f: f64 = eval
-                            .carry
-                            .net_rate_8h
-                            .to_string()
-                            .parse::<f64>()
-                            .unwrap_or(0.0);
-                        let fee_bps_f: f64 = eval
-                            .carry
-                            .round_trip_fee_bps
-                            .to_string()
-                            .parse::<f64>()
-                            .unwrap_or(0.0);
-                        let spread_cost_f: Option<f64> =
-                            depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
                         let now_basis_ms = chrono::Utc::now().timestamp_millis();
                         let hist_basis: Vec<(i64, f64)> = state
                             .state_store
@@ -3124,6 +3139,14 @@ async fn scan_funding_opportunities_for_symbol(
                         expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
                         hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),
                         hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
+                        expected_return_usd: expected_carry_return_usd(
+                            net_8h_f,
+                            fee_bps_f,
+                            spread_cost_f,
+                            basis_hold.as_ref().map(|h| h.hours),
+                            Some(funding_min_apr(state)),
+                            trade_size_usd,
+                        ),
                     });
                 }
             }

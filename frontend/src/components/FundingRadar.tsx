@@ -39,6 +39,33 @@ const CarryDetailField: React.FC<{ label: string; value: React.ReactNode; title?
   </div>
 );
 
+/** Scanner card box: decay-aware expected net over the modelled hold
+ * (backend value, flat fallback), replacing the unrealistic flat daily rate. */
+const CarryExpectedBox: React.FC<{ opp: FundingOpportunityDto }> = ({ opp }) => {
+  const v = expectedCarryUsd(opp);
+  const holdH =
+    opp.expected_hold_hours != null && Number.isFinite(opp.expected_hold_hours) && opp.expected_hold_hours > 0
+      ? opp.expected_hold_hours
+      : null;
+  const title =
+    holdH != null
+      ? `Expected net over ~${holdH.toFixed(1)}h modelled hold with linear funding-gap decay to the min-APR exit, net of round-trip fees${opp.entry_spread_bps != null && opp.entry_spread_bps > 0 ? " + entry spread" : ""}`
+      : "Expected net unavailable — hold unknown";
+  return (
+    <div
+      className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border"
+      title={title}
+    >
+      <div className="text-slate-500">Expected</div>
+      <div
+        className={`font-semibold tabular-nums ${v == null ? "text-slate-400" : v >= 0 ? "text-profit" : "text-loss"}`}
+      >
+        {v == null ? "—" : fmtSignedUsd(v)}
+      </div>
+    </div>
+  );
+};
+
 interface CarryDetailModalProps {
   opp: FundingOpportunityDto;
   rank: number;
@@ -251,6 +278,32 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
   );
 };
 
+/** Expected net carry in USD: backend decay-aware value when present,
+ * else the flat fallback (current-rate accrual over the breakeven hold, net
+ * of fees + spread — same math the modal used historically). Null when
+ * neither is computable. */
+function expectedCarryUsd(opp: FundingOpportunityDto): number | null {
+  const e = opp.expected_return_usd;
+  if (e != null && Number.isFinite(e)) return e;
+  const holdH =
+    opp.break_even_hours != null && Number.isFinite(opp.break_even_hours) && opp.break_even_hours > 0
+      ? opp.break_even_hours
+      : null;
+  if (holdH == null || !(opp.trade_size_usd > 0)) return null;
+  const gross = opp.trade_size_usd * (opp.net_rate_8h_pct / 100) * (holdH / 8);
+  const fees = opp.trade_size_usd * (opp.round_trip_fee_bps / 10000);
+  const spread =
+    opp.entry_spread_bps != null && opp.entry_spread_bps > 0
+      ? (opp.trade_size_usd * opp.entry_spread_bps) / 10000
+      : 0;
+  const net = gross - fees - spread;
+  return Number.isFinite(net) ? net : null;
+}
+
+function fmtSignedUsd(v: number, digits = 0): string {
+  return `${v >= 0 ? "+" : "-"}$${Math.abs(v).toFixed(digits)}`;
+}
+
 const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
   ({ opp, rank, executing, executed, onExecute, onClose, minAprPct = 8.0 }) => {
     // Expected hold (days): backend persistence model when present, else
@@ -268,18 +321,13 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
       opp.expected_hold_hours != null && Number.isFinite(opp.expected_hold_hours);
     const autoH =
       holdHours != null ? Math.max(0.1, Math.round((holdHours / 24) * 10) / 10) : null;
-    const autoHDaysExact = holdHours != null ? holdHours / 24 : null;
     const size = opp.trade_size_usd;
-    const gross =
-      autoHDaysExact != null
-        ? size * (opp.net_rate_8h_pct / 100) * 3 * autoHDaysExact
-        : null;
     const fees = size * (opp.round_trip_fee_bps / 10000);
     const spreadCost =
       opp.entry_spread_bps != null && opp.entry_spread_bps > 0
         ? (size * opp.entry_spread_bps) / 10000
         : 0;
-    const net = gross != null ? gross - fees - spreadCost : null;
+    const net = expectedCarryUsd(opp);
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -966,10 +1014,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         <div className="text-slate-500">Breakeven</div>
                         <div className="font-semibold text-slate-900 tabular-nums">{opp.break_even_hours.toFixed(1)}h</div>
                       </div>
-                      <div className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border">
-                        <div className="text-slate-500">Daily</div>
-                        <div className="font-semibold text-profit tabular-nums">+${opp.estimated_daily_income_usd.toFixed(0)}</div>
-                      </div>
+                      <CarryExpectedBox opp={opp} />
                     </div>
                   </div>
 

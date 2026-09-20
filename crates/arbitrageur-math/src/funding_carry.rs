@@ -423,6 +423,54 @@ pub fn estimate_funding_hold_hours(
     })
 }
 
+/// Expected net carry in USD over the modelled hold with linear funding-gap
+/// decay (the number the scanner card shows instead of a flat daily rate).
+///
+/// Same decay story as [`estimate_funding_hold_hours`] and the popup's dashed
+/// projection: the 8h net rate decays linearly from `net_rate_8h` to the
+/// min-APR exit threshold over `hold_hours`, so accrual uses the average of
+/// the two endpoints — not today's print extrapolated forever. Round-trip
+/// fees plus measured entry spread are subtracted, so early-exit holds
+/// honestly report a signed loss.
+///
+/// - `net_rate_8h`: current net print, fraction per 8h (e.g. 0.00052).
+/// - `hold_hours`: modelled hold from `estimate_funding_hold_hours`.
+///   `None` (unknown hold) returns `None` — a flat-rate extrapolation
+///   disguised as an expectation is refused.
+/// - Below-threshold current rates average at the current rate (exit would be
+///   immediate; costs dominate).
+/// - `min_apr_pct` defaults to 8.0, matching the hold model.
+pub fn expected_carry_return_usd(
+    net_rate_8h: f64,
+    round_trip_fee_bps: f64,
+    entry_spread_cost_bps: Option<f64>,
+    hold_hours: Option<f64>,
+    min_apr_pct: Option<f64>,
+    trade_size_usd: f64,
+) -> Option<f64> {
+    if !(net_rate_8h.is_finite() && net_rate_8h > 0.0) {
+        return None;
+    }
+    if !(round_trip_fee_bps.is_finite() && round_trip_fee_bps >= 0.0) {
+        return None;
+    }
+    let hold = hold_hours.filter(|h| h.is_finite() && *h > 0.0)?;
+    if !(trade_size_usd.is_finite() && trade_size_usd > 0.0) {
+        return None;
+    }
+    let apr = min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+    let threshold_8h = apr / 100.0 / 365.0 / 3.0;
+    let exit_8h = threshold_8h.min(net_rate_8h);
+    let avg_8h = (net_rate_8h + exit_8h) / 2.0;
+    let accrual = trade_size_usd * avg_8h * (hold / 8.0);
+    let spread = entry_spread_cost_bps
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0);
+    let costs = trade_size_usd * (round_trip_fee_bps + spread) / 10_000.0;
+    let net = accrual - costs;
+    net.is_finite().then_some(net)
+}
+
 /// Informational win probability for a funding-carry / basis opportunity.
 ///
 /// Heuristic, NOT a calibrated forecast: under a memoryless assumption the
@@ -798,5 +846,39 @@ mod funding_capacity_tests {
         let big = &rep.tiers[1];
         assert!(small.entry_spread_bps.unwrap() > big.entry_spread_bps.unwrap());
         assert!(approx(rep.optimal_size_usd.unwrap(), big.filled_usd));
+    }
+
+
+    #[test]
+    fn expected_return_decays_to_threshold_over_hold() {
+        // net 0.0008/8h, 8% APR threshold (7.3e-5), 80h hold, $50k, 10 bps fees.
+        let v = expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 50_000.0)
+            .expect("value");
+        let avg = (0.0008 + 8.0 / 100.0 / 365.0 / 3.0) / 2.0;
+        let want = 50_000.0 * avg * 10.0 - 50.0;
+        assert!((v - want).abs() < 1e-6, "got {v}, want {want}");
+        assert!(v > 100.0, "decay-aware value well below the flat $400 extrapolation");
+    }
+
+    #[test]
+    fn expected_return_is_signed_loss_when_below_threshold() {
+        // Current print already below the exit threshold: immediate exit.
+        let v = expected_carry_return_usd(0.000001, 10.0, None, Some(10.0), Some(8.0), 50_000.0)
+            .expect("value");
+        assert!(v < 0.0, "costs dominate: {v}");
+        assert!((v + 50.0).abs() < 1.0, "≈ −fees: {v}");
+    }
+
+    #[test]
+    fn expected_return_refuses_unknown_hold_and_garbage() {
+        assert!(expected_carry_return_usd(0.0008, 10.0, None, None, Some(8.0), 50_000.0).is_none());
+        assert!(expected_carry_return_usd(0.0, 10.0, None, Some(80.0), Some(8.0), 50_000.0).is_none());
+        assert!(expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 0.0).is_none());
+        assert!(expected_carry_return_usd(f64::NAN, 10.0, None, Some(80.0), Some(8.0), 50_000.0).is_none());
+        // Breakeven sanity: hold exactly one 8h period at 10 bps with 10 bps
+        // costs nets ~zero.
+        let v = expected_carry_return_usd(0.001, 10.0, None, Some(8.0), Some(1_000_000.0), 10_000.0)
+            .expect("value");
+        assert!(v.abs() < 1e-6, "{v}");
     }
 }
