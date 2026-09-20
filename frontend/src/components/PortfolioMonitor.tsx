@@ -251,6 +251,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     if (allowed > 0 && fails >= allowed - 1 && fails > 0)
       items.push({ severity: "warn", title: `Error budget nearly exhausted (${fails}/${allowed})`, detail: "One more consecutive failure trips the breaker." });
     for (const b of venueBalances ?? []) {
+      // EMPTY (unfunded, flat) is informational — shown neutrally on its own
+      // card, never as a critical Needs Attention item.
+      if (b.status === "EMPTY") continue;
       if (b.status === "DEPLETED")
         items.push({ severity: "critical", title: `${formatVenueName(b.venue)} balance depleted`, detail: b.recommended_action ?? "Top up or disable this venue." });
       else if (b.status === "LOW_MARGIN")
@@ -427,8 +430,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div className={`h-full ${barCls} transition-all duration-300`} style={{ width: `${barWidth}%` }} />
                     </div>
-                    {b.status !== "HEALTHY" && b.recommended_action && (
+                    {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.recommended_action && (
                       <div className="text-[11px] font-mono text-warn">{b.recommended_action}</div>
+                    )}
+                    {b.status === "EMPTY" && b.recommended_action && (
+                      <div className="text-[11px] font-mono text-slate-400">{b.recommended_action}</div>
                     )}
                   </div>
                 );
@@ -633,10 +639,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               <button
                 onClick={onTriggerKillswitch}
                 className="btn-danger w-full px-2 py-2 text-xs font-mono font-bold flex items-center justify-center shadow-xs cursor-pointer"
-                title="Halt trading — trip the circuit breaker"
+                title="Halt Trading — Trip the Circuit Breaker"
               >
                 <Ban className="w-3.5 h-3.5 mr-1.5" />
-                <span>Halt trading</span>
+                <span>Halt Trading</span>
               </button>
             )}
           </div>

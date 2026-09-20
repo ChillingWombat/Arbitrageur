@@ -105,6 +105,7 @@ fn main() {
             commands::scan_spot_opportunities,
             commands::execute_spot_arbitrage,
             commands::scan_funding_opportunities,
+            commands::get_funding_trend,
             commands::scan_prediction_opportunities,
             commands::run_stat_arb_step,
             commands::compute_optimal_thresholds,

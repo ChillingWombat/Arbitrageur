@@ -261,39 +261,19 @@ impl ExchangeAdapter for LighterAdapter {
     /// rates (binance, bybit, hyperliquid). Only the venue's own entries —
     /// labelled `exchange: "lighter"` on both mainnet and the Robinhood
     /// Chain deployment — are used; external exchange rows are context, not
-    /// this venue's rate. Rates are hourly fractions.
+    /// this venue's rate.
+    ///
+    /// The venue `rate` is an **8-hour aggregated print** (it tracks the
+    /// venue UI's "8hr" figure; hourly ~= rate / 8), so `interval_hours` is
+    /// 8 — the shared carry math normalizes by it. Mislabeling it as hourly
+    /// inflates every Lighter-legged carry quote ~8x.
     async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
         let res = self.get_json("/api/v1/funding-rates").await?;
         let rows = res
             .get("funding_rates")
             .and_then(|r| r.as_array())
             .ok_or_else(|| anyhow::anyhow!("Missing funding_rates in Lighter response"))?;
-        let mut seen = std::collections::HashSet::new();
-        let mut out = Vec::new();
-        for row in rows {
-            let exchange = row.get("exchange").and_then(|e| e.as_str()).unwrap_or("");
-            if !exchange.eq_ignore_ascii_case("lighter") {
-                continue;
-            }
-            let base = row.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let rate_f = row.get("rate").and_then(|r| r.as_f64());
-            if base.is_empty() || !seen.insert(base.to_uppercase()) {
-                continue;
-            }
-            if let Some(rate_f) = rate_f {
-                let rate = Decimal::try_from(rate_f).unwrap_or(dec!(0));
-                out.push(FundingRate {
-                    venue: self.venue_id.clone(),
-                    symbol: Symbol::perp(base, "USDC").canonical(),
-                    rate,
-                    predicted_rate: None,
-                    interval_hours: 1, // Lighter funding accrues hourly
-                    next_funding_time: Utc::now(),
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-        Ok(out)
+        Ok(parse_lighter_funding_rates(rows, &self.venue_id))
     }
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
@@ -562,6 +542,41 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
     }
 }
 
+/// Pure parse of Lighter `/api/v1/funding-rates` rows into venue-owned
+/// [`FundingRate`] prints. Split out for unit testing: the venue `rate` is
+/// an 8-hour print, hence `interval_hours = 8`.
+fn parse_lighter_funding_rates(
+    rows: &[serde_json::Value],
+    venue_id: &VenueId,
+) -> Vec<FundingRate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for row in rows {
+        let exchange = row.get("exchange").and_then(|e| e.as_str()).unwrap_or("");
+        if !exchange.eq_ignore_ascii_case("lighter") {
+            continue;
+        }
+        let base = row.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+        let rate_f = row.get("rate").and_then(|r| r.as_f64());
+        if base.is_empty() || !seen.insert(base.to_uppercase()) {
+            continue;
+        }
+        if let Some(rate_f) = rate_f {
+            let rate = Decimal::try_from(rate_f).unwrap_or(dec!(0));
+            out.push(FundingRate {
+                venue: venue_id.clone(),
+                symbol: Symbol::perp(base, "USDC").canonical(),
+                rate,
+                predicted_rate: None,
+                interval_hours: 8, // 8h-aggregated print (venue UI "8hr")
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +673,27 @@ mod tests {
         assert_eq!(resolve_market_id(&d, "BTC-USDC").unwrap(), 1);
         assert!(resolve_market_id(&d, "BTC-SOL").is_err());
         assert!(resolve_market_id(&d, "BTC-ETH").is_err());
+    }
+
+    #[test]
+    fn parse_lighter_funding_rates_uses_8h_interval() {
+        // Captured 2026-09-20 shape: LINK's venue print (-0.0336%) tracks
+        // the UI "8hr" figure, so hourly ~= rate / 8 ~= UI "1hr" (-0.0039%).
+        let rows = vec![
+            serde_json::json!({"exchange": "binance", "symbol": "LINK", "rate": 0.0001}),
+            serde_json::json!({"exchange": "lighter", "symbol": "LINK", "rate": -0.000336}),
+        ];
+        let out = parse_lighter_funding_rates(&rows, &VenueId::new("lighter"));
+        assert_eq!(out.len(), 1, "external rows are context, not our rate");
+        let fr = &out[0];
+        assert_eq!(fr.interval_hours, 8);
+        let hourly = fr.rate / Decimal::from(fr.interval_hours);
+        let hourly_f = hourly.to_string().parse::<f64>().unwrap();
+        // ~= -0.0042%/h vs UI -0.0039%/h (prints drift between polls).
+        assert!(
+            (hourly_f + 0.000042).abs() < 0.00001,
+            "hourly normalization off: {hourly_f}"
+        );
     }
 
     #[tokio::test]

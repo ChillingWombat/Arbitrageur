@@ -5,10 +5,14 @@ use arbitrageur_core::types::{dec, Decimal};
 /// Health status of an account or position margin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarginHealthStatus {
+    /// Funded account with comfortable margin.
     Healthy,
     Warning,
     Critical,
     Breached,
+    /// Unfunded account: zero equity, no open positions, no margin locked.
+    /// Nothing is at risk, so this is informational — never critical.
+    Empty,
 }
 
 /// Margin monitor configuration.
@@ -44,6 +48,11 @@ impl MarginMonitor {
     /// Assess overall health of an account snapshot.
     pub fn evaluate_account(&self, account: &AccountSnapshot) -> MarginHealthStatus {
         if account.equity <= dec!(0) {
+            // Unfunded and flat: nothing at risk — informational, not a breach.
+            // Zero/negative equity WITH positions or locked margin stays Breached.
+            if account.positions.is_empty() && account.maintenance_margin <= dec!(0) {
+                return MarginHealthStatus::Empty;
+            }
             return MarginHealthStatus::Breached;
         }
 
@@ -87,5 +96,54 @@ impl MarginMonitor {
         } else {
             MarginHealthStatus::Healthy
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbitrageur_core::types::VenueId;
+
+    fn empty_account() -> AccountSnapshot {
+        AccountSnapshot {
+            venue: VenueId("hyperliquid".into()),
+            equity: dec!(0),
+            free_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: vec![],
+            positions: vec![],
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn unfunded_flat_account_is_empty_not_breached() {
+        let m = MarginMonitor::new(MarginMonitorConfig::default());
+        assert_eq!(m.evaluate_account(&empty_account()), MarginHealthStatus::Empty);
+    }
+
+    #[test]
+    fn zero_equity_with_positions_stays_breached() {
+        use arbitrageur_core::position::Position;
+        use arbitrageur_core::types::Side;
+        let m = MarginMonitor::new(MarginMonitorConfig::default());
+        let mut acc = empty_account();
+        acc.positions.push(Position {
+            venue: VenueId("hyperliquid".into()),
+            symbol: "BTC-USDC".into(),
+            side: Side::Buy,
+            quantity: dec!(1),
+            entry_price: dec!(60000),
+            mark_price: dec!(60000),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(5),
+            initial_margin: dec!(12000),
+            maintenance_margin: dec!(6000),
+            updated_at: chrono::Utc::now(),
+        });
+        assert_eq!(m.evaluate_account(&acc), MarginHealthStatus::Breached);
     }
 }

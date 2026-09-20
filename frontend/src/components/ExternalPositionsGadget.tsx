@@ -196,10 +196,10 @@ export const ExternalPositionsGadget: React.FC = () => {
         <div className="flex items-center gap-2 shrink-0">
           <div className="flex gap-1.5" title="Group positions by ticker (net view) or venue (ops view)">
             <button type="button" onClick={() => setGroupBy("ticker")} className={tabCls(groupBy === "ticker")}>
-              By ticker
+              By Ticker
             </button>
             <button type="button" onClick={() => setGroupBy("venue")} className={tabCls(groupBy === "venue")}>
-              By venue
+              By Venue
             </button>
           </div>
           <button

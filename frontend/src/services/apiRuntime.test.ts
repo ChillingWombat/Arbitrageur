@@ -82,6 +82,7 @@ const REGISTERED_NATIVE_COMMANDS = [
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
   "scan_funding_opportunities",
+  "get_funding_trend",
   "scan_prediction_opportunities",
   "run_stat_arb_step",
   "compute_optimal_thresholds",

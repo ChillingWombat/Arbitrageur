@@ -1079,6 +1079,18 @@ CREATE INDEX ix_monitor_signal_events_pair_ts
     ON monitor_signal_events(symbol, buy_venue, sell_venue, ts_ms);
 PRAGMA user_version = 19;
 COMMIT;";
+/// v20 repairs Lighter-family funding history: the venue `/funding-rates`
+/// `rate` is an 8-hour print but was persisted with `interval_hours = 1`,
+/// inflating stored `rate_8h` 8x. Rescale those rows and mark interval 8.
+/// New samples are correct at write time; this is a one-time backfill.
+const MIGRATION_V20_SQL: &str = "\
+BEGIN IMMEDIATE;\
+UPDATE funding_rate_samples\
+SET rate_8h = rate_8h / 8.0, interval_hours = 8\
+WHERE LOWER(venue_id) IN ('lighter', 'robinhood') AND interval_hours = 1;\
+PRAGMA user_version = 20;\
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1587,6 +1599,12 @@ impl StateStore {
         }
         if version <= 18 {
             if let Err(err) = conn.execute_batch(MIGRATION_V19_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 19 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V20_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

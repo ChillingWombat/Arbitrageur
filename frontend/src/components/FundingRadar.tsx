@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
-import type { FundingOpportunityDto, ExecutionLogEntry, OpenPositionDto } from "../types";
+import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto } from "../types";
+import { api } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
@@ -44,10 +45,213 @@ interface CarryDetailModalProps {
   executed: boolean;
   onExecute: (opp: FundingOpportunityDto) => void;
   onClose: () => void;
+  minAprPct?: number;
 }
 
+/** Funding trend for the carry detail popup: per-leg 8h-normalized prints
+ *  (left axis, %/8h) plus ticker mid history (right axis, USD, venue-neutral).
+ *  Dashed green = model-expected net decay from the current print to the
+ *  min-APR exit threshold over the popup's expected hold. Empty series =
+ *  "no history yet" (sampling just started) — current prints above still hold.
+ *  Never interpolates or fabricates: only persisted samples are drawn. */
+const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: number }> = ({
+  opp,
+  minAprPct,
+}) => {
+  const [trend, setTrend] = useState<FundingTrendDto | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setTrend(null);
+    api
+      .getFundingTrend(opp.symbol, opp.long_venue, opp.short_venue, 72)
+      .then((t) => {
+        if (!cancelled) {
+          setTrend(t);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [opp.id, opp.symbol, opp.long_venue, opp.short_venue]);
+
+  const W = 600;
+  const H = 220;
+  const PADL = 52;
+  const PADR = 56;
+  const PADT = 10;
+  const PADB = 20;
+
+  if (loading) {
+    return (
+      <div className="text-xs font-sans text-slate-400 py-6 text-center">
+        Loading funding history…
+      </div>
+    );
+  }
+  const long = (trend?.long_series ?? []).filter((p) => Number.isFinite(p.v));
+  const short = (trend?.short_series ?? []).filter((p) => Number.isFinite(p.v));
+  const price = (trend?.price_series ?? []).filter((p) => Number.isFinite(p.v) && p.v > 0);
+  if (long.length === 0 && short.length === 0) {
+    return (
+      <div className="text-xs font-sans text-slate-400 py-4 text-center">
+        No funding history yet — sampling just started. Current leg prints are shown above.
+      </div>
+    );
+  }
+  const fundVals = [...long.map((p) => p.v), ...short.map((p) => p.v)];
+  // APR = net_8h_frac * 1095 → threshold in %/8h for the min-APR exit line.
+  const thrPct = Number.isFinite(minAprPct) && minAprPct > 0 ? minAprPct / 1095 : 0;
+  const holdH =
+    opp.expected_hold_hours != null &&
+    Number.isFinite(opp.expected_hold_hours) &&
+    opp.expected_hold_hours > 0
+      ? Math.min(opp.expected_hold_hours, 168)
+      : null;
+  const curNet = opp.net_rate_8h_pct;
+  const projVals = holdH != null && Number.isFinite(curNet) ? [curNet, thrPct] : [];
+  const allFund = [...fundVals, thrPct, ...projVals];
+  let fMin = Math.min(...allFund);
+  let fMax = Math.max(...allFund);
+  if (!(fMax > fMin)) {
+    fMax = fMin + 1e-6;
+  }
+  const fPad = (fMax - fMin) * 0.15 || 1e-6;
+  fMin -= fPad;
+  fMax += fPad;
+
+  const nowT = Date.now();
+  const startT = Math.min(long[0]?.t ?? nowT, short[0]?.t ?? nowT);
+  const endHist = Math.max(
+    long.length ? long[long.length - 1].t : startT,
+    short.length ? short[short.length - 1].t : startT,
+  );
+  const projEndT = holdH != null ? nowT + holdH * 3_600_000 : null;
+  const endT = Math.max(endHist, nowT, projEndT ?? 0);
+  const xSpan = Math.max(endT - startT, 1);
+  const xPos = (t: number) => PADL + ((t - startT) / xSpan) * (W - PADL - PADR);
+  const yFund = (v: number) => PADT + (1 - (v - fMin) / (fMax - fMin)) * (H - PADT - PADB);
+
+  let pMin = Infinity;
+  let pMax = -Infinity;
+  for (const pt of price) {
+    if (pt.v < pMin) pMin = pt.v;
+    if (pt.v > pMax) pMax = pt.v;
+  }
+  const hasPrice = price.length > 1 && pMax > pMin;
+  if (!hasPrice) {
+    pMin = 0;
+    pMax = 1;
+  } else {
+    const pp = (pMax - pMin) * 0.1 || 1;
+    pMin -= pp;
+    pMax += pp;
+  }
+  const yPrice = (v: number) => PADT + (1 - (v - pMin) / (pMax - pMin)) * (H - PADT - PADB);
+  const line = (pts: { t: number; v: number }[], y: (v: number) => number) =>
+    pts.map((pt) => `${xPos(pt.t).toFixed(1)},${y(pt.v).toFixed(1)}`).join(" ");
+
+  // Net gap on shared timestamps (both legs minute-bucketed): thin dashed.
+  const shortByT = new Map(short.map((pt) => [pt.t, pt.v]));
+  const netPts = long.flatMap((pt) => {
+    const s = shortByT.get(pt.t);
+    return s == null ? [] : [{ t: pt.t, v: s - pt.v }];
+  });
+  const showProjection = holdH != null && projEndT != null && Number.isFinite(curNet);
+  const fmtT = (t: number) =>
+    new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const mid = trend?.current_mid_usd;
+
+  return (
+    <div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full rounded-lg border border-surface-border bg-surface-raised"
+        role="img"
+        aria-label={`Funding trend for ${opp.symbol}`}
+      >
+        <line x1={PADL} y1={yFund(0)} x2={W - PADR} y2={yFund(0)} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="2 3" />
+        {thrPct > 0 && (
+          <line
+            x1={PADL}
+            y1={yFund(thrPct)}
+            x2={W - PADR}
+            y2={yFund(thrPct)}
+            stroke="#f43f5e"
+            strokeWidth="1"
+            strokeDasharray="3 3"
+            opacity="0.7"
+          />
+        )}
+        {hasPrice && (
+          <polyline points={line(price, yPrice)} fill="none" stroke="#2563eb" strokeWidth="1.5" opacity="0.55" />
+        )}
+        {netPts.length > 1 && (
+          <polyline points={line(netPts, yFund)} fill="none" stroke="#64748b" strokeWidth="1.5" strokeDasharray="5 3" />
+        )}
+        <polyline points={line(long, yFund)} fill="none" stroke="#0d9488" strokeWidth="2" />
+        <polyline points={line(short, yFund)} fill="none" stroke="#ea580c" strokeWidth="2" />
+        {showProjection && (
+          <line
+            x1={xPos(nowT)}
+            y1={yFund(curNet)}
+            x2={xPos(projEndT as number)}
+            y2={yFund(thrPct)}
+            stroke="#16a34a"
+            strokeWidth="2"
+            strokeDasharray="6 4"
+          />
+        )}
+        <circle cx={xPos(nowT)} cy={yFund(curNet)} r="3" fill="#16a34a" />
+        <text x={PADL} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
+          {fmtT(startT)}
+        </text>
+        <text x={W - PADR} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
+          now{holdH != null ? ` → +${holdH.toFixed(1)}h` : ""}
+        </text>
+        <text x={4} y={14} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
+          {`${fMax.toFixed(4)}%`}
+        </text>
+        <text x={4} y={H - PADB} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
+          {`${fMin.toFixed(4)}%`}
+        </text>
+        {hasPrice && (
+          <text x={W - 4} y={14} fontSize="10" fill="#2563eb" fontFamily="Inter, sans-serif" textAnchor="end">
+            {`$${pMax.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+          </text>
+        )}
+      </svg>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] font-sans text-slate-500">
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block w-3 h-0.5 bg-teal-600" /> Long · {opp.long_venue}
+        </span>
+        <span className="inline-flex items-center gap-1">
+          <span className="inline-block w-3 h-0.5 bg-orange-600" /> Short · {opp.short_venue}
+        </span>
+        {netPts.length > 1 && (
+          <span className="inline-flex items-center gap-1">
+            <span className="inline-block w-3 border-t border-dashed border-slate-500" /> Net gap
+          </span>
+        )}
+        {hasPrice && <span className="inline-flex items-center gap-1 text-blue-700">— {opp.symbol} mid</span>}
+        {showProjection && (
+          <span className="inline-flex items-center gap-1 text-green-700">- - expected to min-APR exit</span>
+        )}
+        {mid != null && Number.isFinite(mid) && (
+          <span className="tabular-nums">ref ${mid.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
-  ({ opp, rank, executing, executed, onExecute, onClose }) => {
+  ({ opp, rank, executing, executed, onExecute, onClose, minAprPct = 8.0 }) => {
     // Expected hold (days): backend persistence model when present, else
     // fee breakeven fallback. Projected net subtracts fees AND entry spread
     // so early-exit holds honestly show a signed loss.
@@ -117,6 +321,24 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
               <CarryDetailField label="Long leg" value={opp.long_venue} />
               <CarryDetailField label="Short leg" value={opp.short_venue} />
+              <CarryDetailField
+                label={`Long funding · ${opp.long_venue}`}
+                value={
+                  opp.long_rate_8h_pct != null && Number.isFinite(opp.long_rate_8h_pct)
+                    ? `${opp.long_rate_8h_pct >= 0 ? "+" : ""}${opp.long_rate_8h_pct.toFixed(4)}% / 8h`
+                    : "—"
+                }
+                title="Current funding print of the long leg, 8h-normalized. Spot legs pay none (0)."
+              />
+              <CarryDetailField
+                label={`Short funding · ${opp.short_venue}`}
+                value={
+                  opp.short_rate_8h_pct != null && Number.isFinite(opp.short_rate_8h_pct)
+                    ? `${opp.short_rate_8h_pct >= 0 ? "+" : ""}${opp.short_rate_8h_pct.toFixed(4)}% / 8h`
+                    : "—"
+                }
+                title="Current funding print of the short leg, 8h-normalized."
+              />
               <CarryDetailField
                 label="Net 8h rate"
                 value={`+${opp.net_rate_8h_pct.toFixed(4)}%`}
@@ -206,6 +428,13 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 title="Projected carry over the expected hold at the current 8h rate, net of round-trip fees and entry spread. Negative = expected loss if the gap decays before breakeven."
               />
             </div>
+
+          <div>
+            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5">
+              Funding trend — solid: venue prints (%/8h, left) · blue: {opp.symbol} mid (right) · dashed green: model-expected net to min-APR exit
+            </div>
+            <FundingTrendGraph opp={opp} minAprPct={minAprPct} />
+          </div>
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
@@ -714,6 +943,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             executed={lastExecuted === detailOpp.id}
             onExecute={handleExecute}
             onClose={() => setDetailOppId(null)}
+            minAprPct={minAprPct}
           />
         );
       })()}

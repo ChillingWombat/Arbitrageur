@@ -15,6 +15,7 @@ import type {
   TriangleExecutionParams,
   ConvergenceCheckDto,
   FundingOpportunityDto,
+  FundingTrendDto,
   PredictionOpportunityDto,
   StatArbStepResultDto,
   BertramThresholdDto,
@@ -122,6 +123,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "scan_spot_opportunities",
   "execute_spot_arbitrage",
   "scan_funding_opportunities",
+  "get_funding_trend",
   "scan_prediction_opportunities",
   "run_stat_arb_step",
   "compute_optimal_thresholds",
@@ -544,6 +546,20 @@ export const api = {
     return invokeDesktop("scan_funding_opportunities", {
       symbol: symbolOrSymbols ?? "",
       tradeSizeUsd,
+    });
+  },
+
+  async getFundingTrend(
+    symbol: string,
+    longVenue: string,
+    shortVenue: string,
+    hours: number = 72
+  ): Promise<FundingTrendDto> {
+    return invokeDesktop("get_funding_trend", {
+      symbol,
+      longVenue,
+      shortVenue,
+      hours,
     });
   },
 

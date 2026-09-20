@@ -51,7 +51,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
-                System Setting
+                System Settings
               </h2>
 
             </div>

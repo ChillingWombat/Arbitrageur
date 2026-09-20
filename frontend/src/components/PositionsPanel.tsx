@@ -463,10 +463,10 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           type="button"
           onClick={onOpenSettings}
           className="w-full py-2 px-2 bg-surface hover:bg-slate-50 text-slate-700 hover:text-slate-900 border border-surface-border hover:border-slate-300 rounded-lg text-xs font-sans font-medium transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer active:scale-[0.98]"
-          title="System Setting &amp; Exchange API Keys"
+          title="System Settings &amp; Exchange API Keys"
         >
           <Settings className="w-3.5 h-3.5 text-slate-500" />
-          <span>System Setting</span>
+          <span>System Settings</span>
         </button>
       </div>
 

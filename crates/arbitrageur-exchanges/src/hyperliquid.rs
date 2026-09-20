@@ -465,6 +465,48 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
         let free_margin = (account_value - total_margin_used).max(dec!(0));
 
+        // Perp-only `clearinghouseState` misses funds sitting on the spot side
+        // (a funded wallet then reads $0.00). Best-effort add spot value:
+        // USDC counts at face, other tokens at entry notional (~value).
+        // A spot-read failure keeps perp-only figures (today's behavior).
+        let mut spot_value = dec!(0);
+        match self
+            .post_info(json!({"type": "spotClearinghouseState", "user": user}))
+            .await
+        {
+            Ok(spot) => {
+                if let Some(bals) = spot.get("balances").and_then(|b| b.as_array()) {
+                    for b in bals {
+                        let coin = b.get("coin").and_then(|c| c.as_str()).unwrap_or("");
+                        let num = |key: &str| {
+                            b.get(key)
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| Decimal::from_str(s).ok())
+                                .unwrap_or(dec!(0))
+                        };
+                        let v = if coin.eq_ignore_ascii_case("USDC") {
+                            num("total")
+                        } else {
+                            let ntl = num("entryNtl");
+                            if ntl > dec!(0) {
+                                ntl
+                            } else {
+                                num("total")
+                            }
+                        };
+                        if v > dec!(0) {
+                            spot_value += v;
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("Hyperliquid spot balance read failed for {user}: {e}");
+            }
+        }
+        let account_value = account_value + spot_value;
+        let free_margin = free_margin + spot_value;
+
         let mut positions = Vec::new();
         if let Some(pos_arr) = res.get("assetPositions").and_then(|p| p.as_array()) {
             for p in pos_arr {

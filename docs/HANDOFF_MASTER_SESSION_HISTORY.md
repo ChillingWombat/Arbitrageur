@@ -1358,3 +1358,10 @@ overhaul pass committed as `23d4aed`).
 - **Ask:** wallet addresses and public keys in account cards must always be shown, not hidden behind "(stored — leave blank to keep)".
 - **Fix (`ExchangeAccounts.tsx`, AccountCard only):** new effect auto-fetches every stored non-secret field (walletAddress, accountId, non-secret apiKey) via the existing field-scoped `getAccountCredentialField` IPC while unlocked, so the values render directly in the inputs. Secrets stay masked until the eye toggle; numeric indexes were already prefilled; locked state still shows the placeholder (nothing decryptable). Staged only this hunk — concurrent worker hunks in the same file + margin/hyperliquid streams left untouched.
 - **Verification:** tsc clean, full `npm test` shards 0 fail.
+
+## 47. Session Handoff — 2026-09-20 (Settings save UX + Title Case)
+
+- **Asks:** drop the saved-success banner; `Save Configuration`→`Save Changes` fixed-width with transient `Succeed!`; `System Setting`→`System Settings`; Title-Case audit of all buttons; commit/push + spec/handoff.
+- **Changed (`EngineSettings.tsx`):** deleted both saved banners; submit button is `w-36 justify-center`, states `Save Changes` / `Saving...` / `Succeed!` (existing 3s `saved` reset drives the transient text).
+- **Renames:** `SettingsModal` title, `PositionsPanel` entry button + tooltip, `TickerExplorer` entry → `System Settings`.
+- **Title Case:** `Halt Trading` (monitor + risk ops incl. tooltips), `By Ticker` / `By Venue`, `Via Wallet`. Rest already compliant.

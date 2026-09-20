@@ -405,6 +405,29 @@ export interface FundingOpportunityDto {
   hold_reason?: string;
   /** Heuristic hold confidence 0..1. */
   hold_confidence?: number;
+  /** Current funding print of the LONG leg, 8h-normalized percent.
+   *  Basis opps: long leg is spot (pays none) so 0. Absent on stale backends. */
+  long_rate_8h_pct?: number;
+  /** Current funding print of the SHORT leg, 8h-normalized percent.
+   *  Absent on stale backends. */
+  short_rate_8h_pct?: number;
+}
+
+export interface FundingTrendPointDto {
+  t: number;
+  v: number;
+}
+
+export interface FundingTrendDto {
+  symbol: string;
+  long_venue: string;
+  short_venue: string;
+  /** Per-leg 8h-normalized funding history (percent), ascending by time. */
+  long_series: FundingTrendPointDto[];
+  short_series: FundingTrendPointDto[];
+  /** Ticker mid-price history (USD), ascending by time. */
+  price_series: FundingTrendPointDto[];
+  current_mid_usd?: number;
 }
 
 export interface PredictionOpportunityDto {

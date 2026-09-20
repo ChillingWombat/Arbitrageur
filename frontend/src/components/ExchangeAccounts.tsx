@@ -418,7 +418,7 @@ export const VenueBalancePanel: React.FC<{
         </div>
       )}
 
-      {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && (
+      {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && bal?.status !== "EMPTY" && (
         <div className="p-2.5 bg-warn-dim border border-warn-border rounded-lg text-xs font-mono text-warn flex items-start space-x-2">
           <AlertTriangle className="w-3.5 h-3.5 text-warn shrink-0 mt-0.5" />
           <span>{bal.recommended_action}</span>

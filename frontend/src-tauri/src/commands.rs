@@ -189,6 +189,16 @@ pub struct FundingOpportunityDto {
     /// is missing/thin. Informational: describes cost shape, never sizes.
     #[serde(default)]
     pub depth_slope_bps_per_1k: Option<f64>,
+    /// Current funding print of the LONG leg, 8h-normalized percent
+    /// (rate / interval_hours * 8 * 100). For basis opps the long leg is
+    /// spot, which pays no funding, so this is `Some(0.0)`. `None` on stale
+    /// backends that predate the field.
+    #[serde(default)]
+    pub long_rate_8h_pct: Option<f64>,
+    /// Current funding print of the SHORT leg, 8h-normalized percent.
+    /// `None` on stale backends that predate the field.
+    #[serde(default)]
+    pub short_rate_8h_pct: Option<f64>,
 }
 
 fn default_funding_opp_kind() -> String {
@@ -2261,6 +2271,12 @@ pub async fn execute_triangle_arbitrage_impl(
     }
     let margin_monitor = margin_monitor_from_settings(state);
     match margin_monitor.evaluate_account(&pre_acc) {
+        MarginHealthStatus::Empty => {
+            return Err(format!(
+                "Paper account {} has no funds; execution refused",
+                params.venue
+            ));
+        }
         MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
             return Err(format!(
                 "Paper account {} margin status is critical/breached; execution refused",
@@ -2497,6 +2513,29 @@ pub async fn execute_triangle_arbitrage_impl(
 /// Venue orderbook pair (bids, asks) keyed by venue id.
 type PerpBooks = std::collections::HashMap<String, (Vec<(f64, f64)>, Vec<(f64, f64)>)>;
 
+/// 8h-normalized funding print (percent) for one leg of a scan pair.
+///
+/// Matches the scan `rates` row by venue id string and normalizes
+/// `rate / interval_hours * 8 * 100`. `None` when the venue has no print
+/// or the value is not finite — callers render "—", never fabricate.
+fn scan_leg_rate_8h_pct(
+    rates: &[(
+        &'static str,
+        &'static str,
+        arbitrageur_core::quote::FundingRate,
+    )],
+    venue: &str,
+) -> Option<f64> {
+    rates
+        .iter()
+        .find(|(_, _, r)| r.venue.as_str() == venue)
+        .and_then(|(_, _, r)| {
+            let v: f64 = r.rate.to_string().parse().ok()?;
+            let pct = v / f64::from(r.interval_hours.max(1)) * 8.0 * 100.0;
+            pct.is_finite().then_some(pct)
+        })
+}
+
 async fn scan_funding_opportunities_for_symbol(
     symbol: &str,
     size_dec: Decimal,
@@ -2712,6 +2751,9 @@ async fn scan_funding_opportunities_for_symbol(
                         slope,
                     )
                 };
+                // Per-leg prints for the detail popup (before `opp` moves).
+                let long_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.long_venue);
+                let short_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.short_venue);
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -2754,6 +2796,8 @@ async fn scan_funding_opportunities_for_symbol(
                     optimal_size_usd: depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
                     entry_spread_bps: depth.map(|(_, e)| e).unwrap_or(-1.0),
                     depth_slope_bps_per_1k: slope,
+                    long_rate_8h_pct: long_leg_rate,
+                    short_rate_8h_pct: short_leg_rate,
                     kind: "carry".to_string(),
                     basis_bps: None,
                     spot_price: None,
@@ -3051,6 +3095,17 @@ async fn scan_funding_opportunities_for_symbol(
                             None
                         },
                         depth_slope_bps_per_1k: slope,
+                        // Long leg is spot: pays no funding.
+                        long_rate_8h_pct: Some(0.0),
+                        short_rate_8h_pct: {
+                            let v: f64 =
+                                funding_rate.rate.to_string().parse().unwrap_or(f64::NAN);
+                            let pct = v
+                                / f64::from(funding_rate.interval_hours.max(1))
+                                * 8.0
+                                * 100.0;
+                            pct.is_finite().then_some(pct)
+                        },
                         // Informational only: positive entry basis is an
                         // expected exit tailwind (convergence), and a
                         // positive predicted perp rate confirms the carry.
@@ -3074,6 +3129,119 @@ async fn scan_funding_opportunities_for_symbol(
     }
 
     opps
+}
+
+/// One sampled point: `t` is unix millis, `v` is the value.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FundingTrendPoint {
+    pub t: i64,
+    pub v: f64,
+}
+
+/// Trend substrate for the funding-carry detail popup: per-leg 8h-normalized
+/// funding history (percent), ticker mid-price history (USD), and the latest
+/// live mid for the caption. All series ascending by time, downsampled to a
+/// few hundred points. Empty series mean "no history yet" — clients render
+/// the current prints only and must never interpolate fabrications.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FundingTrendDto {
+    pub symbol: String,
+    pub long_venue: String,
+    pub short_venue: String,
+    pub long_series: Vec<FundingTrendPoint>,
+    pub short_series: Vec<FundingTrendPoint>,
+    pub price_series: Vec<FundingTrendPoint>,
+    pub current_mid_usd: Option<f64>,
+}
+
+/// Downsample an ascending `(ts, value)` series to at most `max` points by
+/// uniform stride. Keeps the last point so the line always reaches "now".
+fn downsample_series(series: &[(i64, f64)], max: usize) -> Vec<FundingTrendPoint> {
+    let mut pts: Vec<FundingTrendPoint> = series
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .map(|(t, v)| FundingTrendPoint { t: *t, v: *v })
+        .collect();
+    if pts.len() > max && max >= 2 {
+        let stride = pts.len().div_ceil(max);
+        let mut thin: Vec<FundingTrendPoint> =
+            pts.into_iter().step_by(stride).collect();
+        if thin.len() > max {
+            thin.truncate(max);
+        }
+        pts = thin;
+    }
+    pts
+}
+
+/// Bare venue id for history lookups: basis opps label legs
+/// `"<venue> SPOT"` / `"<venue> PERP"` — history is keyed by venue.
+fn trend_bare_venue(leg: &str) -> &str {
+    leg.split_whitespace().next().unwrap_or(leg)
+}
+
+pub async fn get_funding_trend_impl(
+    symbol: &str,
+    long_venue: &str,
+    short_venue: &str,
+    hours: Option<f64>,
+    state: &AppEngineState,
+) -> Result<FundingTrendDto, String> {
+    let window_h = hours
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .unwrap_or(72.0)
+        .clamp(1.0, 24.0 * 7.0);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let from_ms = now_ms.saturating_sub((window_h * 3_600_000.0) as i64);
+    let long_v = trend_bare_venue(long_venue);
+    let short_v = trend_bare_venue(short_venue);
+    const MAX_PTS: usize = 240;
+
+    let map_funding = |venue: &str| -> Vec<(i64, f64)> {
+        state
+            .state_store
+            .funding_rate_series(venue, symbol, from_ms, now_ms)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(ts, r8h, _)| {
+                let pct = r8h * 100.0;
+                (ts >= 0 && pct.is_finite()).then_some((ts, pct))
+            })
+            .collect()
+    };
+    let long_hist = map_funding(long_v);
+    let short_hist = map_funding(short_v);
+
+    // Ticker mid history: mean mid per minute bucket across venues so the
+    // price overlay is venue-neutral. Bounded for payload size.
+    let mut buckets: HashMap<i64, (f64, u32)> = HashMap::new();
+    if let Ok(samples) = state.state_store.spread_samples(symbol, from_ms, now_ms) {
+        for s in samples {
+            if !s.mid.is_finite() || s.mid <= 0.0 || s.ts_ms < 0 {
+                continue;
+            }
+            let b = s.ts_ms / 60_000 * 60_000;
+            let e = buckets.entry(b).or_insert((0.0, 0));
+            e.0 += s.mid;
+            e.1 += 1;
+        }
+    }
+    let mut price_hist: Vec<(i64, f64)> = buckets
+        .into_iter()
+        .map(|(b, (sum, n))| (b, sum / f64::from(n.max(1))))
+        .collect();
+    price_hist.sort_by_key(|(t, _)| *t);
+    let current_mid_usd = price_hist.last().map(|(_, m)| *m);
+
+    Ok(FundingTrendDto {
+        symbol: symbol.to_string(),
+        long_venue: long_venue.to_string(),
+        short_venue: short_venue.to_string(),
+        long_series: downsample_series(&long_hist, MAX_PTS),
+        short_series: downsample_series(&short_hist, MAX_PTS),
+        price_series: downsample_series(&price_hist, MAX_PTS),
+        current_mid_usd,
+    })
 }
 
 pub async fn scan_funding_opportunities_batch_impl(
@@ -3818,6 +3986,12 @@ async fn execute_spatial_arbitrage_inner(
     };
     for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
         match margin_monitor.evaluate_account(acc) {
+            MarginHealthStatus::Empty => {
+                return Err(format!(
+                    "Account {} has no funds; execution refused",
+                    vname
+                ));
+            }
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
                 return Err(format!(
                     "Account {} margin status is critical/breached; execution refused",
@@ -4797,6 +4971,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     };
 
     let severity = |s: MarginHealthStatus| match s {
+        MarginHealthStatus::Empty => -1,
         MarginHealthStatus::Healthy => 0,
         MarginHealthStatus::Warning => 1,
         MarginHealthStatus::Critical => 2,
@@ -4836,7 +5011,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             MarginHealthStatus::Breached => "BREACHED",
             MarginHealthStatus::Critical => "CRITICAL",
             MarginHealthStatus::Warning => "WARNING",
-            MarginHealthStatus::Healthy => {
+            MarginHealthStatus::Empty | MarginHealthStatus::Healthy => {
                 if min_liq_dist_pct.is_none() {
                     "UNKNOWN_LIQUIDATION"
                 } else {
@@ -6729,6 +6904,19 @@ pub async fn scan_funding_opportunities(
     }
     let sym = symbol.unwrap_or_default();
     scan_funding_opportunities_impl(&sym, trade_size_usd, &state).await
+}
+
+/// Trend substrate for the funding-carry detail popup (per-leg funding
+/// history + ticker mid history). Read-only over the persisted samples.
+#[tauri::command]
+pub async fn get_funding_trend(
+    symbol: String,
+    long_venue: String,
+    short_venue: String,
+    hours: Option<f64>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<FundingTrendDto, String> {
+    get_funding_trend_impl(&symbol, &long_venue, &short_venue, hours, &state).await
 }
 
 #[tauri::command]
@@ -9171,6 +9359,13 @@ pub async fn get_venue_balances_impl(
                             "LOW_MARGIN".to_string(),
                             Some(format!("Warning: {} margin utilization elevated.", name)),
                         ),
+                        MarginHealthStatus::Empty => (
+                            "EMPTY".to_string(),
+                            Some(format!(
+                                "No funds on {} — deposit to enable trading on this venue.",
+                                name
+                            )),
+                        ),
                         MarginHealthStatus::Critical | MarginHealthStatus::Breached => (
                             "DEPLETED".to_string(),
                             Some(format!(
@@ -9262,6 +9457,13 @@ pub async fn get_venue_balances_impl(
             MarginHealthStatus::Warning => (
                 "LOW_MARGIN".to_string(),
                 Some(format!("Warning: {} margin utilization elevated.", name)),
+            ),
+            MarginHealthStatus::Empty => (
+                "EMPTY".to_string(),
+                Some(format!(
+                    "No funds on {} — deposit to enable trading on this venue.",
+                    name
+                )),
             ),
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => (
                 "DEPLETED".to_string(),
@@ -10588,6 +10790,48 @@ mod tests {
             .expect("scan should succeed");
         // Zero synthetic data: unconfigured state returns empty
         assert_eq!(opps.len(), 0);
+    }
+
+    #[test]
+    fn scan_leg_rate_8h_pct_normalizes_by_interval() {
+        use arbitrageur_core::quote::FundingRate;
+        use chrono::Utc;
+        let now = Utc::now();
+        // Lighter post-fix: raw -0.0336% is an 8h print (interval 8).
+        let r_lighter = FundingRate {
+            venue: "lighter".into(),
+            symbol: "LINK-USDC".into(),
+            rate: "-0.000336".parse().unwrap(),
+            predicted_rate: None,
+            interval_hours: 8,
+            next_funding_time: now,
+            timestamp: now,
+        };
+        // Hyperliquid: hourly print.
+        let r_hl = FundingRate {
+            venue: "hyperliquid".into(),
+            symbol: "LINK-USDC".into(),
+            rate: "0.0000125".parse().unwrap(),
+            predicted_rate: None,
+            interval_hours: 1,
+            next_funding_time: now,
+            timestamp: now,
+        };
+        let rates = vec![("lighter", "Lighter", r_lighter), ("hyperliquid", "Hyperliquid", r_hl)];
+        let long_pct = scan_leg_rate_8h_pct(&rates, "lighter").expect("long leg print");
+        let short_pct = scan_leg_rate_8h_pct(&rates, "hyperliquid").expect("short leg print");
+        // -0.0336%/8*8 = -0.0336%; 0.00125%*8 = +0.01%.
+        assert!((long_pct + 0.0336).abs() < 1e-9, "long pct: {long_pct}");
+        assert!((short_pct - 0.01).abs() < 1e-9, "short pct: {short_pct}");
+        assert!(scan_leg_rate_8h_pct(&rates, "unknown-venue").is_none());
+        // Basis legs resolve through the bare venue id.
+        assert_eq!(trend_bare_venue("hyperliquid SPOT"), "hyperliquid");
+        assert_eq!(trend_bare_venue("lighter"), "lighter");
+        // Downsampling keeps the shape bounded and reaches the last point.
+        let series: Vec<(i64, f64)> = (0..500).map(|i| (i, i as f64)).collect();
+        let thin = downsample_series(&series, 240);
+        assert!(thin.len() <= 240);
+        assert_eq!(thin.last().unwrap().t, 499);
     }
 
     #[test]

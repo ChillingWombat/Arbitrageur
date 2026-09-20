@@ -431,7 +431,7 @@ pub struct VenueBalanceInfo {
     pub available_margin_usd: f64,
     #[serde(default)]
     pub margin_rate_pct: f64,
-    pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED"
+    pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED", "EMPTY"
     pub recommended_action: Option<String>,
     #[serde(default)]
     pub is_live: bool,

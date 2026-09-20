@@ -49,9 +49,9 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
             <button
               onClick={onTriggerKillswitch}
               className="px-2 py-2 bg-loss-dim hover:bg-loss-dim/80 text-loss border border-loss-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
-              title="Halt trading — trip the circuit breaker"
+              title="Halt Trading — Trip the Circuit Breaker"
             >
-              <span>Halt trading</span>
+              <span>Halt Trading</span>
             </button>
           )}
         </div>

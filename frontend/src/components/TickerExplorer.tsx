@@ -709,7 +709,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                   className="mt-2 inline-flex items-center space-x-1.5 px-2 py-2 text-xs bg-accent text-white rounded-lg font-medium hover:bg-accent-hover transition cursor-pointer shadow-2xs"
                 >
                   <Settings className="w-3.5 h-3.5" />
-                  <span>Open System Setting</span>
+                  <span>Open System Settings</span>
                 </button>
               )}
             </EmptyState>

@@ -678,6 +678,30 @@ impl ExchangeAdapter for PopDexAdapter {
         "PopDEX"
     }
 
+    async fn ping(&self) -> anyhow::Result<()> {
+        // Cheap single-shot probe (one tickers page). The default ping runs
+        // the full market scan (paginated tickers + per-symbol fees), which
+        // is too heavy/slow to ever report latency, so the Exchanges tab
+        // showed a balance but no ms for PopDEX. Bypass the rate limiter
+        // and any cache: nonce forces origin so RTT is honest.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let url = format!(
+            "{}/api/v1/public/market/tickers?category=Futures&limit=1&cb={}",
+            self.rest_base(),
+            nonce
+        );
+        let resp = self.client.get(&url).send().await.map_err(|e| {
+            anyhow::anyhow!("PopDEX ping transport error: {e}")
+        })?;
+        if !resp.status().is_success() {
+            anyhow::bail!("PopDEX ping failed: {}", resp.status());
+        }
+        Ok(())
+    }
+
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let tickers = self.fetch_all_tickers().await?;
         if tickers.is_empty() {

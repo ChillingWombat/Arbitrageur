@@ -691,7 +691,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   };
 
   /** Reloads everything an account-level save affects so the card's own
-   *  Save Account button is sufficient — no overall Save Configuration needed:
+   *  Save Account button is sufficient — no overall Save Changes needed:
    *  account lists, venue credential-presence, balances, and live statuses. */
   const handleAccountsChanged = () => {
     setAccountsEpoch((e) => e + 1);
@@ -1067,7 +1067,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                                   : "text-slate-300 opacity-0 group-hover:opacity-100 hover:text-amber-400"
                               }`}
                             >
-                              <Star className={`w-3.5 h-3.5 ${favoriteExchanges.includes(ex.id) ? "fill-amber-500" : ""}`} />
+                              <Star className={`w-2.5 h-2.5 ${favoriteExchanges.includes(ex.id) ? "fill-amber-500" : ""}`} />
                             </span>
                           </div>
                         </div>
@@ -1123,12 +1123,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </div>
                 )}
 
-                {saved && (
-                  <div className="p-4 bg-profit-dim border border-profit-border text-profit rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
-                    <CheckCircle2 className="w-4 h-4 shrink-0" />
-                    <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
-                  </div>
-                )}
 
                 {/* Non-blocking Vault Locked Banner */}
                 {isVaultLocked && api.isTauri && (
@@ -1260,12 +1254,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 </div>
               )}
 
-              {saved && (
-                <div className="p-4 bg-profit-dim border border-profit-border text-profit rounded-xl text-xs font-mono flex items-center space-x-2 animate-in fade-in duration-200">
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                  <span>Configuration saved successfully and updated in live atomic execution coordinator.</span>
-                </div>
-              )}
 
         {/* =================================================================== */}
         {/* SECTION 3: EXECUTION MODES & WARM-UP                               */}
@@ -1731,17 +1719,17 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="submit"
             disabled={loading || saving}
-            className="btn-accent font-mono font-medium flex items-center space-x-2 disabled:opacity-50"
+            className="btn-accent font-mono font-medium flex items-center justify-center space-x-2 disabled:opacity-50 w-36"
           >
             {saving ? (
               <span>Saving...</span>
             ) : saved ? (
               <>
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Saved to Engine</span>
+                <span>Succeed!</span>
               </>
             ) : (
-              <span>Save Configuration</span>
+              <span>Save Changes</span>
             )}
           </button>
         </div>

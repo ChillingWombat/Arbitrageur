@@ -146,7 +146,7 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
               className={`${routeBtnBase} ${!viaDirect ? "bg-accent-dim text-accent border-accent-line/60" : "bg-surface text-slate-500 border-surface-border"}`}
               title="Withdraw to your wallet, then deposit"
             >
-              Via wallet
+              Via Wallet
             </button>
           </div>
         </div>
