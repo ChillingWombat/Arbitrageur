@@ -12,11 +12,13 @@ const leg = (filledQty: number): SignalLegDto => ({
   accountId: null,
   venue: "hyperliquid",
   side: "long",
+      symbol: "BTC-USD",
   intendedQty: 1,
   filledQty,
   fillPrice: 100,
   feeUsd: 0.5,
   venueOrderId: null,
+      clientOrderId: null,
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 });

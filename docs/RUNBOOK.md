@@ -114,3 +114,23 @@ This document captures the failure modes, production bugs identified during the 
 | **Circuit Breaker Tripped** | All new orders halted, process stays active | Inspect logs for root cause; once resolved, run reset. |
 | **Margin Warning (< 15%)** | Warning logged, opening trades restricted | Transfer collateral to the margin-deficient exchange. |
 | **HTTP 429 Rate Limit** | Request coordinator enforces exponential backoff | Lower poll frequency in config to increase interval. |
+| **Signal `unresolved` / `imbalanced`** | Reconciliation supervisor polls every 5 s; stale working orders get a bounded cancel (3 attempts); entries stay blocked on the ticker | The radar page shows a red attention strip listing each escalated signal with its note. Verify positions at both venues, then use **Reconcile Orders Now** (Portfolio monitor) to force a fresh poll pass. If the venue confirms the order closed but the ledger disagrees, resolve manually and check logs for the identity-mismatch reason. |
+| **Residual one-sided exposure (imbalanced entry)** | With `auto_resolve_residual_exposure` enabled (off by default, Engine settings), the supervisor submits reduce-only market orders for the uncovered residual as `flat-{parent}-*` child signals, then reconciles them to terminal state; bounded to 3 attempts | If auto-resolve is off or attempts are exhausted, the signal stays `unresolved`/`imbalanced` — flatten the residual manually at the venue, then run **Reconcile Orders Now**. |
+
+### 2.3 Order Reconciliation
+
+The desktop app runs a reconciliation supervisor (`reconcile_pending_orders`)
+that executes an immediate pass at startup — restart recovery for orders
+accepted before shutdown — and then every 5 seconds. Each pass polls every
+persisted nonterminal leg via the venue's `fetch_order`, identity-checks the
+response (venue + symbol + order id), applies fills/fees monotonically, and
+derives the signal status:
+
+- all legs filled → `balanced` (entry) or `closed` (close family)
+- all legs ended empty → `failed` (entry only — nothing executed)
+- filled leg beside an empty leg → `imbalanced` (residual exposure, ticker stays blocked)
+- anything unproven past 15 minutes → `unresolved` (keeps polling; later passes can still resolve)
+
+Synthetic paper order ids (`sim-%`) are excluded from venue polling. An
+operator can force an immediate pass via **Reconcile Orders Now** on the
+Portfolio monitor (command `reconcile_orders_now`, returns a poll summary).

@@ -1349,23 +1349,53 @@ const OpportunityRadarInner: React.FC = () => {
             operator review — exposure may be open
           </div>
           {attentionSignals.slice(0, 5).map((s) => (
-            <div key={s.id} className="flex items-center gap-2 text-[11px] font-mono">
-              <span
-                className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${
-                  s.status === "imbalanced"
-                    ? "bg-loss/15 text-loss border-loss-border"
-                    : "bg-warn-dim text-warn border-warn-border"
-                }`}
-              >
-                {s.status}
-              </span>
-              <span className="text-slate-700 font-bold">{s.symbol}</span>
-              <span className="text-slate-400">{s.id}</span>
-              {s.note && (
-                <span className="text-slate-500 truncate max-w-md" title={s.note}>
-                  {s.note}
+            <div key={s.id} className="space-y-0.5">
+              <div className="flex items-center gap-2 text-[11px] font-mono">
+                <span
+                  className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${
+                    s.status === "imbalanced"
+                      ? "bg-loss/15 text-loss border-loss-border"
+                      : "bg-warn-dim text-warn border-warn-border"
+                  }`}
+                >
+                  {s.status}
                 </span>
-              )}
+                <span className="text-slate-700 font-bold">{s.symbol}</span>
+                <span className="text-slate-400">{s.id}</span>
+                {s.note && (
+                  <span className="text-slate-500 truncate max-w-md" title={s.note}>
+                    {s.note}
+                  </span>
+                )}
+              </div>
+              {s.legs
+                .filter((l) => l.venueOrderId && l.filledQty < l.intendedQty)
+                .map((l) => (
+                  <div key={l.id} className="flex items-center gap-2 pl-4 text-[10px] font-mono">
+                    <span className="text-slate-500">
+                      {l.venue} {l.side} {l.filledQty}/{l.intendedQty} · order {l.venueOrderId}
+                    </span>
+                    <button
+                      className="px-1.5 py-0.5 rounded border border-warn-border text-warn hover:bg-warn-dim transition cursor-pointer"
+                      title="Send a venue cancel for this order, then re-poll — risk-reducing only"
+                      onClick={async () => {
+                        try {
+                          await api.cancelVenueOrder(
+                            l.venue,
+                            l.symbol,
+                            l.venueOrderId as string,
+                            l.clientOrderId ?? undefined,
+                          );
+                          await api.reconcileOrdersNow();
+                        } catch (e) {
+                          console.error("Cancel venue order failed:", e);
+                        }
+                      }}
+                    >
+                      cancel order
+                    </button>
+                  </div>
+                ))}
             </div>
           ))}
           {attentionSignals.length > 5 && (

@@ -876,11 +876,15 @@ export interface SignalLegDto {
   accountId: string | null;
   venue: string;
   side: "long" | "short";
+  /** Exact per-leg execution symbol (funding legs can diverge from the
+   *  signal root); backfilled from the root for pre-v22 rows. */
+  symbol: string;
   intendedQty: number;
   filledQty: number;
   fillPrice: number | null;
   feeUsd: number;
   venueOrderId: string | null;
+  clientOrderId: string | null;
   createdAt: string;
   updatedAt: string;
 }

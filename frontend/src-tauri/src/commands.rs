@@ -8444,6 +8444,55 @@ pub async fn reconcile_orders_now(
     Ok(crate::reconciliation::reconcile_pending_orders(&state).await)
 }
 
+/// Operator-initiated cancel of one persisted venue order. Cancelling is
+/// risk-reducing (it can only remove resting exposure), so it is allowed in
+/// live mode even while new strategy entries stay blocked — but the vault
+/// must be unlocked so the venue call is actually authenticated.
+#[tauri::command]
+pub async fn cancel_venue_order(
+    venue: String,
+    symbol: String,
+    order_id: String,
+    client_order_id: Option<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
+    if *state.is_live_mode.read() && !state.vault.write().is_unlocked() {
+        return Err(
+            "Cannot cancel a venue order in Live Trading mode while the secure credential vault is locked. Unlock the vault first."
+                .into(),
+        );
+    }
+    let venue = venue.trim().to_lowercase();
+    let symbol = symbol.trim().to_string();
+    let order_id = order_id.trim().to_string();
+    if venue.is_empty() || symbol.is_empty() || order_id.is_empty() {
+        return Err("venue, symbol, and order_id are required".into());
+    }
+    let adapter = state
+        .get_adapter(&venue)
+        .ok_or_else(|| format!("Venue '{venue}' is not admitted for execution"))?;
+    if !adapter.live_order_submission_implemented() || !adapter.has_live_credentials() {
+        return Err(format!(
+            "Venue '{venue}' does not support live order cancellation or has unauthenticated credentials"
+        ));
+    }
+    let client_order_id = client_order_id
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    adapter
+        .cancel_order(arbitrageur_core::order::CancelRequest {
+            venue: adapter.venue_id(),
+            symbol: symbol.clone(),
+            order_id: Some(order_id.clone()),
+            client_order_id,
+        })
+        .await
+        .map_err(|e| format!("Cancel on {venue} for order {order_id} failed: {e}"))?;
+    Ok(format!(
+        "Cancel request accepted on {venue} for order {order_id}"
+    ))
+}
+
 #[tauri::command]
 pub async fn get_engine_settings(
     state: State<'_, Arc<AppEngineState>>,

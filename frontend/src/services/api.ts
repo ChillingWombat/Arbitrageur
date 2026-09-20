@@ -153,6 +153,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "set_live_mode",
   "set_engine_paused",
   "reconcile_orders_now",
+  "cancel_venue_order",
   "get_engine_settings",
   "save_engine_settings",
   "get_ticker_strategy_config",
@@ -704,6 +705,20 @@ export const api = {
 
   async reconcileOrdersNow(): Promise<ReconcileSummaryDto> {
     return invokeDesktop<ReconcileSummaryDto>("reconcile_orders_now");
+  },
+
+  async cancelVenueOrder(
+    venue: string,
+    symbol: string,
+    orderId: string,
+    clientOrderId?: string,
+  ): Promise<string> {
+    return invokeDesktop<string>("cancel_venue_order", {
+      venue,
+      symbol,
+      orderId,
+      clientOrderId,
+    });
   },
 
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
