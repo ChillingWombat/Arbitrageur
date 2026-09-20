@@ -1561,3 +1561,9 @@ overhaul pass committed as `23d4aed`).
 - **Ask (screenshot):** BCH-USDC card Win 41% vs Expected −$2 — "why is winning probability greater than 0?"
 - **Answer verified against the card's own math:** consistent, not contradictory. Fees ≈ $17.75, modelled hold ≈ 18.5h, decayed accrual ≈ $15.75 → Expected −$2; coverage 0.887 → p ≈ 47% ×0.9 predicted-disagree ≈ 41%. 41% means "41% odds the trade covers its costs" — i.e. more likely to lose than win, agreeing in sign with −$2 (guaranteed since §66: p ≥ 0.5 ⟺ Expected ≥ 0). Never 0% because the clamp floor is 2% — even bad trades have nonzero odds.
 - **Shipped:** sub-50% Win renders loss-red (≥50% unchanged slate), tooltip rewritten. Committed `ed401f7`, pushed; app relaunched clean. Worker files untouched.
+
+## 70. Session Handoff — 2026-09-20 (Win → Breakeven probability rename)
+
+- **Ask:** (1) rename winning probability to Breakeven %; (2) do we have P(hitting a target net profit)? (3) is Expected computed correctly — shouldn't it be net × P(win) like the spread monitor?
+- **Findings:** spread Expected IS probability-weighted — per book level Σ take×(p×dev − friction) with p from a measured per-level win-rate curve (`CapacityTier`, `None` when unverifiable). Funding has no such curve, so its Expected is the net along the expected (least-squares-trend) gap path — a conditional expectation under the stated model, not p×G−(1−p)×L. Multiplying by p would double-discount (the decay path already encodes expected persistence) and stack heuristic on heuristic. Neither monitor has P(PnL ≥ $X target).
+- **Shipped:** funding gadget display strings Win→Breakeven (card `Breakeven:`, modal `Breakeven probability`, filter `Min Breakeven`; field names untouched). Backend field docs already describe the sign agreement. Committed `7d03a65`, pushed; app relaunched clean. Worker files untouched.
