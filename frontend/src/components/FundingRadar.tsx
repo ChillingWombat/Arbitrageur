@@ -702,7 +702,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       out = out.filter((o) => ((o.win_probability ?? -Infinity) * 100) >= mp);
     return out;
   }, [opportunities, venueFilters, minExpBps, minWinPct]);
-  const filtersActive = venueFilters.length > 0 || minExpBps !== "" || minWinPct !== "";
   const clearFilters = () => {
     setVenueFilters([]);
     minExpTouched.current = false;
@@ -842,11 +841,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             Opportunity Scanner
           </h3>
           <div className="flex items-center gap-2 text-xs font-sans">
-            {filtersActive && (
-              <span className="text-slate-400 font-mono tabular-nums">
-                {filteredOpps.length}/{opportunities.length}
-              </span>
-            )}
             <div className="relative" ref={venueMenuRef}>
               <button
                 type="button"
@@ -941,16 +935,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               />
               <span className="text-slate-400 text-[11px] font-medium">%</span>
             </div>
-            {filtersActive && (
-              <button
-                type="button"
-                onClick={clearFilters}
-                className="text-slate-400 hover:text-slate-700 font-mono text-[11px] underline underline-offset-2 cursor-pointer"
-                title="Clear all scanner filters"
-              >
-                Clear
-              </button>
-            )}
           </div>
         </div>
 
