@@ -658,7 +658,18 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // multi-select, min net 8h edge (BPS), min win probability (%). None of
   // these reach the engine — execution and the auto loop use the full list.
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
-  const [minExpBps, setMinExpBps] = useState("");
+  // Default mirrors the auto-carry bot's entry hurdle (Min APR %) converted
+  // to 8h BPS: APR/100/365/3*10000 — the same 365d×3 convention the backend
+  // uses both ways. Tracks the live minAprPct until the user overrides it.
+  // Min Win has no bot-side gate (win probability never gates execution),
+  // so it defaults to off.
+  const aprToBps8h = (aprPct: number) =>
+    Number.isFinite(aprPct) && aprPct > 0 ? String((aprPct * 10000) / 100 / 365 / 3) : "";
+  const [minExpBps, setMinExpBps] = useState(() => aprToBps8h(minAprPct));
+  const minExpTouched = useRef(false);
+  useEffect(() => {
+    if (!minExpTouched.current) setMinExpBps(aprToBps8h(minAprPct));
+  }, [minAprPct]);
   const [minWinPct, setMinWinPct] = useState("");
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
@@ -690,7 +701,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   const filtersActive = venueFilters.length > 0 || minExpBps !== "" || minWinPct !== "";
   const clearFilters = () => {
     setVenueFilters([]);
-    setMinExpBps("");
+    minExpTouched.current = false;
+    setMinExpBps(aprToBps8h(minAprPct));
     setMinWinPct("");
   };
   const fundingPositions = useMemo(
@@ -898,12 +910,15 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-              title="Display filter — minimum net 8h funding edge. Does not affect execution"
+              title="Display filter — minimum net 8h funding edge. Defaults to the bot's Min APR hurdle (converted to BPS). Does not affect execution"
             >
               <span className="text-slate-400 font-medium">Min Exp</span>
               <input
                 value={minExpBps}
-                onChange={(e) => setMinExpBps(e.target.value)}
+                onChange={(e) => {
+                  minExpTouched.current = true;
+                  setMinExpBps(e.target.value);
+                }}
                 placeholder="0"
                 className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
               />
@@ -911,7 +926,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-              title="Display filter — minimum win probability. Does not affect execution"
+              title="Display filter — minimum win probability. The bot does not gate on win probability, so this defaults to off. Does not affect execution"
             >
               <span className="text-slate-400 font-medium">Min Win</span>
               <input
