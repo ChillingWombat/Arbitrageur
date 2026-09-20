@@ -1,5 +1,7 @@
 # Arbitrageur System Specification (merged)
-> Merged 2026-09-19 from the five SPEC_*.md files. One spec, five parts — newest decisions win on conflict. Per-part status reflects the live tree; the session handoff log (`docs/HANDOFF_MASTER_SESSION_HISTORY.md`) is the day-to-day record.
+> Merged 2026-09-19 from the five SPEC_*.md files.
+>
+> Session 40 (2026-09-20): Safety settings are now operator-controllable (System Setting → Safety tab: circuit-breaker halt limits, DeltaGuard exposure cap, margin thresholds; live-applied + kv-persisted). Breaker baseline re-anchors on paper↔live switches / paper resets instead of false-tripping (fixes recurring -$196k flat-book halt). Portfolio Monitor is the single reset control; Header/sidebar resets removed; CB-tripped vs halted wording unified to Halted / circuit breaker tripped. One spec, five parts — newest decisions win on conflict. Per-part status reflects the live tree; the session handoff log (`docs/HANDOFF_MASTER_SESSION_HISTORY.md`) is the day-to-day record.
 ## Parts & status
 1. **Core engine (V2)** — ✅ Implemented — paper-only; native execution disabled backend-wide, fail-closed.
 2. **Session-aware seasonality layer** — 🟡 Partially implemented — session profiles + `get_session_profile` IPC exist; full phased rollout pending.

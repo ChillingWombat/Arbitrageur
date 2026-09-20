@@ -32,7 +32,7 @@ import { ToggleSwitch } from "./ToggleSwitch";
 import { VenueAccountsSection } from "./ExchangeAccounts";
 
 
-export type SettingsTab = "execution" | "exchanges" | "network" | "about";
+export type SettingsTab = "execution" | "safety" | "exchanges" | "network" | "about";
 export type ExchangeId =
   | "arcus"
   | "aster"
@@ -114,6 +114,16 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
   const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
   const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
+
+  // Safety: overall circuit-breaker + safety-net limits
+  const [cbMaxDdUsd, setCbMaxDdUsd] = useState(25000);
+  const [cbMaxDdPct, setCbMaxDdPct] = useState(5);
+  const [cbMaxErrors, setCbMaxErrors] = useState(5);
+  const [cbMaxSpreadBps, setCbMaxSpreadBps] = useState(250);
+  const [deltaMaxUnhedged, setDeltaMaxUnhedged] = useState(2500);
+  const [marginWarnPct, setMarginWarnPct] = useState(70);
+  const [marginCritPct, setMarginCritPct] = useState(85);
+  const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
   const [engineWsPort, setEngineWsPort] = useState(8789);
@@ -395,6 +405,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setTradingMode(s.trading_mode === "real" ? "real" : "paper");
         setPaperStartingBalance(s.paper_starting_balance_usd ?? 100000);
         setFastWarmupEnabled(s.fast_warmup_enabled ?? true);
+        setCbMaxDdUsd(s.cb_max_daily_drawdown_usd ?? 25000);
+        setCbMaxDdPct(s.cb_max_daily_drawdown_pct ?? 5);
+        setCbMaxErrors(s.cb_max_consecutive_errors ?? 5);
+        setCbMaxSpreadBps(s.cb_max_spread_divergence_bps ?? 250);
+        setDeltaMaxUnhedged(s.delta_max_unhedged_usd_per_asset ?? 2500);
+        setMarginWarnPct(s.margin_warning_usage_pct ?? 70);
+        setMarginCritPct(s.margin_critical_usage_pct ?? 85);
+        setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
         setHyperliquidPrivateKey(s.hyperliquid_private_key || "");
@@ -535,6 +553,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         trading_mode: tradingMode,
         paper_starting_balance_usd: paperStartingBalance,
         fast_warmup_enabled: fastWarmupEnabled,
+        cb_max_daily_drawdown_usd: Number(cbMaxDdUsd) || 0,
+        cb_max_daily_drawdown_pct: Number(cbMaxDdPct) || 0,
+        cb_max_consecutive_errors: Math.trunc(Number(cbMaxErrors)) || 0,
+        cb_max_spread_divergence_bps: Number(cbMaxSpreadBps) || 0,
+        delta_max_unhedged_usd_per_asset: Number(deltaMaxUnhedged) || 0,
+        margin_warning_usage_pct: Number(marginWarnPct) || 0,
+        margin_critical_usage_pct: Number(marginCritPct) || 0,
+        margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
         spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
         spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
         configured_venues: configuredVenues,
@@ -780,6 +806,26 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             />
             <span>Execution</span>
             {activeTab === "execution" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("safety")}
+            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+              activeTab === "safety"
+                ? "text-accent font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+            }`}
+          >
+            <ShieldAlert
+              className={`w-3 h-3 transition shrink-0 ${
+                activeTab === "safety" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+              }`}
+            />
+            <span>Safety</span>
+            {activeTab === "safety" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
           </button>
@@ -1392,6 +1438,109 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* SECTION: SAFETY — CIRCUIT BREAKER + SAFETY NET                      */}
+        {/* =================================================================== */}
+        {activeTab === "safety" && (
+          <div className="max-w-4xl mx-auto w-full space-y-4 text-xs font-mono">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-1">
+              <label className="text-slate-800 font-bold text-xs flex items-center gap-2">
+                <ShieldAlert className="w-3.5 h-3.5 text-accent" />
+                Overall Circuit Breaker & Safety Net
+              </label>
+              <p className="text-xs text-slate-500">
+                Global halt + guardrail limits. Applies live on save — no restart. Tightening never trips by itself; the next equity update enforces it.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="text-slate-800 font-bold text-xs">Circuit Breaker — Halt Limits</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Halt when the day's loss from the open baseline reaches this USD amount">
+                    Max daily drawdown (USD)
+                  </label>
+                  <input type="number" min="1" step="any" disabled={loading} value={cbMaxDdUsd}
+                    onChange={(e) => setCbMaxDdUsd(parseFloat(e.target.value) || 0)}
+                    className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Halt when the day's loss reaches this percent of the open baseline">
+                    Max daily drawdown (%)
+                  </label>
+                  <input type="number" min="0.1" max="100" step="any" disabled={loading} value={cbMaxDdPct}
+                    onChange={(e) => setCbMaxDdPct(parseFloat(e.target.value) || 0)}
+                    className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Halt after this many consecutive execution errors">
+                    Max consecutive errors
+                  </label>
+                  <input type="number" min="1" max="1000" step="1" disabled={loading} value={cbMaxErrors}
+                    onChange={(e) => setCbMaxErrors(parseInt(e.target.value, 10) || 0)}
+                    className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Reserved toxic-fill guard (bps). Stored with the breaker config; enforced by strategy gates.">
+                    Max spread divergence (bps)
+                  </label>
+                  <input type="number" min="1" step="any" disabled={loading} value={cbMaxSpreadBps}
+                    onChange={(e) => setCbMaxSpreadBps(parseFloat(e.target.value) || 0)}
+                    className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+              </div>
+            </div>
+
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="text-slate-800 font-bold text-xs">DeltaGuard — Net Exposure Guardrail</div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs" title="Per-asset signed net exposure tolerance across venues">
+                  Max unhedged per asset (USD)
+                </label>
+                <input type="number" min="1" step="any" disabled={loading} value={deltaMaxUnhedged}
+                  onChange={(e) => setDeltaMaxUnhedged(parseFloat(e.target.value) || 0)}
+                  className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+              </div>
+              <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
+                Beyond this, exposure-skew warnings fire and executions refuse. Currently $2,500 default.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="text-slate-800 font-bold text-xs">Margin Monitor — Warning Thresholds</div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Margin utilization at which warnings start">
+                    Warning (%)
+                  </label>
+                  <input type="number" min="0" max="100" step="any" disabled={loading} value={marginWarnPct}
+                    onChange={(e) => setMarginWarnPct(parseFloat(e.target.value) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Margin utilization at which venues flag DEPLETED / blocks entries">
+                    Critical (%)
+                  </label>
+                  <input type="number" min="0" max="100" step="any" disabled={loading} value={marginCritPct}
+                    onChange={(e) => setMarginCritPct(parseFloat(e.target.value) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Liquidation buffer below which positions warn">
+                    Min liq. distance (%)
+                  </label>
+                  <input type="number" min="0.1" max="100" step="any" disabled={loading} value={marginMinLiqPct}
+                    onChange={(e) => setMarginMinLiqPct(parseFloat(e.target.value) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
+                Warning must stay below critical. Feeds risk snapshots, venue LOW_MARGIN / DEPLETED flags, and pre-trade margin gates.
+              </p>
+            </div>
           </div>
         )}
 

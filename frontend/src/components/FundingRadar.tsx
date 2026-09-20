@@ -48,15 +48,33 @@ interface CarryDetailModalProps {
 
 const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
   ({ opp, rank, executing, executed, onExecute, onClose }) => {
+    // Expected hold (days): backend persistence model when present, else
+    // fee breakeven fallback. Projected net subtracts fees AND entry spread
+    // so early-exit holds honestly show a signed loss.
+    const holdHours =
+      opp.expected_hold_hours != null &&
+      Number.isFinite(opp.expected_hold_hours) &&
+      opp.expected_hold_hours > 0
+        ? opp.expected_hold_hours
+        : Number.isFinite(opp.break_even_hours) && opp.break_even_hours > 0
+          ? opp.break_even_hours
+          : null;
+    const holdIsModelled =
+      opp.expected_hold_hours != null && Number.isFinite(opp.expected_hold_hours);
     const autoH =
-      Number.isFinite(opp.break_even_hours) && opp.break_even_hours > 0
-        ? Math.max(0.1, Math.round((opp.break_even_hours / 24) * 10) / 10)
-        : null;
+      holdHours != null ? Math.max(0.1, Math.round((holdHours / 24) * 10) / 10) : null;
+    const autoHDaysExact = holdHours != null ? holdHours / 24 : null;
     const size = opp.trade_size_usd;
     const gross =
-      autoH != null ? (size * (opp.net_rate_8h_pct / 100) * 3 * autoH) : null;
+      autoHDaysExact != null
+        ? size * (opp.net_rate_8h_pct / 100) * 3 * autoHDaysExact
+        : null;
     const fees = size * (opp.round_trip_fee_bps / 10000);
-    const net = gross != null ? gross - fees : null;
+    const spreadCost =
+      opp.entry_spread_bps != null && opp.entry_spread_bps > 0
+        ? (size * opp.entry_spread_bps) / 10000
+        : 0;
+    const net = gross != null ? gross - fees - spreadCost : null;
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -157,23 +175,35 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 }
                 title="Measured long-ask vs short-bid cross at executable size"
               />
-              <CarryDetailField label="Fee breakeven" value={`${opp.break_even_hours.toFixed(1)} hrs`} />
+              <CarryDetailField
+                label="Fee breakeven (min)"
+                value={`${opp.break_even_hours.toFixed(1)} hrs`}
+                title="Minimum hold to cover round-trip fees at the current 8h rate (excl. entry spread). Compare with Auto hold (expected) for the modelled exit."
+              />
               <CarryDetailField label="Daily income" value={`+$${opp.estimated_daily_income_usd.toFixed(2)}`} />
               <CarryDetailField
                 label="Round-trip fees"
-                value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)`}
+                value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)${spreadCost > 0 ? ` + spread $${spreadCost.toFixed(2)}` : ""}`}
+                title="Entry friction: taker fees plus measured entry-spread cross (both deducted in Projected net carry)"
               />
               <CarryDetailField
-                label="Auto hold"
-                value={autoH != null ? `${autoH} days` : "—"}
-                title="Derived from this opportunity's fee break-even — not set manually"
+                label={holdIsModelled ? "Auto hold (expected)" : "Auto hold"}
+                value={
+                  autoH != null
+                    ? `${autoH} days${opp.hold_confidence != null ? ` · ${(opp.hold_confidence * 100).toFixed(0)}%` : ""}`
+                    : "—"
+                }
+                title={
+                  opp.hold_reason ??
+                  "Fallback: fee break-even only (stale backend without persistence model) — not set manually"
+                }
               />
               <CarryDetailField
                 label="Projected net carry"
                 value={
                   net != null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"
                 }
-                title="Projected carry over the auto hold at the current 8h rate, net of round-trip fees"
+                title="Projected carry over the expected hold at the current 8h rate, net of round-trip fees and entry spread. Negative = expected loss if the gap decays before breakeven."
               />
             </div>
           </div>

@@ -35,7 +35,6 @@ interface PositionsPanelProps {
   onSelectPosition: (position: OpenPositionDto) => void;
   status?: SystemStatusDto | null;
   isPaused?: boolean;
-  onResetCircuitBreaker?: () => void;
   onOpenPortfolioMonitor?: () => void;
   isPortfolioActive?: boolean;
   onOpenSettings?: () => void;
@@ -74,7 +73,6 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   onSelectPosition,
   status,
   isPaused: propIsPaused,
-  onResetCircuitBreaker,
   onOpenPortfolioMonitor,
   isPortfolioActive,
   onOpenSettings,
@@ -425,10 +423,10 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               }`}
               title={
                 isTripped
-                  ? "Circuit Breaker Tripped: Risk limits breached or Emergency Stop triggered"
+                  ? "Halted — circuit breaker tripped: risk limits breached or Emergency Stop triggered. Reset in Portfolio Monitor."
                   : isPaused
-                  ? "Status: Paused (Executions suspended, positions preserved)"
-                  : "Risk: Normal (Margin, drawdown, and delta neutrality healthy)"
+                  ? "Paused — executions suspended, positions preserved"
+                  : "Healthy — margin, drawdown, and delta neutrality ok"
               }
             >
               <span
@@ -441,20 +439,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 }`}
               />
               <span>
-                {isTripped ? "CB: Tripped" : isPaused ? "Status: Paused" : "Risk: Normal"}
+                {isTripped ? "Halted" : isPaused ? "Paused" : "Healthy"}
               </span>
             </div>
-
-            {isTripped && onResetCircuitBreaker && (
-              <button
-                type="button"
-                onClick={onResetCircuitBreaker}
-                className="btn-warning-subtle text-xs font-mono font-bold px-2 py-2"
-                title="Reset Circuit Breaker"
-              >
-                Reset
-              </button>
-            )}
           </div>
         </div>
 

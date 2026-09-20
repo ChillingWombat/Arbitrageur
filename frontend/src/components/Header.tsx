@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { AlertTriangle, OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
+import { OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
@@ -8,7 +8,6 @@ interface HeaderProps {
   status: SystemStatusDto | null;
   isPaused?: boolean;
   onTogglePause?: (paused: boolean) => void;
-  onResetCircuitBreaker: () => void;
   onEmergencyKillswitch: () => void;
   refreshing: boolean;
   activeTab: ActiveTab;
@@ -24,7 +23,6 @@ export const Header: React.FC<HeaderProps> = ({
   status,
   isPaused: propIsPaused,
   onTogglePause,
-  onResetCircuitBreaker,
   onEmergencyKillswitch,
   refreshing,
   activeTab,
@@ -37,7 +35,6 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [showKillModal, setShowKillModal] = useState(false);
 
-  const isTripped = status?.circuit_breaker_tripped ?? false;
   const isPaused = propIsPaused ?? status?.is_paused ?? false;
 
   return (
@@ -73,20 +70,8 @@ export const Header: React.FC<HeaderProps> = ({
           />
         </div>
 
-        {/* Right: Metrics & Risk Actions */}
+        {/* Right: Metrics & Risk Actions — circuit-breaker reset lives only in Portfolio Monitor */}
         <div className="border-l border-surface-border flex items-center space-x-2 px-3 lg:px-4 shrink-0">
-          {/* Reset CB if tripped */}
-          {isTripped && (
-            <button
-              onClick={onResetCircuitBreaker}
-              className="btn-warning-subtle text-xs font-mono font-bold flex items-center space-x-1.5"
-              title="Reset Circuit Breaker"
-            >
-              <AlertTriangle className="w-3.5 h-3.5" />
-              <span>Reset CB</span>
-            </button>
-          )}
-
           {/* Pause / Continue Button (To the left of STOP, preserves positions) */}
           <button
             onClick={() => onTogglePause?.(!isPaused)}

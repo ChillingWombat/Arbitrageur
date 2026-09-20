@@ -638,7 +638,7 @@ impl OpportunityExecutor {
             baseline_bps: row.baseline_bps,
             deviation_bps: row.deviation_bps,
             net_capture_bps: row.net_capture_bps,
-            p_win: row.p_win,
+            p_win: row.win_probability.or(row.p_win),
             expected_profit_bps: row.expected_profit_bps,
             expected_profit_usd: row.expected_profit_usd,
             optimal_size_usd: row.optimal_size_usd,
@@ -1152,6 +1152,8 @@ mod tests {
             deviation_bps: Some(10.0),
             net_capture_bps: Some(6.0),
             p_win: Some(0.95),
+            reversion_probability: Some(0.95),
+            win_probability: Some(0.95),
             expected_profit_bps: Some(5.7),
             expected_profit_usd: Some(57.0),
             optimal_size_usd: Some(10_000.0),
@@ -1314,6 +1316,8 @@ mod tests {
         let (state, bot) = harness(vec![{
             let mut r = ready_row("BTC", "hyperliquid", "lighter");
             r.p_win = Some(0.5);
+            r.reversion_probability = Some(0.5);
+            r.win_probability = Some(0.5);
             r
         }]);
         let dispatch = MockDispatch::ok();
@@ -1667,6 +1671,8 @@ mod tests {
             {
                 let mut r = ready_row("ETH", "hyperliquid", "lighter");
                 r.p_win = Some(0.5);
+                r.reversion_probability = Some(0.5);
+                r.win_probability = Some(0.5);
                 r
             },
         ]);

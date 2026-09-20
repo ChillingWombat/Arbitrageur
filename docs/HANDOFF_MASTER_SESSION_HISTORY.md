@@ -1302,3 +1302,14 @@ overhaul pass committed as `23d4aed`).
   fixes in `state.rs` (behavior-identical).
 - **Verification:** workspace green, clippy clean (mine), frontend build +
   204 tests pass, release rebuilt, relaunched panic-free.
+
+## 40. Session Handoff — 2026-09-20 (Safety settings + halt-terminology + monitor UX)
+
+- **Ask chain:** fix flat-book `Liquidation buffer 0.0%` false critical + `$500k` vs `$3.5k` venue-total mismatch; explain `Reset CB` / `CB: Tripped`; consolidate to one reset in Portfolio Monitor; unify tripped-vs-halted wording; safer External Positions close flow; header/estimator layout refinements; new Safety settings section; recurring false `-$196k` drawdown halt on flat book.
+- **Portfolio Monitor fixes:** flat book suppresses liquidation warnings (backend flat→`100%` + `flatBook` guard); `en-US` thousand separators; PnL neutral at zero; venue names capitalized; `<1%` shares; dust-bar min-width; sorted venues; venue/header drift footer.
+- **Breaker controls:** removed Header `Reset CB` + sidebar `Reset`; canonical `Reset Circuit Breaker` in monitor health header + Safety Tripwires; `RiskOperations` labels aligned. Terminology unified: status `Halted`, reason `circuit breaker tripped` (`is_halted` ≡ `cb.is_tripped()`).
+- **External Positions:** row select only opens a details popup (read-only pricing); per-row `Details` + `Close…` buttons; Arm→Confirm close stays inside the modal; ESC/overlay/X/Done dismiss.
+- **Layout:** `Monitor:`→`Strategy:` next to total; reset at right; Needs Attention above Capital; Rebalance Estimator last; consistent `h-9` estimator controls; placeholder worth-it verdict hidden.
+- **Safety tab (new):** System Setting → Safety — CB drawdown USD/% + consecutive errors + spread divergence, DeltaGuard per-asset cap, margin warn/critical/liq-distance. Validation + kv persist (`risk.*`), live-applied (`update_config`, delta re-limit, margin feeds next snapshot). `CircuitBreakerConfig` now `RwLock` + `reanchor_baseline()`.
+- **False-halt root cause + fix:** `$200k` hardcoded baseline vs ~`$3.5k` live funds scored mode switches/restarts as drawdown. Risk snapshot now re-anchors on paper↔live universe change; paper-balance resets re-anchor too. `last_risk_live_universe` tracked; drawdown test updated for anchor-vs-measure semantics.
+- **Verification:** `tsc` clean, risk/engine/circuit backend tests pass (7), frontend tests + vite build pass. Release rebuilt + relaunched via `run.sh`.

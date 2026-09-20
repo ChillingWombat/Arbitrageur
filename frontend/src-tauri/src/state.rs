@@ -364,6 +364,30 @@ fn default_paper_starting_balance() -> f64 {
 fn default_fast_warmup_enabled() -> bool {
     true
 }
+fn default_cb_max_daily_drawdown_usd() -> f64 {
+    25000.0
+}
+fn default_cb_max_daily_drawdown_pct() -> f64 {
+    5.0
+}
+fn default_cb_max_consecutive_errors() -> u32 {
+    5
+}
+fn default_cb_max_spread_divergence_bps() -> f64 {
+    250.0
+}
+fn default_delta_max_unhedged_usd() -> f64 {
+    2500.0
+}
+fn default_margin_warning_pct() -> f64 {
+    70.0
+}
+fn default_margin_critical_pct() -> f64 {
+    85.0
+}
+fn default_margin_min_liq_distance_pct() -> f64 {
+    15.0
+}
 fn default_referral_lighter() -> String {
     "https://app.lighter.xyz/?referral=SOLO&source=none".into()
 }
@@ -441,6 +465,26 @@ pub struct EngineSettingsDto {
     pub paper_starting_balance_usd: f64,
     #[serde(default = "default_fast_warmup_enabled")]
     pub fast_warmup_enabled: bool,
+
+    // Overall circuit-breaker + safety-net limits (new Safety settings section).
+    // Live-applied on save: breaker limits update in place, delta guard
+    // re-limits, margin thresholds feed the next risk snapshot.
+    #[serde(default = "default_cb_max_daily_drawdown_usd")]
+    pub cb_max_daily_drawdown_usd: f64,
+    #[serde(default = "default_cb_max_daily_drawdown_pct")]
+    pub cb_max_daily_drawdown_pct: f64,
+    #[serde(default = "default_cb_max_consecutive_errors")]
+    pub cb_max_consecutive_errors: u32,
+    #[serde(default = "default_cb_max_spread_divergence_bps")]
+    pub cb_max_spread_divergence_bps: f64,
+    #[serde(default = "default_delta_max_unhedged_usd")]
+    pub delta_max_unhedged_usd_per_asset: f64,
+    #[serde(default = "default_margin_warning_pct")]
+    pub margin_warning_usage_pct: f64,
+    #[serde(default = "default_margin_critical_pct")]
+    pub margin_critical_usage_pct: f64,
+    #[serde(default = "default_margin_min_liq_distance_pct")]
+    pub margin_min_liquidation_distance_pct: f64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -604,6 +648,14 @@ impl Default for EngineSettingsDto {
             trading_mode: default_trading_mode(),
             paper_starting_balance_usd: default_paper_starting_balance(),
             fast_warmup_enabled: default_fast_warmup_enabled(),
+            cb_max_daily_drawdown_usd: default_cb_max_daily_drawdown_usd(),
+            cb_max_daily_drawdown_pct: default_cb_max_daily_drawdown_pct(),
+            cb_max_consecutive_errors: default_cb_max_consecutive_errors(),
+            cb_max_spread_divergence_bps: default_cb_max_spread_divergence_bps(),
+            delta_max_unhedged_usd_per_asset: default_delta_max_unhedged_usd(),
+            margin_warning_usage_pct: default_margin_warning_pct(),
+            margin_critical_usage_pct: default_margin_critical_pct(),
+            margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -973,6 +1025,12 @@ pub struct AppEngineState {
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
     pub kalman_filter: RwLock<HedgeRatioKalmanFilter>,
     pub is_live_mode: RwLock<bool>,
+    /// Which equity universe the breaker baseline tracks (None = not yet
+    /// anchored). Paper<->live switches change the account universe, which is
+    /// not a trading loss — the next risk snapshot re-anchors instead of
+    /// tripping. Prevents the classic false halt: $200k baseline vs $3.5k
+    /// live funds reading as a -$196k "drawdown".
+    pub last_risk_live_universe: RwLock<Option<bool>>,
     pub total_realized_profit: RwLock<Decimal>,
     pub total_realized_profit_live: RwLock<Decimal>,
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
@@ -1214,18 +1272,6 @@ impl AppEngineState {
         let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
         let market_data_hub = MarketDataHub::new(1024, 400);
 
-        let cb_config = CircuitBreakerConfig {
-            max_daily_drawdown_usd: dec!(25000.0),
-            max_daily_drawdown_pct: dec!(5.0),
-            max_consecutive_errors: 5,
-            max_spread_divergence_bps: dec!(250.0),
-        };
-        let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(200000.0)));
-        let delta_guard = RwLock::new(DeltaGuard::new(dec!(2500.0)));
-        let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
-        let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
-        let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
-
         let mut initial_settings = EngineSettingsDto::default();
         if let Ok(Some(mode)) = state_store.kv_get("engine.trading_mode") {
             if mode == "real" || mode == "paper" {
@@ -1246,6 +1292,69 @@ impl AppEngineState {
                 }
             }
         }
+        // Overall circuit-breaker + safety-net limits persist in kv so a
+        // restart keeps the operator's Safety tab values.
+        {
+            let get_f = |k: &str| state_store.kv_get(k).ok().flatten().and_then(|v| v.parse::<f64>().ok());
+            let get_u = |k: &str| state_store.kv_get(k).ok().flatten().and_then(|v| v.parse::<u32>().ok());
+            if let Some(v) = get_f("risk.cb_max_dd_usd") {
+                if v.is_finite() && v > 0.0 && v <= 1_000_000_000_000.0 {
+                    initial_settings.cb_max_daily_drawdown_usd = v;
+                }
+            }
+            if let Some(v) = get_f("risk.cb_max_dd_pct") {
+                if v.is_finite() && v > 0.0 && v <= 100.0 {
+                    initial_settings.cb_max_daily_drawdown_pct = v;
+                }
+            }
+            if let Some(v) = get_u("risk.cb_max_errors") {
+                if (1..=1000).contains(&v) {
+                    initial_settings.cb_max_consecutive_errors = v;
+                }
+            }
+            if let Some(v) = get_f("risk.cb_max_spread_bps") {
+                if v.is_finite() && v > 0.0 && v <= 100_000.0 {
+                    initial_settings.cb_max_spread_divergence_bps = v;
+                }
+            }
+            if let Some(v) = get_f("risk.delta_max_unhedged") {
+                if v.is_finite() && v > 0.0 && v <= 1_000_000_000.0 {
+                    initial_settings.delta_max_unhedged_usd_per_asset = v;
+                }
+            }
+            if let Some(v) = get_f("risk.margin_warn") {
+                if v.is_finite() && (0.0..100.0).contains(&v) {
+                    initial_settings.margin_warning_usage_pct = v;
+                }
+            }
+            if let Some(v) = get_f("risk.margin_crit") {
+                if v.is_finite() && v > 0.0 && v <= 100.0 {
+                    initial_settings.margin_critical_usage_pct = v;
+                }
+            }
+            if let Some(v) = get_f("risk.margin_min_liq") {
+                if v.is_finite() && v > 0.0 && v <= 100.0 {
+                    initial_settings.margin_min_liquidation_distance_pct = v;
+                }
+            }
+            if initial_settings.margin_warning_usage_pct >= initial_settings.margin_critical_usage_pct {
+                initial_settings.margin_warning_usage_pct = 70.0;
+                initial_settings.margin_critical_usage_pct = 85.0;
+            }
+        }
+        let cb_config = CircuitBreakerConfig {
+            max_daily_drawdown_usd: Decimal::from_f64_retain(initial_settings.cb_max_daily_drawdown_usd).unwrap_or(dec!(25000.0)),
+            max_daily_drawdown_pct: Decimal::from_f64_retain(initial_settings.cb_max_daily_drawdown_pct).unwrap_or(dec!(5.0)),
+            max_consecutive_errors: initial_settings.cb_max_consecutive_errors,
+            max_spread_divergence_bps: Decimal::from_f64_retain(initial_settings.cb_max_spread_divergence_bps).unwrap_or(dec!(250.0)),
+        };
+        let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(200000.0)));
+        let delta_guard = RwLock::new(DeltaGuard::new(
+            Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset).unwrap_or(dec!(2500.0)),
+        ));
+        let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
+        let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
+        let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
         let settings = RwLock::new(initial_settings);
 
         let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
@@ -1287,6 +1396,7 @@ impl AppEngineState {
             coordinator,
             kalman_filter,
             is_live_mode: RwLock::new(false),
+            last_risk_live_universe: RwLock::new(None),
             total_realized_profit: RwLock::new(dec!(0)),
             total_realized_profit_live: RwLock::new(dec!(0)),
             execution_logs: RwLock::new(initial_logs),

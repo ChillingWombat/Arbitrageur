@@ -65,7 +65,12 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
   const fromProfile = getVenueProfile(from);
   const toProfile = getVenueProfile(to);
   const selCls =
-    "px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer max-w-full";
+    "h-9 w-full px-2.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer";
+  const inputCls =
+    "h-9 w-full px-2.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-900 tabular-nums focus:outline-none focus:ring-1 focus:ring-accent";
+  const labelCls = "text-[11px] font-mono font-bold text-slate-500 leading-none";
+  const routeBtnBase =
+    "h-9 flex-1 px-2 rounded-lg text-xs font-mono font-bold border flex items-center justify-center transition cursor-pointer";
   const verdictCls =
     result.verdict === "worth_it"
       ? "bg-profit-dim/40 border-profit-border text-slate-900"
@@ -87,56 +92,58 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
         </p>
       </div>
 
-      {/* Form: from / to / amount / profit + route + swap toggles. */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-        <label className="space-y-1">
-          <span className="text-[11px] font-mono font-bold text-slate-500">FROM</span>
+      {/* Form: from / to / amount / profit + route + swap toggles. All controls share h-9. */}
+      <div className="grid grid-cols-2 items-end gap-2 md:grid-cols-5">
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className={labelCls}>FROM</span>
           <select value={from} onChange={(e) => setFrom(e.target.value)} className={selCls} title="Source venue">
             {options.map((v) => (
               <option key={v} value={v}>{getVenueProfile(v)?.label ?? v}</option>
             ))}
           </select>
         </label>
-        <label className="space-y-1">
-          <span className="text-[11px] font-mono font-bold text-slate-500">TO</span>
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className={labelCls}>TO</span>
           <select value={to} onChange={(e) => setTo(e.target.value)} className={selCls} title="Destination venue">
             {options.map((v) => (
               <option key={v} value={v}>{getVenueProfile(v)?.label ?? v}</option>
             ))}
           </select>
         </label>
-        <label className="space-y-1">
-          <span className="text-[11px] font-mono font-bold text-slate-500">AMOUNT (USD)</span>
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className={labelCls}>AMOUNT (USD)</span>
           <input
             value={amount}
             onChange={(e) => setAmount(e.target.value.replace(/[^0-9.]/g, ""))}
             inputMode="decimal"
-            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-900 tabular-nums focus:outline-none focus:ring-1 focus:ring-accent"
+            className={inputCls}
           />
         </label>
-        <label className="space-y-1">
-          <span className="text-[11px] font-mono font-bold text-slate-500">OPPORTUNITY PROFIT (USD)</span>
+        <label className="flex min-w-0 flex-col gap-1.5">
+          <span className={labelCls}>OPPORTUNITY PROFIT (USD)</span>
           <input
             value={profit}
             onChange={(e) => setProfit(e.target.value.replace(/[^0-9.]/g, ""))}
             inputMode="decimal"
             placeholder="e.g. 50"
-            className="w-full px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-900 tabular-nums focus:outline-none focus:ring-1 focus:ring-accent"
+            className={inputCls}
           />
         </label>
-        <div className="space-y-1">
-          <span className="text-[11px] font-mono font-bold text-slate-500">ROUTE</span>
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <span className={labelCls}>ROUTE</span>
           <div className="flex gap-1.5">
             <button
+              type="button"
               onClick={() => setViaDirect(true)}
-              className={`flex-1 px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold border ${viaDirect ? "bg-accent-dim text-accent border-accent-line/60" : "bg-surface text-slate-500 border-surface-border"}`}
+              className={`${routeBtnBase} ${viaDirect ? "bg-accent-dim text-accent border-accent-line/60" : "bg-surface text-slate-500 border-surface-border"}`}
               title="Withdraw straight to the destination deposit address"
             >
               Direct
             </button>
             <button
+              type="button"
               onClick={() => setViaDirect(false)}
-              className={`flex-1 px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold border ${!viaDirect ? "bg-accent-dim text-accent border-accent-line/60" : "bg-surface text-slate-500 border-surface-border"}`}
+              className={`${routeBtnBase} ${!viaDirect ? "bg-accent-dim text-accent border-accent-line/60" : "bg-surface text-slate-500 border-surface-border"}`}
               title="Withdraw to your wallet, then deposit"
             >
               Via wallet
@@ -187,11 +194,13 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
             {result.cheapestPath}
           </div>
 
-          {/* Worth-it verdict. */}
-          <div className={`px-3 py-2.5 rounded-lg border text-xs font-mono ${verdictCls}`}>
-            <span className="font-bold">{result.verdict === "worth_it" ? "Worth rebalancing. " : result.verdict === "not_worth_it" ? "Skip the rebalance. " : ""}</span>
-            {result.verdictDetail}
-          </div>
+          {/* Worth-it verdict — hidden when no profit entered (placeholder removed). */}
+          {(result.verdict === "worth_it" || result.verdict === "not_worth_it" || result.totalCostUsd == null) && (
+            <div className={`px-3 py-2.5 rounded-lg border text-xs font-mono ${verdictCls}`}>
+              <span className="font-bold">{result.verdict === "worth_it" ? "Worth rebalancing. " : result.verdict === "not_worth_it" ? "Skip the rebalance. " : ""}</span>
+              {result.verdictDetail}
+            </div>
+          )}
 
           {result.warnings.length > 0 && (
             <div className="flex items-start gap-2 text-[11px] font-mono text-warn">

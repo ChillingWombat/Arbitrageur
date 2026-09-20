@@ -231,8 +231,23 @@ pub struct MonitorRowDto {
     pub deviation_bps: Option<f64>,
     /// Net capture at the optimal tier after all friction, bps.
     pub net_capture_bps: Option<f64>,
+    /// Deprecated alias of `reversion_probability` (kept for old clients).
     pub p_win: Option<f64>,
-    /// Ranking key: net_capture_bps × p_win.
+    /// Direction-insensitive mean-reversion probability P(|dev| reverts
+    /// before the stop band). Informational only — NOT a trade win rate.
+    /// Render as "Reversion Probability" in detail views, never as "Win %".
+    pub reversion_probability: Option<f64>,
+    /// Directional trade win probability after every execution detail
+    /// (edge direction, profitable capacity, funding known, exit depth,
+    /// persistence, coverage, variation, session). `Some(0.0)` when the
+    /// current ordered direction has no edge or is hard-blocked; `None`
+    /// only when uncomputable (thin history / missing books). This is the
+    /// table's "Win %" column.
+    pub win_probability: Option<f64>,
+    /// Signed probability-weighted PnL expectation, bps. Negative means an
+    /// expected loss — never floored to 0. `exp_bps` from the ladder is
+    /// already probability-weighted, so it is used directly; the fallback
+    /// is `(dev - friction) * reversion` with no `max(0)` floor.
     pub expected_profit_bps: Option<f64>,
     pub expected_profit_usd: Option<f64>,
     pub optimal_size_usd: Option<f64>,
@@ -644,6 +659,60 @@ pub(crate) fn pair_win_probability(
         };
     }
     ou_fallback_p_win(&vals, series, mu, current_spread_bps, band_bps)
+}
+
+/// Directional trade win probability: reversion gated by every execution
+/// detail. Returns:
+/// - `None` when reversion is unknown, books are missing, or the
+///   qualification window is unmet (genuinely uncomputable).
+/// - `Some(0.0)` when the ordered direction has no edge (`dev < entry_thresh`)
+///   or is hard-blocked (funding unknown, exit uncostable, no profitable
+///   capacity, persistence/coverage/variation/session gates fail).
+/// - `Some(reversion)` only when a trade in this direction could actually
+///   execute at a profit. Session sizing (`allow` < 1) affects size, not
+///   probability, so it does not discount here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn trade_win_probability(
+    reversion: Option<f64>,
+    dev_bps: Option<f64>,
+    entry_thresh_bps: f64,
+    books_ok: bool,
+    window_met: bool,
+    funding_unknown: bool,
+    exit_uncostable: bool,
+    optimal_size_usd: Option<f64>,
+    variation_ok: bool,
+    ratio_ok: bool,
+    coverage_ok: bool,
+    session_conf_ok: bool,
+    session_blocked: bool,
+) -> Option<f64> {
+    let p = reversion.filter(|v| v.is_finite() && (0.0..=1.0).contains(v))?;
+    if !books_ok || !window_met {
+        return None;
+    }
+    let dev = dev_bps.filter(|d| d.is_finite())?;
+    if !entry_thresh_bps.is_finite() {
+        return None;
+    }
+    // Wrong direction for this ordered pair: entering here bets against the
+    // historical edge. P(profit) ≈ 0 regardless of reversion magnitude.
+    if dev < entry_thresh_bps {
+        return Some(0.0);
+    }
+    // Cost unknown or exit unpriceable: expectation is unknowable, but the
+    // trade cannot be taken as modelled — hard-block to 0, not None, so the
+    // table shows 0% instead of inheriting a misleading 100% reversion.
+    if funding_unknown || exit_uncostable {
+        return Some(0.0);
+    }
+    if optimal_size_usd.map(|s| !(s.is_finite() && s > 0.0)).unwrap_or(true) {
+        return Some(0.0);
+    }
+    if !variation_ok || !ratio_ok || !coverage_ok || !session_conf_ok || session_blocked {
+        return Some(0.0);
+    }
+    Some(p)
 }
 
 /* ------------------------------------------------------------------------ */
@@ -2263,13 +2332,35 @@ impl SpreadMonitorEngine {
             }
         });
 
+        // --- directional trade win probability + signed expectation --------
+        // `p_win` is direction-insensitive reversion P(|dev| reverts). The
+        // table's Win % must be directional: wrong-direction or hard-blocked
+        // rows read 0%, never 100%. Signed expectation never floors to 0.
+        let win_probability = trade_win_probability(
+            p_win,
+            dev_bps,
+            entry_thresh,
+            books_ok,
+            window_met,
+            funding_unknown,
+            exit_uncostable,
+            optimal,
+            variation_ok,
+            ratio_ok,
+            coverage_ok,
+            session_conf_ok,
+            session_block.is_some(),
+        );
         // --- executability ------------------------------------------------
+        // Gate on the directional trade win probability (falls back to
+        // reversion only when the directional value is uncomputable).
+        let gate_p = win_probability.or(p_win);
         let (executable, mut block_reason) = execution_gate(
             status,
             books_ok,
             session_block,
             signal_active,
-            p_win,
+            gate_p,
             cfg.min_win_probability,
             funding_unknown,
             exit_uncostable,
@@ -2299,10 +2390,12 @@ impl SpreadMonitorEngine {
             // fake positive capture.
             net_capture_bps: exp_bps.or_else(|| dev_bps.map(|d| d - friction_bps)),
             p_win,
-            expected_profit_bps: exp_bps.zip(p_win).map(|(e, p)| e * p).or_else(|| {
+            reversion_probability: p_win,
+            win_probability,
+            expected_profit_bps: exp_bps.or_else(|| {
                 dev_bps
                     .zip(p_win)
-                    .map(|(d, p)| (d - friction_bps).max(0.0) * p)
+                    .map(|(d, p)| (d - friction_bps) * p)
             }),
             expected_profit_usd: exp_usd,
             optimal_size_usd: optimal,
@@ -3113,6 +3206,100 @@ mod tests {
             pair_win_probability(&series, f64::INFINITY, 5.0, 5),
             None
         );
+    }
+
+    #[test]
+    fn trade_win_probability_wrong_direction_is_zero_not_reversion() {
+        // High reversion (1.0) but negative dev for this ordered direction:
+        // trade win must be 0.0, never 100%.
+        let w = trade_win_probability(
+            Some(1.0),
+            Some(-16.6),
+            4.0,
+            true,
+            true,
+            false,
+            false,
+            Some(1000.0),
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(w, Some(0.0));
+    }
+
+    #[test]
+    fn trade_win_probability_ready_keeps_reversion_blocked_goes_zero() {
+        // Ready path: all gates pass -> keeps reversion.
+        let ready = trade_win_probability(
+            Some(0.98),
+            Some(5.0),
+            4.0,
+            true,
+            true,
+            false,
+            false,
+            Some(1000.0),
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(ready, Some(0.98));
+        // Same edge but funding unknown -> hard-blocked to 0.
+        let blocked = trade_win_probability(
+            Some(0.98),
+            Some(5.0),
+            4.0,
+            true,
+            true,
+            true,
+            false,
+            Some(1000.0),
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(blocked, Some(0.0));
+        // No profitable capacity -> 0.
+        let nocap = trade_win_probability(
+            Some(0.98),
+            Some(5.0),
+            4.0,
+            true,
+            true,
+            false,
+            false,
+            None,
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(nocap, Some(0.0));
+        // Unmet window -> unknown, not zero.
+        let prep = trade_win_probability(
+            Some(0.98),
+            Some(5.0),
+            4.0,
+            true,
+            false,
+            false,
+            false,
+            Some(1000.0),
+            true,
+            true,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(prep, None);
     }
 
     #[test]

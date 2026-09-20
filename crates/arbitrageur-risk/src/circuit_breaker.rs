@@ -32,7 +32,7 @@ impl Default for CircuitBreakerConfig {
 /// Thread-safe enterprise circuit breaker.
 #[derive(Debug)]
 pub struct CircuitBreaker {
-    config: CircuitBreakerConfig,
+    config: RwLock<CircuitBreakerConfig>,
     is_tripped: AtomicBool,
     trip_reason: Arc<RwLock<Option<String>>>,
     consecutive_errors: AtomicU32,
@@ -45,7 +45,7 @@ pub struct CircuitBreaker {
 impl CircuitBreaker {
     pub fn new(config: CircuitBreakerConfig, initial_equity: Decimal) -> Self {
         Self {
-            config,
+            config: RwLock::new(config),
             is_tripped: AtomicBool::new(false),
             trip_reason: Arc::new(RwLock::new(None)),
             consecutive_errors: AtomicU32::new(0),
@@ -75,6 +75,20 @@ impl CircuitBreaker {
         self.is_tripped.store(true, Ordering::SeqCst);
     }
 
+    /// Re-anchor the baseline to a new equity universe (e.g. paper<->live
+    /// mode switch or paper-balance reset). Switching account universes is
+    /// not a trading loss, so it must never trip: baseline, current, and
+    /// peak all move together and any prior trip/errors clear.
+    pub fn reanchor_baseline(&self, equity: Decimal) {
+        *self.day_start_equity.write() = equity;
+        *self.current_equity.write() = equity;
+        *self.peak_equity.write() = equity;
+        *self.trip_reason.write() = None;
+        *self.tripped_at.write() = None;
+        self.consecutive_errors.store(0, Ordering::SeqCst);
+        self.is_tripped.store(false, Ordering::SeqCst);
+    }
+
     /// Reset after operator review. The drawdown baseline is re-anchored to
     /// the current equity so prior losses are not carried into the new window.
     pub fn reset(&self) {
@@ -91,11 +105,11 @@ impl CircuitBreaker {
     /// Record an execution error (e.g. unhedged leg, API timeout).
     pub fn record_error(&self, details: &str) {
         let count = self.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
-        warn!("Consecutive execution error #{} / {}: {}", count, self.config.max_consecutive_errors, details);
-        if count >= self.config.max_consecutive_errors {
+        warn!("Consecutive execution error #{} / {}: {}", count, self.config.read().max_consecutive_errors, details);
+        if count >= self.config.read().max_consecutive_errors {
             self.trip(format!(
                 "Exceeded maximum consecutive execution errors ({}/{}): {}",
-                count, self.config.max_consecutive_errors, details
+                count, self.config.read().max_consecutive_errors, details
             ));
         }
     }
@@ -119,15 +133,15 @@ impl CircuitBreaker {
             let dollar_loss = start - new_equity;
             let loss_pct = (dollar_loss / start) * dec!(100);
 
-            if dollar_loss >= self.config.max_daily_drawdown_usd {
+            if dollar_loss >= self.config.read().max_daily_drawdown_usd {
                 self.trip(format!(
                     "Daily dollar drawdown limit breached: -${} (max ${})",
-                    dollar_loss, self.config.max_daily_drawdown_usd
+                    dollar_loss, self.config.read().max_daily_drawdown_usd
                 ));
-            } else if loss_pct >= self.config.max_daily_drawdown_pct {
+            } else if loss_pct >= self.config.read().max_daily_drawdown_pct {
                 self.trip(format!(
                     "Daily percentage drawdown limit breached: -{}% (max {}%)",
-                    loss_pct, self.config.max_daily_drawdown_pct
+                    loss_pct, self.config.read().max_daily_drawdown_pct
                 ));
             }
         }
@@ -140,12 +154,23 @@ impl CircuitBreaker {
 
     /// Get configured max consecutive errors
     pub fn max_consecutive_errors(&self) -> u32 {
-        self.config.max_consecutive_errors
+        self.config.read().max_consecutive_errors
     }
 
     /// Get configured max daily dollar drawdown
     pub fn max_daily_drawdown_usd(&self) -> Decimal {
-        self.config.max_daily_drawdown_usd
+        self.config.read().max_daily_drawdown_usd
+    }
+
+    /// Snapshot the live circuit-breaker limits (for settings UI).
+    pub fn get_config(&self) -> CircuitBreakerConfig {
+        self.config.read().clone()
+    }
+
+    /// Live-update the circuit-breaker limits without restarting.
+    /// Tightening never trips by itself; the next equity update enforces it.
+    pub fn update_config(&self, cfg: CircuitBreakerConfig) {
+        *self.config.write() = cfg;
     }
 
     /// Get starting equity for the day

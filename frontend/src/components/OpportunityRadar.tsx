@@ -76,6 +76,18 @@ const fmtDur = (secs: number | null | undefined) => {
 const fmtTs = (ms: number | null | undefined) =>
   ms == null ? "—" : new Date(ms).toLocaleTimeString();
 
+/* ------------------------------------------------------------------ */
+/* Win probability helpers — reversion (detail-only) vs trade win (table) */
+/* ------------------------------------------------------------------ */
+
+/** Direction-insensitive mean reversion P(|dev| reverts). Detail-only. */
+const getReversion = (r: MonitorRowDto): number | null | undefined =>
+  (r as { reversionProbability?: number | null }).reversionProbability ?? r.pWin;
+
+/** Directional trade win probability after all gates. Table Win % + Min Win filter. */
+const getWin = (r: MonitorRowDto): number | null | undefined =>
+  (r as { winProbability?: number | null }).winProbability ?? r.pWin;
+
 const STATUS_STYLE: Record<string, string> = {
   ready: "bg-profit-dim text-profit border-profit-border",
   triggered: "bg-warn-dim text-warn border-warn-border",
@@ -667,7 +679,7 @@ const CapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) =>
           <div
             className={`w-10 rounded-lg ${good ? "bg-accent/70" : "bg-slate-300"}`}
             style={{ height: `${h}px` }}
-            title={`net ${fmtBps(t.netBps)}bp · E ${fmtBps(t.expectedNetBps)}bp · p ${fmtPct(t.marginalPWin)}`}
+            title={`net ${fmtBps(t.netBps)}bp · signed E ${fmtBps(t.expectedNetBps)}bp · reversion p ${fmtPct(t.marginalPWin)}`}
           />
           <span className="text-xs text-slate-500">{fmtUsd(t.sizeUsd)}</span>
           <span className={`text-xs ${good ? "text-accent" : "text-slate-400"}`}>
@@ -777,11 +789,24 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-              <DetailField label="Expected profit" value={fmtBpsU(r.expectedProfitBps)} />
+              <DetailField
+                label="Expected profit (signed PnL)"
+                value={fmtBpsU(r.expectedProfitBps)}
+                title="Signed probability-weighted PnL per unit. Negative = expected loss — never floored to 0."
+              />
               <DetailField label="Net capture" value={fmtBpsU(r.netCaptureBps)} />
               <DetailField label="Baseline" value={fmtBpsU(r.baselineBps)} />
               <DetailField label="Deviation" value={fmtBpsU(r.deviationBps)} />
-              <DetailField label="Win probability" value={fmtPct(r.pWin)} />
+              <DetailField
+                label="Win probability"
+                value={fmtPct(getWin(r))}
+                title="Directional P(trade is profitable) after edge direction, profitable capacity, funding, exit depth, persistence, coverage, variation and session gates. 0% when this direction has no edge or is hard-blocked."
+              />
+              <DetailField
+                label="Reversion probability"
+                value={fmtPct(getReversion(r))}
+                title="Direction-insensitive P(|deviation| reverts before the stop band). Informational only — high reversion with negative deviation still means 0% trade win for this direction."
+              />
               <DetailField
                 label="Persistence"
                 value={fmtPct(r.thresholdRatio)}
@@ -889,7 +914,12 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
               </span>
             )}
           </td>
-          <td className="px-2 py-2 text-right font-bold text-accent font-mono tabular-nums">
+          <td
+            className={`px-2 py-2 text-right font-mono tabular-nums font-bold ${
+              (r.expectedProfitBps ?? 0) >= 0 ? "text-profit" : "text-loss"
+            }`}
+            title="Signed probability-weighted PnL expectation (negative = expected loss)"
+          >
             {fmtBpsU(r.expectedProfitBps)}
           </td>
           <td className="px-2 py-2 text-right font-mono tabular-nums">{fmtBpsU(r.netCaptureBps)}</td>
@@ -903,7 +933,12 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
           >
             {fmtBpsU(r.deviationBps)}
           </td>
-          <td className="px-2 py-2 text-right font-mono">{fmtPct(r.pWin)}</td>
+          <td
+            className="px-2 py-2 text-right font-mono"
+            title="Directional trade win probability — 0% when this direction has no edge or is blocked. See Reversion Probability in details."
+          >
+            {fmtPct(getWin(r))}
+          </td>
           <td className="px-2 py-2 text-right font-mono" title="Fraction of in-window buckets at/above entry (persistence gate)">
             {fmtPct(r.thresholdRatio)}
           </td>
@@ -1114,7 +1149,7 @@ const OpportunityRadarInner: React.FC = () => {
       out = out.filter((r) => (r.expectedProfitBps ?? -Infinity) >= me);
     const mp = Number(minPWin);
     if (Number.isFinite(mp) && minPWin !== "")
-      out = out.filter((r) => (r.pWin ?? -Infinity) >= mp / 100);
+      out = out.filter((r) => (getWin(r) ?? -Infinity) >= mp / 100);
     return out;
   }, [snap, search, venueFilters, minExpBps, minPWin]);
 
@@ -1388,7 +1423,10 @@ const OpportunityRadarInner: React.FC = () => {
                 <th className="px-2 py-2 w-6" />
                 <th className="px-2 py-2">Symbol</th>
                 <th className="px-2 py-2" title="Buy venue → sell venue">Route</th>
-              <th className="px-2 py-1.5 text-right" title="Probability-weighted expected profit, basis points">
+              <th
+                className="px-2 py-1.5 text-right"
+                title="Signed probability-weighted PnL expectation, bps (negative = expected loss)"
+              >
                 Exp Profit
               </th>
               <th className="px-2 py-1.5 text-right" title="Edge after fees and crossing friction">
@@ -1400,7 +1438,10 @@ const OpportunityRadarInner: React.FC = () => {
               <th className="px-2 py-1.5 text-right" title="Signed deviation of current edge from baseline">
                 Deviation
               </th>
-              <th className="px-2 py-1.5 text-right" title="Empirical probability the deviation converges before the stop band">
+              <th
+                className="px-2 py-1.5 text-right"
+                title="Directional trade win probability after all gates (0% when this direction has no edge or is blocked). Reversion Probability lives in the detail card."
+              >
                 Win %
               </th>
               <th className="px-2 py-1.5 text-right" title="Share of in-window buckets holding at/above entry (persistence)">

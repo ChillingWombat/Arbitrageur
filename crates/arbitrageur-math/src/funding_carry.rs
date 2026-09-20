@@ -220,6 +220,209 @@ pub fn evaluate_spot_perp_carry(
     .map(|b| b.carry)
 }
 
+/// Expected funding-carry holding horizon: how long the funding gap is
+/// expected to stay above the exit threshold.
+///
+/// v1 model (transparent, testable):
+/// - Total cost to cover = round-trip fees + measured entry-spread cost
+///   (static spread impact). Dynamic spread *drift* beyond entry is NOT yet
+///   modelled — no perp/spot basis history exists in the scanner — and is
+///   disclosed in `reason` with a confidence penalty when depth slope is high.
+/// - Exit threshold = `min_apr_pct` converted to an 8h rate (default 8% APR).
+///   When the gap decays below this, the bot would rotate out.
+/// - `history` carries `(ts_ms, net_8h_fraction)` for the CURRENT direction
+///   (short-leg rate minus long-leg rate, per-8h fraction, e.g. 0.000585 for
+///   +0.0585%). A least-squares trend over the trailing window predicts the
+///   crossing time `t_cross = (threshold - current) / slope`.
+/// - Expected hold = `t_cross` clamped to `[breakeven_total, 168h]`. If the
+///   gap decays before breakeven, the hold IS `t_cross` (early exit at a loss
+///   — signed net carry will be negative, honestly).
+/// - Stable/growing gaps (`slope >= 0`) hold to the 7-day persistence cap.
+/// - Thin history (<10 points or <6h span) falls back to fee+spread breakeven
+///   with low confidence — the old frontend behaviour, now labelled.
+/// - Confidence blends history depth, trend R², volatility (CV penalty),
+///   predicted-rate agreement, and depth-slope (spread-drift proxy).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FundingHoldEstimate {
+    /// Expected hold in hours (already clamped, finite, > 0).
+    pub hours: f64,
+    /// Minimum profitable hold (fee+spread breakeven) in hours.
+    pub breakeven_hours: f64,
+    /// Human-readable basis: decay slope, threshold, spread inclusion.
+    pub reason: String,
+    /// 0..1 heuristic confidence (never 0/1).
+    pub confidence: f64,
+}
+
+pub fn estimate_funding_hold_hours(
+    net_rate_8h: f64,
+    round_trip_fee_bps: f64,
+    entry_spread_cost_bps: Option<f64>,
+    history: &[(i64, f64)],
+    min_apr_pct: Option<f64>,
+    predicted_agrees: Option<bool>,
+    depth_slope_bps_per_1k: Option<f64>,
+) -> Option<FundingHoldEstimate> {
+    if !net_rate_8h.is_finite() || net_rate_8h <= 0.0 {
+        return None;
+    }
+    if !round_trip_fee_bps.is_finite() || round_trip_fee_bps < 0.0 {
+        return None;
+    }
+    let spread_cost = entry_spread_cost_bps
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .unwrap_or(0.0);
+    let total_cost_ratio = (round_trip_fee_bps + spread_cost) / 10_000.0;
+    let net_hourly = net_rate_8h / 8.0;
+    if !net_hourly.is_finite() || net_hourly <= 0.0 {
+        return None;
+    }
+    let breakeven_total = total_cost_ratio / net_hourly;
+    if !breakeven_total.is_finite() || breakeven_total <= 0.0 {
+        return None;
+    }
+    const MAX_HOLD_HOURS: f64 = 168.0; // 7-day persistence cap
+    let apr = min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+    let threshold_8h = apr / 100.0 / 365.0 / 3.0;
+    let spread_note = if spread_cost > 0.0 {
+        format!(" incl. {spread_cost:.1} bps entry spread")
+    } else {
+        String::new()
+    };
+
+    // Thin history: honest fallback to breakeven.
+    let span_hours = history
+        .first()
+        .zip(history.last())
+        .map(|((a, _), (b, _))| (*b as f64 - *a as f64) / 3_600_000.0)
+        .unwrap_or(0.0);
+    if history.len() < 10 || !span_hours.is_finite() || span_hours < 6.0 {
+        let mut conf: f64 = 0.30;
+        match predicted_agrees {
+            Some(true) => conf += 0.05,
+            Some(false) => conf -= 0.05,
+            None => {}
+        }
+        return Some(FundingHoldEstimate {
+            hours: breakeven_total.clamp(0.1, MAX_HOLD_HOURS),
+            breakeven_hours: breakeven_total,
+            reason: format!(
+                "fee+spread breakeven{spread_note}; insufficient funding history ({} prints, {:.1}h span) for persistence — dynamic spread drift deferred",
+                history.len(),
+                span_hours.max(0.0),
+            ),
+            confidence: conf.clamp(0.1, 0.95),
+        });
+    }
+
+    // Least-squares trend of net_8h (fraction) vs time (hours since first).
+    let t0 = history[0].0 as f64;
+    let mut n = 0usize;
+    let (mut sx, mut sy, mut sxx, mut sxy) = (0.0, 0.0, 0.0, 0.0);
+    for (ts, r) in history {
+        if !r.is_finite() {
+            continue;
+        }
+        let x = (*ts as f64 - t0) / 3_600_000.0;
+        if !x.is_finite() {
+            continue;
+        }
+        n += 1;
+        sx += x;
+        sy += r;
+        sxx += x * x;
+        sxy += x * r;
+    }
+    if n < 10 {
+        let mut conf: f64 = 0.30;
+        match predicted_agrees {
+            Some(true) => conf += 0.05,
+            Some(false) => conf -= 0.05,
+            None => {}
+        }
+        return Some(FundingHoldEstimate {
+            hours: breakeven_total.clamp(0.1, MAX_HOLD_HOURS),
+            breakeven_hours: breakeven_total,
+            reason: format!(
+                "fee+spread breakeven{spread_note}; only {n} finite history points — persistence deferred"
+            ),
+            confidence: conf.clamp(0.1, 0.95),
+        });
+    }
+    let nf = n as f64;
+    let denom = nf * sxx - sx * sx;
+    let slope = if denom.abs() < 1e-12 { 0.0 } else { (nf * sxy - sx * sy) / denom };
+    let intercept = (sy - slope * sx) / nf;
+    // R² + residual volatility.
+    let mean_y = sy / nf;
+    let (mut ss_tot, mut ss_res) = (0.0, 0.0);
+    for (ts, r) in history {
+        if !r.is_finite() {
+            continue;
+        }
+        let x = (*ts as f64 - t0) / 3_600_000.0;
+        let pred = intercept + slope * x;
+        ss_tot += (r - mean_y).powi(2);
+        ss_res += (r - pred).powi(2);
+    }
+    let r2 = if ss_tot > 1e-18 { (1.0 - ss_res / ss_tot).clamp(0.0, 1.0) } else { 0.0 };
+    let std = (ss_res / nf).sqrt();
+    let cv = if mean_y.abs() > 1e-12 { std / mean_y.abs() } else { 1.0 };
+
+    // Slope is per-hour in 8h-fraction units; current = last observed (robust).
+    let current = history.iter().rev().find_map(|(_, r)| r.is_finite().then_some(*r)).unwrap_or(net_rate_8h);
+    let (hours_raw, mode): (f64, &str) = if slope >= 0.0 {
+        (MAX_HOLD_HOURS, "stable/growing funding gap; 7-day persistence cap")
+    } else {
+        let t_cross = (threshold_8h - current) / slope; // slope<0 -> positive when current>threshold
+        if !t_cross.is_finite() {
+            (breakeven_total, "decay fit unstable; fee+spread breakeven")
+        } else if t_cross < breakeven_total {
+            (t_cross, "gap decays below min-APR threshold before fee+spread breakeven (early exit at loss)")
+        } else {
+            (t_cross.min(MAX_HOLD_HOURS), "linear decay of funding gap to min-APR threshold")
+        }
+    };
+    // Volatility haircut: choppy gaps get shorter expected holds.
+    let vol_mult = 1.0 / (1.0 + cv.max(0.0) * 0.5);
+    let hours = (hours_raw * vol_mult).clamp(0.1, MAX_HOLD_HOURS);
+
+    let mut conf: f64 = 0.50;
+    if span_hours >= 48.0 {
+        conf += 0.10;
+    }
+    if r2 >= 0.5 {
+        conf += 0.10;
+    } else if r2 < 0.2 {
+        conf -= 0.10;
+    }
+    if cv > 0.5 {
+        conf -= 0.10;
+    }
+    match predicted_agrees {
+        Some(true) => conf += 0.10,
+        Some(false) => conf -= 0.10,
+        None => {}
+    }
+    if let Some(slope_cost) = depth_slope_bps_per_1k.filter(|v| v.is_finite() && *v > 0.0) {
+        // Steep books mean spread drift can erase carry fast — disclose + penalise.
+        if slope_cost > 0.5 {
+            conf -= 0.05;
+        }
+    }
+    let slope_bps_per_day = slope * 10_000.0 * 24.0;
+    let reason = format!(
+        "{mode}{spread_note}; slope {slope_bps_per_day:+.2} bps/day (R² {r2:.2}), threshold {:.4}%/8h, vol CV {cv:.2}",
+        threshold_8h * 100.0,
+    );
+    Some(FundingHoldEstimate {
+        hours,
+        breakeven_hours: breakeven_total,
+        reason,
+        confidence: conf.clamp(0.1, 0.95),
+    })
+}
+
 /// Informational win probability for a funding-carry / basis opportunity.
 ///
 /// Heuristic, NOT a calibrated forecast: under a memoryless assumption the
@@ -509,6 +712,31 @@ mod funding_win_probability_tests {
         let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None).expect("buffered");
         assert!(agree > base && base > disagree, "agree={agree} base={base} disagree={disagree}");
         assert!(buffered > base, "buffered={buffered} base={base}");
+    }
+
+    #[test]
+    fn hold_thin_history_falls_back_to_breakeven() {
+        let est = super::estimate_funding_hold_hours(0.000585, 3.5, Some(0.0), &[], Some(8.0), None, None).unwrap();
+        // fee 3.5bps / (0.0585%/8h) = ~4.8h breakeven
+        assert!((est.hours - 4.8).abs() < 0.5, "got {}", est.hours);
+        assert!(est.confidence < 0.5);
+    }
+
+    #[test]
+    fn hold_decaying_gap_exits_before_breakeven_when_fast_decay() {
+        // Steep decay: 0.10%/8h -> 0.01%/8h over 10h; threshold 8% APR ~0.0073%/8h.
+        // Breakeven on 3.5bps at 0.0585%/8h would be ~4.8h, but gap collapses fast.
+        let hist: Vec<(i64, f64)> = (0..20).map(|i| (i*1_800_000, 0.001 - i as f64*0.00005)).collect();
+        let est = super::estimate_funding_hold_hours(0.000585, 3.5, Some(2.0), &hist, Some(8.0), Some(false), Some(0.1)).unwrap();
+        assert!(est.hours < est.breakeven_hours, "decaying gap should exit early: hold {} vs be {} reason {}", est.hours, est.breakeven_hours, est.reason);
+    }
+
+    #[test]
+    fn hold_stable_gap_caps_at_7d() {
+        let hist: Vec<(i64, f64)> = (0..50).map(|i| (i*3_600_000, 0.0006)).collect();
+        let est = super::estimate_funding_hold_hours(0.0006, 3.5, Some(0.0), &hist, Some(8.0), Some(true), Some(0.02)).unwrap();
+        assert!(est.hours > est.breakeven_hours);
+        assert!(est.hours <= 168.0 + 1e-9);
     }
 
     #[test]

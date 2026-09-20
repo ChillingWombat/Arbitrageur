@@ -789,7 +789,6 @@ export const App: React.FC = () => {
         status={systemStatus}
         isPaused={isPaused}
         onTogglePause={handleTogglePause}
-        onResetCircuitBreaker={handleResetCircuitBreaker}
         onEmergencyKillswitch={handleEmergencyKillswitch}
         refreshing={refreshing}
         activeTab={activeTab}
@@ -814,7 +813,6 @@ export const App: React.FC = () => {
           onSelectPosition={handleSelectPosition}
           status={systemStatus}
           isPaused={isPaused}
-          onResetCircuitBreaker={handleResetCircuitBreaker}
           onOpenPortfolioMonitor={handleTogglePortfolio}
           isPortfolioActive={activeTab === "portfolio_monitor"}
           onOpenSettings={handleOpenSettings}

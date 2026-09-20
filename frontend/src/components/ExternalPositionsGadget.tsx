@@ -18,6 +18,10 @@
  *   - Polling is 15s, NOT the app's 3s rhythm: account reads are
  *     authenticated and heavy; a manual Refresh covers urgency. Grouping is
  *     the pure helper `groupExternalPositions` (tested alongside).
+ *   - SAFETY UX: clicking / selecting a row only opens a details popup
+ *     (read-only pricing). Nothing closes until the explicit per-position
+ *     Close button inside the popup is armed and then confirmed. This avoids
+ *     misclick closes.
  *   - Safety is backend-enforced (live mode + unlocked vault + capable venue
  *     + fresh re-read + dust floor); the UI additionally disables the button
  *     with the reason inline so the gates are visible, not mysterious.
@@ -85,6 +89,25 @@ export const ExternalPositionsGadget: React.FC = () => {
     () => (data?.positions ?? []).find((p) => p.key === selectedKey) ?? null,
     [data, selectedKey],
   );
+
+  // Details popup: selection alone never closes — it only opens this modal.
+  // Closing requires the explicit Arm + Confirm inside the modal.
+  const openDetails = useCallback((p: ExternalPositionDto) => {
+    setSelectedKey(p.key);
+  }, []);
+  const closeDetails = useCallback(() => {
+    setSelectedKey(null);
+  }, []);
+
+  // ESC closes the popup; row selection stays harmless.
+  useEffect(() => {
+    if (!selected) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeDetails();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, closeDetails]);
 
   const loadRec = useCallback(async (p: ExternalPositionDto, feeBps: number) => {
     setRecBusy(true);
@@ -228,14 +251,21 @@ export const ExternalPositionsGadget: React.FC = () => {
               {g.positions.map((p) => {
                 const on = p.key === selectedKey;
                 return (
-                  <button
+                  <div
                     key={p.key}
-                    type="button"
-                    onClick={() => setSelectedKey(on ? null : p.key)}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => openDetails(p)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openDetails(p);
+                      }
+                    }}
                     className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-mono border-t border-surface-border/60 transition cursor-pointer text-left ${
                       on ? "bg-accent-dim/50" : "hover:bg-surface-raised/50"
                     }`}
-                    title={p.closeSupported ? "Select to price a bot close" : "Venue cannot place live orders through the bot"}
+                    title="Click for details — selection alone never closes"
                   >
                     <span className="flex items-center gap-2 min-w-0">
                       <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${p.side === "long" ? "bg-profit-dim text-profit" : "bg-loss-dim text-loss"}`}>
@@ -248,12 +278,37 @@ export const ExternalPositionsGadget: React.FC = () => {
                       </span>
                       {!p.closeSupported && <span className="text-warn text-[10px] font-bold">NO BOT CLOSE</span>}
                     </span>
-                    <span className="tabular-nums text-slate-700 shrink-0">
-                      {num(p.externalQty)} @ ${num(p.markPrice, 2)}
-                      {" · "}
-                      <span className={`font-bold ${p.unrealizedPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>{usd(p.unrealizedPnlUsd)}</span>
+                    <span className="flex items-center gap-2 shrink-0">
+                      <span className="tabular-nums text-slate-700">
+                        {num(p.externalQty)} @ ${num(p.markPrice, 2)}
+                        {" · "}
+                        <span className={`font-bold ${p.unrealizedPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>{usd(p.unrealizedPnlUsd)}</span>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openDetails(p);
+                        }}
+                        className="px-2 py-1 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-surface text-slate-600 border-surface-border hover:text-slate-900 hover:border-slate-300"
+                        title={p.closeSupported ? `Close ${p.symbol} on ${p.venue} via bot — opens details popup` : `${p.venue} cannot place live orders through the bot`}
+                      >
+                        Details
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!p.closeSupported}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openDetails(p);
+                        }}
+                        className="px-2 py-1 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
+                        title={p.closeSupported ? `Close ${p.symbol} on ${p.venue} via bot — opens details popup, nothing closes until Confirm` : `${p.venue} cannot place live orders through the bot`}
+                      >
+                        Close…
+                      </button>
                     </span>
-                  </button>
+                  </div>
                 );
               })}
             </div>
@@ -261,22 +316,43 @@ export const ExternalPositionsGadget: React.FC = () => {
         </div>
       )}
 
-      {/* Close panel for the selected position. */}
+      {/* Details popup for the selected position. Selection alone never
+          closes — the live close requires Arm + Confirm inside this modal. */}
       {selected && (
-        <div className="rounded-xl border border-accent-line/60 bg-accent-dim/30 p-3.5 space-y-3">
-          <div className="flex items-center justify-between gap-2">
-            <h3 className="text-xs font-mono font-bold tracking-wider text-slate-900">
-              CLOSE {selected.base} {selected.side.toUpperCase()} ON {selected.venue.toUpperCase()} — {num(selected.externalQty)} @ ${num(selected.markPrice, 2)}
-            </h3>
-            <button
-              type="button"
-              onClick={() => setSelectedKey(null)}
-              className="p-1 rounded-md text-slate-400 hover:text-slate-700 cursor-pointer"
-              title="Deselect"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-in fade-in duration-150"
+          onClick={() => closeDetails()}
+          role="dialog"
+          aria-modal="true"
+          aria-label={`External position details for ${selected.symbol} on ${selected.venue}`}
+        >
+          <div
+            className="bg-surface border border-surface-border rounded-2xl w-full max-w-lg max-h-[85vh] overflow-y-auto shadow-2xl animate-in zoom-in-95 duration-150"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2 border-b border-surface-border pb-2.5">
+                <div className="min-w-0">
+                  <h3 className="text-[13px] font-mono font-bold tracking-wider text-slate-900 truncate">
+                    {selected.symbol} · {selected.side.toUpperCase()} ON {selected.venue.toUpperCase()}
+                  </h3>
+                  <p className="text-[11px] font-mono text-slate-500 mt-0.5">
+                    {num(selected.externalQty)} @ ${num(selected.markPrice, 2)} ·{" "}
+                    <span className={`font-bold ${selected.unrealizedPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
+                      {usd(selected.unrealizedPnlUsd)}
+                    </span>{" "}
+                    · viewing details only — nothing closes until Confirm
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => closeDetails()}
+                  className="p-1.5 rounded-lg border border-surface-border text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
+                  title="Close popup (Esc)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
 
           {recBusy && <div className="text-xs font-mono text-slate-500">Pricing close against live depth…</div>}
           {recError && (
@@ -366,8 +442,25 @@ export const ExternalPositionsGadget: React.FC = () => {
                   {result.orderId && <span className="text-slate-500"> · order {result.orderId}</span>}
                 </div>
               )}
+              <div className="flex items-center justify-between gap-2 pt-1">
+                <span className="text-[11px] font-mono text-slate-500">
+                  {selected.closeSupported
+                    ? "Per-ticker / per-venue close — this popup only."
+                    : `${selected.venue} cannot place live orders through the bot.`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => closeDetails()}
+                  className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold border bg-surface text-slate-600 border-surface-border hover:text-slate-900 cursor-pointer"
+                  title="Close popup"
+                >
+                  Done
+                </button>
+              </div>
             </div>
           )}
+            </div>
+          </div>
         </div>
       )}
     </div>

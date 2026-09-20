@@ -19,8 +19,8 @@ use arbitrageur_math::autotune::{
 use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
 use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
-    evaluate_funding_carry, evaluate_spot_perp_basis, funding_entry_capacity,
-    funding_win_probability,
+    estimate_funding_hold_hours, evaluate_funding_carry, evaluate_spot_perp_basis,
+    funding_entry_capacity, funding_win_probability,
 };
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
@@ -172,6 +172,18 @@ pub struct FundingOpportunityDto {
     /// executability — same contract as the spread monitor's field.
     #[serde(default)]
     pub win_probability: Option<f64>,
+    /// Modelled expected holding horizon in hours: time until the funding
+    /// gap is expected to decay below the min-APR exit threshold, clamped to
+    /// [fee+spread breakeven, 168h]. Thin history falls back to breakeven.
+    /// `None` on stale backends — clients fall back to `break_even_hours`.
+    #[serde(default)]
+    pub expected_hold_hours: Option<f64>,
+    /// Human-readable hold basis (decay slope, threshold, spread inclusion).
+    #[serde(default)]
+    pub hold_reason: Option<String>,
+    /// Heuristic hold confidence 0..1 (never 0/1).
+    #[serde(default)]
+    pub hold_confidence: Option<f64>,
     /// Marginal entry-cost slope in bps per extra $1k notional, summed over
     /// both legs at the requested trade size. `None` when either leg's book
     /// is missing/thin. Informational: describes cost shape, never sizes.
@@ -181,6 +193,64 @@ pub struct FundingOpportunityDto {
 
 fn default_funding_opp_kind() -> String {
     "carry".to_string()
+}
+
+/// Build the net funding-gap history for the CURRENT carry direction:
+/// `short_venue_rate_8h - long_venue_rate_8h` per minute bucket, trailing 7d.
+/// Returns `(ts_ms, net_8h_fraction)` ascending. Empty on any store hiccup —
+/// the estimator falls back to fee+spread breakeven (never fabricates).
+fn carry_gap_history(
+    state: &AppEngineState,
+    symbol: &str,
+    long_venue_id: &str,
+    short_venue_id: &str,
+    now_ms: i64,
+) -> Vec<(i64, f64)> {
+    const WINDOW_MS: i64 = 7 * 24 * 3_600_000;
+    let from = now_ms.saturating_sub(WINDOW_MS);
+    let long_series = state
+        .state_store
+        .funding_rate_series(long_venue_id, symbol, from, now_ms)
+        .unwrap_or_default();
+    let short_series = state
+        .state_store
+        .funding_rate_series(short_venue_id, symbol, from, now_ms)
+        .unwrap_or_default();
+    if long_series.is_empty() || short_series.is_empty() {
+        return Vec::new();
+    }
+    let mut long_map: HashMap<i64, f64> = HashMap::new();
+    for (ts, r8h, _) in long_series {
+        if r8h.is_finite() {
+            long_map.entry(ts).or_insert(r8h);
+        }
+    }
+    let mut out = Vec::new();
+    for (ts, r8h, _) in short_series {
+        if !r8h.is_finite() {
+            continue;
+        }
+        if let Some(lr) = long_map.get(&ts) {
+            let net = r8h - lr;
+            if net.is_finite() {
+                out.push((ts, net));
+            }
+        }
+    }
+    out.sort_by_key(|(ts, _)| *ts);
+    out
+}
+
+/// Min-APR exit threshold for the funding hold model (strategy params,
+/// default 8% when absent).
+fn funding_min_apr(state: &AppEngineState) -> f64 {
+    state
+        .strategy_params
+        .read()
+        .get("funding")
+        .map(|p| p.funding_min_apr_pct)
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(8.0)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2189,7 +2259,7 @@ pub async fn execute_triangle_arbitrage_impl(
             params.venue, pre_acc.free_margin
         ));
     }
-    let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    let margin_monitor = margin_monitor_from_settings(state);
     match margin_monitor.evaluate_account(&pre_acc) {
         MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
             return Err(format!(
@@ -2574,6 +2644,74 @@ async fn scan_funding_opportunities_for_symbol(
                     let (_, short_bids) = perp_books.get(vid_for(&opp.short_venue)?)?;
                     entry_gradient(long_asks, short_bids, size_f).map(|g| g.slope_bps_per_1k)
                 })();
+                // Expected hold: funding-gap persistence to the min-APR exit
+                // threshold + fee+spread breakeven + spread-drift disclosure.
+                // History is the minute-bucketed training substrate (7d); thin
+                // history falls back to breakeven with low confidence.
+                let hold_estimate = {
+                    let net_8h_f: f64 = opp
+                        .net_rate_8h
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let fee_bps_f: f64 = opp
+                        .round_trip_fee_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let spread_cost_f: Option<f64> =
+                        depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
+                    let hourly = |rate: Decimal, interval: u32| {
+                        rate / Decimal::from(interval.max(1))
+                    };
+                    let agrees_hold = match (
+                        r_a.predicted_rate,
+                        r_b.predicted_rate,
+                    ) {
+                        (Some(pa), Some(pb)) => {
+                            let pa_h = hourly(pa, r_a.interval_hours);
+                            let pb_h = hourly(pb, r_b.interval_hours);
+                            Some(
+                                if hourly(r_a.rate, r_a.interval_hours)
+                                    >= hourly(r_b.rate, r_b.interval_hours)
+                                {
+                                    pa_h >= pb_h
+                                } else {
+                                    pb_h >= pa_h
+                                },
+                            )
+                        }
+                        _ => None,
+                    };
+                    let now_hold_ms = chrono::Utc::now().timestamp_millis();
+                    // Resolve venue ids for history (fall back to names).
+                    let long_vid_hold: &str = rates
+                        .iter()
+                        .find(|(_, _, r)| r.venue.as_str() == opp.long_venue.as_str())
+                        .map(|(vid, _, _)| *vid)
+                        .unwrap_or(opp.long_venue.as_str());
+                    let short_vid_hold: &str = rates
+                        .iter()
+                        .find(|(_, _, r)| r.venue.as_str() == opp.short_venue.as_str())
+                        .map(|(vid, _, _)| *vid)
+                        .unwrap_or(opp.short_venue.as_str());
+                    let hist = carry_gap_history(
+                        state,
+                        symbol,
+                        long_vid_hold,
+                        short_vid_hold,
+                        now_hold_ms,
+                    );
+                    estimate_funding_hold_hours(
+                        net_8h_f,
+                        fee_bps_f,
+                        spread_cost_f,
+                        &hist,
+                        Some(funding_min_apr(state)),
+                        agrees_hold,
+                        slope,
+                    )
+                };
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -2656,6 +2794,9 @@ async fn scan_funding_opportunities_for_symbol(
                             agrees,
                         )
                     },
+                    expected_hold_hours: hold_estimate.as_ref().map(|h| h.hours),
+                    hold_reason: hold_estimate.as_ref().map(|h| h.reason.clone()),
+                    hold_confidence: hold_estimate.as_ref().map(|h| h.confidence),
                 });
             }
         }
@@ -2810,6 +2951,46 @@ async fn scan_funding_opportunities_for_symbol(
                         spot_mid.to_string().parse::<f64>().unwrap_or(0.0);
                     let perp_mid_f =
                         perp_mid.to_string().parse::<f64>().unwrap_or(0.0);
+                    // Expected hold for basis: single-venue perp funding history
+                    // (spot pays none). Same decay-to-threshold model as carry.
+                    let basis_hold = {
+                        let net_8h_f: f64 = eval
+                            .carry
+                            .net_rate_8h
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0);
+                        let fee_bps_f: f64 = eval
+                            .carry
+                            .round_trip_fee_bps
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0);
+                        let spread_cost_f: Option<f64> =
+                            depth.map(|(_, e)| e).filter(|v| v.is_finite() && *v > 0.0);
+                        let now_basis_ms = chrono::Utc::now().timestamp_millis();
+                        let hist_basis: Vec<(i64, f64)> = state
+                            .state_store
+                            .funding_rate_series(
+                                &venue_id.to_string(),
+                                symbol,
+                                now_basis_ms.saturating_sub(7 * 24 * 3_600_000),
+                                now_basis_ms,
+                            )
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter_map(|(ts, r, _)| r.is_finite().then_some((ts, r)))
+                            .collect();
+                        estimate_funding_hold_hours(
+                            net_8h_f,
+                            fee_bps_f,
+                            spread_cost_f,
+                            &hist_basis,
+                            Some(funding_min_apr(state)),
+                            funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
+                            slope,
+                        )
+                    };
                     opps.push(FundingOpportunityDto {
                         id: format!("{symbol}-{venue_label}-BASIS"),
                         symbol: symbol.to_string(),
@@ -2883,6 +3064,9 @@ async fn scan_funding_opportunities_for_symbol(
                             },
                             funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
                         ),
+                        expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
+                        hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),
+                        hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
                     });
                 }
             }
@@ -3609,7 +3793,7 @@ async fn execute_spatial_arbitrage_inner(
             )
         })?;
 
-    let margin_monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    let margin_monitor = margin_monitor_from_settings(state);
     let acc_buy = if is_live {
         buy_adapter
             .fetch_account()
@@ -4474,9 +4658,27 @@ pub async fn execute_prediction_arbitrage_impl(
     Err("Native 'prediction' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
+/// Re-anchor the breaker after a paper-universe reset (sync context).
+fn cb_reanchor_to_paper(state: &AppEngineState, total: Decimal) {
+    state.circuit_breaker.reanchor_baseline(total);
+    *state.last_risk_live_universe.write() = Some(*state.is_live_mode.read());
+}
+
+/// Build the margin monitor from the operator's Safety settings so the
+/// risk snapshot, venue balances, and pre-trade gates share one threshold set.
+fn margin_monitor_from_settings(state: &AppEngineState) -> MarginMonitor {
+    let s = state.settings.read();
+    let cfg = MarginMonitorConfig {
+        warning_margin_usage_pct: Decimal::from_f64_retain(s.margin_warning_usage_pct).unwrap_or(dec!(70.0)),
+        critical_margin_usage_pct: Decimal::from_f64_retain(s.margin_critical_usage_pct).unwrap_or(dec!(85.0)),
+        min_liquidation_distance_pct: Decimal::from_f64_retain(s.margin_min_liquidation_distance_pct).unwrap_or(dec!(15.0)),
+    };
+    MarginMonitor::new(cfg)
+}
+
 pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOverviewDto, String> {
     let cb = &state.circuit_breaker;
-    let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    let monitor = margin_monitor_from_settings(state);
 
     // Risk telemetry: live mode reads live adapters for admitted venues so
     // the header reconciles with the Capital Allocation gadget. Paper mode
@@ -4520,8 +4722,19 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
 
     // Feed observed equity into the breaker, then re-read its state so a
-    // drawdown trip is reflected in this same snapshot.
-    cb.update_equity(total_equity_dec);
+    // drawdown trip is reflected in this same snapshot. A paper<->live
+    // universe switch is NOT a loss: re-anchor the baseline instead of
+    // tripping (fixes the recurring false halt where a $200k paper baseline
+    // vs ~$3.5k live funds reads as a -$196k "drawdown" on a flat book).
+    {
+        let mut universe = state.last_risk_live_universe.write();
+        if *universe != Some(is_live) {
+            cb.reanchor_baseline(total_equity_dec);
+            *universe = Some(is_live);
+        } else {
+            cb.update_equity(total_equity_dec);
+        }
+    }
     let is_halted = cb.is_tripped();
     let cb_str = match cb.trip_reason() {
         Some(reason) => format!("TRIPPED: {}", reason),
@@ -5758,6 +5971,51 @@ pub fn save_engine_settings_impl(
     {
         return Err("Paper starting balance must be a positive number up to 1e12 USD".into());
     }
+    // Overall circuit-breaker + safety-net limits (Safety settings section).
+    if !settings.cb_max_daily_drawdown_usd.is_finite()
+        || settings.cb_max_daily_drawdown_usd <= 0.0
+        || settings.cb_max_daily_drawdown_usd > 1_000_000_000_000.0
+    {
+        return Err("Max daily drawdown (USD) must be a positive number up to 1e12".into());
+    }
+    if !settings.cb_max_daily_drawdown_pct.is_finite()
+        || settings.cb_max_daily_drawdown_pct <= 0.0
+        || settings.cb_max_daily_drawdown_pct > 100.0
+    {
+        return Err("Max daily drawdown (%) must be within 0–100".into());
+    }
+    if settings.cb_max_consecutive_errors < 1 || settings.cb_max_consecutive_errors > 1000 {
+        return Err("Max consecutive errors must be within 1–1000".into());
+    }
+    if !settings.cb_max_spread_divergence_bps.is_finite()
+        || settings.cb_max_spread_divergence_bps <= 0.0
+        || settings.cb_max_spread_divergence_bps > 100_000.0
+    {
+        return Err("Max spread divergence (bps) must be a positive number up to 100000".into());
+    }
+    if !settings.delta_max_unhedged_usd_per_asset.is_finite()
+        || settings.delta_max_unhedged_usd_per_asset <= 0.0
+        || settings.delta_max_unhedged_usd_per_asset > 1_000_000_000.0
+    {
+        return Err("DeltaGuard max unhedged per asset must be a positive USD amount".into());
+    }
+    if !settings.margin_warning_usage_pct.is_finite()
+        || !settings.margin_critical_usage_pct.is_finite()
+        || !settings.margin_min_liquidation_distance_pct.is_finite()
+    {
+        return Err("Margin thresholds must be finite numbers".into());
+    }
+    if settings.margin_warning_usage_pct < 0.0
+        || settings.margin_warning_usage_pct >= settings.margin_critical_usage_pct
+        || settings.margin_critical_usage_pct > 100.0
+    {
+        return Err("Margin warning % must be below critical %, both within 0–100".into());
+    }
+    if settings.margin_min_liquidation_distance_pct <= 0.0
+        || settings.margin_min_liquidation_distance_pct > 100.0
+    {
+        return Err("Min liquidation distance % must be within 0–100".into());
+    }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
@@ -5907,6 +6165,8 @@ pub fn save_engine_settings_impl(
     }
     // A changed starting balance reinitializes every paper account: fresh
     // equity, no open positions. Unrelated saves leave paper state alone.
+    // Re-anchor the breaker to the new paper universe so the balance change
+    // itself is never misread as a drawdown halt.
     let prev_balance = state.settings.read().paper_starting_balance_usd;
     if sanitized.paper_starting_balance_usd != prev_balance {
         if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
@@ -5924,11 +6184,41 @@ pub fn save_engine_settings_impl(
                         .set_equity_expectation(vid, f, "", now_ms);
                 }
             }
+            if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
+                let n = state.paper_exchanges().len() as u32;
+                if n > 0 {
+                    cb_reanchor_to_paper(state, eq * Decimal::from(n));
+                }
+            }
         }
     }
     let _ = state
         .state_store
         .kv_set("engine.trading_mode", &sanitized.trading_mode);
+    // Persist Safety limits so restarts keep the operator's values.
+    let _ = state.state_store.kv_set("risk.cb_max_dd_usd", &sanitized.cb_max_daily_drawdown_usd.to_string());
+    let _ = state.state_store.kv_set("risk.cb_max_dd_pct", &sanitized.cb_max_daily_drawdown_pct.to_string());
+    let _ = state.state_store.kv_set("risk.cb_max_errors", &sanitized.cb_max_consecutive_errors.to_string());
+    let _ = state.state_store.kv_set("risk.cb_max_spread_bps", &sanitized.cb_max_spread_divergence_bps.to_string());
+    let _ = state.state_store.kv_set("risk.delta_max_unhedged", &sanitized.delta_max_unhedged_usd_per_asset.to_string());
+    let _ = state.state_store.kv_set("risk.margin_warn", &sanitized.margin_warning_usage_pct.to_string());
+    let _ = state.state_store.kv_set("risk.margin_crit", &sanitized.margin_critical_usage_pct.to_string());
+    let _ = state.state_store.kv_set("risk.margin_min_liq", &sanitized.margin_min_liquidation_distance_pct.to_string());
+    // Live-apply: breaker limits update in place (no restart), delta guard
+    // re-limits, margin thresholds feed the next snapshot automatically.
+    {
+        use arbitrageur_risk::circuit_breaker::CircuitBreakerConfig;
+        let cfg = CircuitBreakerConfig {
+            max_daily_drawdown_usd: Decimal::from_f64_retain(sanitized.cb_max_daily_drawdown_usd).unwrap_or(dec!(25000.0)),
+            max_daily_drawdown_pct: Decimal::from_f64_retain(sanitized.cb_max_daily_drawdown_pct).unwrap_or(dec!(5.0)),
+            max_consecutive_errors: sanitized.cb_max_consecutive_errors,
+            max_spread_divergence_bps: Decimal::from_f64_retain(sanitized.cb_max_spread_divergence_bps).unwrap_or(dec!(250.0)),
+        };
+        state.circuit_breaker.update_config(cfg);
+        if let Some(limit) = Decimal::from_f64_retain(sanitized.delta_max_unhedged_usd_per_asset) {
+            state.delta_guard.write().set_max_unhedged_usd_per_asset(limit);
+        }
+    }
     *state.settings.write() = sanitized;
     Ok("Configuration applied to the current session".into())
 }
@@ -8812,7 +9102,7 @@ pub async fn get_venue_balances_impl(
     state: &AppEngineState,
 ) -> Result<Vec<VenueBalanceInfo>, String> {
     let is_live = *state.is_live_mode.read();
-    let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+    let monitor = margin_monitor_from_settings(state);
     let mut results = Vec::new();
 
     if is_live {
@@ -15185,6 +15475,10 @@ mod tests {
         state.circuit_breaker.update_equity(dec!(1000000.0));
         state.circuit_breaker.reset();
         assert_eq!(state.circuit_breaker.day_start_equity(), dec!(1000000.0));
+        // Mark the equity universe as already anchored so the snapshot measures
+        // drawdown against the 1M baseline instead of re-anchoring (universe
+        // switches re-anchor; steady-state snapshots measure).
+        *state.last_risk_live_universe.write() = Some(*state.is_live_mode.read());
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
         assert_eq!(risk.current_drawdown_usd, 400000.0);
