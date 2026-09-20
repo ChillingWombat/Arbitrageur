@@ -5,12 +5,13 @@ import {
   ArrowLeftRight,
   Check,
   CheckCircle2,
-  ExternalLink,
   Eye,
   EyeOff,
   KeyRound,
   Plus,
   RefreshCw,
+  Terminal,
+  Copy,
   Trash2,
 } from "lucide-react";
 import { api } from "../services/api";
@@ -18,6 +19,8 @@ import type {
   AccountCredentialInput,
   AccountDto,
   AgentCheckDto,
+  ApproveTxDto,
+  SignApproveDto,
   EngineSettingsDto,
   StrategyAccountRouteDto,
   VenueBalanceInfo,
@@ -468,10 +471,16 @@ function normalizeLeverageText(raw: string): string {
 /* PopDEX agent-setup toolkit modal                                    */
 /* ------------------------------------------------------------------ */
 
-/** Guided PopDEX agent setup: generate locally → approve in own wallet → verify. */
+const diyCommand = (built: ApproveTxDto, agent: string, mainAddr: string): string =>
+  `cast send ${built.to} "approveAgent(address,address,bytes32,uint64,uint64,bool)" ${agent} ${mainAddr} 0x0000000000000000000000000000000000000000000000000000000000000000 0 $(date +%s%3N) false --rpc-url ${built.rpcUrl} --private-key $MAIN_PRIVATE_KEY`;
+
+/** Guided PopDEX agent setup: generate locally → approve with the main
+ * key (signed once in this modal and never stored — or via a DIY shell
+ * command for the cautious) → verify on-chain → save. */
+const POPDEX_API_DOCS = "https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api";
 const PopdexAgentToolkit: React.FC<{
   initialMain: string;
-  onUseKey: (key: string) => void;
+  onUseKey: (agentKey: string, mainAddr: string) => void;
   onClose: () => void;
 }> = ({ initialMain, onUseKey, onClose }) => {
   const [network, setNetwork] = useState<"testnet" | "mainnet">("testnet");
@@ -479,7 +488,11 @@ const PopdexAgentToolkit: React.FC<{
   const [agentAddr, setAgentAddr] = useState("");
   const [agentKey, setAgentKey] = useState("");
   const [check, setCheck] = useState<AgentCheckDto | null>(null);
-  const [signerPath, setSignerPath] = useState<string | null>(null);
+  const [mainKey, setMainKey] = useState("");
+  const [showMainKey, setShowMainKey] = useState(false);
+  const [signed, setSigned] = useState<SignApproveDto | null>(null);
+  const [diy, setDiy] = useState<ApproveTxDto | null>(null);
+  const [copiedDiy, setCopiedDiy] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [keyUsed, setKeyUsed] = useState(false);
@@ -521,8 +534,11 @@ const PopdexAgentToolkit: React.FC<{
           </button>
         </div>
         <p className="text-[11px] font-sans text-slate-500 leading-normal">
-          Your main key never enters this app. Generate the agent key here, approve it
-          once in your own wallet, verify on-chain, then save the account below.
+          Generate the agent key here, approve it once with the main key, verify
+          on-chain, then save the account below. The main key signs a single
+          transaction and is <b>never stored</b> — or run the command yourself
+          instead (step 3, option B).{" "}
+          <a href={POPDEX_API_DOCS} target="_blank" rel="noreferrer" className="underline">PopDEX API guide</a>
         </p>
 
         <div className="flex gap-2 items-center text-xs font-mono">
@@ -531,7 +547,7 @@ const PopdexAgentToolkit: React.FC<{
             <button
               key={n}
               type="button"
-              onClick={() => { setNetwork(n); setCheck(null); setSignerPath(null); }}
+              onClick={() => { setNetwork(n); setCheck(null); setSigned(null); setDiy(null); }}
               aria-pressed={network === n}
               className={`px-2.5 py-1 rounded-lg font-bold border transition cursor-pointer ${
                 network === n ? "bg-accent text-white border-accent" : "text-slate-500 border-surface-border hover:bg-slate-100/70"
@@ -575,8 +591,8 @@ const PopdexAgentToolkit: React.FC<{
               <div className="text-[11px] font-mono break-all"><span className="text-slate-400">Address: </span><span className="text-slate-900">{agentAddr}</span></div>
               <div className="text-[11px] font-mono break-all"><span className="text-slate-400">Private key: </span><span className="text-loss font-bold">{agentKey.slice(0, 10)}…{agentKey.slice(-6)} (shown once)</span></div>
               <div className="flex gap-2">
-                <button type="button" onClick={() => { onUseKey(agentKey); setKeyUsed(true); }} className={btnAccent}>
-                  <Check className="w-3.5 h-3.5" /> {keyUsed ? "Filled into account ✓" : "Use this key in the account form"}
+                <button type="button" onClick={() => { onUseKey(agentKey, main.trim()); setKeyUsed(true); }} className={btnAccent}>
+                  <Check className="w-3.5 h-3.5" /> {keyUsed ? "Filled into account ✓" : "Use this key + main address in the account form"}
                 </button>
                 <button type="button" onClick={() => void run("gen", async () => {
                   const g = await api.generatePopdexAgent();
@@ -592,22 +608,76 @@ const PopdexAgentToolkit: React.FC<{
         </div>
 
         <div className={stepCard}>
-          <div className="text-xs font-mono font-bold text-slate-800">3 · Approve in MetaMask / Rabby (external wallet page)</div>
+          <div className="text-xs font-mono font-bold text-slate-800">3 · Approve with the main key (one time)</div>
           <p className="text-[10px] font-sans text-slate-500 leading-normal">
-            Approval <b>cannot</b> happen inside this app — we never hold your main private key.
-            Press the button below to open a locally-generated signer page, connect <b>MetaMask</b> or <b>Rabby</b>
-            with your <b>main</b> account, review the official <span className="font-mono">approveAgent</span> call,
-            and sign it there. Never paste your main key anywhere.
+            <b>Option A — sign here:</b> paste the <b>main</b> private key below and press Sign.
+            It signs exactly one <span className="font-mono">approveAgent</span> transaction and is
+            wiped from memory immediately — never saved, never sent anywhere else. Prefer not
+            to paste it? Use <b>option B</b> below instead.
           </p>
-          <button type="button" disabled={busy !== null || !main} onClick={() => void run("open", async () => {
-              setSignerPath(await api.openPopdexSignerPage(main.trim(), agentAddr, network));
-            })} className={`${btnAccent} w-full justify-center !text-[13px] !py-2.5`} title="Opens a locally-generated page: generate the agent key there if needed, then sign with MetaMask or Rabby">
-              <ExternalLink className="w-4 h-4" /> {busy === "open" ? "Opening…" : "Open wallet signer — sign with MetaMask / Rabby"}
+          <div className="flex gap-2">
+            <input
+              type={showMainKey ? "text" : "password"}
+              value={mainKey}
+              onChange={(e) => setMainKey(e.target.value)}
+              placeholder="Main private key 0x… (used once, never stored)"
+              autoComplete="off"
+              spellCheck={false}
+              className="flex-1 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <button type="button" onClick={() => setShowMainKey((s) => !s)} className={btnGhost} aria-label={showMainKey ? "Hide" : "Show"}>
+              {showMainKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             </button>
-          {signerPath && <p className="text-[10px] font-mono text-slate-500 break-all">Signer page: {signerPath}</p>}
-          {!agentAddr && <p className="text-[10px] font-sans text-slate-400">Tip: no agent yet? The signer page can generate one for you (step 1 there).</p>}
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button type="button" disabled={busy !== null || !main || !agentAddr || !mainKey} onClick={() => void (async () => {
+              const key = mainKey;
+              setMainKey("");
+              await run("sign", async () => {
+                setSigned(await api.signPopdexApproveWithMain(main.trim(), agentAddr, key, network));
+                setCheck(null);
+              });
+            })()} className={btnAccent}>
+              <KeyRound className="w-3.5 h-3.5" /> {busy === "sign" ? "Signing…" : "Sign approval"}
+            </button>
+            {signed && (
+              <span className="text-[11px] font-mono break-all">
+                <span className="text-profit font-bold">Submitted ✓ </span>
+                <a href={signed.explorerUrl} target="_blank" rel="noreferrer" className="underline text-slate-600">{signed.txHash.slice(0, 12)}…</a>
+              </span>
+            )}
+          </div>
+          <div className="pt-1 space-y-1.5">
+            <p className="text-[10px] font-sans text-slate-500 leading-normal">
+              <b>Option B — run it yourself</b> (nothing secret touches this app): show the{" "}
+              <span className="font-mono">cast</span> command and run it in your own terminal.{" "}
+              <a href={POPDEX_API_DOCS} target="_blank" rel="noreferrer" className="underline">API guide, step 4</a>
+            </p>
+            <button type="button" disabled={busy !== null || !main || !agentAddr} onClick={() => void run("diy", async () => {
+              const built = await api.buildPopdexApproveTx(main.trim(), agentAddr, network);
+              setDiy(built);
+              setCopiedDiy(false);
+            })} className={btnGhost}>
+              <Terminal className="w-3.5 h-3.5" /> {busy === "diy" ? "Building…" : diy ? "Rebuild command" : "Show DIY command"}
+            </button>
+            {diy && (
+              <div className="space-y-1.5">
+                <pre className="whitespace-pre-wrap break-all text-[10px] font-mono bg-slate-900 text-slate-100 rounded-lg p-2.5">{diyCommand(diy, agentAddr, main.trim())}</pre>
+                <button type="button" onClick={() => void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(diyCommand(diy, agentAddr, main.trim()));
+                    setCopiedDiy(true);
+                    setTimeout(() => setCopiedDiy(false), 1500);
+                  } catch {
+                    setError("Clipboard blocked — select the command manually.");
+                  }
+                })()} className={btnGhost}>
+                  {copiedDiy ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} {copiedDiy ? "Copied ✓" : "Copy command"}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
-
         <div className={stepCard}>
           <div className="text-xs font-mono font-bold text-slate-800">4 · Verify on-chain, then save</div>
           <div className="flex gap-2 items-center">
@@ -1003,7 +1073,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
         {toolkitOpen && account.venue.toLowerCase() === "popdex" && (
           <PopdexAgentToolkit
             initialMain={(valueFor("walletAddress" as CredFieldKey) ?? "").trim()}
-            onUseKey={(k) => setValue("privateKey", k)}
+            onUseKey={(k, m) => { setValue("privateKey", k); if (m) setValue("walletAddress", m); }}
             onClose={() => setToolkitOpen(false)}
           />
         )}
@@ -1191,7 +1261,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
         {toolkitOpen && venue.toLowerCase() === "popdex" && (
           <PopdexAgentToolkit
             initialMain={(drafts["walletAddress"] ?? "").trim()}
-            onUseKey={(k) => setDrafts((d) => ({ ...d, privateKey: k }))}
+            onUseKey={(k, m) => setDrafts((d) => ({ ...d, privateKey: k, ...(m ? { walletAddress: m } : {}) }))}
             onClose={() => setToolkitOpen(false)}
           />
         )}

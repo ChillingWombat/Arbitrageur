@@ -1269,6 +1269,10 @@ export interface AgentCheckDto {
   approved: boolean;
   agentCount: number;
 }
+export interface SignApproveDto {
+  txHash: string;
+  explorerUrl: string;
+}
 export interface RadarBotConfigDto {
   enabled: boolean;
   mode: "off" | "auto" | "paused" | "reduce_only";

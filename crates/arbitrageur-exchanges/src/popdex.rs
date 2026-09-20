@@ -1316,6 +1316,135 @@ pub fn build_approve_agent_calldata(
     Ok(format!("0x{}", hex::encode(call.abi_encode())))
 }
 
+/// Sign + submit `approveAgent` with the MAIN key, entirely in-process.
+///
+/// The main key is transient: it arrives per-call, signs exactly one
+/// transaction, and is dropped on return — it is never persisted, never bound
+/// to the adapter, and never logged. Operators uncomfortable pasting any main
+/// key should use the DIY `cast` command from `approve_agent_cast_command`
+/// instead (same calldata, signed in their own shell).
+///
+/// Fail-closed checks: agent != main, the pasted key must derive the `main`
+/// address (catches wrong-key pastes), and the node chain id must match the
+/// selected network. Returns the mined transaction hash.
+pub async fn submit_approve_agent_with_main(
+    network: PopDexNetwork,
+    main: &str,
+    agent: &str,
+    main_key: &Zeroizing<String>,
+) -> anyhow::Result<String> {
+    use alloy::network::TransactionBuilder;
+    use alloy::providers::{Provider, ProviderBuilder};
+    use alloy::rpc::types::TransactionRequest;
+    use alloy::signers::local::PrivateKeySigner;
+
+    let main_addr: Address = main
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
+    let agent_addr: Address = agent
+        .trim()
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad agent address: {e}"))?;
+    if main_addr == agent_addr {
+        anyhow::bail!("agent address equals the main address — generate a fresh agent key instead");
+    }
+    let signer: PrivateKeySigner = main_key
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("bad main private key (want 0x-hex secp256k1)"))?;
+    if signer.address() != main_addr {
+        anyhow::bail!("the pasted private key does not match the main account address — refusing to sign");
+    }
+    let now_ms = Utc::now().timestamp_millis().max(0) as u64;
+    let calldata_hex = build_approve_agent_calldata(
+        &agent_addr.to_string(),
+        &main_addr.to_string(),
+        now_ms,
+    )?;
+    let calldata =
+        hex::decode(calldata_hex.trim().trim_start_matches("0x"))
+            .map_err(|e| anyhow::anyhow!("calldata encode failed: {e}"))?;
+
+    let provider = ProviderBuilder::new().wallet(signer).connect_http(
+        network
+            .rpc_url()
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad RPC url: {e}"))?,
+    );
+    let chain_id = provider
+        .get_chain_id()
+        .await
+        .map_err(|e| anyhow::anyhow!("PopDEX RPC unreachable: {e}"))?;
+    if chain_id != network.chain_id() {
+        anyhow::bail!(
+            "PopDEX chain id mismatch: node reports {chain_id}, expected {} — wrong network, refusing to sign",
+            network.chain_id()
+        );
+    }
+    let to_addr: Address = POPDEX_ACCOUNT_PRECOMPILE
+        .parse()
+        .map_err(|e| anyhow::anyhow!("bad contract address: {e}"))?;
+    let gas_price = provider
+        .get_gas_price()
+        .await
+        .map_err(|e| anyhow::anyhow!("gas price query failed: {e}"))?;
+    // Estimate first: a reverting call fails closed HERE with the node error
+    // instead of burning a main-key signature on a doomed transaction.
+    let estimate_tx = TransactionRequest::default()
+        .with_from(main_addr)
+        .with_to(to_addr)
+        .with_input(Bytes::from(calldata.clone()));
+    let gas_limit = provider
+        .estimate_gas(estimate_tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("PopDEX estimateGas reverted (call would fail): {e}"))?;
+    let gas_limit = gas_limit.saturating_mul(125).saturating_div(100).max(100_000);
+    let tx = TransactionRequest::default()
+        .with_to(to_addr)
+        .with_input(Bytes::from(calldata))
+        .with_nonce(now_ms)
+        .with_chain_id(chain_id)
+        .with_gas_price(gas_price)
+        .with_gas_limit(gas_limit);
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .map_err(|e| anyhow::anyhow!("PopDEX sendTransaction failed: {e}"))?;
+    let tx_hash = format!("{:#x}", pending.tx_hash());
+    let receipt = tokio::time::timeout(Duration::from_secs(30), pending.get_receipt())
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("PopDEX receipt timeout for {tx_hash} — check the explorer before retrying")
+        })?
+        .map_err(|e| anyhow::anyhow!("PopDEX receipt query failed for {tx_hash}: {e}"))?;
+    if !receipt.status() {
+        anyhow::bail!("PopDEX transaction reverted: {tx_hash} — see the explorer for the error code");
+    }
+    Ok(tx_hash)
+}
+
+/// DIY `cast` command for the same approval (network-aware RPC + live nonce).
+/// For operators who won't paste the main key anywhere but their own shell.
+/// Docs: <https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api> (Step 4).
+pub fn approve_agent_cast_command(
+    network: PopDexNetwork,
+    main: &str,
+    agent: &str,
+    nonce_ms: u64,
+) -> String {
+    format!(
+        "cast send {account} \"approveAgent(address,address,bytes32,uint64,uint64,bool)\" \
+  {agent} {main} 0x0000000000000000000000000000000000000000000000000000000000000000 0 {nonce} false \
+  --rpc-url {rpc} --private-key $MAIN_PRIVATE_KEY",
+        account = POPDEX_ACCOUNT_PRECOMPILE,
+        agent = agent.trim(),
+        main = main.trim(),
+        nonce = nonce_ms,
+        rpc = network.rpc_url(),
+    )
+}
+
 /// EIP-681 request URI for the approval call (paste into a wallet app that
 /// accepts contract-interaction URIs, or scan if it renders QR elsewhere).
 pub fn approve_agent_eip681(main: &str, agent: &str, nonce_ms: u64, chain_id: u64) -> String {
@@ -1364,6 +1493,47 @@ mod tests {
         assert_eq!(PopDexNetwork::default(), PopDexNetwork::Mainnet);
         assert_eq!(PopDexNetwork::Mainnet.chain_id(), 2184);
         assert_eq!(PopDexNetwork::Testnet.chain_id(), 34952);
+    }
+
+    #[tokio::test]
+    async fn main_key_approval_validates_before_any_signature() {
+        use zeroize::Zeroizing;
+        let main = "0x1111111111111111111111111111111111111111";
+        let agent = "0x2222222222222222222222222222222222222222";
+        // Scalar-1 key derives 0x7e5f… — not `main`, so key/address mismatch
+        // fails closed before any RPC contact.
+        let wrong = Zeroizing::new(
+            "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+        );
+        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, main, agent, &wrong)
+            .await
+            .is_err());
+        // Agent == main is refused even with a matching key shape.
+        let bad = Zeroizing::new("0xnope".to_string());
+        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, main, main, &bad)
+            .await
+            .is_err());
+        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, "nope", agent, &bad)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn diy_cast_command_is_network_aware() {
+        let main = "0x1111111111111111111111111111111111111111";
+        let agent = "0x2222222222222222222222222222222222222222";
+        let cmd = approve_agent_cast_command(PopDexNetwork::Testnet, main, agent, 42);
+        for marker in [
+            "approveAgent(address,address,bytes32,uint64,uint64,bool)",
+            "testnet-app.popdex.xyz",
+            main,
+            agent,
+            "MAIN_PRIVATE_KEY",
+        ] {
+            assert!(cmd.contains(marker), "cast command missing {marker}");
+        }
+        assert!(approve_agent_cast_command(PopDexNetwork::Mainnet, main, agent, 42)
+            .contains("app.popdex.xyz"));
     }
 
     #[test]

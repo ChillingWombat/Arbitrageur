@@ -57,6 +57,7 @@ import type {
   GeneratedAgentDto,
   ApproveTxDto,
   AgentCheckDto,
+  SignApproveDto,
   SessionProfileDto,
   VenueCapabilityDto,
 } from "../types/index.ts";
@@ -958,8 +959,8 @@ export const api = {
     return invokeDesktop<AgentCheckDto>("check_popdex_agent", { main, agent, network });
   },
 
-  async openPopdexSignerPage(main: string, agent: string, network: string): Promise<string> {
-    return invokeDesktop<string>("open_popdex_signer_page", { main, agent, network });
+  async signPopdexApproveWithMain(main: string, agent: string, mainKey: string, network: string): Promise<SignApproveDto> {
+    return invokeDesktop<SignApproveDto>("sign_popdex_approve_with_main", { main, agent, mainKey, network });
   },
 
   // ---- Session seasonality (Phase 1, display only) ----
