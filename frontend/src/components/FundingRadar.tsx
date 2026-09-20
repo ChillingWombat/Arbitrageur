@@ -333,6 +333,28 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
         ? (size * opp.entry_spread_bps) / 10000
         : 0;
     const net = expectedCarryUsd(opp);
+    // P(net >= target): empirical CDF over the backtest deciles (linear
+    // interpolation, ≈ by construction with 11 points). Target editable,
+    // default $100.
+    const [targetUsd, setTargetUsd] = useState("100");
+    const probTarget = useMemo(() => {
+      const t = Number(targetUsd);
+      const d = opp.backtest_deciles_usd;
+      if (!Number.isFinite(t) || !d || d.length === 0 || d.some((v) => !Number.isFinite(v)))
+        return null;
+      const n = d.length;
+      if (t <= d[0]) return 1;
+      if (t > d[n - 1]) return 0;
+      for (let i = 0; i < n - 1; i++) {
+        const lo = d[i];
+        const hi = d[i + 1];
+        if (t <= hi) {
+          const frac = hi > lo ? (t - lo) / (hi - lo) : 0;
+          return Math.min(1, Math.max(0, 1 - (i + Math.min(1, Math.max(0, frac))) / (n - 1)));
+        }
+      }
+      return 0;
+    }, [opp.backtest_deciles_usd, targetUsd]);
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -499,6 +521,28 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 }
                 title="Measured mean net per trailing-history entry. Unmeasurable below 20 scoreable entries."
               />
+              <div
+                className="space-y-0.5"
+                title="Empirical probability that a trailing-history entry nets at least the target (≈, interpolated over 11 net deciles). Unmeasurable below 20 scoreable entries."
+              >
+                <div className="text-[11px] font-sans text-slate-400 font-medium">P(target profit)</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-sm font-bold font-sans text-slate-900 tabular-nums">$</span>
+                  <input
+                    value={targetUsd}
+                    onChange={(e) => setTargetUsd(e.target.value)}
+                    className="w-16 h-9 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono font-bold text-slate-900 tabular-nums focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition"
+                  />
+                  <span className="text-sm font-bold font-sans text-accent tabular-nums">
+                    {probTarget != null ? `≈${(probTarget * 100).toFixed(0)}%` : "—"}
+                  </span>
+                </div>
+                {opp.backtest_deciles_usd != null && opp.backtest_deciles_usd.length >= 11 && (
+                  <div className="text-[10px] font-sans text-slate-400 tabular-nums">
+                    P10 {opp.backtest_deciles_usd[1] >= 0 ? "+" : "-"}${Math.abs(opp.backtest_deciles_usd[1]).toFixed(0)} · P50 {opp.backtest_deciles_usd[5] >= 0 ? "+" : "-"}${Math.abs(opp.backtest_deciles_usd[5]).toFixed(0)} · P90 {opp.backtest_deciles_usd[9] >= 0 ? "+" : "-"}${Math.abs(opp.backtest_deciles_usd[9]).toFixed(0)}
+                  </div>
+                )}
+              </div>
             </div>
 
           <div>

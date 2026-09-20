@@ -411,6 +411,8 @@ export interface FundingOpportunityDto {
   backtest_expected_usd?: number;
   /** Backtest entry trials behind the two figures above. */
   backtest_trials?: number;
+  /** Ascending net-USD deciles (P0…P100, 11 points) for P(net >= any target). Absent below 20 trials. */
+  backtest_deciles_usd?: number[];
   /** Expected net carry in USD over the modelled hold with linear
    * funding-gap decay to the min-APR exit threshold, net of round-trip
    * fees + measured entry spread (signed). Absent on stale backends. */

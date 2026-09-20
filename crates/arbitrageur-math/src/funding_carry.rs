@@ -520,6 +520,9 @@ pub struct GapBacktest {
     pub expected_usd: f64,
     /// Mean realized hold in hours.
     pub mean_hold_hours: f64,
+    /// Ascending net-USD deciles (P0=min … P100=max, 11 points) enabling
+    /// P(net >= any target) without re-running trials.
+    pub deciles_usd: Vec<f64>,
 }
 
 pub fn backtest_gap_carry(
@@ -556,6 +559,7 @@ pub fn backtest_gap_carry(
     let mut wins = 0u32;
     let mut sum_net = 0.0;
     let mut sum_hold = 0.0;
+    let mut nets: Vec<f64> = Vec::new();
     let t_end = pts.last().map(|(t, _)| *t).unwrap_or(0.0);
     let mut i = 0usize;
     while i < pts.len() {
@@ -596,6 +600,7 @@ pub fn backtest_gap_carry(
         trials += 1;
         sum_net += net;
         sum_hold += hold_h;
+        nets.push(net);
         if net > 0.0 {
             wins += 1;
         }
@@ -604,13 +609,47 @@ pub fn backtest_gap_carry(
     if trials < min_trials.max(1) {
         return None;
     }
+    nets.sort_by(|a, b| a.total_cmp(b));
+    let deciles_usd = (0..=10)
+        .map(|k| nets[(k * (nets.len() - 1)) / 10])
+        .collect();
     Some(GapBacktest {
         trials,
         wins,
         win_rate: (wins as f64) / (trials as f64),
         expected_usd: sum_net / (trials as f64),
         mean_hold_hours: sum_hold / (trials as f64),
+        deciles_usd,
     })
+}
+
+/// Empirical P(net >= `target_usd`) by linear interpolation over ascending
+/// net-USD deciles (see [`GapBacktest::deciles_usd`]). Below P0 ≈ 100%,
+/// above P100 ≈ 0%. Approximate by construction (11 points) — displayed
+/// with ≈, never more precise than the grid allows.
+pub fn prob_net_above_target(deciles_asc: &[f64], target_usd: f64) -> Option<f64> {
+    if deciles_asc.is_empty() || !target_usd.is_finite() {
+        return None;
+    }
+    if deciles_asc.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let n = deciles_asc.len();
+    if target_usd <= deciles_asc[0] {
+        return Some(1.0);
+    }
+    if target_usd > deciles_asc[n - 1] {
+        return Some(0.0);
+    }
+    for i in 0..n - 1 {
+        let (lo, hi) = (deciles_asc[i], deciles_asc[i + 1]);
+        if target_usd <= hi {
+            let frac = if hi > lo { (target_usd - lo) / (hi - lo) } else { 0.0 };
+            let cdf = (i as f64 + frac.clamp(0.0, 1.0)) / ((n - 1) as f64);
+            return Some((1.0 - cdf).clamp(0.0, 1.0));
+        }
+    }
+    Some(0.0)
 }
 
 /// Informational win probability for a funding-carry / basis opportunity.
@@ -1001,6 +1040,37 @@ mod funding_win_probability_tests {
         // Garbage hold refuses rather than inventing.
         assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(f64::NAN)).is_none());
         assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(0.0)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod prob_target_tests {
+    use super::*;
+
+    #[test]
+    fn prob_at_target_interpolates_deciles() {
+        let d: Vec<f64> = (0..=10).map(|k| k as f64 * 10.0).collect(); // 0..100
+        assert_eq!(prob_net_above_target(&d, -5.0), Some(1.0));
+        assert_eq!(prob_net_above_target(&d, 0.0), Some(1.0));
+        assert_eq!(prob_net_above_target(&d, 100.0), Some(0.0));
+        assert_eq!(prob_net_above_target(&d, 100.01), Some(0.0));
+        // Midpoint of [20,30] -> CDF 0.25 -> P 0.75.
+        let p = prob_net_above_target(&d, 25.0).expect("p");
+        assert!((p - 0.75).abs() < 1e-12, "{p}");
+        assert!(prob_net_above_target(&[], 10.0).is_none());
+        assert!(prob_net_above_target(&d, f64::NAN).is_none());
+    }
+
+    #[test]
+    fn prob_matches_counted_win_rate_at_zero() {
+        // On a symmetric +/- book, P(net>=0) must equal the counted share.
+        let nets: Vec<f64> = (-50..=50).map(|v| v as f64).collect();
+        let mut sorted = nets.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let dec: Vec<f64> = (0..=10).map(|k| sorted[(k * (sorted.len() - 1)) / 10]).collect();
+        let p = prob_net_above_target(&dec, 0.0).expect("p");
+        let counted = nets.iter().filter(|v| **v >= 0.0).count() as f64 / nets.len() as f64;
+        assert!((p - counted).abs() < 0.06, "p={p} counted={counted}");
     }
 }
 

@@ -205,6 +205,10 @@ pub struct FundingOpportunityDto {
     /// Backtest entry trials behind the two figures above.
     #[serde(default)]
     pub backtest_trials: Option<u32>,
+    /// Ascending net-USD deciles (P0…P100, 11 points) enabling P(net >= any
+    /// target) client-side without re-running trials. `None` below 20 trials.
+    #[serde(default)]
+    pub backtest_deciles_usd: Option<Vec<f64>>,
     /// Marginal entry-cost slope in bps per extra $1k notional, summed over
     /// both legs at the requested trade size. `None` when either leg's book
     /// is missing/thin. Informational: describes cost shape, never sizes.
@@ -2776,7 +2780,7 @@ async fn scan_funding_opportunities_for_symbol(
                 // Per-leg prints for the detail popup (before `opp` moves).
                 let long_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.long_venue);
                 let short_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.short_venue);
-                let (bt_win, bt_exp, bt_n) = backtest_stats(
+                let (bt_win, bt_exp, bt_n, bt_dec) = backtest_stats(
                     &hist,
                     funding_min_apr(state),
                     fee_bps_f,
@@ -2886,6 +2890,7 @@ async fn scan_funding_opportunities_for_symbol(
                     backtest_win_rate: bt_win,
                     backtest_expected_usd: bt_exp,
                     backtest_trials: bt_n,
+                    backtest_deciles_usd: bt_dec,
                 });
             }
         }
@@ -3080,7 +3085,7 @@ async fn scan_funding_opportunities_for_symbol(
                             slope,
                         )
                     };
-                    let (bt_win, bt_exp, bt_n) = backtest_stats(
+                    let (bt_win, bt_exp, bt_n, bt_dec) = backtest_stats(
                         &hist_basis,
                         funding_min_apr(state),
                         fee_bps_f,
@@ -3182,6 +3187,7 @@ async fn scan_funding_opportunities_for_symbol(
                         backtest_win_rate: bt_win,
                         backtest_expected_usd: bt_exp,
                         backtest_trials: bt_n,
+                        backtest_deciles_usd: bt_dec,
                         expected_return_usd: expected_carry_return_usd(
                             net_8h_f,
                             fee_bps_f,
@@ -6653,13 +6659,18 @@ fn backtest_stats(
     fee_bps: f64,
     spread_bps: Option<f64>,
     trade_size_usd: f64,
-) -> (Option<f64>, Option<f64>, Option<u32>) {
+) -> (Option<f64>, Option<f64>, Option<u32>, Option<Vec<f64>>) {
     let threshold_8h = min_apr_pct.max(0.0) / 100.0 / 365.0 / 3.0;
     let spread = spread_bps.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(0.0);
     let cost_ratio = (fee_bps.max(0.0) + spread) / 10_000.0;
     match backtest_gap_carry(hist, threshold_8h, cost_ratio, trade_size_usd, 168.0, 20) {
-        Some(b) => (Some(b.win_rate), Some(b.expected_usd), Some(b.trials)),
-        None => (None, None, None),
+        Some(b) => (
+            Some(b.win_rate),
+            Some(b.expected_usd),
+            Some(b.trials),
+            Some(b.deciles_usd),
+        ),
+        None => (None, None, None, None),
     }
 }
 
@@ -18064,6 +18075,10 @@ mod tests {
         assert!(again.is_err(), "open legs must block re-entry");
 
         // Each leg unwinds through the existing flatten path, freeing the slot.
+        // Re-seed first: the flatten path requires fresh (2s) hub books, and
+        // under parallel-suite load the execute above can age the seeded
+        // books past that — a scheduling artifact, not leg state.
+        seed_triangle_books(&state);
         for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
             let flat = flatten_ticker_positions_impl(Some(sym), "triangle", &state)
                 .await
