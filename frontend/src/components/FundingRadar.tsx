@@ -1008,7 +1008,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                       )}
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Win:</span>
-                        <span className="font-semibold text-slate-900 tabular-nums" title="Modelled-hold fee-coverage heuristic — informational only; sub-50% whenever Expected is negative">{opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}</span>
+                        <span
+                          className={`font-semibold tabular-nums ${opp.win_probability != null && opp.win_probability < 0.5 ? "text-loss" : "text-slate-900"}`}
+                          title="Odds the trade covers its costs over the modelled hold (informational only — never gates entries). Below 50% = more likely to lose than win, agreeing in sign with a negative Expected."
+                        >
+                          {opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
+                        </span>
                       </div>
                     </div>
 
