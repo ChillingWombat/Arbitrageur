@@ -467,12 +467,22 @@ impl DecibelAdapter {
     /// has no subaccount — the fix is creating one in the Decibel app, not
     /// guessing an address.
     async fn primary_subaccount(&self, owner: &str) -> anyhow::Result<String> {
-        let val = self
-            .get_json(&format!("/api/v1/subaccounts?owner={}", owner.trim()))
-            .await?;
-        let rows = as_array(&val).ok_or_else(|| {
-            anyhow::anyhow!("Decibel subaccounts response has no list for owner {owner}")
-        })?;
+        let owner = owner.trim();
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        // Checksum-cased wallets have been observed to miss; retry lowercase.
+        for candidate in [owner.to_string(), owner.to_lowercase()] {
+            let val = self
+                .get_json(&format!("/api/v1/subaccounts?owner={candidate}"))
+                .await?;
+            rows = as_array(&val)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Decibel subaccounts response has no list for owner {owner}")
+                })?
+                .clone();
+            if !rows.is_empty() {
+                break;
+            }
+        }
         if rows.is_empty() {
             anyhow::bail!(
                 "Decibel owner {owner} has no subaccount yet — create one at https://app.decibel.trade, then re-read"
