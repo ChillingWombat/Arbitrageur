@@ -106,6 +106,77 @@ fn classify_response(resp: &OrderResponse) -> LegPoll {
     }
 }
 
+/// Derives the durable signal status from this pass's per-leg outcomes.
+/// Pure so the full classification matrix is unit-testable: every input
+/// (poll set, leg count, age, close-vs-entry, cancel notes) is explicit.
+fn derive_signal_status(
+    polls: &[LegPoll],
+    leg_count: usize,
+    age: i64,
+    is_close_signal: bool,
+    cancel_notes: Option<&Vec<String>>,
+) -> (Option<SignalStatus>, Option<String>) {
+    // Every persisted leg must be accounted for this pass — a leg missing a
+    // venue order id can never be proven, so the signal stays on the
+    // escalation path instead of resolving off partial evidence.
+    let all_known = polls.len() == leg_count && polls.iter().all(|p| *p != LegPoll::Unknown);
+    let any_working = polls.contains(&LegPoll::Working);
+    if !all_known || any_working {
+        // Still working or unproven: hold current state until the deadline,
+        // then escalate — never assume terminal.
+        if age > NON_FINAL_DEADLINE_SECS {
+            let mut note = format!(
+                "Order state not fully resolved within {}s; manual reconciliation required",
+                NON_FINAL_DEADLINE_SECS
+            );
+            if let Some(cn) = cancel_notes {
+                if !cn.is_empty() {
+                    note.push_str("; cancel: ");
+                    note.push_str(&cn.join(", "));
+                }
+            }
+            return (Some(SignalStatus::Unresolved), Some(note));
+        }
+        return (None, None);
+    }
+    if polls.iter().all(|p| *p == LegPoll::Filled) {
+        return (
+            Some(if is_close_signal {
+                SignalStatus::Closed
+            } else {
+                SignalStatus::Balanced
+            }),
+            Some("All legs reached terminal filled state via venue poll".into()),
+        );
+    }
+    if polls
+        .iter()
+        .all(|p| matches!(*p, LegPoll::Filled | LegPoll::CancelledEmpty))
+        && polls.contains(&LegPoll::CancelledEmpty)
+    {
+        // Terminal zero-fill legs. A close whose order ended empty may still
+        // hold the position — never done. An entry where EVERY leg ended
+        // empty executed nothing — Failed is honest and releases the ticker.
+        // An entry where SOME leg filled while another ended empty holds
+        // residual one-sided exposure — that is Imbalanced, never Failed
+        // (which would unblock the ticker over a live residual).
+        return (
+            Some(if is_close_signal {
+                SignalStatus::Unresolved
+            } else if polls.iter().all(|p| *p == LegPoll::CancelledEmpty) {
+                SignalStatus::Failed
+            } else {
+                SignalStatus::Imbalanced
+            }),
+            Some("Order(s) ended with zero fill per venue".into()),
+        );
+    }
+    (
+        Some(SignalStatus::Unresolved),
+        Some("Leg(s) ended partially filled or with mixed terminal states".into()),
+    )
+}
+
 /// One reconciliation pass. Returns counts for the monitor feed.
 pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummary {
     let _guard = match state.reconcile_lock.try_lock() {
@@ -277,67 +348,13 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
         // flatten children — both exist to reduce exposure, so an empty
         // terminal leg is never a clean "Failed".
         let is_close_signal = strategy_id == "external" || signal_id.starts_with("flat-");
-        // Every persisted leg must be accounted for this pass — a leg
-        // missing a venue order id can never be proven, so the signal stays
-        // on the escalation path instead of resolving off partial evidence.
-        let all_known = polls.len() == *leg_count && polls.iter().all(|p| *p != LegPoll::Unknown);
-        let any_working = polls.contains(&LegPoll::Working);
-        let (new_status, note): (Option<SignalStatus>, Option<String>) =
-            if !all_known || any_working {
-                // Still working or unproven: hold current state until the
-                // deadline, then escalate — never assume terminal.
-                if *age > NON_FINAL_DEADLINE_SECS {
-                    let mut note = format!(
-                        "Order state not fully resolved within {}s; manual reconciliation required",
-                        NON_FINAL_DEADLINE_SECS
-                    );
-                    if let Some(cn) = cancel_notes.get(signal_id) {
-                        if !cn.is_empty() {
-                            note.push_str("; cancel: ");
-                            note.push_str(&cn.join(", "));
-                        }
-                    }
-                    (Some(SignalStatus::Unresolved), Some(note))
-                } else {
-                    (None, None)
-                }
-            } else if polls.iter().all(|p| *p == LegPoll::Filled) {
-                (
-                    Some(if is_close_signal {
-                        SignalStatus::Closed
-                    } else {
-                        SignalStatus::Balanced
-                    }),
-                    Some("All legs reached terminal filled state via venue poll".into()),
-                )
-            } else if polls
-                .iter()
-                .all(|p| matches!(*p, LegPoll::Filled | LegPoll::CancelledEmpty))
-                && polls.contains(&LegPoll::CancelledEmpty)
-            {
-                // Terminal zero-fill legs. A close whose order ended empty may
-                // still hold the position — never done. An entry where EVERY
-                // leg ended empty executed nothing — Failed is honest and
-                // releases the ticker. An entry where SOME leg filled while
-                // another ended empty holds residual one-sided exposure —
-                // that is Imbalanced, never Failed (which would unblock the
-                // ticker over a live residual).
-                (
-                    Some(if is_close_signal {
-                        SignalStatus::Unresolved
-                    } else if polls.iter().all(|p| *p == LegPoll::CancelledEmpty) {
-                        SignalStatus::Failed
-                    } else {
-                        SignalStatus::Imbalanced
-                    }),
-                    Some("Order(s) ended with zero fill per venue".into()),
-                )
-            } else {
-                (
-                    Some(SignalStatus::Unresolved),
-                    Some("Leg(s) ended partially filled or with mixed terminal states".into()),
-                )
-            };
+        let (new_status, note): (Option<SignalStatus>, Option<String>) = derive_signal_status(
+            polls,
+            *leg_count,
+            *age,
+            is_close_signal,
+            cancel_notes.get(signal_id),
+        );
         if let Some(status) = new_status {
             if state
                 .state_store
@@ -811,5 +828,118 @@ mod tests {
         let r = residual_leg_quantities(&exec, &[same_side]);
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].1, 1.0);
+    }
+
+    #[test]
+    fn derive_status_all_filled_entry_balances() {
+        let (st, _) = derive_signal_status(&[LegPoll::Filled, LegPoll::Filled], 2, 10, false, None);
+        assert_eq!(st, Some(SignalStatus::Balanced));
+    }
+
+    #[test]
+    fn derive_status_all_filled_close_resolves() {
+        let (st, _) = derive_signal_status(&[LegPoll::Filled], 1, 10, true, None);
+        assert_eq!(st, Some(SignalStatus::Closed));
+    }
+
+    #[test]
+    fn derive_status_all_empty_entry_fails_clean() {
+        let (st, _) = derive_signal_status(
+            &[LegPoll::CancelledEmpty, LegPoll::CancelledEmpty],
+            2,
+            10,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Failed));
+    }
+
+    #[test]
+    fn derive_status_mixed_fill_and_empty_entry_is_imbalanced() {
+        // The core residual-exposure case: one leg filled, the other ended
+        // empty — the ticker must stay blocked.
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::CancelledEmpty],
+            2,
+            10,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Imbalanced));
+    }
+
+    #[test]
+    fn derive_status_empty_close_is_never_clean() {
+        // A close that ended empty may still hold the position.
+        let (st, _) = derive_signal_status(&[LegPoll::CancelledEmpty], 1, 10, true, None);
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+    }
+
+    #[test]
+    fn derive_status_partial_terminal_is_unresolved() {
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::PartialTerminal],
+            2,
+            10,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+    }
+
+    #[test]
+    fn derive_status_working_holds_then_escalates() {
+        // Before the deadline: no status change.
+        let (st, note) =
+            derive_signal_status(&[LegPoll::Filled, LegPoll::Working], 2, 10, false, None);
+        assert_eq!(st, None);
+        assert!(note.is_none());
+        // Past the deadline: escalate.
+        let (st, note) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::Working],
+            2,
+            NON_FINAL_DEADLINE_SECS + 1,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+        assert!(note.unwrap().contains("manual reconciliation"));
+    }
+
+    #[test]
+    fn derive_status_unknown_or_missing_leg_holds_then_escalates() {
+        // Fewer polls than legs — an unproven leg can never resolve early.
+        let (st, _) = derive_signal_status(&[LegPoll::Filled], 2, 10, false, None);
+        assert_eq!(st, None);
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled],
+            2,
+            NON_FINAL_DEADLINE_SECS + 1,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+        // Unknown poll outcome behaves identically.
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::Unknown],
+            2,
+            NON_FINAL_DEADLINE_SECS + 1,
+            false,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+    }
+
+    #[test]
+    fn derive_status_cancel_notes_surface_in_escalation() {
+        let notes = vec!["kraken ord-1 attempt 1/3: sent".to_string()];
+        let (_, note) = derive_signal_status(
+            &[LegPoll::Working],
+            1,
+            NON_FINAL_DEADLINE_SECS + 1,
+            false,
+            Some(&notes),
+        );
+        assert!(note.unwrap().contains("attempt 1/3"));
     }
 }
