@@ -1537,3 +1537,10 @@ overhaul pass committed as `23d4aed`).
 
 - **Ask:** monitor-gadget filters showed `0.730593` — cap all filter inputs at 2 decimal places.
 - **Shipped:** bot-mirrored defaults normalized via 2dp helpers in both strips (`FundingRadar` APR→BPS default now `0.73`; spread `OpportunityRadar` Min Exp likewise). User typing is never reformatted mid-edit; filtering math unchanged (parses the string). Committed `0f08519`, pushed; app relaunched (PID 560398) clean. Worker files untouched.
+
+## 66. Session Handoff — 2026-09-20 (win probability hold-aligned with expected return)
+
+- **Ask (screenshot):** LINK-USDC card shows Win 65% next to Expected −$13 — contradictory.
+- **Root cause:** two horizons. Win% used a flat 24h fee-coverage heuristic (`24h carry / fee` at today's print); Expected uses the modelled hold with linear gap decay. A fast-decaying gap scores well on 24h-flat math while losing money on its actual ~breakeven-short hold.
+- **Fix:** `funding_win_probability` takes `WinHoldContext { hold_hours, min_apr_pct, entry_spread_bps }` — coverage becomes decay-averaged hold accrual over fee+spread costs (same inputs as `expected_carry_return_usd`), so p ≥ 0.5 agrees in sign with non-negative expectation by construction. `None` keeps legacy 24h-flat (tests pin it). Both scan paths pass the modelled hold; copy updated (DTO docs, card + modal tooltips).
+- **Verification:** math 97/0 (new sign-agreement test + legacy pin), desktop 317/0 (a triangle flatten test flaked twice under parallel load with a 2s book-TTL race — passes alone and in full suite; pre-existing, untouched paths, noted), tsc 0, vite 0, release rebuilt, app relaunched (PID 566833) clean. Committed `bb5a3e6`, pushed. Worker files untouched.
