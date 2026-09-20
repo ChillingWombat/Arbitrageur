@@ -1338,3 +1338,9 @@ overhaul pass committed as `23d4aed`).
 - **Fix (`popdex.rs`):** `assert_main_initialized` public-REST preflight in `submit_approve_agent_with_main` — explicit missing-account signals (404 / code 11100 / "does not exist") fail closed BEFORE the main key signs, with funding guidance (testnet faucet vs mainnet deposit + app links + guide Steps 2-4). Raw `-32000`/`Core account not found` RPC failures at estimate/send are rewritten into the same message via `map_core_account_error`; other errors pass through. Transport blips skip the preflight (no misdiagnosis). New `approve_agent_cast_command` covered too.
 - **Toolkit:** step-1 hint is now network-aware with direct links (testnet faucet + testnet app / mainnet app).
 - **Verification:** exchanges 98/0, desktop 307/0, tsc + clippy clean.
+
+## 44. Session Handoff — 2026-09-20 (Doc links open, faucet link, Mainnet first)
+
+- **Ask:** (1) PopDEX API doc link opens nothing, (2) testnet faucet = https://crypto-chief.com/faucet/arbitrum-sepolia/, (3) Mainnet button before Testnet.
+- **Fix:** new `open_external_url` IPC (https-only, host allowlist `popdex.xyz` + `crypto-chief.com`, OS opener) registered in `main.rs`; all toolkit external links (API guide ×2, testnet/mainnet app, faucet) now go through it instead of `target="_blank"` (blocked by Tauri). Faucet hint next to the network buttons + step-1 testnet hint point at the crypto-chiefArbitrum-Sepolia faucet. Button order swapped to Mainnet-first (default selection still testnet).
+- **Verification:** desktop 308/0 (new allowlist test), exchanges 98/0, tsc clean, full `npm test` shards green, vite build clean.

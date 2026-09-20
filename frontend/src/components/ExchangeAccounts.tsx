@@ -478,6 +478,12 @@ const diyCommand = (built: ApproveTxDto, agent: string, mainAddr: string): strin
  * key (signed once in this modal and never stored — or via a DIY shell
  * command for the cautious) → verify on-chain → save. */
 const POPDEX_API_DOCS = "https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api";
+const POPDEX_TESTNET_APP = "https://testnet-app.popdex.xyz";
+const POPDEX_MAINNET_APP = "https://app.popdex.xyz";
+const POPDEX_TEST_FAUCET = "https://crypto-chief.com/faucet/arbitrum-sepolia/";
+const openDoc = (url: string, setError: (e: string | null) => void) => {
+  api.openExternalUrl(url).catch((e) => setError(e instanceof Error ? e.message : String(e)));
+};
 const PopdexAgentToolkit: React.FC<{
   initialMain: string;
   onUseKey: (agentKey: string, mainAddr: string) => void;
@@ -538,12 +544,12 @@ const PopdexAgentToolkit: React.FC<{
           on-chain, then save the account below. The main key signs a single
           transaction and is <b>never stored</b> — or run the command yourself
           instead (step 3, option B).{" "}
-          <a href={POPDEX_API_DOCS} target="_blank" rel="noreferrer" className="underline">PopDEX API guide</a>
+          <button type="button" onClick={() => openDoc(POPDEX_API_DOCS, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">PopDEX API guide</button>
         </p>
 
         <div className="flex gap-2 items-center text-xs font-mono">
           <span className="text-slate-500">Network:</span>
-          {(["testnet", "mainnet"] as const).map((n) => (
+          {(["mainnet", "testnet"] as const).map((n) => (
             <button
               key={n}
               type="button"
@@ -553,11 +559,11 @@ const PopdexAgentToolkit: React.FC<{
                 network === n ? "bg-accent text-white border-accent" : "text-slate-500 border-surface-border hover:bg-slate-100/70"
               }`}
             >
-              {n === "testnet" ? "Testnet" : "Mainnet"}
+              {n === "mainnet" ? "Mainnet" : "Testnet"}
             </button>
           ))}
           {network === "testnet" && (
-            <span className="text-[10px] font-sans text-slate-400">free test USDT from the PopDEX faucet</span>
+            <span className="text-[10px] font-sans text-slate-400">free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button></span>
           )}
         </div>
 
@@ -574,9 +580,9 @@ const PopdexAgentToolkit: React.FC<{
           <p className="text-[10px] font-sans text-slate-400">
             Must already hold a deposit — the chain rejects every transaction (error -32000) until the first deposit.{" "}
             {network === "testnet" ? (
-              <>Claim free test USDT from the faucet, then deposit in the <a href="https://testnet-app.popdex.xyz" target="_blank" rel="noreferrer" className="underline">testnet app</a>.</>
+              <>Claim free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button>, then deposit in the <button type="button" onClick={() => openDoc(POPDEX_TESTNET_APP, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">testnet app</button>.</>
             ) : (
-              <>Deposit USDT in the <a href="https://app.popdex.xyz" target="_blank" rel="noreferrer" className="underline">PopDEX app</a> first, then approve here.</>
+              <>Deposit USDT in the <button type="button" onClick={() => openDoc(POPDEX_MAINNET_APP, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">PopDEX app</button> first, then approve here.</>
             )}
           </p>
         </div>
@@ -658,7 +664,7 @@ const PopdexAgentToolkit: React.FC<{
             <p className="text-[10px] font-sans text-slate-500 leading-normal">
               <b>Option B — run it yourself</b> (nothing secret touches this app): show the{" "}
               <span className="font-mono">cast</span> command and run it in your own terminal.{" "}
-              <a href={POPDEX_API_DOCS} target="_blank" rel="noreferrer" className="underline">API guide, step 4</a>
+              <button type="button" onClick={() => openDoc(POPDEX_API_DOCS, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">API guide, step 4</button>
             </p>
             <button type="button" disabled={busy !== null || !main || !agentAddr} onClick={() => void run("diy", async () => {
               const built = await api.buildPopdexApproveTx(main.trim(), agentAddr, network);

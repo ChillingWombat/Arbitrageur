@@ -10196,6 +10196,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn external_url_opener_is_allowlisted() {
+        // Non-allowlisted URLs (and non-https schemes) are refused without
+        // touching the OS opener — offline-safe.
+        assert!(super::open_external_url("https://evil.example/phish".to_string()).await.is_err());
+        assert!(super::open_external_url("file:///tmp/x.html".to_string()).await.is_err());
+        assert!(super::open_external_url("https://popdex.xyz.evil.example/".to_string()).await.is_err());
+    }
+
+    #[tokio::test]
     async fn main_key_approval_fails_closed_without_network() {
         // Wrapper validates key/address mismatch locally (before any RPC
         // contact), so the wrong-key case runs offline.
@@ -17312,6 +17321,48 @@ pub async fn check_popdex_agent(
         approved,
         agent_count,
     })
+}
+
+/// Open an `https://` URL in the OS browser (Tauri blocks plain
+/// `target="_blank"` navigation, so toolkit doc/faucet/app links go through
+/// here). Host allowlist only — never files, never custom schemes.
+#[tauri::command]
+pub async fn open_external_url(url: String) -> Result<(), String> {
+    let u = url.trim();
+    let host = u
+        .strip_prefix("https://")
+        .and_then(|rest| rest.split(['/','?','#']).next())
+        .unwrap_or_default()
+        .to_lowercase();
+    const ALLOWED: &[&str] = &[
+        "popdex.xyz",
+        "crypto-chief.com",
+    ];
+    let ok = ALLOWED
+        .iter()
+        .any(|d| host == *d || host.ends_with(&format!(".{d}")));
+    if !ok {
+        return Err(format!("refusing to open non-allowlisted URL: {u}"));
+    }
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open")
+        .arg(u)
+        .status()
+        .map_err(|e| format!("cannot open browser: {e}"))?;
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .arg(u)
+        .status()
+        .map_err(|e| format!("cannot open browser: {e}"))?;
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/c", "start", "", u])
+        .status()
+        .map_err(|e| format!("cannot open browser: {e}"))?;
+    if !status.success() {
+        return Err("browser did not open the link".to_string());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

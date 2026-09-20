@@ -959,6 +959,10 @@ export const api = {
     return invokeDesktop<AgentCheckDto>("check_popdex_agent", { main, agent, network });
   },
 
+  async openExternalUrl(url: string): Promise<void> {
+    return invokeDesktop<void>("open_external_url", { url });
+  },
+
   async signPopdexApproveWithMain(main: string, agent: string, mainKey: string, network: string): Promise<SignApproveDto> {
     return invokeDesktop<SignApproveDto>("sign_popdex_approve_with_main", { main, agent, mainKey, network });
   },

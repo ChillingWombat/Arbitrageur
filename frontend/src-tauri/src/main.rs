@@ -179,6 +179,7 @@ fn main() {
             commands::build_popdex_approve_tx,
             commands::check_popdex_agent,
             commands::sign_popdex_approve_with_main,
+            commands::open_external_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrageur Tauri desktop application");
