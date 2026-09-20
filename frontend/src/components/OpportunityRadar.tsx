@@ -1025,7 +1025,11 @@ const OpportunityRadarInner: React.FC = () => {
   const [showConfig, setShowConfig] = useState(false);
   const [search, setSearch] = useState("");
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
-  const [minExpBps, setMinExpBps] = useState(() => String(defaultRadarBotConfig().minExpectedProfitBps)); // default mirrors the bot entry hurdle (bot minExpectedProfitBps)
+  // Filter inputs show at most 2 decimal places (bot-mirrored defaults are
+  // normalized; user typing is never reformatted mid-edit).
+  const to2dpStr = (n: number): string =>
+    Number.isFinite(n) ? String(parseFloat(n.toFixed(2))) : "";
+  const [minExpBps, setMinExpBps] = useState(() => to2dpStr(defaultRadarBotConfig().minExpectedProfitBps)); // default mirrors the bot entry hurdle (bot minExpectedProfitBps)
   const minExpTouched = useRef(false);
   const [minPWin, setMinPWin] = useState("95"); // default mirrors the monitor ready floor (minWinProbability 0.95)
   const [showVenueMenu, setShowVenueMenu] = useState(false);
@@ -1102,7 +1106,7 @@ const OpportunityRadarInner: React.FC = () => {
   // minExpectedProfitBps until the user overrides it locally.
   useEffect(() => {
     if (!minExpTouched.current && botCfg && Number.isFinite(botCfg.minExpectedProfitBps)) {
-      setMinExpBps(String(botCfg.minExpectedProfitBps));
+      setMinExpBps(to2dpStr(botCfg.minExpectedProfitBps));
     }
   }, [botCfg]);
 

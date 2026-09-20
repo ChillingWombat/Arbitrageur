@@ -663,8 +663,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // uses both ways. Tracks the live minAprPct until the user overrides it.
   // Min Win has no bot-side gate (win probability never gates execution),
   // so it defaults to off.
+  // Filter inputs show at most 2 decimal places (bot-mirrored defaults are
+  // normalized; user typing is never reformatted mid-edit).
+  const to2dp = (n: number): string =>
+    Number.isFinite(n) ? String(parseFloat(n.toFixed(2))) : "";
   const aprToBps8h = (aprPct: number) =>
-    Number.isFinite(aprPct) && aprPct > 0 ? String((aprPct * 10000) / 100 / 365 / 3) : "";
+    Number.isFinite(aprPct) && aprPct > 0 ? to2dp((aprPct * 10000) / 100 / 365 / 3) : "";
   const [minExpBps, setMinExpBps] = useState(() => aprToBps8h(minAprPct));
   const minExpTouched = useRef(false);
   useEffect(() => {
