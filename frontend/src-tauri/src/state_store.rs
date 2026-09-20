@@ -1387,7 +1387,12 @@ fn normalize_venue(raw: &str) -> anyhow::Result<String> {
     {
         anyhow::bail!("invalid venue ID: expected 1-64 ASCII alphanumeric/underscore/hyphen");
     }
-    Ok(v)
+    // Persist the canonical id — reconciler identity checks compare the
+    // adapter's venue verbatim, so an alias ("hl", "binance futures") must
+    // never reach durable state.
+    Ok(crate::state::canonical_venue_id(&v)
+        .map(str::to_string)
+        .unwrap_or(v))
 }
 
 fn normalize_label(raw: &str) -> anyhow::Result<String> {
