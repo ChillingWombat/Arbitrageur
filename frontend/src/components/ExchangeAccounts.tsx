@@ -571,7 +571,14 @@ const PopdexAgentToolkit: React.FC<{
             spellCheck={false}
             className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p className="text-[10px] font-sans text-slate-400">Must already hold a deposit — the chain rejects approvals for unfunded accounts.</p>
+          <p className="text-[10px] font-sans text-slate-400">
+            Must already hold a deposit — the chain rejects every transaction (error -32000) until the first deposit.{" "}
+            {network === "testnet" ? (
+              <>Claim free test USDT from the faucet, then deposit in the <a href="https://testnet-app.popdex.xyz" target="_blank" rel="noreferrer" className="underline">testnet app</a>.</>
+            ) : (
+              <>Deposit USDT in the <a href="https://app.popdex.xyz" target="_blank" rel="noreferrer" className="underline">PopDEX app</a> first, then approve here.</>
+            )}
+          </p>
         </div>
 
         <div className={stepCard}>

@@ -1331,3 +1331,10 @@ overhaul pass committed as `23d4aed`).
 - **Tests:** new `main_key_approval_validates_before_any_signature` (exchanges) + `main_key_approval_fails_closed_without_network` (Tauri, offline) + `diy_cast_command_is_network_aware`; backend `approve_agent_cast_command` mirrors the displayed command.
 - **Verification:** desktop 307/0, exchanges 97/0, tsc clean, ExchangeAccounts 7/7, clippy clean, vite build clean.
 - **Ops note:** earlier "app closes after password" reports were my launcher exec-sessions being reaped (process-group kill), not an app crash — relaunch with `setsid` survives; confirmed alive across sessions.
+
+## 43. Session Handoff — 2026-09-20 (Uninitialized-account error fix)
+
+- **Symptom:** in-popup Sign failed with `-32000: Core account not found for sender 0xFd91…` — the main account has never been funded, so the chain rejects every transaction including `approveAgent`.
+- **Fix (`popdex.rs`):** `assert_main_initialized` public-REST preflight in `submit_approve_agent_with_main` — explicit missing-account signals (404 / code 11100 / "does not exist") fail closed BEFORE the main key signs, with funding guidance (testnet faucet vs mainnet deposit + app links + guide Steps 2-4). Raw `-32000`/`Core account not found` RPC failures at estimate/send are rewritten into the same message via `map_core_account_error`; other errors pass through. Transport blips skip the preflight (no misdiagnosis). New `approve_agent_cast_command` covered too.
+- **Toolkit:** step-1 hint is now network-aware with direct links (testnet faucet + testnet app / mainnet app).
+- **Verification:** exchanges 98/0, desktop 307/0, tsc + clippy clean.

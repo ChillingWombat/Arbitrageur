@@ -1316,6 +1316,62 @@ pub fn build_approve_agent_calldata(
     Ok(format!("0x{}", hex::encode(call.abi_encode())))
 }
 
+/// Human guidance for an uninitialized PopDEX core account.
+fn uninitialized_account_msg(main: &str, network: PopDexNetwork) -> String {
+    let (app, faucet) = match network {
+        PopDexNetwork::Mainnet => (
+            "https://app.popdex.xyz",
+            "deposit USDT in the PopDEX app first",
+        ),
+        PopDexNetwork::Testnet => (
+            "https://testnet-app.popdex.xyz",
+            "claim free test USDT from the PopDEX faucet, then deposit in the testnet app",
+        ),
+    };
+    format!(
+        "PopDEX core account {main} is not initialized on {net} yet — the chain rejects every transaction until the first deposit. {faucet} ({app}), then retry. Guide: https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api (Steps 2-4).",
+        net = match network {
+            PopDexNetwork::Mainnet => "mainnet",
+            PopDexNetwork::Testnet => "testnet",
+        },
+    )
+}
+
+/// Rewrite a raw `-32000 Core account not found` RPC failure into the
+/// actionable message above; every other error passes through unchanged.
+fn map_core_account_error(raw: &str, main: &str, network: PopDexNetwork) -> String {
+    if raw.contains("Core account not found") || raw.contains("-32000") {
+        return uninitialized_account_msg(main, network);
+    }
+    format!("PopDEX sendTransaction failed: {raw}")
+}
+
+/// Public-REST preflight: refuse to sign when the main core account does
+/// not exist yet. Only explicit missing-account signals fail here; transport
+/// errors pass through to the normal RPC error path (no misdiagnosis).
+async fn assert_main_initialized(network: PopDexNetwork, main: &str) -> anyhow::Result<()> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+    let url = format!("{}/api/v1/account/{}/overview", network.rest_base(), main);
+    let resp = match client.get(&url).send().await {
+        Ok(r) => r,
+        Err(_) => return Ok(()),
+    };
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!("{}", uninitialized_account_msg(main, network));
+    }
+    if !resp.status().is_success() {
+        return Ok(());
+    }
+    let body = resp.text().await.unwrap_or_default();
+    if body.contains("11100") || body.contains("does not exist") || body.contains("Core account not found") {
+        anyhow::bail!("{}", uninitialized_account_msg(main, network));
+    }
+    Ok(())
+}
+
 /// Sign + submit `approveAgent` with the MAIN key, entirely in-process.
 ///
 /// The main key is transient: it arrives per-call, signs exactly one
@@ -1356,6 +1412,11 @@ pub async fn submit_approve_agent_with_main(
     if signer.address() != main_addr {
         anyhow::bail!("the pasted private key does not match the main account address — refusing to sign");
     }
+    // Preflight: the chain rejects every transaction (including approveAgent)
+    // from a core account that was never initialized (no deposit yet) with
+    // `-32000: Core account not found for sender`. Catch that via public REST
+    // BEFORE touching the main key's signature, and say what to do.
+    assert_main_initialized(network, main.trim()).await?;
     let now_ms = Utc::now().timestamp_millis().max(0) as u64;
     let calldata_hex = build_approve_agent_calldata(
         &agent_addr.to_string(),
@@ -1398,7 +1459,7 @@ pub async fn submit_approve_agent_with_main(
     let gas_limit = provider
         .estimate_gas(estimate_tx)
         .await
-        .map_err(|e| anyhow::anyhow!("PopDEX estimateGas reverted (call would fail): {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{}", map_core_account_error(&e.to_string(), main.trim(), network)))?;
     let gas_limit = gas_limit.saturating_mul(125).saturating_div(100).max(100_000);
     let tx = TransactionRequest::default()
         .with_to(to_addr)
@@ -1410,7 +1471,7 @@ pub async fn submit_approve_agent_with_main(
     let pending = provider
         .send_transaction(tx)
         .await
-        .map_err(|e| anyhow::anyhow!("PopDEX sendTransaction failed: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{}", map_core_account_error(&e.to_string(), main.trim(), network)))?;
     let tx_hash = format!("{:#x}", pending.tx_hash());
     let receipt = tokio::time::timeout(Duration::from_secs(30), pending.get_receipt())
         .await
@@ -1516,6 +1577,22 @@ mod tests {
         assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, "nope", agent, &bad)
             .await
             .is_err());
+    }
+
+    #[test]
+    fn core_account_errors_point_at_funding() {
+        let main = "0x1111111111111111111111111111111111111111";
+        let rewritten = map_core_account_error(
+            "server returned an error response: error code -32000: Core account not found for sender",
+            main,
+            PopDexNetwork::Testnet,
+        );
+        assert!(rewritten.contains("not initialized"), "got: {rewritten}");
+        assert!(rewritten.contains("faucet"), "got: {rewritten}");
+        assert!(rewritten.contains("popdex.xyz/docs"), "got: {rewritten}");
+        let passthrough = map_core_account_error("insufficient funds", main, PopDexNetwork::Mainnet);
+        assert!(passthrough.contains("insufficient funds"), "got: {passthrough}");
+        assert!(uninitialized_account_msg(main, PopDexNetwork::Mainnet).contains("mainnet"));
     }
 
     #[test]
