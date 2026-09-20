@@ -1489,3 +1489,18 @@ overhaul pass committed as `23d4aed`).
   - `types/index.ts` gains `max_leverage?`.
 - **Verification:** tsc 0, desktop 315/0 (updated 2 tests that pinned the 5x ceiling), committed `1000ff7` + `6c91209`, pushed; vite build 0, forced release rebuild (touch + 29.8s link), app relaunched (PID 531249) ALIVE, routine WARNs only.
 - **Tree note:** only the 7 listed paths staged; worker UI hunks (stale-balance field etc.) preserved in place, second worker should rebase.
+
+## 60. Session Handoff — 2026-09-20 (blocked-carry diagnosis + failure logging end-to-end)
+
+- **Ask (screenshot):** (1) why was Open Carry #1 (NEAR-USDC long vanta / short lighter, $50k) blocked with "Execution blocked: Execution failed"; (2) failures are invisible — record + persist ALL logs.
+- **Why THIS click failed — two compounding causes found, both fixed:**
+  - (a) The banner always shows the generic "Execution failed": `FundingRadar`/`PredictionHub` used `err instanceof Error ? … : "Execution failed"`, but Tauri rejections are plain strings — the backend's specific reason never rendered. Same bug class as the modal save error (§58).
+  - (b) The backend reason was never logged anywhere either: `execute_funding_carry_impl` returns `Err` for ~15 gates (breaker, paused, live-refusal, rescan-miss, hurdle, books, blocking signals, existing position, paper margin Empty/Critical, sizing) with no log push and no `tracing` call — invisible in app log AND Log Monitor. Exact gate for this click is unrecoverable post-hoc; ranked suspects for $50k/leg: paper free-margin (`leg_im = size/lev` vs paper free), paper margin Critical on either leg, rescan-miss (books moved), or live-mode refusal — the fix makes the next block self-reporting.
+- **Shipped:**
+  - `record_execution_log(state, entry)` choke point (commands.rs): memory vec (capped 2000) + best-effort SQLite; all 8 production push sites routed through it (3 test-only pushes left direct).
+  - All six execute commands wrapped (spot/spatial/triangle/cross-ticker/funding/prediction): on `Err`, `tracing::warn!` + failed entry (`success:false`, `note:"Execution blocked: {reason}"`, legs "blocked") → Log Monitor + app log. Impl-level behavior untouched (2 tests assert impl rejections add no rows — still green).
+  - Persistence (v21): `execution_log` table + index, `insert/load` (newest-first, table capped 2000), startup reloads newest 500 (Log Monitor no longer starts empty), version guard 20→21 (+3 test asserts).
+  - Frontend: shared `describeCommandError` (api.ts); FundingRadar + PredictionHub render verbatim backend reasons.
+- **Surgery notes:** struct `ExecutionLogEntry` moved state.rs → state_store.rs (re-export keeps paths); repaired a bad paste (orphaned AccountProfile derives) + a dropped migrate block + the version guard during the session — all green now.
+- **Verification:** desktop 317/0 (new: v21 round-trip incl. REPLACE semantics + limit; record helper memory+sqlite), tsc 0, vite 0, forced release rebuild, app relaunched (PID 539340, prod DB migrated to v21 cleanly) ALIVE, routine WARNs only. Committed `d91ca7c`, pushed.
+- **Tree note:** only the 6 listed paths staged; worker UI files untouched.
