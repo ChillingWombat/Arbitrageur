@@ -25,8 +25,8 @@ pub struct AccountProfile {
     #[serde(default = "default_account_tier")]
     pub account_tier: String,
     /// Per-account leverage ceiling, 1..=5. `None` = unlimited (the backend
-    /// hard ceiling of 5 still applies). Effective order-time leverage is
-    /// min(strategy target, this cap, venue cap).
+    /// hard ceiling of 100 still applies). Effective order-time leverage is
+    /// min(strategy target, this cap, venue cap, Risk Control global max).
     #[serde(default)]
     pub max_leverage: Option<u32>,
     pub created_at: String,
@@ -924,8 +924,8 @@ COMMIT;
 PRAGMA foreign_keys = ON;";
 
 /// v14 adds the per-account leverage ceiling. NULL = unlimited (the backend
-/// hard ceiling of 5 still applies); otherwise 1..=5, enforced at order
-/// time as min(strategy target, account cap, venue cap).
+/// hard ceiling of 100 still applies); otherwise 1..=5, enforced at order
+/// time as min(strategy target, account cap, venue cap, Risk Control max).
 const MIGRATION_V14_SQL: &str = "\
 BEGIN IMMEDIATE;
 ALTER TABLE exchange_accounts
