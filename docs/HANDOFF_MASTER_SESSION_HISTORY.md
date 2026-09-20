@@ -1277,3 +1277,28 @@ overhaul pass committed as `23d4aed`).
   + `RiskOperations.tsx` contain another worker's uncommitted UI edits — left
   untouched (only 3 never-read decls briefly touched to unbreak the build,
   then restored byte-identical).
+
+## 39. Session Handoff — 2026-09-20 (PopDEX agent-setup toolkit)
+
+- **Ask:** in-page toolkit so the operator gets an agent key via their own
+  wallet app, without the main key ever entering Arbitrageur.
+- **Built:** `PopdexAgentToolkit` modal on the PopDEX account card —
+  (1) main address, (2) local fresh keygen (`generate_popdex_agent`, OS RNG,
+  never re-approves revoked addresses), one-click fill into the vault-backed
+  field, (3) approval via `build_popdex_approve_tx` (official calldata,
+  EIP-681 URI, copy buttons) or `open_popdex_signer_page` — a locally
+  generated HTML page opened in the system browser where MetaMask/Rabby signs
+  `approveAgent` with the MAIN key (chain auto-switch, explorer link),
+  (4) `check_popdex_agent` on-chain verify, then Save Account.
+- **No WalletConnect:** no maintained Rust WC-v2 client exists
+  (`walletconnect` crate is a dead v0.0.1); hand-rolling relay/X25519/ChaCha
+  was judged too risky for key-adjacent flows. The signer-page achieves the
+  same UX with standard wallet tooling and zero new dependencies.
+- **Tree note:** shared checkout has a second worker's uncommitted feature
+  stream (kv settings hydration, portfolio/risk UI, funding-carry work across
+  ~15 files). Commits here stage only toolkit files (`git apply --cached`
+  hunk-split for `commands.rs`); their files untouched except restoring 3
+  helper decls removed by mistake mid-edit and 2 mechanical clippy range
+  fixes in `state.rs` (behavior-identical).
+- **Verification:** workspace green, clippy clean (mine), frontend build +
+  204 tests pass, release rebuilt, relaunched panic-free.
