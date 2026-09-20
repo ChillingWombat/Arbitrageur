@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   AlertCircle,
   SlidersHorizontal,
+  X,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
@@ -45,6 +46,157 @@ const formatPrice = (price: number, symbol: string): string => {
   return `${formatted} ${quote}`;
 };
 
+interface TriangleLegView {
+  symbol: string;
+  action: "BUY" | "SELL";
+  price: number;
+  fee_bps: number;
+}
+
+const TriangleDetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
+  label,
+  value,
+  title,
+}) => (
+  <div className="space-y-0.5" title={title}>
+    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
+    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
+  </div>
+);
+
+interface TriangleDetailModalProps {
+  opp: TriangleOpportunityDto;
+  executing: boolean;
+  onExecute: (opp: TriangleOpportunityDto) => void;
+  onClose: () => void;
+}
+
+/** Click-through detail for one triangle cycle: legs, route math, venue and
+ *  latency facts. Read-only over the scanned DTO — never synthesizes. */
+const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
+  ({ opp, executing, onExecute, onClose }) => {
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onClose();
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [onClose]);
+    const legs: { leg: TriangleLegView; label: string; tone: string }[] = [
+      { leg: opp.leg1, label: "Leg 1", tone: "bg-blue-50 text-blue-700" },
+      { leg: opp.leg2, label: "Leg 2", tone: "bg-purple-50 text-purple-700" },
+      { leg: opp.leg3, label: "Leg 3", tone: "bg-green-50 text-green-700" },
+    ];
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="bg-surface border border-surface-border rounded-2xl w-[640px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <Triangle className="w-3.5 h-3.5 text-accent shrink-0" />
+              <span className="text-sm font-bold font-sans text-slate-900 truncate">{opp.path}</span>
+              <span
+                className={`px-2 py-0.5 rounded-md text-xs font-sans font-semibold border ${
+                  opp.is_executable
+                    ? "bg-profit-dim text-profit border-profit-border"
+                    : "bg-surface-raised text-slate-400 border-surface-border"
+                }`}
+              >
+                {opp.is_executable ? "EXECUTABLE" : "SUB-HURDLE"}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              title="Close details (ESC)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {legs.map(({ leg, label, tone }) => (
+                <div key={label} className="rounded-xl border border-surface-border bg-surface-raised p-3 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className={`px-2 py-0.5 rounded-md text-xs font-sans font-semibold ${tone}`}>
+                      {label}
+                    </span>
+                    <span className="text-[11px] font-sans font-bold text-slate-500">{leg.action}</span>
+                  </div>
+                  <div className="text-sm font-bold font-mono text-slate-900">{leg.symbol}</div>
+                  <div className="flex items-center justify-between text-xs font-sans">
+                    <span className="text-slate-400">Price</span>
+                    <span className="font-bold text-slate-900 tabular-nums">{formatPrice(leg.price, leg.symbol)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs font-sans">
+                    <span className="text-slate-400">Fee</span>
+                    <span className="font-medium text-slate-500 tabular-nums">{leg.fee_bps.toFixed(1)} BPS</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+              <TriangleDetailField label="Exchange" value={opp.venue} />
+              <TriangleDetailField
+                label="Gross discrepancy"
+                value={`+${formatBps(opp.gross_spread_bps)} BPS`}
+              />
+              <TriangleDetailField
+                label="Total fees"
+                value={`-${formatBps(opp.total_fee_bps)} BPS`}
+              />
+              <TriangleDetailField
+                label="Net profit"
+                value={`${opp.net_spread_bps >= 0 ? "+" : ""}${formatBps(opp.net_spread_bps)} BPS`}
+              />
+              <TriangleDetailField
+                label="Est. profit"
+                value={`$${opp.net_profit_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                title={`At $${opp.trade_size_usd.toLocaleString()} trade size`}
+              />
+              <TriangleDetailField
+                label="Est. latency"
+                value={`${opp.estimated_latency_ms}ms`}
+                title="Measured venue latency at scan time"
+              />
+            </div>
+
+            <div className="rounded-xl border border-accent-line bg-accent-dim px-4 py-2.5 text-xs font-sans flex items-center justify-between gap-2">
+              <span className="text-slate-500">
+                Synthetic Route: <span className="font-bold text-accent">{opp.path}</span>
+              </span>
+              <span className="tabular-nums text-slate-500">
+                Net:{" "}
+                <span className={`font-bold ${opp.net_spread_bps >= 0 ? "text-profit" : "text-loss"}`}>
+                  {opp.net_spread_bps >= 0 ? "+" : ""}{formatBps(opp.net_spread_bps)} BPS
+                </span>
+              </span>
+            </div>
+          </div>
+
+          <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => onExecute(opp)}
+              disabled={executing}
+              className="btn-primary !text-xs !py-2.5 !px-2.5 font-sans cursor-pointer"
+            >
+              <span>{executing ? "Filling..." : "Fill Cycle"}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  },
+);
+
 export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   executionLogs: _executionLogs,
   onRefreshAll,
@@ -56,6 +208,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   const [opportunities, setOpportunities] = useState<TriangleOpportunityDto[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
   const [selectedOpp, setSelectedOpp] = useState<TriangleOpportunityDto | null>(null);
+  const [detailOppId, setDetailOppId] = useState<string | null>(null);
 
   // Bot lifecycle — triangular cycles are atomic (3 legs on one venue), so a
   // stop never leaves residual exposure; reduce-only drains instantly.
@@ -96,8 +249,19 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     setBotMessage("");
   };
 
-  const handleDeployCycle = async () => {
-    if (!selectedOpp) return;
+  const handleOpenDetail = (opp: TriangleOpportunityDto) => {
+    handleSelectOpp(opp);
+    setDetailOppId(opp.id);
+  };
+
+  const handleExecuteFromDetail = async (opp: TriangleOpportunityDto) => {
+    handleSelectOpp(opp);
+    setDetailOppId(null);
+    await deployCycle(opp);
+  };
+
+  const deployCycle = async (opp: TriangleOpportunityDto | null) => {
+    if (!opp) return;
     if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") {
       setBotStatus("error");
       setBotMessage(`Entry blocked: bot is ${bot.phase.replace("_", "-")} — only exits are permitted`);
@@ -109,15 +273,15 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     try {
       await new Promise((r) => setTimeout(r, 400));
       setBotStatus("dispatching");
-      setBotMessage(`Submitting sequential 3-leg cycle on ${selectedOpp.venue}...`);
+      setBotMessage(`Submitting sequential 3-leg cycle on ${opp.venue}...`);
 
       const params: TriangleExecutionParams = {
-        id: selectedOpp.id,
-        venue: selectedOpp.venue,
-        path: selectedOpp.path,
+        id: opp.id,
+        venue: opp.venue,
+        path: opp.path,
         trade_size_usd: tradeSizeUsd,
         min_profit_bps: minProfitBps,
-        net_spread_bps: selectedOpp.net_spread_bps,
+        net_spread_bps: opp.net_spread_bps,
       };
 
       const result = await api.executeTriangleArbitrage(params);
@@ -126,12 +290,16 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
 
       setBotStatus("filled");
       setBotMessage(
-        `✓ Triangular Cycle Filled! Net Profit: +$${result.realized_profit_usd.toFixed(2)} USD (+${result.spread_bps.toFixed(1)} BPS) in ${selectedOpp.estimated_latency_ms}ms.`
+        `✓ Triangular Cycle Filled! Net Profit: +$${result.realized_profit_usd.toFixed(2)} USD (+${result.spread_bps.toFixed(1)} BPS) in ${opp.estimated_latency_ms}ms.`
       );
     } catch (err: unknown) {
       setBotStatus("error");
       setBotMessage(err instanceof Error ? err.message : "Execution failed");
     }
+  };
+
+  const handleDeployCycle = () => {
+    void deployCycle(selectedOpp);
   };
 
   // Automated Execution Bot Loop
@@ -405,7 +573,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-surface-border pb-2.5">
           <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-            Detected Triangular Opportunities ({opportunities.length})
+            Opportunity Scanner
           </h2>
           <div className="flex items-center space-x-3">
             {/* Asset Filters */}
@@ -448,7 +616,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
                   return (
                     <tr
                       key={opp.id}
-                      onClick={() => handleSelectOpp(opp)}
+                      onClick={() => handleOpenDetail(opp)}
                       className={`hover:bg-slate-50/70 transition cursor-pointer ${
                         isSelected ? "bg-accent-dim/40" : ""
                       }`}
@@ -511,6 +679,19 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           </table>
         </div>
       </div>
+      {(() => {
+        const detailOpp =
+          detailOppId != null ? opportunities.find((o) => o.id === detailOppId) ?? null : null;
+        if (!detailOpp) return null;
+        return (
+          <TriangleDetailModal
+            opp={detailOpp}
+            executing={botStatus === "verifying" || botStatus === "dispatching"}
+            onExecute={handleExecuteFromDetail}
+            onClose={() => setDetailOppId(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

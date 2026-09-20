@@ -1375,3 +1375,12 @@ overhaul pass committed as `23d4aed`).
 - **Backfill:** schema v20 rescales pre-fix lighter/robinhood rows (rate_8h/8, interval 8); version asserts bumped 19->20; new v20 + downsample-pinning tests. `docs/EXCHANGES.md` Lighter section documents the 8h semantics.
 - **Tree note:** commit 8adacef (concurrent worker) swept the completed funding files in; this session stages ONLY the tail hunks (`state_store.rs`, downsample hunk of `commands.rs`, `docs/EXCHANGES.md`) plus SPEC/handoff. Their margin/balance streams in shared files left untouched.
 - **Verification:** desktop 310/0 (2 new), exchanges 99/0, math 93/0, tsc clean, `npm test` green, live API cross-check (LINK/BTC/ETH/NEAR/TAO on both venues).
+
+## 49. Session Handoff — 2026-09-20 (Triangle: scanner rename + popup + PopDEX cross-quote fix)
+
+- **Asks:** (1) rename "Detected Triangular Opportunities (N)" to Opportunity Scanner with no count, (2) click an opportunity for a detail popup, (3) PopDEX shows BTC-XRP-style legs it has no ticker for (+3788 BPS phantoms).
+- **Root cause:** `PopDexAdapter::venue_symbol` stripped every symbol to `{BASE}USDT`, so `fetch_orderbook("BTC-XRP")` returned the BTCUSDT book mislabeled — the middle leg priced at 80,429 "XRP" vs the honest ~58,289 (80439/1.38). Other venues already fail closed (HL rejects non-USD quotes, Lighter resolves via market_id, Vanta via `to_vanta_symbol`).
+- **Fix (`popdex.rs` only):** `require_usd_quote` guard at the top of `fetch_orderbook` / `fetch_ticker` / `fetch_funding_rate` + `cross_quoted_symbols_fail_closed` regression test. Triangle scan's existing all-or-none book resolution then skips PopDEX cycles honestly (a USDT-only venue cannot form A-B middle legs).
+- **UI (`TriangularArbitrage.tsx`):** header is now "Opportunity Scanner" (count dropped); row click selects AND opens a `TriangleDetailModal` (legs, prices/fees, gross/fees/net, est profit, latency, route, Fill Cycle with backdrop-blur/ESC/backdrop-close); `handleDeployCycle` refactored to `deployCycle(opp)` so modal and row fills share one path.
+- **Tree note:** stages only `popdex.rs`, `TriangularArbitrage.tsx`, SPEC + this entry; concurrent worker files untouched.
+- **Verification:** exchanges 100/0, tsc clean, `npm test` green; app rebuilt (FE+release clean) and relaunched. Live triangle-tab confirmation left to the operator (scan is click-triggered, no auto-scan in monitor).

@@ -596,6 +596,27 @@ impl PopDexAdapter {
         Ok(out)
     }
 
+    /// PopDEX lists USDT-quoted futures only. A cross-quoted engine symbol
+    /// (e.g. `BTC-XRP`) must never silently resolve to the base asset's USDT
+    /// book — that mislabels one market's price as another's and fabricates
+    /// phantom arbitrage (observed: +3800 BPS triangle cycles with the middle
+    /// leg priced off the BTC book). Fail closed instead.
+    fn require_usd_quote(symbol: &str) -> anyhow::Result<()> {
+        let clean = symbol.trim().replace('/', "-");
+        let parts: Vec<&str> = clean.split(['-', '_', ':']).collect();
+        if parts.len() < 2 {
+            return Ok(()); // bare base keeps the legacy `{BASE}USDT` mapping
+        }
+        let quote = parts[1];
+        if quote.eq_ignore_ascii_case("USD")
+            || quote.eq_ignore_ascii_case("USDC")
+            || quote.eq_ignore_ascii_case("USDT")
+        {
+            return Ok(());
+        }
+        anyhow::bail!("PopDEX lists USDT-quoted futures only; no market for '{symbol}'")
+    }
+
     /// Venue pair code for an engine symbol (`BTC-USDC` → `BTCUSDT`).
     fn venue_symbol(symbol: &str) -> String {
         let base = symbol
@@ -757,6 +778,7 @@ impl ExchangeAdapter for PopDexAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
+        Self::require_usd_quote(symbol)?;
         let venue_symbol = Self::venue_symbol(symbol);
         let payload = self.fetch_book(&venue_symbol).await?;
         let mut book = OrderBook::new(self.venue_id(), symbol.to_string());
@@ -774,6 +796,7 @@ impl ExchangeAdapter for PopDexAdapter {
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
+        Self::require_usd_quote(symbol)?;
         let venue_symbol = Self::venue_symbol(symbol);
         let rows: Vec<TickerRow> = self
             .rest_get(&format!(
@@ -795,6 +818,7 @@ impl ExchangeAdapter for PopDexAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
+        Self::require_usd_quote(symbol)?;
         let venue_symbol = Self::venue_symbol(symbol);
         let rows: Vec<FundingRow> = self
             .rest_get(&format!(
@@ -1658,6 +1682,17 @@ mod tests {
         assert_eq!(PopDexAdapter::venue_symbol("BTC-USDC"), "BTCUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("eth"), "ETHUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("QQQ"), "QQQUSDT");
+    }
+
+    #[test]
+    fn cross_quoted_symbols_fail_closed() {
+        // Regression: `BTC-XRP` used to resolve to the BTCUSDT book and price
+        // the middle triangle leg off the wrong market (+3800 BPS phantoms).
+        assert!(PopDexAdapter::require_usd_quote("BTC-USDC").is_ok());
+        assert!(PopDexAdapter::require_usd_quote("XRP-USDT").is_ok());
+        assert!(PopDexAdapter::require_usd_quote("eth").is_ok());
+        assert!(PopDexAdapter::require_usd_quote("BTC-XRP").is_err());
+        assert!(PopDexAdapter::require_usd_quote("ETH-BTC").is_err());
     }
 
     #[test]
