@@ -1282,19 +1282,53 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
 /// suffixes (Binance-style "BTCUSD") only strip when at least 3 chars of
 /// base remain — otherwise real tickers like "TUSD"/"SUSD"/"BUSD" would
 /// collapse to a single letter.
+///
+/// After stripping, equivalent cash-index underlyings merge via
+/// [`canonical_index_alias`]: Lighter `US100` and PopDEX `TECH100` are both
+/// Nasdaq-100 index perps, so they pair, group, and net together instead of
+/// appearing as two unrelated tickers.
 pub fn canonical_base(raw: &str) -> String {
     let up = raw.trim().to_uppercase();
+    let mut stripped = up.as_str();
+    let mut cut = false;
     for suf in ["-USDC", "-USDT", "-USD", "/USDC", "/USDT", "/USD", "-PERP"] {
         if up.len() > suf.len() && up.ends_with(suf) {
-            return up[..up.len() - suf.len()].to_string();
+            stripped = &up[..up.len() - suf.len()];
+            cut = true;
+            break;
         }
     }
-    for suf in ["USDC", "USDT", "USD"] {
-        if up.ends_with(suf) && up.len() - suf.len() >= 3 {
-            return up[..up.len() - suf.len()].to_string();
+    if !cut {
+        for suf in ["USDC", "USDT", "USD"] {
+            if up.ends_with(suf) && up.len() - suf.len() >= 3 {
+                stripped = &up[..up.len() - suf.len()];
+                break;
+            }
         }
     }
-    up
+    match canonical_index_alias(stripped) {
+        Some(alias) => alias.to_string(),
+        None => stripped.to_string(),
+    }
+}
+
+/// Venue-name aliases for the same economic underlying (cash equity indices
+/// traded as perps under different tickers). Returns the canonical family
+/// name, or `None` when the base is not a known index alias.
+///
+/// Families (identity is unambiguous — same index, same currency):
+/// - Nasdaq-100 → `NAS100` (Lighter `US100`, PopDEX `TECH100`, …)
+/// - S&P 500 → `SPX500` (`US500`, `SP500`, `SPX`, …)
+/// - Dow Jones → `US30` (`DJ30`, `WS30`, `DJI`, …)
+pub fn canonical_index_alias(base: &str) -> Option<&'static str> {
+    match base {
+        "US100" | "TECH100" | "NAS100" | "USTEC" | "USTEC100" | "NQ100" | "NQ" => {
+            Some("NAS100")
+        }
+        "US500" | "SPX500" | "SP500" | "SPX" => Some("SPX500"),
+        "US30" | "DJ30" | "WS30" | "DJI" | "DJIA" => Some("US30"),
+        _ => None,
+    }
 }
 
 /// Every storage key that may hold samples for one asset. Background paths
@@ -4027,6 +4061,29 @@ mod tests {
         ));
         let file = dir.join("state.sqlite3");
         (dir, file)
+    }
+
+    #[test]
+    fn canonical_base_merges_equivalent_index_underlyings() {
+        // The reported case: Lighter US100 == PopDEX TECH100 (Nasdaq-100).
+        assert_eq!(canonical_base("US100"), "NAS100");
+        assert_eq!(canonical_base("TECH100"), "NAS100");
+        assert_eq!(canonical_base("US100-PERP"), "NAS100");
+        assert_eq!(canonical_base("TECH100USDT"), "NAS100");
+        assert_eq!(canonical_base("tech100/usdc"), "NAS100");
+        assert_eq!(canonical_base("NAS100"), "NAS100");
+        assert_eq!(canonical_base("USTEC"), "NAS100");
+        // Siblings in the same class.
+        assert_eq!(canonical_base("US500"), "SPX500");
+        assert_eq!(canonical_base("SPX"), "SPX500");
+        assert_eq!(canonical_base("US30"), "US30");
+        assert_eq!(canonical_base("DJ30"), "US30");
+        // Non-indices untouched (incl. quote-strip behavior).
+        assert_eq!(canonical_base("BTC-USDC"), "BTC");
+        assert_eq!(canonical_base("BTCUSDT"), "BTC");
+        assert_eq!(canonical_base("TUSD"), "TUSD");
+        assert_eq!(canonical_base("BUSD"), "BUSD");
+        assert_eq!(canonical_base("ETH-PERP"), "ETH");
     }
 
     #[test]

@@ -66,6 +66,11 @@ pub struct ExternalPositionsResponse {
     pub positions: Vec<ExternalPositionDto>,
     /// Per-venue read problems ("hyperliquid: no credentials", …). Empty = all read.
     pub unreadable: Vec<String>,
+    /// Per-venue read-vs-shown reconciliation ("hyperliquid: read 2 live
+    /// position(s), 1 shown externally (1 fully system-owned, …)"). Only
+    /// present when rows were read but not all surface — answers "why don't
+    /// I see venue X's position?" without guessing.
+    pub venue_notes: Vec<String>,
     pub live_mode: bool,
 }
 
@@ -132,6 +137,25 @@ pub fn residual_qty(live_qty: f64, system_qty: f64) -> f64 {
         return 0.0;
     }
     (live_qty - system_qty).max(0.0)
+}
+
+/// One-line diagnostic when a venue's live rows don't all surface as
+/// external positions. `None` in the happy path (nothing read, or everything
+/// read is shown) so the UI stays quiet unless there is something to explain.
+pub fn venue_position_note(
+    venue_name: &str,
+    raw: usize,
+    shown: usize,
+    system_owned: usize,
+    dust_skipped: usize,
+    malformed: usize,
+) -> Option<String> {
+    if raw == 0 || shown >= raw {
+        return None;
+    }
+    Some(format!(
+        "{venue_name}: read {raw} live position(s), {shown} shown externally          ({system_owned} fully system-owned, {dust_skipped} dust under $1, {malformed} malformed)"
+    ))
 }
 
 /// Walk price levels (best-first) filling `qty`; returns (vwap, filled).
@@ -221,6 +245,7 @@ pub async fn get_external_positions_impl(
 
     let mut positions = Vec::new();
     let mut unreadable = Vec::new();
+    let mut venue_notes = Vec::new();
     for (vid, name, adapter) in state.get_venues() {
         if !adapter.has_live_credentials() {
             unreadable.push(format!("{name}: no live credentials in the vault"));
@@ -236,23 +261,33 @@ pub async fn get_external_positions_impl(
         let venue_lc = vid.to_string().to_lowercase();
         let close_supported =
             adapter.supports_live_execution() && adapter.has_live_credentials();
+        let (mut raw, mut shown, mut sys_n, mut dust_n, mut bad_n) = (0usize, 0usize, 0usize, 0usize, 0usize);
         for p in &account.positions {
+            raw += 1;
             let qty = dec_f64(p.quantity);
             if !qty.is_finite() || qty <= 0.0 {
+                bad_n += 1;
                 continue;
             }
             let base = canonical_base(&p.symbol);
             let sq = p.signed_quantity();
             let side_sign = (sq.is_sign_positive() as i32 - sq.is_sign_negative() as i32) as f64;
             if side_sign == 0.0 {
+                bad_n += 1;
                 continue;
             }
             let sys = system_qty_for(&signals, &venue_lc, &base, side_sign);
             let ext = residual_qty(qty, sys);
-            let mark = dec_f64(p.mark_price);
-            if ext * mark < DUST_NOTIONAL_USD {
+            if ext <= 0.0 {
+                sys_n += 1;
                 continue;
             }
+            let mark = dec_f64(p.mark_price);
+            if ext * mark < DUST_NOTIONAL_USD {
+                dust_n += 1;
+                continue;
+            }
+            shown += 1;
             let entry = dec_f64(p.entry_price);
             let upnl = dec_f64(p.unrealized_pnl);
             positions.push(ExternalPositionDto {
@@ -281,6 +316,9 @@ pub async fn get_external_positions_impl(
                 updated_at: p.updated_at.to_rfc3339(),
             });
         }
+        if let Some(note) = venue_position_note(name, raw, shown, sys_n, dust_n, bad_n) {
+            venue_notes.push(note);
+        }
     }
     positions.sort_by(|a, b| {
         b.notional_usd
@@ -290,6 +328,7 @@ pub async fn get_external_positions_impl(
     Ok(ExternalPositionsResponse {
         positions,
         unreadable,
+        venue_notes,
         live_mode,
     })
 }
@@ -621,6 +660,17 @@ mod tests {
         assert_eq!(residual_qty(0.5, 1.0), 0.0);
         assert_eq!(residual_qty(f64::NAN, 1.0), 0.0);
         assert_eq!(residual_qty(1.0, f64::INFINITY), 0.0);
+    }
+
+    #[test]
+    fn venue_note_only_fires_on_hidden_rows() {
+        assert!(venue_position_note("Hyperliquid", 0, 0, 0, 0, 0).is_none());
+        assert!(venue_position_note("Hyperliquid", 2, 2, 0, 0, 0).is_none());
+        let n = venue_position_note("Hyperliquid", 3, 1, 1, 1, 0).expect("note");
+        assert!(n.contains("read 3 live position(s)"), "{n}");
+        assert!(n.contains("1 shown externally"), "{n}");
+        assert!(n.contains("1 fully system-owned"), "{n}");
+        assert!(n.contains("1 dust under $1"), "{n}");
     }
 
     #[test]
