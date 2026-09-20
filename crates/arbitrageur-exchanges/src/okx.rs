@@ -236,7 +236,7 @@ impl OkxAdapter {
 
     /// Engine base-unit quantity into whole OKX contracts (floor). Pure.
     fn contracts_for_qty(qty: Decimal, ct_val: Decimal) -> Option<Decimal> {
-        if !(qty > dec!(0)) || !(ct_val > dec!(0)) {
+        if qty <= dec!(0) || ct_val <= dec!(0) {
             return None;
         }
         let contracts = (qty / ct_val).trunc();
@@ -837,7 +837,6 @@ impl ExchangeAdapter for OkxAdapter {
 mod tests {
     use super::*;
 
-    #[test]
     #[test]
     fn sign_request_matches_verified_vector() {
         // Cross-checked with `openssl dgst -sha256 -hmac secret -binary | openssl base64`

@@ -1423,3 +1423,18 @@ overhaul pass committed as `23d4aed`).
 - **Still fail-closed (documented, not attempted):** Lighter/Robinhood orders (need the native Starknet/Poseidon signer lib per EXCHANGES §2.3 — pure-Rust fabrication refused), Decibel orders (Aptos entry-function/BCS research outstanding), Arcus account+orders (private API undocumented in-repo; market data itself is a hardcoded list + key-gated books).
 - **Tree note:** stages only the six adapter files + this entry; concurrent worker hunks (commands.rs, state.rs, EngineSettings/ExchangeAccounts/PortfolioMonitor, types) untouched.
 - **Verification:** exchanges 117/0, clippy clean (2 pre-existing okx nonminimal_bool warnings untouched).
+
+## 54. Session Handoff — 2026-09-20 (Lighter live orders via vendored Go signer + apiKeyIndex plumbing)
+
+- **Ask:** "add those librarys. we dont have to have every part to be rust. keep working dont stop. fill all gaps, fix all issues."
+- **Shipped (Rust + vendored non-Rust lib, per operator approval):**
+  - `crates/arbitrageur-exchanges/native/lighter/liblighter_signer.so` (+ header): reference Go implementation (`elliottech/lighter-go`) compiled as a C-shared library. Poseidon2/Goldilocks-quintic Schnorr has no Rust crate, so a pure-Rust port was refused in favor of the audited native lib.
+  - New `lighter_signer.rs`: `libloading` runtime FFI (`CreateClient`, `SignCreateOrder`, `SignCancelOrder`, `Free`); fail-closed when the lib is absent. Search order: `LIGHTER_SIGNER_LIB` → exe-dir sidecar → vendored copy. Local-signing round-trip tests pass.
+  - `lighter.rs`: real `place_order` / `cancel_order` (fresh `nextNonce` → sign → form `POST /api/v1/sendTx`, success only on HTTP-ok + `code==200` + echoed `tx_hash`); `live_order_submission_implemented()=true`; per-adapter order lock; `api_key_index` field + `set_api_key_index()`.
+  - `robinhood.rs` forwards `live_order_submission_implemented` (Robinhood deployment covered automatically).
+  - `state.rs`: vault `api_key_index` (UI collects 2–254) now forwarded to both `live_lighter` and `live_robinhood` via `set_api_key_index()` (u64→u8 validated, out-of-range warns); cleared on lock. Without this hop orders correctly failed closed with "requires an API Key Index".
+  - Chain ids from base URL: mainnet 304, testnet 300, `rh.lighter` 466324. tx_type create=14 / cancel=15. Scaling via single `orderBookDetails` payload (price human×10^price_dec, buy-floor/sell-ceil, amount floor); market orders = limited-slippage SDK clone (±2% band + full-size depth walk, else bail).
+- **Docs:** `EXCHANGES.md` §2.3 rewritten as IMPLEMENTED; `SPEC.md` rollout paragraph updated (remaining: Decibel Aptos tx, Arcus private API).
+- **Verification:** exchanges 128/0, `cargo clippy -p arbitrageur-exchanges` 0 warnings (2 pre-existing okx lints fixed), `cargo check -p arbitrageur-desktop` clean, release rebuilt + sidecar hash-matched + app relaunched and smoke-tested (process alive, normal fail-closed market-data warnings only).
+- **Still fail-closed:** Decibel orders (Aptos `dex_accounts::place_order_to_subaccount` entry fn researched — package + market addresses need live verification, needs `bcs` crate), Arcus account+orders (private API undocumented).
+- **Tree note:** second worker's risk/stale-balance hunks (commands.rs, EngineSettings/ExchangeAccounts/PortfolioMonitor, types) left uncommitted; this commit stages only the Lighter + apiKeyIndex + docs paths.

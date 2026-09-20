@@ -1,5 +1,6 @@
 use crate::vault::ExchangeCredentials;
 use arbitrageur_core::hub::MarketDataHub;
+use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::types::{dec, Decimal};
 use arbitrageur_exchanges::arcus::ArcusAdapter;
 use arbitrageur_exchanges::aster::AsterAdapter;
@@ -388,6 +389,9 @@ fn default_margin_critical_pct() -> f64 {
 fn default_margin_min_liq_distance_pct() -> f64 {
     15.0
 }
+fn default_balance_stale_warn_secs() -> u64 {
+    300
+}
 fn default_referral_lighter() -> String {
     "https://app.lighter.xyz/?referral=SOLO&source=none".into()
 }
@@ -431,7 +435,7 @@ pub struct VenueBalanceInfo {
     pub available_margin_usd: f64,
     #[serde(default)]
     pub margin_rate_pct: f64,
-    pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED", "EMPTY"
+    pub status: String, // "HEALTHY", "LOW_MARGIN", "DEPLETED", "EMPTY", "STALE", "LOCKED", "ERROR", "NO_CREDENTIALS"
     pub recommended_action: Option<String>,
     #[serde(default)]
     pub is_live: bool,
@@ -485,6 +489,11 @@ pub struct EngineSettingsDto {
     pub margin_critical_usage_pct: f64,
     #[serde(default = "default_margin_min_liq_distance_pct")]
     pub margin_min_liquidation_distance_pct: f64,
+    /// Grace period before a repeatedly-unreadable venue balance escalates
+    /// to a warning. Until then the last known-good figures keep totals and
+    /// drawdown stable (a blip is not a loss).
+    #[serde(default = "default_balance_stale_warn_secs")]
+    pub balance_stale_warn_secs: u64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -656,6 +665,7 @@ impl Default for EngineSettingsDto {
             margin_warning_usage_pct: default_margin_warning_pct(),
             margin_critical_usage_pct: default_margin_critical_pct(),
             margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
+            balance_stale_warn_secs: default_balance_stale_warn_secs(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -1031,6 +1041,11 @@ pub struct AppEngineState {
     /// tripping. Prevents the classic false halt: $200k baseline vs $3.5k
     /// live funds reading as a -$196k "drawdown".
     pub last_risk_live_universe: RwLock<Option<bool>>,
+    /// Last known-good live account snapshot per venue, with read timestamp.
+    /// A transiently-unreadable venue keeps contributing its cached figures
+    /// to totals/drawdown (a blip is not a loss) until the Safety-tab grace
+    /// period expires, after which it escalates to ERROR.
+    pub last_good_accounts: Mutex<std::collections::HashMap<String, (AccountSnapshot, i64)>>,
     pub total_realized_profit: RwLock<Decimal>,
     pub total_realized_profit_live: RwLock<Decimal>,
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
@@ -1337,6 +1352,11 @@ impl AppEngineState {
                     initial_settings.margin_min_liquidation_distance_pct = v;
                 }
             }
+            if let Some(v) = get_u("risk.stale_warn_secs") {
+                if v >= 30 && v <= 3600 {
+                    initial_settings.balance_stale_warn_secs = v as u64;
+                }
+            }
             if initial_settings.margin_warning_usage_pct >= initial_settings.margin_critical_usage_pct {
                 initial_settings.margin_warning_usage_pct = 70.0;
                 initial_settings.margin_critical_usage_pct = 85.0;
@@ -1397,6 +1417,7 @@ impl AppEngineState {
             kalman_filter,
             is_live_mode: RwLock::new(false),
             last_risk_live_universe: RwLock::new(None),
+            last_good_accounts: Mutex::new(std::collections::HashMap::new()),
             total_realized_profit: RwLock::new(dec!(0)),
             total_realized_profit_live: RwLock::new(dec!(0)),
             execution_logs: RwLock::new(initial_logs),
@@ -1436,7 +1457,9 @@ impl AppEngineState {
             let _ = self.live_popdex.update_credentials(None, None, None);
             self.live_hl.update_credentials(None, None);
             self.live_lighter.update_credentials(None, None);
+            self.live_lighter.set_api_key_index(None);
             self.live_robinhood.update_credentials(None, None);
+            self.live_robinhood.set_api_key_index(None);
             self.live_vanta.update_credentials(None, None, None);
             self.live_binance.update_credentials(None, None);
             self.live_okx.update_credentials(None, None, None);
@@ -1492,6 +1515,7 @@ impl AppEngineState {
 
             let mut lighter_idx = None;
             let mut lighter_key = None;
+            let mut lighter_key_idx: Option<u8> = None;
             if let Some(cred) = get_active_cred(&["lighter"]) {
                 let key = if !cred.api_key.trim().is_empty() {
                     Some(cred.api_key.clone())
@@ -1501,11 +1525,19 @@ impl AppEngineState {
                 if key.is_some() {
                     lighter_key = key;
                     lighter_idx = cred.account_index;
+                    lighter_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
+                    if cred.api_key_index.is_some() && lighter_key_idx.is_none() {
+                        tracing::warn!(
+                            "lighter api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
+                            cred.api_key_index
+                        );
+                    }
                 }
             }
 
             let mut rh_idx = None;
             let mut rh_key = None;
+            let mut rh_key_idx: Option<u8> = None;
             if let Some(cred) = get_active_cred(&["robinhood", "robinhood lighter", "rh"]) {
                 let key = if !cred.api_key.trim().is_empty() {
                     Some(cred.api_key.clone())
@@ -1515,6 +1547,13 @@ impl AppEngineState {
                 if key.is_some() {
                     rh_key = key;
                     rh_idx = cred.account_index;
+                    rh_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
+                    if cred.api_key_index.is_some() && rh_key_idx.is_none() {
+                        tracing::warn!(
+                            "robinhood api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
+                            cred.api_key_index
+                        );
+                    }
                 }
             }
 
@@ -1611,7 +1650,9 @@ impl AppEngineState {
             }
             self.live_hl.update_credentials(hl_wallet, hl_pk);
             self.live_lighter.update_credentials(lighter_idx, lighter_key);
+            self.live_lighter.set_api_key_index(lighter_key_idx);
             self.live_robinhood.update_credentials(rh_idx, rh_key);
+            self.live_robinhood.set_api_key_index(rh_key_idx);
             self.live_vanta.update_credentials(vanta_acc, vanta_key, vanta_sec);
             self.live_binance.update_credentials(binance_key, binance_sec);
             self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
@@ -1631,7 +1672,9 @@ impl AppEngineState {
             let _ = self.live_popdex.update_credentials(None, None, None);
             self.live_hl.update_credentials(None, None);
             self.live_lighter.update_credentials(None, None);
+            self.live_lighter.set_api_key_index(None);
             self.live_robinhood.update_credentials(None, None);
+            self.live_robinhood.set_api_key_index(None);
             self.live_vanta.update_credentials(None, None, None);
             self.live_binance.update_credentials(None, None);
             self.live_okx.update_credentials(None, None, None);

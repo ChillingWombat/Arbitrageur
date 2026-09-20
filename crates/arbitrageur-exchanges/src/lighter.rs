@@ -8,7 +8,7 @@ use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use crate::rate_limiter::AccountRequestCoordinator;
 use parking_lot::RwLock;
 use zeroize::Zeroizing;
@@ -20,8 +20,13 @@ pub struct LighterAdapter {
     client: Client,
     base_url: String,
     account_index: RwLock<Option<u64>>,
+    api_key_index: RwLock<Option<u8>>,
     api_key_private_key: RwLock<Option<Zeroizing<String>>>,
     rate_limiter: AccountRequestCoordinator,
+    /// Serialises nonce-fetch -> sign -> submit so concurrent orders never
+    /// reuse a server nonce (a reused nonce is rejected; worse, a caller
+    /// might misread the rejection as a fill problem).
+    order_lock: tokio::sync::Mutex<()>,
 }
 
 impl LighterAdapter {
@@ -61,7 +66,9 @@ impl LighterAdapter {
             },
             base_url: base,
             account_index: parking_lot::RwLock::new(account_index),
+            api_key_index: parking_lot::RwLock::new(None),
             api_key_private_key: parking_lot::RwLock::new(api_key_private_key.map(Zeroizing::new)),
+            order_lock: tokio::sync::Mutex::new(()),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
@@ -73,6 +80,84 @@ impl LighterAdapter {
     ) {
         *self.account_index.write() = account_index;
         *self.api_key_private_key.write() = api_key_private_key.map(Zeroizing::new);
+    }
+
+    /// Lighter API-key slot that signed the key (UI: 2-254; 0-1 are the
+    /// web/mobile slots). The Go-side validator rejects 255, so there is no
+    /// wildcard default — orders fail closed until this is configured.
+    pub fn set_api_key_index(&self, api_key_index: Option<u8>) {
+        *self.api_key_index.write() = api_key_index;
+    }
+
+    fn signing_identity(&self) -> anyhow::Result<(u64, u8, Zeroizing<String>)> {
+        let account = self
+            .account_index
+            .read()
+            .ok_or_else(|| anyhow::anyhow!("Lighter live orders require an account index"))?;
+        if account == 0 {
+            anyhow::bail!("Lighter live orders require a non-zero account index");
+        }
+        let key_idx = self
+            .api_key_index
+            .read()
+            .ok_or_else(|| anyhow::anyhow!("Lighter live orders require an API Key Index (2-254)"))?;
+        if key_idx > 254 {
+            anyhow::bail!("Lighter API Key Index must be 0-254");
+        }
+        let key = self
+            .api_key_private_key
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Lighter live orders require the API private key"))?;
+        if key.trim().is_empty() {
+            anyhow::bail!("Lighter live orders require a non-empty API private key");
+        }
+        Ok((account, key_idx, key))
+    }
+
+    fn chain_id(&self) -> u32 {
+        lighter_chain_id_for_url(&self.base_url)
+    }
+
+    /// Fresh server nonce for (account, api-key). Bypasses the read cache:
+    /// a cached nonce would double-submit and get rejected.
+    async fn fetch_next_nonce(&self, account: u64, api_key_index: u8) -> anyhow::Result<i64> {
+        let url = format!(
+            "{}/api/v1/nextNonce?account_index={}&api_key_index={}",
+            self.base_url, account, api_key_index
+        );
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let snippet: String = resp.text().await.unwrap_or_default().chars().take(256).collect();
+            anyhow::bail!("Lighter nextNonce failed: {} {}", status, snippet);
+        }
+        let v: serde_json::Value = resp.json().await?;
+        v.get("nonce")
+            .and_then(|n| n.as_i64())
+            .ok_or_else(|| anyhow::anyhow!("Lighter nextNonce response carries no nonce"))
+    }
+
+    /// Submit a signed L2 transaction exactly like the official Python SDK:
+    /// `POST /api/v1/sendTx` as `application/x-www-form-urlencoded` with
+    /// `tx_type` + `tx_info`. `code == 200` is the only accepted outcome.
+    async fn submit_signed_tx(&self, signed: &crate::lighter_signer::SignedLighterTx) -> anyhow::Result<String> {
+        let body = format!(
+            "tx_type={}&tx_info={}",
+            signed.tx_type,
+            urlencoding::encode(&signed.tx_info)
+        );
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/sendTx", self.base_url))
+            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(body)
+            .send()
+            .await?;
+        let ok = resp.status().is_success();
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        parse_send_tx_result(ok, status, &text, &signed.tx_hash)
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -427,12 +512,146 @@ impl ExchangeAdapter for LighterAdapter {
             .is_some_and(|k| !k.trim().is_empty())
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+    fn live_order_submission_implemented(&self) -> bool {
+        true
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        let _guard = self.order_lock.lock().await;
+        let (account, api_key_index, api_key) = self.signing_identity()?;
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("Lighter order quantity must be positive");
+        }
+        if order.side != Side::Buy && order.side != Side::Sell {
+            anyhow::bail!("Lighter order side must be buy or sell");
+        }
+        let is_ask = order.side == Side::Sell;
+
+        // Market id + fixed-point scales come from the same payload so a
+        // mid-update market list cannot mix an id with another market's
+        // decimals (which would silently move the price ~10x per digit).
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let (market_id, price_dec, size_dec) = resolve_market_order_params(&details, &order.symbol)?;
+
+        let base_amount = scale_lighter_amount(order.quantity, size_dec, &order.symbol)?;
+        let (l2_type, tif, expiry_ms, limit_px) = match order.order_type {
+            OrderType::Market => {
+                if order.post_only {
+                    anyhow::bail!("Lighter post-only market orders are not supported");
+                }
+                let book = self.fetch_orderbook(&order.symbol).await?;
+                let worst_px =
+                    market_limit_price(&book, order.side, order.quantity, &order.symbol)?;
+                (1u8, 0u8, 0i64, worst_px)
+            }
+            OrderType::Limit | OrderType::ImmediateOrCancel => {
+                let px = order.price.ok_or_else(|| {
+                    anyhow::anyhow!("Lighter limit orders require a price")
+                })?;
+                if px <= dec!(0) {
+                    anyhow::bail!("Lighter order limit price must be positive");
+                }
+                let tif = if order.post_only {
+                    2u8
+                } else {
+                    match order.time_in_force {
+                        TimeInForce::ImmediateOrCancel => 0u8,
+                        TimeInForce::GoodTilCancelled => 1u8,
+                        TimeInForce::PostOnly => 2u8,
+                        TimeInForce::FillOrKill => anyhow::bail!(
+                            "Lighter has no fill-or-kill; refusing to downgrade to IOC silently"
+                        ),
+                    }
+                };
+                let expiry_ms = if tif == 1 { -1 } else { 0 };
+                (0u8, tif, expiry_ms, px)
+            }
+            OrderType::PostOnly => {
+                let px = order.price.ok_or_else(|| {
+                    anyhow::anyhow!("Lighter post-only orders require a price")
+                })?;
+                if px <= dec!(0) {
+                    anyhow::bail!("Lighter order limit price must be positive");
+                }
+                (0u8, 2u8, -1i64, px)
+            }
+        };
+        let price = scale_lighter_price(limit_px, price_dec, order.side, &order.symbol)?;
+
+        let nonce = self.fetch_next_nonce(account, api_key_index).await?;
+        let client_order_index =
+            lighter_client_order_index(&order.client_order_id);
+        let params = crate::lighter_signer::CreateOrderParams {
+            market_index: market_id as i64,
+            client_order_index,
+            base_amount,
+            price,
+            is_ask,
+            order_type: l2_type,
+            time_in_force: tif,
+            reduce_only: order.reduce_only,
+            order_expiry_ms: expiry_ms,
+            nonce,
+            api_key_index: api_key_index as i64,
+            account_index: account as i64,
+        };
+        let signed = crate::lighter_signer::sign_create_order(
+            None,
+            &self.base_url,
+            self.chain_id(),
+            api_key.as_str(),
+            &params,
+        )?;
+        let tx_hash = self.submit_signed_tx(&signed).await?;
+        Ok(OrderResponse {
+            order_id: tx_hash,
+            client_order_id: order.client_order_id.clone(),
+            venue: self.venue_id.clone(),
+            symbol: order.symbol.clone(),
+            status: OrderStatus::New,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(signed.tx_info),
+            timestamp: Utc::now(),
+        })
+    }
+
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        let _guard = self.order_lock.lock().await;
+        let (account, api_key_index, api_key) = self.signing_identity()?;
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let market_id = resolve_market_id(&details, &req.symbol)?;
+        // The venue cancels by numeric index: a live order id from this
+        // adapter is a tx_hash (hex, not an index), so cancellation keys off
+        // the client order index — recomputed deterministically from the
+        // client order id — or a directly supplied numeric index.
+        let order_index: i64 = match req.order_id {
+            Some(ref id) if id.parse::<i64>().is_ok() => id.parse::<i64>().unwrap_or(0),
+            _ => match req.client_order_id {
+                Some(ref cid) if !cid.trim().is_empty() => lighter_client_order_index(cid),
+                _ => anyhow::bail!(
+                    "Lighter cancel needs a numeric order index or the client order id"
+                ),
+            },
+        };
+        let nonce = self.fetch_next_nonce(account, api_key_index).await?;
+        let signed = crate::lighter_signer::sign_cancel_order(
+            None,
+            &self.base_url,
+            self.chain_id(),
+            api_key.as_str(),
+            market_id as i64,
+            order_index,
+            nonce,
+            api_key_index as i64,
+            account as i64,
+        )?;
+        self.submit_signed_tx(&signed).await?;
+        Ok(())
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
@@ -469,6 +688,230 @@ pub fn append_lighter_levels(book: &mut OrderBook, payload: &serde_json::Value) 
                 book.asks.push(BookLevel::new(p, s));
             }
         }
+    }
+}
+
+/// Chain id for Lighter-protocol deployments, selected from the base URL:
+/// mainnet `304`, testnet `300`, Robinhood Chain `466324`. A wrong chain id
+/// signs a hash the sequencer rejects, so anything unrecognised stays on
+/// mainnet rather than guessing a testnet.
+pub fn lighter_chain_id_for_url(base_url: &str) -> u32 {
+    let lower = base_url.to_lowercase();
+    if lower.contains("testnet") {
+        300
+    } else if lower.contains("rh.lighter") {
+        466324
+    } else {
+        304
+    }
+}
+
+/// Market id plus fixed-point scales for order submission, resolved from one
+/// `orderBookDetails` payload so the id can never pair with another market's
+/// decimals. Unlike the read path (which defaults missing scales), orders
+/// fail closed when a scale is absent: a guessed scale moves the price ~10x
+/// per digit.
+fn resolve_market_order_params(
+    details: &serde_json::Value,
+    symbol: &str,
+) -> anyhow::Result<(u64, u32, u32)> {
+    let market_id = resolve_market_id(details, symbol)?;
+    let entries = details
+        .get("order_book_details")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
+    let entry = entries
+        .iter()
+        .find(|e| e.get("market_id").and_then(|m| m.as_u64()) == Some(market_id))
+        .ok_or_else(|| anyhow::anyhow!("Lighter market {} vanished mid-order", market_id))?;
+    let scale = |key: &str| -> anyhow::Result<u32> {
+        let v = entry
+            .get(key)
+            .and_then(|x| x.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("Lighter market {} lacks '{}'", market_id, key))?;
+        if v > 18 {
+            anyhow::bail!("Lighter market {} '{}' scale {} is absurd", market_id, key, v);
+        }
+        Ok(v as u32)
+    };
+    Ok((market_id, scale("price_decimals")?, scale("size_decimals")?))
+}
+
+/// Scale a human price to the L2 integer (`human x 10^price_decimals`),
+/// rounding toward the trader's favour (buys down, sells up) so the
+/// submitted price is never worse than quoted.
+pub fn scale_lighter_price(
+    human: Decimal,
+    price_decimals: u32,
+    side: Side,
+    symbol: &str,
+) -> anyhow::Result<u32> {
+    if human <= dec!(0) {
+        anyhow::bail!("Lighter price for '{}' must be positive", symbol);
+    }
+    if price_decimals > 18 {
+        anyhow::bail!("Lighter price scale {} is absurd", price_decimals);
+    }
+    let factor = Decimal::from(10u64.pow(price_decimals));
+    let scaled = human * factor;
+    let rounded = match side {
+        Side::Buy => scaled.floor(),
+        Side::Sell => scaled.ceil(),
+    };
+    if rounded < dec!(1) || rounded > Decimal::from(u32::MAX) {
+        anyhow::bail!("Lighter price {} for '{}' out of range", human, symbol);
+    }
+    Ok(rounded.to_string().parse::<u32>().unwrap_or(0))
+}
+
+/// Scale a human size to the L2 integer (`human x 10^size_decimals`),
+/// always rounding down so the order never exceeds the requested size.
+pub fn scale_lighter_amount(
+    human: Decimal,
+    size_decimals: u32,
+    symbol: &str,
+) -> anyhow::Result<i64> {
+    if human <= dec!(0) {
+        anyhow::bail!("Lighter quantity for '{}' must be positive", symbol);
+    }
+    if size_decimals > 18 {
+        anyhow::bail!("Lighter size scale {} is absurd", size_decimals);
+    }
+    const MAX_BASE_AMOUNT: i64 = (1 << 48) - 1;
+    let scaled = (human * Decimal::from(10u64.pow(size_decimals))).floor();
+    if scaled < dec!(1) || scaled > Decimal::from(MAX_BASE_AMOUNT) {
+        anyhow::bail!("Lighter quantity {} for '{}' out of range", human, symbol);
+    }
+    Ok(scaled.to_string().parse::<i64>().unwrap_or(0))
+}
+
+/// Deterministic L2 client order index (1..=2^48-1) from the hex/uuid client
+/// order id. The same id always maps to the same index, which is also what
+/// lets `cancel_order` key off the client order id.
+pub fn lighter_client_order_index(client_order_id: &str) -> i64 {
+    use sha2::{Digest, Sha256};
+    const MASK_48: u64 = (1 << 48) - 1;
+    let digest = Sha256::digest(client_order_id.trim().as_bytes());
+    let mut buf = [0u8; 8];
+    buf[2..8].copy_from_slice(&digest[..6]);
+    let idx = (u64::from_be_bytes(buf) & MASK_48) as i64;
+    if idx < 1 {
+        1
+    } else {
+        idx
+    }
+}
+
+/// Worst-acceptable limit price for a Lighter market (IOC) order, mirroring
+/// the official SDK's limited-slippage path: best-touch +/- 2% band, plus a
+/// full-size depth walk. Bails when the book cannot fill the whole quantity
+/// or the walk already breaches the band — submitting anyway would accept an
+/// unbounded price.
+pub fn market_limit_price(
+    book: &OrderBook,
+    side: Side,
+    quantity: Decimal,
+    symbol: &str,
+) -> anyhow::Result<Decimal> {
+    let mut levels: Vec<(Decimal, Decimal)> = match side {
+        // A buy lifts asks from the cheapest up.
+        Side::Buy => book.asks.iter().map(|l| (l.price, l.size)).collect(),
+        // A sell hits bids from the dearest down.
+        Side::Sell => book.bids.iter().map(|l| (l.price, l.size)).collect(),
+    };
+    if levels.is_empty() {
+        anyhow::bail!("No Lighter {} book to price a market order for '{}'", side_name(side), symbol);
+    }
+    match side {
+        Side::Buy => levels.sort_by_key(|l| l.0),
+        Side::Sell => levels.sort_by_key(|l| std::cmp::Reverse(l.0)),
+    }
+    let ideal = levels[0].0;
+    if ideal <= dec!(0) {
+        anyhow::bail!("Lighter top-of-book for '{}' is not positive", symbol);
+    }
+    let band = dec!(0.02);
+    let acceptable = match side {
+        Side::Buy => ideal * (dec!(1) + band),
+        Side::Sell => ideal * (dec!(1) - band),
+    };
+    let mut filled = dec!(0);
+    let mut notional = dec!(0);
+    for (px, sz) in &levels {
+        if filled >= quantity {
+            break;
+        }
+        let take = (*sz).min(quantity - filled);
+        filled += take;
+        notional += take * *px;
+    }
+    if filled < quantity {
+        anyhow::bail!(
+            "Lighter book too thin for {} {} '{}' (only {} available)",
+            quantity,
+            side_name(side),
+            symbol,
+            filled
+        );
+    }
+    let vwap = notional / filled;
+    let breached = match side {
+        Side::Buy => vwap > acceptable,
+        Side::Sell => vwap < acceptable,
+    };
+    if breached {
+        anyhow::bail!(
+            "Lighter market order for '{}' breaches the 2% slippage band (vwap {})",
+            symbol,
+            vwap
+        );
+    }
+    Ok(acceptable)
+}
+
+/// Pure validation of a `sendTx` HTTP response: HTTP success plus `code ==
+/// 200` plus a `tx_hash` echoing the hash that was signed. Anything else is a
+/// rejection — never treated as an order.
+pub fn parse_send_tx_result(
+    http_ok: bool,
+    http_status: u16,
+    body: &str,
+    expected_tx_hash: &str,
+) -> anyhow::Result<String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let code = v.get("code").and_then(|c| c.as_i64());
+    if http_ok && code == Some(200) {
+        let tx_hash = v
+            .get("tx_hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .to_string();
+        if tx_hash.is_empty() {
+            anyhow::bail!("Lighter sendTx accepted but returned no tx_hash");
+        }
+        if tx_hash != expected_tx_hash {
+            anyhow::bail!("Lighter sendTx returned a different tx_hash than signed — refusing to track");
+        }
+        return Ok(tx_hash);
+    }
+    let msg = v
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or(body.chars().take(256).collect::<String>().as_str())
+        .to_string();
+    anyhow::bail!(
+        "Lighter sendTx rejected (http {} code {:?}): {}",
+        http_status,
+        code,
+        msg
+    )
+}
+
+fn side_name(side: Side) -> &'static str {
+    match side {
+        Side::Buy => "buy",
+        Side::Sell => "sell",
     }
 }
 
@@ -694,6 +1137,109 @@ mod tests {
             (hourly_f + 0.000042).abs() < 0.00001,
             "hourly normalization off: {hourly_f}"
         );
+    }
+
+    #[test]
+    fn chain_id_mapping() {
+        assert_eq!(lighter_chain_id_for_url("https://mainnet.zklighter.elliot.ai"), 304);
+        assert_eq!(lighter_chain_id_for_url("https://testnet.zklighter.elliot.ai"), 300);
+        assert_eq!(lighter_chain_id_for_url("https://api.rh.lighter.xyz"), 466324);
+        assert_eq!(lighter_chain_id_for_url("https://example.com"), 304);
+    }
+
+    #[test]
+    fn scale_price_rounds_toward_trader() {
+        // 4dp market: 12.34567 -> buy 123456, sell 123457.
+        assert_eq!(
+            scale_lighter_price(dec!(12.34567), 4, Side::Buy, "T").unwrap(),
+            123456
+        );
+        assert_eq!(
+            scale_lighter_price(dec!(12.34567), 4, Side::Sell, "T").unwrap(),
+            123457
+        );
+        assert!(scale_lighter_price(dec!(0), 4, Side::Buy, "T").is_err());
+        assert!(scale_lighter_price(dec!(-1), 4, Side::Buy, "T").is_err());
+    }
+
+    #[test]
+    fn scale_amount_floors() {
+        // 3dp market: 1.2349 -> 1234 (never rounds the size up).
+        assert_eq!(scale_lighter_amount(dec!(1.2349), 3, "T").unwrap(), 1234);
+        assert!(scale_lighter_amount(dec!(0.0001), 3, "T").is_err());
+        assert!(scale_lighter_amount(dec!(0), 3, "T").is_err());
+    }
+
+    #[test]
+    fn client_order_index_stable_and_bounded() {
+        let a = lighter_client_order_index("d290f1ee-6c54-4b01-90e6-d701748f0851");
+        let b = lighter_client_order_index("d290f1ee-6c54-4b01-90e6-d701748f0851");
+        assert_eq!(a, b);
+        assert!((1..=(1i64 << 48) - 1).contains(&a));
+        let c = lighter_client_order_index("different-id");
+        assert_ne!(a, c);
+    }
+
+    fn book_for(side_px: &[(f64, f64)], symbol: &str) -> OrderBook {
+        let mut book = OrderBook::new(VenueId::new("lighter"), symbol.to_string());
+        for (p, s) in side_px {
+            book.asks.push(BookLevel::new(
+                Decimal::from_str(&p.to_string()).unwrap(),
+                Decimal::from_str(&s.to_string()).unwrap(),
+            ));
+        }
+        book
+    }
+
+    #[test]
+    fn market_limit_price_buy_within_band() {
+        // Asks 100x10, 101x10. Buy 15 -> ideal 100, acceptable 102.
+        let book = book_for(&[(100.0, 10.0), (101.0, 10.0)], "T");
+        let px = market_limit_price(&book, Side::Buy, dec!(15), "T").unwrap();
+        assert_eq!(px, dec!(102));
+    }
+
+    #[test]
+    fn market_limit_price_thin_book_fails_closed() {
+        let book = book_for(&[(100.0, 10.0)], "T");
+        assert!(market_limit_price(&book, Side::Buy, dec!(11), "T").is_err());
+    }
+
+    #[test]
+    fn market_limit_price_slippage_breach_fails_closed() {
+        // Walk VWAP (100*1 + 200*10)/11 = 190.9 > 102 band -> reject.
+        let book = book_for(&[(100.0, 1.0), (200.0, 10.0)], "T");
+        assert!(market_limit_price(&book, Side::Buy, dec!(11), "T").is_err());
+    }
+
+    #[test]
+    fn parse_send_tx_accepts_only_matching_hash() {
+        let body = serde_json::json!({"code": 200, "tx_hash": "abc", "message": "ok"}).to_string();
+        assert_eq!(
+            parse_send_tx_result(true, 200, &body, "abc").unwrap(),
+            "abc"
+        );
+        assert!(parse_send_tx_result(true, 200, &body, "other").is_err());
+        let bad = serde_json::json!({"code": 400, "message": "bad nonce"}).to_string();
+        let err = parse_send_tx_result(true, 200, &bad, "abc").expect_err("code != 200");
+        assert!(err.to_string().contains("bad nonce"));
+        assert!(parse_send_tx_result(false, 400, &bad, "abc").is_err());
+    }
+
+    #[test]
+    fn resolve_order_params_pairs_id_with_decimals() {
+        let details = serde_json::json!({"order_book_details": [
+            {"symbol": "BTC", "market_id": 1, "market_type": "perp", "price_decimals": 2, "size_decimals": 5},
+            {"symbol": "ETH", "market_id": 2, "market_type": "perp", "price_decimals": 3, "size_decimals": 4}
+        ]});
+        assert_eq!(
+            resolve_market_order_params(&details, "ETH-USDC").unwrap(),
+            (2, 3, 4)
+        );
+        let missing = serde_json::json!({"order_book_details": [
+            {"symbol": "BTC", "market_id": 1, "market_type": "perp"}
+        ]});
+        assert!(resolve_market_order_params(&missing, "BTC-USDC").is_err());
     }
 
     #[tokio::test]

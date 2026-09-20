@@ -100,6 +100,10 @@ impl ExchangeAdapter for RobinhoodAdapter {
         self.inner.supports_live_execution()
     }
 
+    fn live_order_submission_implemented(&self) -> bool {
+        self.inner.live_order_submission_implemented()
+    }
+
     fn has_live_credentials(&self) -> bool {
         self.inner.has_live_credentials()
     }

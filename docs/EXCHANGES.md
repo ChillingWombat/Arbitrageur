@@ -96,8 +96,28 @@ Lighter operates a high-throughput orderbook DEX secured by zero-knowledge rollu
    the venue UI's "8hr" figure; hourly ~= rate / 8) — adapters must record it
    with `interval_hours = 8` or carry quotes inflate ~8x.
 
-### 2.3 Signing Architecture
-Order submissions require native Starknet / Poseidon curve signatures generated via Lighter's native C-ABI dynamic library (`lighter-signer-linux-amd64.so`) or Taoli remote signer.
+### 2.3 Signing Architecture (IMPLEMENTED 2026-09-20)
+Orders use the ZK-friendly Schnorr scheme (Goldilocks-quintic + Poseidon2) for
+which no Rust crate exists, so signing is delegated to the reference Go
+implementation (`github.com/elliottech/lighter-go`, Apache-2.0) compiled as a
+C-shared library and vendored at
+`crates/arbitrageur-exchanges/native/lighter/liblighter_signer.so`
+(`libloading` runtime load: `LIGHTER_SIGNER_LIB` env → sidecar next to the
+executable → vendored copy; a missing library is a fail-closed error, never a
+fabricated signature).
+- Nonce: fresh `GET {base}/api/v1/nextNonce?account_index=&api_key_index=`
+  (uncached — a cached nonce would double-submit).
+- Sign: `SignCreateOrder` / `SignCancelOrder` over the L2 payload
+  (tx_type create=14 / cancel=15; chain id from base URL: mainnet 304,
+  testnet 300, `rh.lighter` 466324; unknown → 304).
+- Submit: form `POST {base}/api/v1/sendTx` (`tx_type` + urlencoded `tx_info`);
+  success requires HTTP-ok + `code==200` + echoed `tx_hash` match.
+- Identity: account index (>0) + API private key + **API Key Index (0–254,
+  UI collects 2–254; the Go validator rejects 255, so there is no wildcard
+  default — orders fail closed until `set_api_key_index()` is configured,
+  now plumbed from the vault through `state.rs` for both `lighter` and the
+  `robinhood` deployment). `live_order_submission_implemented() == true`;
+  the Robinhood adapter forwards it automatically.
 
 ---
 

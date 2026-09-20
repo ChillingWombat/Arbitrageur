@@ -2,6 +2,7 @@ pub mod rate_limiter;
 pub mod wallet;
 pub mod hyperliquid;
 pub mod lighter;
+pub mod lighter_signer;
 pub mod popdex;
 pub mod vanta;
 pub mod ws;

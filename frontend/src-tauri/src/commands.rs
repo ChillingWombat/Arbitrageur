@@ -4,6 +4,7 @@ use crate::state::{
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
 use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use arbitrageur_execution::coordinator::ArbitrageExecutionResult;
@@ -5295,6 +5296,44 @@ fn cb_reanchor_to_paper(state: &AppEngineState, total: Decimal) {
     *state.last_risk_live_universe.write() = Some(*state.is_live_mode.read());
 }
 
+/// Live account read with last-known-good fallback.
+/// Ok((snapshot, None)) = fresh read (cache refreshed).
+/// Ok((snapshot, Some(age_ms))) = read failed, serving cached figures so a
+/// connectivity blip never reads as a loss of funds.
+/// Err = read failed with nothing cached (venue never read successfully).
+async fn live_account_or_cached(
+    state: &AppEngineState,
+    vid: &str,
+    adapter: &Arc<dyn ExchangeAdapter>,
+) -> Result<(AccountSnapshot, Option<i64>), String> {
+    match adapter.fetch_account().await {
+        Ok(mut acc) => {
+            acc.venue = vid.into();
+            let now_ms = Utc::now().timestamp_millis();
+            state
+                .last_good_accounts
+                .lock()
+                .insert(vid.to_string(), (acc.clone(), now_ms));
+            Ok((acc, None))
+        }
+        Err(e) => {
+            let cached = state.last_good_accounts.lock().get(vid).cloned();
+            match cached {
+                Some((acc, ts)) => {
+                    let age = Utc::now().timestamp_millis().saturating_sub(ts);
+                    Ok((acc, Some(age)))
+                }
+                None => Err(e.to_string()),
+            }
+        }
+    }
+}
+
+/// Grace period before a stale venue escalates to ERROR (ms).
+fn stale_grace_ms(state: &AppEngineState) -> i64 {
+    (state.settings.read().balance_stale_warn_secs as i64).clamp(30, 3600) * 1000
+}
+
 /// Build the margin monitor from the operator's Safety settings so the
 /// risk snapshot, venue balances, and pre-trade gates share one threshold set.
 fn margin_monitor_from_settings(state: &AppEngineState) -> MarginMonitor {
@@ -5319,14 +5358,22 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let is_live = *state.is_live_mode.read();
     let mut accounts = Vec::new();
     if is_live {
+        // A venue whose read fails keeps contributing its last-known-good
+        // figures: a connectivity blip is not a loss of funds and must not
+        // move the portfolio total or trip the drawdown breaker.
         for (vid, _name, adapter) in state.get_venues() {
-            match adapter.fetch_account().await {
-                Ok(mut acc) => {
-                    acc.venue = vid.into();
+            match live_account_or_cached(state, vid, &adapter).await {
+                Ok((acc, stale_age)) => {
+                    if let Some(age) = stale_age {
+                        tracing::warn!(
+                            "risk overview: {vid} read failed, using last-known figures ({}s old)",
+                            age / 1000
+                        );
+                    }
                     accounts.push(acc);
                 }
                 Err(e) => {
-                    tracing::warn!("risk overview: live account read failed for {vid}: {e}");
+                    tracing::warn!("risk overview: live account read failed for {vid} (no cache): {e}");
                 }
             }
         }
@@ -6648,6 +6695,9 @@ pub fn save_engine_settings_impl(
     {
         return Err("Min liquidation distance % must be within 0–100".into());
     }
+    if settings.balance_stale_warn_secs < 30 || settings.balance_stale_warn_secs > 3600 {
+        return Err("Balance staleness warning must be within 30–3600 seconds".into());
+    }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
@@ -6836,6 +6886,7 @@ pub fn save_engine_settings_impl(
     let _ = state.state_store.kv_set("risk.margin_warn", &sanitized.margin_warning_usage_pct.to_string());
     let _ = state.state_store.kv_set("risk.margin_crit", &sanitized.margin_critical_usage_pct.to_string());
     let _ = state.state_store.kv_set("risk.margin_min_liq", &sanitized.margin_min_liquidation_distance_pct.to_string());
+    let _ = state.state_store.kv_set("risk.stale_warn_secs", &sanitized.balance_stale_warn_secs.to_string());
     // Live-apply: breaker limits update in place (no restart), delta guard
     // re-limits, margin thresholds feed the next snapshot automatically.
     {
@@ -9758,23 +9809,47 @@ pub async fn get_venue_balances_impl(
         for (vid, name, adapter) in state.get_venues() {
             let def_acc_id = state.state_store.default_account(vid).ok().flatten().map(|a| a.id);
             if !adapter.has_live_credentials() {
+                // Truthful status: credentials stored but vault locked is not
+                // the same as nothing configured (an enabled venue with a
+                // saved account is configured — it just can't be read now).
+                let locked = !state.vault.write().is_unlocked();
+                let configured = state
+                    .vault
+                    .write()
+                    .configured_venues()
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|v| v.eq_ignore_ascii_case(vid));
+                let (status, action) = if locked && configured {
+                    (
+                        "LOCKED".to_string(),
+                        Some(format!(
+                            "Vault is locked — unlock to read the live {name} balance."
+                        )),
+                    )
+                } else {
+                    (
+                        "NO_CREDENTIALS".to_string(),
+                        Some(format!(
+                            "No usable live API credentials for {name} in the secure vault — add them on the account card."
+                        )),
+                    )
+                };
                 results.push(VenueBalanceInfo {
                     venue: vid.to_string(),
                     equity_usd: 0.0,
                     available_margin_usd: 0.0,
                     margin_rate_pct: 0.0,
-                    status: "NO_CREDENTIALS".to_string(),
-                    recommended_action: Some(format!(
-                        "No live API credentials configured for {name} in the secure vault."
-                    )),
+                    status,
+                    recommended_action: action,
                     is_live: true,
                     account_id: def_acc_id,
                 });
                 continue;
             }
 
-            match adapter.fetch_account().await {
-                Ok(account) => {
+            match live_account_or_cached(state, vid, &adapter).await {
+                Ok((account, stale_age)) => {
                     let free_margin_usd = account
                         .free_margin
                         .to_string()
@@ -9832,6 +9907,29 @@ pub async fn get_venue_balances_impl(
                         ),
                     };
 
+                    // Stale override: figures above are last-known-good. Inside the
+                    // grace period this stays quiet (STALE); past it, it
+                    // escalates to ERROR so the operator is warned — but the
+                    // cached balance is still reported, never zeroed.
+                    let (status, action) = match stale_age {
+                        Some(age) if age > stale_grace_ms(state) => (
+                            "ERROR".to_string(),
+                            Some(format!(
+                                "Live balance unreadable for {}s — last known ${:.2}. Check the connection, then re-check funds on the venue site.",
+                                age / 1000,
+                                equity_usd
+                            )),
+                        ),
+                        Some(age) => (
+                            "STALE".to_string(),
+                            Some(format!(
+                                "Live read failed — last known ${:.2} from {}s ago.",
+                                equity_usd,
+                                age / 1000
+                            )),
+                        ),
+                        None => (status, action),
+                    };
                     results.push(VenueBalanceInfo {
                         venue: vid.to_string(),
                         equity_usd,
@@ -12744,9 +12842,12 @@ mod tests {
         let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
             .await
             .expect_err("live funding must refuse without two-leg reconciliation");
+        // Lighter live submission is implemented (vendored Go signer), so the
+        // refusal now names the credential blocker instead of "not implemented".
         assert!(
-            err.contains("lighter") && err.contains("not implemented"),
-            "refusal must name the unimplemented leg: {err}"
+            err.contains("lighter")
+                && (err.contains("credentials") || err.contains("not implemented")),
+            "refusal must name the lighter leg and its blocker: {err}"
         );
         assert!(err.contains("Paper Trading"), "refusal must point at paper: {err}");
         *state.is_live_mode.write() = false;
