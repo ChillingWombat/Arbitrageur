@@ -600,6 +600,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 }) => {
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
+  const [execError, setExecError] = useState<string | null>(null);
+  const execErrorTimer = useRef<number | null>(null);
   const [detailOppId, setDetailOppId] = useState<string | null>(null);
   const [dockTab, setDockTab] = useState<"position" | "history" | "logs">("history");
   const [detailPosKey, setDetailPosKey] = useState<string | null>(null);
@@ -624,7 +626,17 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
 
 
 
-  const handleExecute = async (opp: FundingOpportunityDto) => {
+  const showExecError = (message: string) => {
+    setExecError(message);
+    if (execErrorTimer.current != null) window.clearTimeout(execErrorTimer.current);
+    execErrorTimer.current = window.setTimeout(() => setExecError(null), 8000);
+  };
+
+  // Silent auto-loop failures stay in the console: surfacing them would
+  // re-banner every 8s while native execution is disabled backend-wide.
+  // Manual clicks always surface the backend reason inline (never throw to
+  // the error boundary — an expected fail-closed rejection is not a crash).
+  const handleExecute = async (opp: FundingOpportunityDto, opts?: { silent?: boolean }) => {
     if (!onExecuteCarry) return;
     if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") return;
     setExecutingId(opp.id);
@@ -632,6 +644,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       await onExecuteCarry(opp);
       setLastExecuted(opp.id);
       setTimeout(() => setLastExecuted(null), 3000);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Execution failed";
+      console.error(`Funding carry execution failed for ${opp.id}:`, message);
+      if (!opts?.silent) showExecError(message);
     } finally {
       setExecutingId(null);
     }
@@ -648,7 +664,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     const topOpp = opportunities.find((o) => o.net_apr_pct >= minAprPct);
     if (topOpp) {
       lastAutoCarryExecRef.current = now;
-      handleExecute(topOpp);
+      void handleExecute(topOpp, { silent: true });
     }
   }, [bot.entriesAllowed, executingId, opportunities, isPaused, minAprPct]);
 
@@ -705,6 +721,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
+            </span>
+          )}
+          {execError && (
+            <span className="text-xs font-mono text-loss max-w-96 truncate" title={execError}>
+              Execution blocked: {execError}
             </span>
           )}
         </div>

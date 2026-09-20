@@ -26,6 +26,8 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   const [searchTerm, setSearchTerm] = useState("");
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
+  const [execError, setExecError] = useState<string | null>(null);
+  const execErrorTimer = useRef<number | null>(null);
   // Prediction parity positions persist until market resolution — lifecycle
   // is strategy-wide (markets are not perp symbols).
   const bot = useBotLifecycle({ strategyId: "prediction" });
@@ -36,7 +38,13 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
     onSearch(searchTerm);
   };
 
-  const handleExecute = async (opp: PredictionOpportunityDto) => {
+  const showExecError = (message: string) => {
+    setExecError(message);
+    if (execErrorTimer.current != null) window.clearTimeout(execErrorTimer.current);
+    execErrorTimer.current = window.setTimeout(() => setExecError(null), 8000);
+  };
+
+  const handleExecute = async (opp: PredictionOpportunityDto, opts?: { silent?: boolean }) => {
     if (!onExecutePrediction) return;
     if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") return;
     setExecutingId(opp.id);
@@ -44,6 +52,10 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
       await onExecutePrediction(opp);
       setLastExecuted(opp.id);
       setTimeout(() => setLastExecuted(null), 3000);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Execution failed";
+      console.error(`Prediction execution failed for ${opp.id}:`, message);
+      if (!opts?.silent) showExecError(message);
     } finally {
       setExecutingId(null);
     }
@@ -59,7 +71,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
     const bestOpp = opportunities.find((o) => o.net_profit_cents >= 1.0);
     if (bestOpp) {
       lastAutoPredExecRef.current = now;
-      handleExecute(bestOpp);
+      void handleExecute(bestOpp, { silent: true });
     }
   }, [bot.entriesAllowed, executingId, opportunities, isPaused]);
 
@@ -138,6 +150,11 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
+            </span>
+          )}
+          {execError && (
+            <span className="text-xs font-mono text-loss max-w-96 truncate" title={execError}>
+              Execution blocked: {execError}
             </span>
           )}
         </div>
