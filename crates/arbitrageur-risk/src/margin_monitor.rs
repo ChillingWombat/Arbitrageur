@@ -1,6 +1,6 @@
-use tracing::warn;
 use arbitrageur_core::position::{AccountSnapshot, Position};
 use arbitrageur_core::types::{dec, Decimal};
+use tracing::warn;
 
 /// Health status of an account or position margin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,10 @@ mod tests {
     #[test]
     fn unfunded_flat_account_is_empty_not_breached() {
         let m = MarginMonitor::new(MarginMonitorConfig::default());
-        assert_eq!(m.evaluate_account(&empty_account()), MarginHealthStatus::Empty);
+        assert_eq!(
+            m.evaluate_account(&empty_account()),
+            MarginHealthStatus::Empty
+        );
     }
 
     #[test]

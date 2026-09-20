@@ -66,8 +66,11 @@ curl -i http://127.0.0.1:8787/
 ```
 
 To bind a non-loopback address, set `ARBITRAGEUR_BIND` in
-`/etc/arbitrageur/arbitrageur.env`. Loopback is the default; exposing the
-placeholder publicly gains nothing and widens fingerprinting.
+`/etc/arbitrageur/arbitrageur.env` or in the per-instance
+`/etc/arbitrageur/arbitrageur-<port>.env` override. Loopback is the default;
+exposing the placeholder publicly gains nothing and widens fingerprinting.
+The `arbitrager*` files in this directory are compatibility aliases only;
+new installs should copy the `arbitrageur*` filenames shown above.
 
 ## 4. Log rotation
 
@@ -118,5 +121,6 @@ credentials (funds stay on venues), but re-entry needs the password.
   `arbitrageur.env.sample` carry ports/paths/log filters only.
 - Service hardening in the unit: `NoNewPrivileges`, `PrivateTmp`,
   `ProtectSystem=full`, `UMask=0077`.
-- Live trading is disabled fail-closed in code; the daemon cannot sign or
-  submit orders on any venue.
+- New live strategy entries are disabled fail-closed application-wide;
+  separately, this headless daemon is only a health placeholder and performs
+  no market ingestion, account reads, signing, or order submission.

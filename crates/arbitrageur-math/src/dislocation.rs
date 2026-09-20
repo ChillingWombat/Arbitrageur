@@ -56,16 +56,13 @@ fn baseline_mid(
             // Deterministic: highest weight wins; ties (and the no-weights
             // case) resolve to the lowest sorted venue index, never to hash
             // order.
-            let leader_idx = mids
-                .keys()
-                .copied()
-                .min_by(|a, b| {
-                    let wa = weights.get(&venues[*a]).copied().unwrap_or(0.0);
-                    let wb = weights.get(&venues[*b]).copied().unwrap_or(0.0);
-                    wb.partial_cmp(&wa)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| a.cmp(b))
-                })?;
+            let leader_idx = mids.keys().copied().min_by(|a, b| {
+                let wa = weights.get(&venues[*a]).copied().unwrap_or(0.0);
+                let wb = weights.get(&venues[*b]).copied().unwrap_or(0.0);
+                wb.partial_cmp(&wa)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.cmp(b))
+            })?;
             mids.get(&leader_idx).copied()
         }
         BaselineMode::Consensus => {
@@ -179,8 +176,10 @@ pub fn compute_deviation_series(
         }
         out.ts_ms.push(bkey);
         out.dev_bps.push(row);
-        out.band_max_bps.push(if max.is_finite() { max } else { 0.0 });
-        out.band_min_bps.push(if min.is_finite() { min } else { 0.0 });
+        out.band_max_bps
+            .push(if max.is_finite() { max } else { 0.0 });
+        out.band_min_bps
+            .push(if min.is_finite() { min } else { 0.0 });
     }
     out
 }
@@ -201,8 +200,13 @@ mod tests {
     fn consensus_equal_weight_centers_deviations() {
         // A: 100, B: 102 -> mean 101; devs -99.0/+99.0 bps
         let samples = vec![s(1000, "a", 100.0), s(1000, "b", 102.0)];
-        let series =
-            compute_deviation_series(&samples, &HashMap::new(), BaselineMode::Consensus, 1000, 100);
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            100,
+        );
         assert_eq!(series.venues, vec!["a", "b"]);
         assert_eq!(series.ts_ms, vec![1000]);
         let row = &series.dev_bps[0];
@@ -223,7 +227,10 @@ mod tests {
         let series = compute_deviation_series(&samples, &w, BaselineMode::Leader, 1000, 100);
         let row = &series.dev_bps[0];
         assert_eq!(row[0].unwrap(), 0.0, "leader is pinned to baseline");
-        assert!((row[1].unwrap() - 200.0).abs() < 1e-9, "b is 2% = 200bps rich");
+        assert!(
+            (row[1].unwrap() - 200.0).abs() < 1e-9,
+            "b is 2% = 200bps rich"
+        );
     }
 
     #[test]
@@ -235,7 +242,10 @@ mod tests {
             compute_deviation_series(&samples, &HashMap::new(), BaselineMode::Leader, 1000, 100);
         let row = &series.dev_bps[0];
         assert_eq!(row[0].unwrap(), 0.0, "'aaa' (lowest idx) must lead");
-        assert!((row[1].unwrap() - (-5_000.0)).abs() < 1e-9, "zzz is half of aaa");
+        assert!(
+            (row[1].unwrap() - (-5_000.0)).abs() < 1e-9,
+            "zzz is half of aaa"
+        );
     }
 
     #[test]
@@ -245,8 +255,7 @@ mod tests {
         let mut w = HashMap::new();
         w.insert("a".to_string(), 3.0);
         w.insert("b".to_string(), 1.0);
-        let series =
-            compute_deviation_series(&samples, &w, BaselineMode::Consensus, 1000, 100);
+        let series = compute_deviation_series(&samples, &w, BaselineMode::Consensus, 1000, 100);
         let row = &series.dev_bps[0];
         let expected_a = (100.0 / 102.5 - 1.0) * 10_000.0;
         assert!((row[0].unwrap() - expected_a).abs() < 1e-9);
@@ -260,8 +269,13 @@ mod tests {
             s(1000, "b", 101.0),
             s(2000, "a", 100.5),
         ];
-        let series =
-            compute_deviation_series(&samples, &HashMap::new(), BaselineMode::Consensus, 1000, 100);
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            100,
+        );
         assert_eq!(series.ts_ms, vec![1000, 2000]);
         assert_eq!(series.dev_bps[1][1], None);
         // single-venue bucket collapses the band
@@ -275,8 +289,13 @@ mod tests {
             samples.push(s(i * 1000, "a", 100.0 + i as f64 * 0.01));
             samples.push(s(i * 1000, "b", 100.5 + i as f64 * 0.01));
         }
-        let series =
-            compute_deviation_series(&samples, &HashMap::new(), BaselineMode::Consensus, 1000, 100);
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            100,
+        );
         assert_eq!(series.ts_ms.len(), 100);
         assert_eq!(*series.ts_ms.first().unwrap(), 0);
         assert_eq!(*series.ts_ms.last().unwrap(), 999_000);
@@ -289,8 +308,13 @@ mod tests {
             s(1000, "b", -5.0),
             s(1000, "c", 100.0),
         ];
-        let series =
-            compute_deviation_series(&samples, &HashMap::new(), BaselineMode::Consensus, 1000, 100);
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            100,
+        );
         assert_eq!(series.venues, vec!["c"]);
         assert_eq!(series.dev_bps[0][0].unwrap(), 0.0);
     }

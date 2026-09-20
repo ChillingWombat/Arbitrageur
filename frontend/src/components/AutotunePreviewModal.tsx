@@ -40,7 +40,7 @@ function formatValue(param: string, v: number | null): string {
 
 /** Manual-transcription text: READY rows only, `param=value` per line. */
 export function buildAutotuneCopyText(rec: AutotuneRecommendationDto): string {
-  const lines = [`# AutoTune ${rec.symbol} (recommend-only — transcribe manually)`];
+  const lines = [`# AutoTune ${rec.symbol} READY rows (manual transcription or selected apply)`];
   for (const row of rec.rows) {
     if (row.status === "READY" && row.recommended != null) {
       lines.push(`${row.param}=${row.recommended}`);

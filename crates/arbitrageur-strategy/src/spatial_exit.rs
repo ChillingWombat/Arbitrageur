@@ -58,8 +58,13 @@ pub enum SpatialExitVerdict {
     Hold,
     /// No baseline or no live quote: never auto-exit blind. The operator
     /// path (manual flatten) stays available; the slot stays occupied.
-    Unwatched { reason: String },
-    Exit { trigger: SpatialExitTrigger, reason: String },
+    Unwatched {
+        reason: String,
+    },
+    Exit {
+        trigger: SpatialExitTrigger,
+        reason: String,
+    },
 }
 
 /// Why a pair position is being unwound.
@@ -100,7 +105,10 @@ pub fn evaluate_spatial_exit(
     if live <= cfg.converge_exit_bps {
         return SpatialExitVerdict::Exit {
             trigger: SpatialExitTrigger::Converged,
-            reason: format!("edge decayed to {live:.1} bps (exit at <= {:.1})", cfg.converge_exit_bps),
+            reason: format!(
+                "edge decayed to {live:.1} bps (exit at <= {:.1})",
+                cfg.converge_exit_bps
+            ),
         };
     }
     if live <= entry - cfg.stop_drop_bps {
@@ -142,7 +150,10 @@ mod tests {
         for live in [0.0, -2.5] {
             assert!(matches!(
                 evaluate_spatial_exit(Some(8.0), Some(live), 0, 1000, &cfg()),
-                SpatialExitVerdict::Exit { trigger: SpatialExitTrigger::Converged, .. }
+                SpatialExitVerdict::Exit {
+                    trigger: SpatialExitTrigger::Converged,
+                    ..
+                }
             ));
         }
     }
@@ -153,7 +164,10 @@ mod tests {
         // past the stop; convergence must win.
         assert!(matches!(
             evaluate_spatial_exit(Some(2.0), Some(-4.0), 0, 1000, &cfg()),
-            SpatialExitVerdict::Exit { trigger: SpatialExitTrigger::Converged, .. }
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::Converged,
+                ..
+            }
         ));
     }
 
@@ -161,12 +175,18 @@ mod tests {
     fn stopped_on_adverse_excursion() {
         assert!(matches!(
             evaluate_spatial_exit(Some(8.0), Some(2.0), 0, 1000, &cfg()),
-            SpatialExitVerdict::Exit { trigger: SpatialExitTrigger::Stopped, .. }
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::Stopped,
+                ..
+            }
         ));
         // The stop band is inclusive, matching convergence_auto semantics.
         assert!(matches!(
             evaluate_spatial_exit(Some(8.0), Some(3.0), 0, 1000, &cfg()),
-            SpatialExitVerdict::Exit { trigger: SpatialExitTrigger::Stopped, .. }
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::Stopped,
+                ..
+            }
         ));
         assert_eq!(
             evaluate_spatial_exit(Some(8.0), Some(3.1), 0, 1000, &cfg()),
@@ -180,7 +200,10 @@ mod tests {
         let at = c.max_hold_secs * 1000;
         assert!(matches!(
             evaluate_spatial_exit(Some(8.0), Some(6.0), 0, at, &c),
-            SpatialExitVerdict::Exit { trigger: SpatialExitTrigger::TimedOut, .. }
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::TimedOut,
+                ..
+            }
         ));
         assert_eq!(
             evaluate_spatial_exit(Some(8.0), Some(6.0), 0, at - 1, &c),

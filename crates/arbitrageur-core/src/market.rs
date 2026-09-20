@@ -1,6 +1,6 @@
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use crate::types::{Decimal, VenueId};
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Types of tradable financial markets supported across asset classes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -25,17 +25,25 @@ pub enum MarketType {
 
 impl MarketType {
     pub fn is_crypto(&self) -> bool {
-        matches!(self, MarketType::Spot | MarketType::Perpetual | MarketType::DatedFutures)
+        matches!(
+            self,
+            MarketType::Spot | MarketType::Perpetual | MarketType::DatedFutures
+        )
     }
 
     pub fn is_prediction(&self) -> bool {
-        matches!(self, MarketType::PredictionBinary | MarketType::PredictionCategorical)
+        matches!(
+            self,
+            MarketType::PredictionBinary | MarketType::PredictionCategorical
+        )
     }
 
     pub fn is_traditional(&self) -> bool {
         matches!(
             self,
-            MarketType::TraditionalEquity | MarketType::TraditionalFutures | MarketType::TraditionalFx
+            MarketType::TraditionalEquity
+                | MarketType::TraditionalFutures
+                | MarketType::TraditionalFx
         )
     }
 

@@ -1,6 +1,6 @@
+use crate::types::{dec, Decimal, Side, VenueId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::types::{dec, Decimal, Side, VenueId};
 
 /// Derivative / Perp / Spot position details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,10 +77,14 @@ pub struct AccountSnapshot {
 
 impl AccountSnapshot {
     pub fn get_position(&self, symbol: &str) -> Option<&Position> {
-        self.positions.iter().find(|p| p.symbol.eq_ignore_ascii_case(symbol))
+        self.positions
+            .iter()
+            .find(|p| p.symbol.eq_ignore_ascii_case(symbol))
     }
 
     pub fn get_balance(&self, currency: &str) -> Option<&Balance> {
-        self.balances.iter().find(|b| b.currency.eq_ignore_ascii_case(currency))
+        self.balances
+            .iter()
+            .find(|b| b.currency.eq_ignore_ascii_case(currency))
     }
 }

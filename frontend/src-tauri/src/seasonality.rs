@@ -54,8 +54,7 @@ fn day_realized_vol(samples: &[(i64, f64)]) -> Option<f64> {
     if !mean.is_finite() || mean <= 0.0 {
         return None;
     }
-    let var =
-        vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
+    let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (vals.len() - 1) as f64;
     if var.is_finite() && var > 0.0 {
         Some(10_000.0 * var.sqrt() / mean)
     } else {
@@ -73,7 +72,10 @@ fn daily_rv_series(
     if start_ms < 0 {
         return None;
     }
-    let samples = state.state_store.spread_samples(symbol, start_ms, now_ms).ok()?;
+    let samples = state
+        .state_store
+        .spread_samples(symbol, start_ms, now_ms)
+        .ok()?;
     let mut mids_by_venue: std::collections::HashMap<String, Vec<(i64, f64)>> =
         std::collections::HashMap::new();
     for s in &samples {
@@ -100,8 +102,7 @@ fn daily_rv_series(
         let mut spreads: Vec<f64> = Vec::new();
         for (ia, a) in venues.iter().enumerate() {
             for b in venues.iter().skip(ia + 1) {
-                let (Some(ma), Some(mb)) = (mids_by_venue.get(a), mids_by_venue.get(b))
-                else {
+                let (Some(ma), Some(mb)) = (mids_by_venue.get(a), mids_by_venue.get(b)) else {
                     continue;
                 };
                 let fa: Vec<(i64, f64)> = ma
@@ -205,7 +206,11 @@ fn run_one_symbol(
         reason: decision.reason.clone(),
         updated_ts: now_ms,
     };
-    if state.state_store.phase2_upsert_promotion_state(&row).is_err() {
+    if state
+        .state_store
+        .phase2_upsert_promotion_state(&row)
+        .is_err()
+    {
         return (anchor_written, PromotionStatus::Held);
     }
     (anchor_written, decision.status)
@@ -271,11 +276,7 @@ pub fn run_seasonality_promotion(
     Ok(out)
 }
 
-pub fn session_coupling_for(
-    state: &AppEngineState,
-    symbol: &str,
-    now_ms: i64,
-) -> SessionCoupling {
+pub fn session_coupling_for(state: &AppEngineState, symbol: &str, now_ms: i64) -> SessionCoupling {
     let neutral = SessionCoupling {
         tau_scale: 1.0,
         sigma_scale: 1.0,
@@ -402,8 +403,16 @@ mod tests {
         let summary = run_seasonality_promotion(&state, now).unwrap();
         assert_eq!(summary.symbols_scanned, 1);
         assert_eq!(summary.anchors_written, 1);
-        assert!(state.state_store.phase2_har_anchor("BTC-USDC").unwrap().is_some());
-        assert!(state.state_store.phase2_promotion_state("BTC-USDC").unwrap().is_some());
+        assert!(state
+            .state_store
+            .phase2_har_anchor("BTC-USDC")
+            .unwrap()
+            .is_some());
+        assert!(state
+            .state_store
+            .phase2_promotion_state("BTC-USDC")
+            .unwrap()
+            .is_some());
         assert_eq!(
             state.state_store.kv_get(LAST_PROMOTION_KV).unwrap(),
             Some(now.to_string())
@@ -441,14 +450,15 @@ mod tests {
             .state_store
             .kv_set(
                 STRESS_SPANS_KV,
-                &format!(
-                    r#"[{{"start_ms": {span_start}, "end_ms": {span_end}}}]"#,
-                ),
+                &format!(r#"[{{"start_ms": {span_start}, "end_ms": {span_end}}}]"#,),
             )
             .unwrap();
         let summary = run_seasonality_promotion(&state, now).unwrap();
         assert_eq!(summary.symbols_scanned, 1);
-        assert_eq!(summary.anchors_written, 0, "40 stressed days excluded, <30 remain");
+        assert_eq!(
+            summary.anchors_written, 0,
+            "40 stressed days excluded, <30 remain"
+        );
         assert_eq!(summary.skipped, 1);
     }
 

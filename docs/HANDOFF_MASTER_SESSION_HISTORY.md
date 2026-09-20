@@ -2,7 +2,7 @@
 
 > **Historical record.** This document captures the development history as it happened. Some feature claims below describe aspirational or since-disabled functionality; for the current, accurate safety and capability status, see `README.md` → *Current Safety Status*.
 
-**Document Version**: 2.4.0
+**Document Version**: 2.5.0
 **Generated At**: 2026-09-20
 **Repository**: `/mnt/Data/Projects/Arbitrageur`  
 **Application**: Arbitrageur (High-Frequency Multi-Venue Arbitrage & Quantitative Terminal)  
@@ -47,8 +47,8 @@ The user requested a ground-up Rust engine managed with Pixi:
      $$x^*(c) = \mu \pm \sigma \sqrt{\frac{2 c}{\theta}}$$
   4. **Ornstein-Uhlenbeck (OU) Parameter Calibration**: Fits drift speed $\theta$, long-term mean $\mu$, and volatility $\sigma$ to empirical spread observations via maximum likelihood estimation (MLE).
   5. **Kalman Filter Dynamic Hedge Ratio**: Dynamically tracks time-varying beta ($\beta_t$) and intercept ($\alpha_t$) for statistical arbitrage pair trading ($P_y = \alpha + \beta P_x + \epsilon$).
-  6. **Arrow-Debreu Synthetic Prediction Parity**: Risk-free synthetic arbitrage between Polymarket CTF and Kalshi CFTC binary event contracts:
-     $$\text{Cost} = \text{Price}(\text{YES}) + \text{Price}(\text{NO}) + \text{Fees} < \$1.00 \implies \text{Arb Return} = \frac{\$1.00 - \text{Cost}}{\text{Cost}}$$
+  6. **Arrow-Debreu Synthetic Prediction Parity**: Conditional synthetic parity between Polymarket CTF and Kalshi CFTC binary event contracts, valid only when both contracts settle the same event under materially identical rules:
+     $$\text{Cost} = \text{Price}(\text{YES}) + \text{Price}(\text{NO}) + \text{Fees} < \$1.00 \implies \text{Indicative Return} = \frac{\$1.00 - \text{Cost}}{\text{Cost}}$$
 
 ---
 
@@ -1594,3 +1594,34 @@ overhaul pass committed as `23d4aed`).
 - **Verification:** `node --experimental-strip-types --test src/types/tickers.test.ts` 25/25; `npm run build` green; `cargo check --manifest-path frontend/src-tauri/Cargo.toml` green; `cargo test -p arbitrageur-exchanges --lib` 133/133; targeted strategy-filter and new `base_mark_prices` Tauri tests green.
 - **Files:** `frontend/src/types/tickers.ts`, `frontend/src/types/tickers.test.ts`, `frontend/src/types/index.ts`, `frontend/src/App.tsx`, `frontend/src/components/TickerConfigModal.tsx`, `frontend/src/components/TickerStrategyBar.tsx`, `frontend/src-tauri/src/commands.rs`, `crates/arbitrageur-core/src/exchange.rs`, `crates/arbitrageur-exchanges/src/{hyperliquid,lighter,vanta,binance,okx,aster,kraken}.rs`, `README.md`, `SPEC.md`.
 - **Commit:** dynamic ticker universe feature, committed and pushed in this session.
+
+## 74. Session Handoff — 2026-09-20 (deep review remediation: live-entry boundary, exact close accounting, deployment/CI, venue-native positions)
+
+- **Ask:** review the spec, handoff documents, DeepSeek review, and code in detail; produce an independent review and cross-check; then keep fixing every verified issue, update docs, and push.
+- **Review artifacts:** `docs/PROJECT_REVIEW_2026-09-20.md` records the independent evidence-based findings; `docs/PROJECT_REVIEW_CROSSCHECK_2026-09-20.md` reconciles them with DeepSeek's review and tracks remediation status.
+- **Live-entry boundary:** capability now separates authenticated order submission from strategy-entry readiness. `live_ready` means full terminal/restart reconciliation and remains false; submission-capable adapters may still support authenticated reads and explicit risk-reducing close requests. New live strategy entries fail closed globally.
+- **Close/flatten accounting:** flatten intent is persisted before dispatch, venue order IDs attach to the exact leg, child fills attribute by canonical venue + exact persisted leg symbol + side, zero-fill/partial/full outcomes are distinguished, and `Closed` is set only after the account reread confirms flatness. Emergency compensation and flatten use reduce-only orders where supported.
+- **Adapter hardening:** order acknowledgements now validate venue/symbol/client/order/fill consistency; contract/lot quantities reject non-exact multiples rather than silently rounding down; PopDEX uses deterministic client order identity; prediction CLI no longer fabricates prices; the vendored Lighter signer is pinned by SHA-256 and rejects modified copies.
+- **Venue-native position normalization (latest):** new `ExchangeAdapter::account_position_for` resolves account rows into the exact symbol/quantity domain used by `OrderRequest` and signal legs. Implemented for Binance/Aster/PopDEX (`BTCUSDT`), OKX (`BTC-USDT-SWAP`), Kraken (`PF_XBTUSD`), Vanta (`PERP_BTC_USDC`), Decibel (`BTC-PERP`), and Lighter (`market_id` + spot/perp labels); Robinhood delegates to its inner Lighter adapter. Unknown or ambiguous mappings leave exposure unresolved rather than treated as flat. Quantities/prices stay in venue-native contract units — see Session 75 for the 1000x correction.
+- **Security/ops:** bulk credential-read IPC removed; vault auto-locks 60s after leaving settings with reopen cancellation and manual lock; deployment templates, CI, Dependabot, signer digest check, and file-mode hygiene added/normalized.
+- **Verification so far:** `cargo check --workspace` clean; `cargo test -p arbitrageur-exchanges` **145/145**; `cargo test -p arbitrageur-desktop` **327/327**. Final workspace/frontend/format/clippy verification is run before commit/push.
+
+## 75. Session Handoff — 2026-09-20 (venue-native contract units: 1000x correction, orderbook contract sizes, Aster bare-base resolution)
+
+- **Continuation of §74:** deeper adapter audit of Binance/Aster scaled contracts against live `exchangeInfo`.
+- **Finding (critical):** the earlier "1000x scaling" conversion was wrong. Live `exchangeInfo` on both Binance and Aster lists `1000PEPEUSDT` with `baseAsset: "1000PEPE"`, `quantityPrecision: 0`, `LOT_SIZE minQty/stepSize: "1"` — the venue-native quantity unit IS `1000PEPE` and prices are quoted per that unit. The canonical engine symbol `1000PEPE-USDT` is therefore already denominated in those units. The old code scaled `positionAmt` ×1000 into "raw PEPE" and would have scaled an `OrderRequest` ×1000 again on dispatch — a flatten of a real position would have submitted ~1,000,000× the intended quantity.
+- **Second bug exposed:** the old `to_venue_symbol` hardcoded `USDT` for non-1000x bases — `BTC-USDC` orders/requests were silently routed to `BTCUSDT`. Now the requested quote is preserved (`BTC-USDC` → `BTCUSDC`) and bare bases without an explicit quote are rejected instead of guessed onto USDT.
+- **Fixed:** Binance `to_venue_symbol` now returns the exact `{base}{quote}` venue spelling (no aliasing, no scaling flag); order requests, order-response validation, orderbook/ticker prices+sizes, and account positions all stay in venue-native units; `PEPE-USDT` no longer aliases onto `1000PEPEUSDT` in either direction. Aster `resolve_venue_symbol` now resolves every unseparated input through live `exchangeInfo` (a listed venue symbol wins verbatim; otherwise the bare base resolves to its preferred-listed quote) — `1000PEPE` now resolves correctly where the old `len<=6` heuristic passed it through verbatim; added positive quantity/limit-price guards to Aster `place_order`.
+- **Orderbook contract sizes:** OKX book level sizes are contracts — now converted by `ctVal` (previously overstated depth ~100× on `BTC-USDT-SWAP`). Kraken Futures book sizes likewise converted by `contractSize` from `/instruments` (both reuse the same cached public metadata as the order paths).
+- **Docs:** `EXCHANGES.md` documents venue-native contract units for scaled symbols; `CAPABILITIES.md` and the §4.11 crosscheck entry corrected; Session 52/53's "1000x scaling" notes are superseded by this entry.
+- **Verification:** `cargo test -p arbitrageur-exchanges` **150/150** including new venue-native-unit regressions and the corrected USDC-symbol acknowledgement test.
+
+## 76. Session Handoff — 2026-09-20 (canonical venue-volume keys: silent volume-filter bypass fix)
+
+- **Continuation of §74–75:** same venue-unit audit, applied to `fetch_volumes_24h`.
+- **Finding:** volume maps were keyed heterogeneously — Binance `BTCUSDT`, OKX `BTC-USDT-SWAP`, Kraken `PF_XBTUSD`, while Aster/PopDEX/Lighter/Vanta/Hyperliquid emitted bare bases. Every consumer (strategy auto volume floor, autotune capacity tiers, signal-series venue weights, Ticker Explorer volume columns) matched exact base names, so Binance/OKX/Kraken volume was **silently invisible**: the MIN-aggregation volume floor could pass tickers those venues should have blocked, and capacity tiers never saw their depth.
+- **Fixed:** all adapters now key `fetch_volumes_24h` by the canonical `BASE-QUOTE` symbol (Binance `BTC-USDT`, OKX `BTC-USDT`, Kraken `BTC-USD`, Aster `BTC-USDT`/`BTC-USD1`, Hyperliquid/Lighter/Vanta `*-USDC`, PopDEX `*-USDT`); unmappable rows (delivery futures, Kraken inverse/flex/spot-derivative, Lighter spot) are skipped rather than miskeyed. Lighter spot rows are excluded — they share the base name and would inflate perp depth.
+- **Matchers:** `strategy_filters::venue_asset_volume_usd` and frontend `getVenueAssetVolumeUsd` now strip quote/instrument suffixes (`-USDC/-USDT/-USD1/-USD/-PERP/-SWAP/-U`, `/` variants, bare `USDC/USDT/USD`) until stable, keep K-/1000-prefix aliases, and pick the **deepest** matching market so multi-quote venues (Aster `BTC-USDT` vs `BTC-USD1`) resolve deterministically instead of depending on HashMap order. `canonical_base` in `state_store` strips the same suffixes until stable so stored volume-sample keys reduce fully (`BTC-USDT-SWAP` → `BTC`).
+- **Consumers updated:** signal-series venue weights and `autotune_tiers_with_cap` now reuse `venue_asset_volume_usd` instead of duplicating exact-key lookups that could never match canonical keys.
+- **Verification:** `cargo test -p arbitrageur-exchanges` **150/150**; `cargo test strategy_filters` **11/11** (incl. new multi-quote deepest-market and compound-suffix regressions); `node --experimental-strip-types --test src/types/tickers.test.ts` **26/26**.
+- **Files:** `crates/arbitrageur-exchanges/src/{binance,aster,okx,kraken,popdex,lighter,hyperliquid,vanta}.rs`, `frontend/src-tauri/src/{strategy_filters.rs,state_store.rs,commands.rs}`, `frontend/src/types/tickers.ts`, `frontend/src/types/tickers.test.ts`.

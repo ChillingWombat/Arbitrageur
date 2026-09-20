@@ -236,10 +236,15 @@ pub fn har_forecast_next(anchor: &HarAnchor, daily_rv_bps: &[f64]) -> Option<f64
         return None;
     }
     let last = tail[tail.len() - 1];
-    let weekly = tail.iter().skip(tail.len() - HAR_WEEKLY_LOOKBACK).sum::<f64>()
+    let weekly = tail
+        .iter()
+        .skip(tail.len() - HAR_WEEKLY_LOOKBACK)
+        .sum::<f64>()
         / HAR_WEEKLY_LOOKBACK as f64;
     let monthly = tail.iter().sum::<f64>() / HAR_MONTHLY_LOOKBACK as f64;
-    let pred = anchor.intercept + anchor.b_daily * last + anchor.b_weekly * weekly
+    let pred = anchor.intercept
+        + anchor.b_daily * last
+        + anchor.b_weekly * weekly
         + anchor.b_monthly * monthly;
     if !pred.is_finite() {
         return None;
@@ -309,17 +314,13 @@ pub fn coupling_inputs(
     global_rv_bps: Option<f64>,
 ) -> SessionCoupling {
     let tau_scale = match (session_med_bps, global_med_bps) {
-        (Some(s), Some(g))
-            if s.is_finite() && g.is_finite() && s > 0.0 && g > 0.0 =>
-        {
+        (Some(s), Some(g)) if s.is_finite() && g.is_finite() && s > 0.0 && g > 0.0 => {
             (s / g).clamp(0.5, 2.0)
         }
         _ => 1.0,
     };
     let sigma_scale = match (session_rv_bps, global_rv_bps) {
-        (Some(s), Some(g))
-            if s.is_finite() && g.is_finite() && s > 0.0 && g > 0.0 =>
-        {
+        (Some(s), Some(g)) if s.is_finite() && g.is_finite() && s > 0.0 && g > 0.0 => {
             (s / g).clamp(0.5, 1.5)
         }
         _ => 1.0,
@@ -524,7 +525,9 @@ pub fn exclude_stress_days(
             Some(e) => e,
             None => continue,
         };
-        let stressed = stress.iter().any(|s| s.start_ms < day_end && *ts < s.end_ms);
+        let stressed = stress
+            .iter()
+            .any(|s| s.start_ms < day_end && *ts < s.end_ms);
         if !stressed {
             kept_ts.push(*ts);
             kept_vals.push(*v);
@@ -651,9 +654,15 @@ mod tests {
         let d = decide_promotion(2.0, -1.5);
         assert_eq!(d.status, PromotionStatus::Demoted);
         assert_eq!(decide_promotion(0.1, 0.1).status, PromotionStatus::Held);
-        assert_eq!(decide_promotion(f64::NAN, 1.0).status, PromotionStatus::Held);
+        assert_eq!(
+            decide_promotion(f64::NAN, 1.0).status,
+            PromotionStatus::Held
+        );
         assert_eq!(decide_promotion(0.0, 0.0).status, PromotionStatus::Held);
-        assert_eq!(PromotionStatus::parse("promoted"), Some(PromotionStatus::Promoted));
+        assert_eq!(
+            PromotionStatus::parse("promoted"),
+            Some(PromotionStatus::Promoted)
+        );
         assert_eq!(PromotionStatus::parse("bogus"), None);
     }
 

@@ -11,8 +11,8 @@ const position: OpenPositionDto = {
   symbol: "BTC-USDC",
   signalCount: 2,
   venues: [
-    { venue: "hyperliquid", netQty: 1.5 },
-    { venue: "lighter", netQty: -1.5 },
+    { venue: "hyperliquid", symbol: "BTC-USDC", netQty: 1.5 },
+    { venue: "lighter", symbol: "BTC-USDC", netQty: -1.5 },
   ],
   expectedNetUsd: 25,
   unrealizedPnlUsd: 4.2,
@@ -36,9 +36,9 @@ test("position card renders identity, grey PnL, and signed venue rows", () => {
   assert.match(html, /BTC-USDC/);
   assert.match(html, /SPREAD/);
   assert.match(html, /PnL \+\$4\.20/);
-  // Venue rows: long on top (+), short below (-)
-  const hl = html.indexOf(">HL<");
-  const lt = html.indexOf(">LGT<");
+  // Venue rows: long on top (+), short below (-), each labelled with its leg symbol.
+  const hl = html.indexOf(">HL BTC-USDC<");
+  const lt = html.indexOf(">LGT BTC-USDC<");
   assert.ok(hl >= 0 && lt > hl, "long venue row renders above short venue row");
   assert.match(html, /\+1\.5000/);
   assert.match(html, /-1\.5000/);

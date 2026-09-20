@@ -296,7 +296,7 @@ export function tickerUnavailabilityReason(
     return "Engine status unavailable — start the desktop app so venue lanes can report.";
   }
   if (status.is_live_mode) {
-    return "Real Trading mode has no read-only market lanes — switch to Paper mode to stream venue quotes.";
+    return "Live Trading mode has no read-only market lanes — switch to Paper mode to stream venue quotes.";
   }
   if (activeVenueCodes.size === 0) {
     const enabled = (status.active_venues ?? []).filter(
@@ -419,11 +419,46 @@ export function filterAvailableTickers(
   });
 }
 
+const VOLUME_KEY_QUOTE_SUFFIXES = [
+  "-USDC",
+  "-USDT",
+  "-USD1",
+  "-USD",
+  "-PERP",
+  "-SWAP",
+  "-U",
+  "/USDC",
+  "/USDT",
+  "/USD",
+  "USDC",
+  "USDT",
+  "USD",
+];
+
+function stripVolumeQuoteSuffix(key: string): string {
+  // Strip instrument-class and quote suffixes until stable so compound
+  // spellings (`BTC-USDT-SWAP`, `BTC-USD-PERP`) fully reduce to the base.
+  let cur = key;
+  for (;;) {
+    let next: string | undefined;
+    for (const suf of VOLUME_KEY_QUOTE_SUFFIXES) {
+      if (cur.length > suf.length && cur.endsWith(suf)) {
+        const rest = cur.slice(0, cur.length - suf.length).replace(/[-/]+$/, "");
+        if (rest.length >= 2) next = rest;
+        break;
+      }
+    }
+    if (next === undefined || next === cur) return cur;
+    cur = next;
+  }
+}
+
 /**
  * 24h notional volume (USD) for a base asset within one venue's volume map.
- * Venue asset naming is normalized (case-insensitive; "K"- and "1000"-prefix
- * variants like Hyperliquid's kPEPE map to the plain base). Returns undefined
- * when the venue does not report the asset.
+ * Keys are canonical `BASE-QUOTE` venue symbols (bare-base keys are also
+ * tolerated); quote suffixes are stripped and "K"-/"1000"-prefix variants
+ * like Hyperliquid's kPEPE map to the plain base. Returns undefined when
+ * the venue does not report the asset.
  */
 export function getVenueAssetVolumeUsd(
   volumes: Record<string, number>,
@@ -431,17 +466,19 @@ export function getVenueAssetVolumeUsd(
 ): number | undefined {
   const b = base.toUpperCase();
   const candidates = [b, `K${b}`, `1000${b}`];
-  for (const wanted of candidates) {
-    const entry = Object.entries(volumes).find(
-      ([rawKey, v]) =>
-        rawKey.toUpperCase() === wanted &&
-        typeof v === "number" &&
-        Number.isFinite(v) &&
-        v > 0
-    );
-    if (entry) return entry[1];
+  // A venue may list the base under several quote assets (e.g. `BTC-USDT`
+  // and `BTC-USD1`); take the deepest matching market — it bounds what the
+  // venue can source for the base and keeps the pick deterministic.
+  let best: number | undefined;
+  for (const [rawKey, v] of Object.entries(volumes)) {
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) continue;
+    const key = rawKey.trim().toUpperCase();
+    const stripped = stripVolumeQuoteSuffix(key);
+    if (candidates.some((w) => w === key || w === stripped)) {
+      best = best === undefined ? v : Math.max(best, v);
+    }
   }
-  return undefined;
+  return best;
 }
 
 /**

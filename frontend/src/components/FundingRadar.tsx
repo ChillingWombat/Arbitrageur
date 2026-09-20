@@ -395,8 +395,16 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-              <CarryDetailField label="Long leg" value={opp.long_venue} />
-              <CarryDetailField label="Short leg" value={opp.short_venue} />
+              <CarryDetailField
+                label="Long leg"
+                value={`${opp.long_venue} · ${opp.long_symbol ?? "?"} (${opp.long_market_type ?? "?"})`}
+                title="Display venue plus the exact execution symbol and market type used for books and orders"
+              />
+              <CarryDetailField
+                label="Short leg"
+                value={`${opp.short_venue} · ${opp.short_symbol ?? "?"} (${opp.short_market_type ?? "?"})`}
+                title="Display venue plus the exact execution symbol and market type used for books and orders"
+              />
               <CarryDetailField
                 label={`Long funding · ${opp.long_venue}`}
                 value={
@@ -642,7 +650,7 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
             <CarryDetailField label="Strategy" value={pos.strategyId} />
             <CarryDetailField
               label="Legs"
-              value={pos.venues.map((v) => `${v.venue} (${v.netQty >= 0 ? "+" : ""}${v.netQty})`).join(" / ") || "—"}
+              value={pos.venues.map((v) => `${v.venue}:${v.symbol ?? "?"} (${v.netQty >= 0 ? "+" : ""}${v.netQty})`).join(" / ") || "—"}
             />
             <CarryDetailField
               label="Notional"
@@ -803,7 +811,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   };
 
   // Silent auto-loop failures stay in the console: surfacing them would
-  // re-banner every 8s while native execution is disabled backend-wide.
+  // re-banner every 8s while live strategy entries are disabled backend-wide.
   // Manual clicks always surface the backend reason inline (never throw to
   // the error boundary — an expected fail-closed rejection is not a crash).
   const handleExecute = async (opp: FundingOpportunityDto, opts?: { silent?: boolean }) => {
@@ -1182,7 +1190,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               <EmptyState
                 plain
                 title="No Open Funding Positions"
-                hint="Carry/basis fills will aggregate here per symbol with live PnL. Native execution is currently disabled, so this stays empty until authenticated order submission lands."
+                hint="Carry/basis fills aggregate here per symbol with live PnL after paper execution. Live strategy entries remain disabled until terminal order reconciliation exists."
               />
             ) : (
               <div className="divide-y divide-surface-border">

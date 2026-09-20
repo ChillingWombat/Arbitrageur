@@ -109,7 +109,6 @@ const REGISTERED_NATIVE_COMMANDS = [
   "lock_vault",
   "delete_exchange_credentials",
   "delete_account_credentials",
-  "get_account_credentials",
   "get_account_credential_field",
   "execute_spatial_candidates",
   "list_signal_executions",

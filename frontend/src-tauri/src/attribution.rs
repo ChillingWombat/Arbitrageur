@@ -134,7 +134,11 @@ pub struct TimeWeightedAvg {
 /// point; the last point extends to `now_ms`. Points outside the window are
 /// clipped (the latest pre-window point seeds the window start). Returns
 /// `None` when no point covers any part of the window.
-pub fn time_weighted_avg(points: &[(i64, f64)], now_ms: i64, window_ms: i64) -> Option<TimeWeightedAvg> {
+pub fn time_weighted_avg(
+    points: &[(i64, f64)],
+    now_ms: i64,
+    window_ms: i64,
+) -> Option<TimeWeightedAvg> {
     if window_ms <= 0 || now_ms < 0 {
         return None;
     }
@@ -220,10 +224,30 @@ mod tests {
         // 60100 (+100), buy back the short @ 60050 (+70). Gross 170, fees
         // 5 + 5 = 10 -> net 160. Exit fills carry the closing trade side.
         let fills = vec![
-            LegFill { is_short: false, qty: 1.0, price: Some(60000.0), fee_usd: 5.0 },
-            LegFill { is_short: true, qty: 1.0, price: Some(60120.0), fee_usd: 0.0 },
-            LegFill { is_short: true, qty: 1.0, price: Some(60100.0), fee_usd: 5.0 },
-            LegFill { is_short: false, qty: 1.0, price: Some(60050.0), fee_usd: 0.0 },
+            LegFill {
+                is_short: false,
+                qty: 1.0,
+                price: Some(60000.0),
+                fee_usd: 5.0,
+            },
+            LegFill {
+                is_short: true,
+                qty: 1.0,
+                price: Some(60120.0),
+                fee_usd: 0.0,
+            },
+            LegFill {
+                is_short: true,
+                qty: 1.0,
+                price: Some(60100.0),
+                fee_usd: 5.0,
+            },
+            LegFill {
+                is_short: false,
+                qty: 1.0,
+                price: Some(60050.0),
+                fee_usd: 0.0,
+            },
         ];
         let pnl = family_realized_pnl(&fills).expect("priced fills");
         assert!((pnl.net_usd - 160.0).abs() < 1e-9);
@@ -232,7 +256,12 @@ mod tests {
 
     #[test]
     fn family_pnl_unpriced_fills_are_none() {
-        let fills = vec![LegFill { is_short: false, qty: 1.0, price: None, fee_usd: 0.0 }];
+        let fills = vec![LegFill {
+            is_short: false,
+            qty: 1.0,
+            price: None,
+            fee_usd: 0.0,
+        }];
         assert!(family_realized_pnl(&fills).is_none());
         assert!(family_realized_pnl(&[]).is_none());
     }

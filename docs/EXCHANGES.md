@@ -6,13 +6,29 @@
 > on its newly published native API — contracts + REST, §11). §6 transfer-rails /
 > rebalance research. Re-check fee figures on venue pages before moving size.
 
-> NOTE: sections below mentioning Variational / edgeX / GRVT / Ondo Perps /
-> dYdX / Paradex / long-tail venues are historical research notes kept for
-> context. Those venues are not admitted, listed, or credentialed anywhere in the
-> system. Restoring one means adding a native-API adapter.
+> NOTE: `docs/CAPABILITIES.md` is the authoritative runtime matrix. Sections
+> below mentioning Variational / edgeX / GRVT / Ondo Perps / dYdX / Paradex /
+> long-tail venues are historical research notes kept for context. Any legacy
+> “Admitted” status in those notes means a parser was once registered for
+> research, **not** that `get_venues` admits the venue today. Restoring one
+> means adding and admitting a native-API adapter.
 
 
 This guide details the integration protocols, API specifications, and signing mechanisms for each supported market venue in the **Arbitrageur** platform.
+
+## Current runtime inventory
+
+The runtime admits only enabled adapters in `get_venues`; capability remains endpoint-specific and is tracked in `docs/CAPABILITIES.md`:
+
+- Hyperliquid, Lighter, Robinhood Lighter, Vanta/Orderly
+- Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel
+- Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
+
+Submission transport is not terminal fill reconciliation. No listed venue is live-strategy-entry ready.
+
+Account-position matching is adapter-owned. Live flattening asks the adapter to resolve the venue-native position back to the signal leg's exact symbol before sizing or verifying a reduce-only close. Examples: Binance/Aster/PopDEX `BTCUSDT`, Kraken `PF_XBTUSD`, OKX `BTC-USDT-SWAP`, Vanta `PERP_BTC_USDC`, Decibel `BTC-PERP`, and Lighter `market_id`/spot-vs-perp resolution. Unsupported, unknown, or ambiguous mappings fail closed as unresolved exposure; they are never treated as flat.
+
+**Venue-native contract units (Binance/Aster scaled symbols):** exchangeInfo lists scaled contracts with their own base asset — `1000PEPEUSDT` has `baseAsset: "1000PEPE"`, `quantityPrecision: 0`, `LOT_SIZE stepSize: "1"` (verified live on both venues). The canonical engine symbol `1000PEPE-USDT` is therefore denominated in venue-native `1000PEPE` units: `positionAmt`, `origQty`, order `quantity`, and book level sizes are all already in those units and prices are quoted per unit. Adapters must NOT rescale by 1000 in either direction — a `PEPE-USDT` request is a different (nonexistent) market, not an alias.
 
 ---
 
@@ -181,8 +197,10 @@ Robinhood Web3 connects to the Robinhood EVM chain with multi-DEX router support
 
 ## 6. Aster (Binance-Style Futures DEX)
 
-Paper read-only adapter (`AsterAdapter`, venue `aster`, admitted to
-`get_venues`). Public REST only, no auth.
+Native adapter (`AsterAdapter`, venue `aster`, admitted to `get_venues`).
+Public market/account reads plus authenticated submission transport are
+implemented; terminal fill/restart reconciliation is not, so strategy live
+entry remains disabled.
 
 - **REST API:** `https://fapi.asterdex.com` (`/fapi/v3/*` recommended,
   `/fapi/v1/*` legacy)
@@ -217,8 +235,9 @@ minimum interval.
 
 ## 7. Ondo Perps (Tokenized Equities + Crypto)
 
-Paper read-only adapter (`OndoPerpsAdapter`, venue `ondoperps`, admitted to
-`get_venues`). Public REST only, no auth. Poll politely: ~1 req/s venue
+Historical paper read-only research (`OndoPerpsAdapter`, venue `ondoperps`,
+not admitted by `get_venues` in the current build). Public REST only, no
+auth. Poll politely: ~1 req/s venue
 guidance, so the adapter's coordinator minimum interval is 1100ms.
 
 - **REST API:** `https://api.ondoperps.xyz`
@@ -340,17 +359,14 @@ through only after metadata confirms they name a tradable contract.
 
 ---
 
-## 10. Long-tail perp venues (`extended_venues.rs`, researched 2026-09-19)
+## 10. Long-tail perp venues — historical research, not admitted
 
-One shared paper read-only adapter serves 23 long-tail perp venues through a
-per-venue spec table (public REST only, no auth; account / order / leverage
-paths fail closed; `supports_live_execution = false`). Since 2026-09-19 every
-no-API venue (these 23 plus edgeX, GRVT, Ondo Perps — and earlier PopDEX,
-Variational, Decibel) also accepts an optional vault-encrypted EVM wallet
-(`update_credentials`, zeroizing signer, address-must-match-key) as
-wallet-direct preparation: keys sync on vault unlock and clear on lock, but
-live execution stays fail-closed until each venue's signing flow is
-implemented and audited. The user asked for two
+The 2026-09-19 `extended_venues.rs` experiment is no longer part of the
+current workspace. The table below is retained only as API/custody research;
+none of these venues is admitted by `get_venues`, listed in the runtime
+catalog, or available for strategy execution. Any restoration requires a new
+adapter, current endpoint verification, and a capability-matrix update. The
+original user asked for two
 things per venue: (a) a working market-data adapter, and (b) a custody
 verdict — "can they take my money away if they shutdown, skip town, or go
 bankrupt". The table below is (b); the adapter status column is (a).
@@ -362,31 +378,31 @@ MEDIUM = hybrid (offchain matching, onchain settlement — the operator runs the
 book but cannot sign for your collateral). CAUTION = trade paper-only until the
 named issue resolves.
 
-| Venue | Venue id | Custody | Can they take funds? | Adapter status |
+| Venue | Venue id | Custody | Can they take funds? | Historical adapter status |
 |---|---|---|---|---|
-| dYdX Chain | `dydx` | LOW (L1, self-custody) | No — onchain positions, user keys | Admitted (curl-verified: markets + book) |
-| Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | Admitted (curl-verified: markets + book) |
-| GMX V2 | `gmx` | LOW (GLV vaults, self-custody) | No — vault shares, user keys; prices-only feed (no orderbook by design) | Admitted (curl-verified tickers; excluded from spread pairs) |
-| Aevo | `aevo` | LOW–MED (offchain book, onchain settlement) | Cannot move collateral without user signatures | Admitted (curl-verified: markets + book) |
-| ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Admitted (LIVE 2026-09-19: 88 markets, 25-level books, hourly funding) |
-| Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Admitted (LIVE 2026-09-19: 326 markets, full-depth books, funding in marketStats; client sends UA+Accept — edge 403s fingerprint-less clients) |
-| Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Admitted (LIVE 2026-09-19: per-currency instruments via `api.lyra.finance`, top-of-book + funding from `get_ticker`; no depth endpoint exists) |
-| StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Admitted (LIVE 2026-09-19: 13 markets, 130-level books, hourly funding; per-entry 4.0 bps taker fee) |
-| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Admitted (LIVE 2026-09-19: 286 LCD derivative markets, scaled onchain books; funding NOT on LCD — fails closed) |
-| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Admitted (UNVERIFIED 2026-09-19: `api.vest.exchange` Cloudflare-530s — origin DNS dead; fails closed) |
-| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: site is a CloudFront shell, no public API found; fails closed) |
-| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (UNVERIFIED 2026-09-19: `api.evedex.com` DNS-fails, `exchange.evedex.com` 404s; fails closed) |
-| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.bulk.exchange` serves an unrelated landing page; real app at `app.bulk.trade` has no public API found; fails closed) |
-| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Admitted (LIVE 2026-09-19: 216 markets via `/refdata`; books/tickers auth-gated — fail closed) |
-| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Admitted (UNVERIFIED 2026-09-19: onchain Arbitrum reads only — no public REST; Python SDK needs key+RPC; fails closed) |
-| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Admitted (UNVERIFIED 2026-09-19: `sodex.xyz` is a parked `/lander` domain; fails closed) |
-| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Admitted (UNVERIFIED 2026-09-19: `alphax.exchange` is a parked `/lander` domain; fails closed) |
-| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Admitted (LIVE 2026-09-19: 77 markets via `/v1/info`, books via `/v1/book`, funding+predicted via `/v1/info/prices`; crossed books rejected) |
-| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.nado.xyz` is a dead Vercel deployment; app live but no public API found; fails closed) |
-| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `io-trader.com` is a parked page — no such venue found; fails closed) |
-| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `niza.fun` is a memecoin site, no futures product found; fails closed) |
-| Astros | `astros` | LOW (Sui, onchain via DeepBook) | No — user keeps keys (docs claim) | Admitted (UNVERIFIED 2026-09-19: perp frontend live at `perp.astros.ag`, no public REST found; fails closed) |
-| Gate DEX | `gatedex` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Admitted (UNVERIFIED 2026-09-19: `api.gate-dex.io` DNS-fails — no such venue found; fails closed) |
+| dYdX Chain | `dydx` | LOW (L1, self-custody) | No — onchain positions, user keys | Historical research (curl-verified: markets + book) |
+| Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | Historical research (curl-verified: markets + book) |
+| GMX V2 | `gmx` | LOW (GLV vaults, self-custody) | No — vault shares, user keys; prices-only feed (no orderbook by design) | Historical research (curl-verified tickers; excluded from spread pairs) |
+| Aevo | `aevo` | LOW–MED (offchain book, onchain settlement) | Cannot move collateral without user signatures | Historical research (curl-verified: markets + book) |
+| ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Historical research (LIVE 2026-09-19: 88 markets, 25-level books, hourly funding) |
+| Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Historical research (LIVE 2026-09-19: 326 markets, full-depth books, funding in marketStats; client sends UA+Accept — edge 403s fingerprint-less clients) |
+| Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Historical research (LIVE 2026-09-19: per-currency instruments via `api.lyra.finance`, top-of-book + funding from `get_ticker`; no depth endpoint exists) |
+| StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Historical research (LIVE 2026-09-19: 13 markets, 130-level books, hourly funding; per-entry 4.0 bps taker fee) |
+| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Historical research (LIVE 2026-09-19: 286 LCD derivative markets, scaled onchain books; funding NOT on LCD — fails closed) |
+| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Historical research (UNVERIFIED 2026-09-19: `api.vest.exchange` Cloudflare-530s — origin DNS dead; fails closed) |
+| Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: site is a CloudFront shell, no public API found; fails closed) |
+| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Historical research (UNVERIFIED 2026-09-19: `api.evedex.com` DNS-fails, `exchange.evedex.com` 404s; fails closed) |
+| BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `api.bulk.exchange` serves an unrelated landing page; real app at `app.bulk.trade` has no public API found; fails closed) |
+| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Historical research (LIVE 2026-09-19: 216 markets via `/refdata`; books/tickers auth-gated — fail closed) |
+| Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Historical research (UNVERIFIED 2026-09-19: onchain Arbitrum reads only — no public REST; Python SDK needs key+RPC; fails closed) |
+| SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Historical research (UNVERIFIED 2026-09-19: `sodex.xyz` is a parked `/lander` domain; fails closed) |
+| AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Historical research (UNVERIFIED 2026-09-19: `alphax.exchange` is a parked `/lander` domain; fails closed) |
+| Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Historical research (LIVE 2026-09-19: 77 markets via `/v1/info`, books via `/v1/book`, funding+predicted via `/v1/info/prices`; crossed books rejected) |
+| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `api.nado.xyz` is a dead Vercel deployment; app live but no public API found; fails closed) |
+| IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `io-trader.com` is a parked page — no such venue found; fails closed) |
+| Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `niza.fun` is a memecoin site, no futures product found; fails closed) |
+| Astros | `astros` | LOW (Sui, onchain via DeepBook) | No — user keeps keys (docs claim) | Historical research (UNVERIFIED 2026-09-19: perp frontend live at `perp.astros.ag`, no public REST found; fails closed) |
+| Gate DEX | `gatedex` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `api.gate-dex.io` DNS-fails — no such venue found; fails closed) |
 
 **Deliberately not venues.** Orderly "Derivatives" is the same Orderly rails
 as Vanta — a second Orderly venue would double-count one orderbook, so use the
@@ -406,9 +422,9 @@ funding), StandX (13 markets / 130-level books / hourly funding), Helix
 (286 LCD markets / scaled onchain books; funding not on LCD — fails
 closed), Pacifica (77 markets / books / funding + predicted rate), and
 QFEX (216 markets via `/refdata`; books auth-gated — fails closed). The
-remaining 12 are UNVERIFIED (dead/parked hosts or no public REST found —
-see table) and stay admitted paper-only per operator request, failing
-closed to honest venue errors. Each parser fails closed per entry (bad
+remaining 12 were UNVERIFIED in that research sweep (dead/parked hosts or no
+public REST found — see table). These notes do not admit any venue today;
+each parser was designed to fail closed per entry (bad
 shapes skip entries, empty books never masquerade as quotes, crossed
 Pacifica books are rejected), so a wrong guess degrades to venue errors,
 never bad data.

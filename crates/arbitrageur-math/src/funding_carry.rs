@@ -1,5 +1,5 @@
-use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
 use arbitrageur_core::quote::FundingRate;
+use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
 
 /// Detailed breakdown of a cross-exchange funding rate carry opportunity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,9 +51,17 @@ pub fn evaluate_funding_carry(
     let hourly_rate_b = venue_b.rate / Decimal::from(venue_b.interval_hours.max(1));
 
     let (short_venue, long_venue, net_hourly) = if hourly_rate_a >= hourly_rate_b {
-        (venue_a.venue.to_string(), venue_b.venue.to_string(), hourly_rate_a - hourly_rate_b)
+        (
+            venue_a.venue.to_string(),
+            venue_b.venue.to_string(),
+            hourly_rate_a - hourly_rate_b,
+        )
     } else {
-        (venue_b.venue.to_string(), venue_a.venue.to_string(), hourly_rate_b - hourly_rate_a)
+        (
+            venue_b.venue.to_string(),
+            venue_a.venue.to_string(),
+            hourly_rate_b - hourly_rate_a,
+        )
     };
 
     if net_hourly <= dec!(0) {
@@ -61,9 +69,7 @@ pub fn evaluate_funding_carry(
     }
 
     let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
-    let net_apr = net_hourly
-        .checked_mul(dec!(8760))
-        .unwrap_or(dec!(999999));
+    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(dec!(999999));
 
     // APY = (1 + net_hourly)^8760 - 1
     let hourly_f64 = net_hourly.to_string().parse::<f64>().unwrap_or(0.0);
@@ -282,7 +288,9 @@ pub fn estimate_funding_hold_hours(
         return None;
     }
     const MAX_HOLD_HOURS: f64 = 168.0; // 7-day persistence cap
-    let apr = min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+    let apr = min_apr_pct
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(8.0);
     let threshold_8h = apr / 100.0 / 365.0 / 3.0;
     let spread_note = if spread_cost > 0.0 {
         format!(" incl. {spread_cost:.1} bps entry spread")
@@ -351,7 +359,11 @@ pub fn estimate_funding_hold_hours(
     }
     let nf = n as f64;
     let denom = nf * sxx - sx * sx;
-    let slope = if denom.abs() < 1e-12 { 0.0 } else { (nf * sxy - sx * sy) / denom };
+    let slope = if denom.abs() < 1e-12 {
+        0.0
+    } else {
+        (nf * sxy - sx * sy) / denom
+    };
     let intercept = (sy - slope * sx) / nf;
     // R² + residual volatility.
     let mean_y = sy / nf;
@@ -365,14 +377,29 @@ pub fn estimate_funding_hold_hours(
         ss_tot += (r - mean_y).powi(2);
         ss_res += (r - pred).powi(2);
     }
-    let r2 = if ss_tot > 1e-18 { (1.0 - ss_res / ss_tot).clamp(0.0, 1.0) } else { 0.0 };
+    let r2 = if ss_tot > 1e-18 {
+        (1.0 - ss_res / ss_tot).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     let std = (ss_res / nf).sqrt();
-    let cv = if mean_y.abs() > 1e-12 { std / mean_y.abs() } else { 1.0 };
+    let cv = if mean_y.abs() > 1e-12 {
+        std / mean_y.abs()
+    } else {
+        1.0
+    };
 
     // Slope is per-hour in 8h-fraction units; current = last observed (robust).
-    let current = history.iter().rev().find_map(|(_, r)| r.is_finite().then_some(*r)).unwrap_or(net_rate_8h);
+    let current = history
+        .iter()
+        .rev()
+        .find_map(|(_, r)| r.is_finite().then_some(*r))
+        .unwrap_or(net_rate_8h);
     let (hours_raw, mode): (f64, &str) = if slope >= 0.0 {
-        (MAX_HOLD_HOURS, "stable/growing funding gap; 7-day persistence cap")
+        (
+            MAX_HOLD_HOURS,
+            "stable/growing funding gap; 7-day persistence cap",
+        )
     } else {
         let t_cross = (threshold_8h - current) / slope; // slope<0 -> positive when current>threshold
         if !t_cross.is_finite() {
@@ -380,7 +407,10 @@ pub fn estimate_funding_hold_hours(
         } else if t_cross < breakeven_total {
             (t_cross, "gap decays below min-APR threshold before fee+spread breakeven (early exit at loss)")
         } else {
-            (t_cross.min(MAX_HOLD_HOURS), "linear decay of funding gap to min-APR threshold")
+            (
+                t_cross.min(MAX_HOLD_HOURS),
+                "linear decay of funding gap to min-APR threshold",
+            )
         }
     };
     // Volatility haircut: choppy gaps get shorter expected holds.
@@ -458,7 +488,9 @@ pub fn expected_carry_return_usd(
     if !(trade_size_usd.is_finite() && trade_size_usd > 0.0) {
         return None;
     }
-    let apr = min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+    let apr = min_apr_pct
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .unwrap_or(8.0);
     let threshold_8h = apr / 100.0 / 365.0 / 3.0;
     let exit_8h = threshold_8h.min(net_rate_8h);
     let avg_8h = (net_rate_8h + exit_8h) / 2.0;
@@ -565,7 +597,7 @@ pub fn backtest_gap_carry(
     while i < pts.len() {
         let (t0, g0) = pts[i];
         // Only prints a live desk would enter on, with a scoreable future.
-        if !(g0 > threshold_8h) || t_end - t0 < 24.0 {
+        if g0 <= threshold_8h || t_end - t0 < 24.0 {
             i += stride.max(1);
             continue;
         }
@@ -589,7 +621,7 @@ pub fn backtest_gap_carry(
             i += stride.max(1);
             continue;
         }
-        let hold_h = (pts[(j.min(pts.len() - 1))].0 - t0).max(0.0);
+        let hold_h = (pts[j.min(pts.len() - 1)].0 - t0).max(0.0);
         let mean_gap = sum_gap / (n_path as f64);
         let accrual = trade_size_usd * mean_gap * (hold_h / 8.0);
         let net = accrual - trade_size_usd * cost_ratio;
@@ -644,7 +676,11 @@ pub fn prob_net_above_target(deciles_asc: &[f64], target_usd: f64) -> Option<f64
     for i in 0..n - 1 {
         let (lo, hi) = (deciles_asc[i], deciles_asc[i + 1]);
         if target_usd <= hi {
-            let frac = if hi > lo { (target_usd - lo) / (hi - lo) } else { 0.0 };
+            let frac = if hi > lo {
+                (target_usd - lo) / (hi - lo)
+            } else {
+                0.0
+            };
             let cdf = (i as f64 + frac.clamp(0.0, 1.0)) / ((n - 1) as f64);
             return Some((1.0 - cdf).clamp(0.0, 1.0));
         }
@@ -708,7 +744,10 @@ pub fn funding_win_probability(
             if !(h.hold_hours.is_finite() && h.hold_hours > 0.0) {
                 return None;
             }
-            let apr = h.min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+            let apr = h
+                .min_apr_pct
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(8.0);
             let threshold_8h = apr / 100.0 / 365.0 / 3.0;
             let exit_8h = threshold_8h.min(rate_f);
             ((rate_f + exit_8h) / 2.0) * (h.hold_hours / 8.0)
@@ -923,16 +962,26 @@ mod spot_perp_basis_tests {
     #[test]
     fn non_positive_funding_is_none_no_borrow_desk() {
         let fr = perp_funding("lighter", "BTC-USDC", "0.0", 8);
-        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0)).is_none());
+        assert!(
+            evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
+                .is_none()
+        );
         let neg = perp_funding("lighter", "BTC-USDC", "-0.0001", 8);
-        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &neg, dec!(3.5), dec!(2000.0)).is_none());
+        assert!(
+            evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &neg, dec!(3.5), dec!(2000.0))
+                .is_none()
+        );
     }
 
     #[test]
     fn non_positive_prices_are_none() {
         let fr = perp_funding("lighter", "BTC-USDC", "0.0001", 8);
-        assert!(evaluate_spot_perp_basis(dec!(0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0)).is_none());
-        assert!(evaluate_spot_perp_basis(dec!(100.0), dec!(0), &fr, dec!(3.5), dec!(2000.0)).is_none());
+        assert!(
+            evaluate_spot_perp_basis(dec!(0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0)).is_none()
+        );
+        assert!(
+            evaluate_spot_perp_basis(dec!(100.0), dec!(0), &fr, dec!(3.5), dec!(2000.0)).is_none()
+        );
     }
 
     #[test]
@@ -960,23 +1009,40 @@ mod funding_win_probability_tests {
         assert!((p - 0.50).abs() < 0.02, "unexpected {p}");
         // Faster breakeven -> higher P; slower -> lower P (monotonic).
         let fast = funding_win_probability(dec!(0.001), dec!(7.2), None, None, None).expect("fast");
-        let slow = funding_win_probability(dec!(0.000024), dec!(7.2), None, None, None).expect("slow");
+        let slow =
+            funding_win_probability(dec!(0.000024), dec!(7.2), None, None, None).expect("slow");
         assert!(fast > p && p > slow, "fast={fast} p={p} slow={slow}");
     }
 
     #[test]
     fn adjustments_lift_or_trim() {
-        let base = funding_win_probability(dec!(0.0001), dec!(7.2), None, None, None).expect("base");
-        let agree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(true), None).expect("agree");
-        let disagree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(false), None).expect("disagree");
-        let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None, None).expect("buffered");
-        assert!(agree > base && base > disagree, "agree={agree} base={base} disagree={disagree}");
+        let base =
+            funding_win_probability(dec!(0.0001), dec!(7.2), None, None, None).expect("base");
+        let agree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(true), None)
+            .expect("agree");
+        let disagree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(false), None)
+            .expect("disagree");
+        let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None, None)
+            .expect("buffered");
+        assert!(
+            agree > base && base > disagree,
+            "agree={agree} base={base} disagree={disagree}"
+        );
         assert!(buffered > base, "buffered={buffered} base={base}");
     }
 
     #[test]
     fn hold_thin_history_falls_back_to_breakeven() {
-        let est = super::estimate_funding_hold_hours(0.000585, 3.5, Some(0.0), &[], Some(8.0), None, None).unwrap();
+        let est = super::estimate_funding_hold_hours(
+            0.000585,
+            3.5,
+            Some(0.0),
+            &[],
+            Some(8.0),
+            None,
+            None,
+        )
+        .unwrap();
         // fee 3.5bps / (0.0585%/8h) = ~4.8h breakeven
         assert!((est.hours - 4.8).abs() < 0.5, "got {}", est.hours);
         assert!(est.confidence < 0.5);
@@ -986,26 +1052,61 @@ mod funding_win_probability_tests {
     fn hold_decaying_gap_exits_before_breakeven_when_fast_decay() {
         // Steep decay: 0.10%/8h -> 0.01%/8h over 10h; threshold 8% APR ~0.0073%/8h.
         // Breakeven on 3.5bps at 0.0585%/8h would be ~4.8h, but gap collapses fast.
-        let hist: Vec<(i64, f64)> = (0..20).map(|i| (i*1_800_000, 0.001 - i as f64*0.00005)).collect();
-        let est = super::estimate_funding_hold_hours(0.000585, 3.5, Some(2.0), &hist, Some(8.0), Some(false), Some(0.1)).unwrap();
-        assert!(est.hours < est.breakeven_hours, "decaying gap should exit early: hold {} vs be {} reason {}", est.hours, est.breakeven_hours, est.reason);
+        let hist: Vec<(i64, f64)> = (0..20)
+            .map(|i| (i * 1_800_000, 0.001 - i as f64 * 0.00005))
+            .collect();
+        let est = super::estimate_funding_hold_hours(
+            0.000585,
+            3.5,
+            Some(2.0),
+            &hist,
+            Some(8.0),
+            Some(false),
+            Some(0.1),
+        )
+        .unwrap();
+        assert!(
+            est.hours < est.breakeven_hours,
+            "decaying gap should exit early: hold {} vs be {} reason {}",
+            est.hours,
+            est.breakeven_hours,
+            est.reason
+        );
     }
 
     #[test]
     fn hold_stable_gap_caps_at_7d() {
-        let hist: Vec<(i64, f64)> = (0..50).map(|i| (i*3_600_000, 0.0006)).collect();
-        let est = super::estimate_funding_hold_hours(0.0006, 3.5, Some(0.0), &hist, Some(8.0), Some(true), Some(0.02)).unwrap();
+        let hist: Vec<(i64, f64)> = (0..50).map(|i| (i * 3_600_000, 0.0006)).collect();
+        let est = super::estimate_funding_hold_hours(
+            0.0006,
+            3.5,
+            Some(0.0),
+            &hist,
+            Some(8.0),
+            Some(true),
+            Some(0.02),
+        )
+        .unwrap();
         assert!(est.hours > est.breakeven_hours);
         assert!(est.hours <= 168.0 + 1e-9);
     }
 
     #[test]
     fn degenerate_inputs_are_none_and_bounds_hold() {
-        assert_eq!(funding_win_probability(dec!(0), dec!(7.2), None, None, None), None);
-        assert_eq!(funding_win_probability(dec!(-0.0001), dec!(7.2), None, None, None), None);
+        assert_eq!(
+            funding_win_probability(dec!(0), dec!(7.2), None, None, None),
+            None
+        );
+        assert_eq!(
+            funding_win_probability(dec!(-0.0001), dec!(7.2), None, None, None),
+            None
+        );
         // Extremes never reach 0/1.
-        let huge = funding_win_probability(dec!(0.01), dec!(0.1), Some(dec!(1000)), Some(true), None).expect("huge");
-        let tiny = funding_win_probability(dec!(0.0000001), dec!(100.0), None, Some(false), None).expect("tiny");
+        let huge =
+            funding_win_probability(dec!(0.01), dec!(0.1), Some(dec!(1000)), Some(true), None)
+                .expect("huge");
+        let tiny = funding_win_probability(dec!(0.0000001), dec!(100.0), None, Some(false), None)
+            .expect("tiny");
         assert!(huge <= 0.98 && tiny >= 0.02, "huge={huge} tiny={tiny}");
     }
 
@@ -1021,24 +1122,32 @@ mod funding_win_probability_tests {
             })
         };
         // Short decaying hold, costs dominate -> loss AND sub-50% win.
-        let exp = super::expected_carry_return_usd(0.00022, 10.0, None, Some(8.0), Some(8.0), 50_000.0)
-            .expect("expected");
+        let exp =
+            super::expected_carry_return_usd(0.00022, 10.0, None, Some(8.0), Some(8.0), 50_000.0)
+                .expect("expected");
         assert!(exp < 0.0, "expected loss: {exp}");
-        let p = funding_win_probability(dec!(0.00022), dec!(10.0), None, None, hold(8.0))
-            .expect("p");
+        let p =
+            funding_win_probability(dec!(0.00022), dec!(10.0), None, None, hold(8.0)).expect("p");
         assert!(p < 0.5, "win must be sub-50% alongside a loss: {p}");
         // Long stable hold -> profit AND super-50% win.
-        let exp2 = super::expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 50_000.0)
-            .expect("expected2");
+        let exp2 =
+            super::expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 50_000.0)
+                .expect("expected2");
         assert!(exp2 > 0.0, "expected profit: {exp2}");
-        let p2 = funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(80.0))
-            .expect("p2");
+        let p2 =
+            funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(80.0)).expect("p2");
         assert!(p2 > 0.5, "win must be super-50% alongside a profit: {p2}");
         // Unknown hold keeps the legacy flat-24h answer.
-        let legacy = funding_win_probability(dec!(0.00024), dec!(7.2), None, None, None).expect("legacy");
-        assert!((legacy - 0.50).abs() < 0.02, "legacy 24h scale unchanged: {legacy}");
+        let legacy =
+            funding_win_probability(dec!(0.00024), dec!(7.2), None, None, None).expect("legacy");
+        assert!(
+            (legacy - 0.50).abs() < 0.02,
+            "legacy 24h scale unchanged: {legacy}"
+        );
         // Garbage hold refuses rather than inventing.
-        assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(f64::NAN)).is_none());
+        assert!(
+            funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(f64::NAN)).is_none()
+        );
         assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(0.0)).is_none());
     }
 }
@@ -1067,7 +1176,9 @@ mod prob_target_tests {
         let nets: Vec<f64> = (-50..=50).map(|v| v as f64).collect();
         let mut sorted = nets.clone();
         sorted.sort_by(|a, b| a.total_cmp(b));
-        let dec: Vec<f64> = (0..=10).map(|k| sorted[(k * (sorted.len() - 1)) / 10]).collect();
+        let dec: Vec<f64> = (0..=10)
+            .map(|k| sorted[(k * (sorted.len() - 1)) / 10])
+            .collect();
         let p = prob_net_above_target(&dec, 0.0).expect("p");
         let counted = nets.iter().filter(|v| **v >= 0.0).count() as f64 / nets.len() as f64;
         assert!((p - counted).abs() < 0.06, "p={p} counted={counted}");
@@ -1091,8 +1202,15 @@ mod gap_backtest_tests {
         // every entry covers 10 bps costs many times over.
         let gaps = vec![0.0008; 168];
         let h = series(0, 3_600_000, &gaps);
-        let b = backtest_gap_carry(&h, 8.0 / 100.0 / 365.0 / 3.0, 10.0 / 10_000.0, 50_000.0, 168.0, 20)
-            .expect("backtest");
+        let b = backtest_gap_carry(
+            &h,
+            8.0 / 100.0 / 365.0 / 3.0,
+            10.0 / 10_000.0,
+            50_000.0,
+            168.0,
+            20,
+        )
+        .expect("backtest");
         assert!(b.trials >= 20, "trials={}", b.trials);
         assert_eq!(b.wins, b.trials);
         assert!((b.win_rate - 1.0).abs() < 1e-12);
@@ -1103,10 +1221,19 @@ mod gap_backtest_tests {
     fn collapsing_gap_loses_with_short_holds() {
         // Sawtooth: each hour alternates 0.0008 / 0.0 — entries exit almost
         // immediately, costs dominate.
-        let gaps: Vec<f64> = (0..336).map(|i| if i % 2 == 0 { 0.0008 } else { 0.0 }).collect();
+        let gaps: Vec<f64> = (0..336)
+            .map(|i| if i % 2 == 0 { 0.0008 } else { 0.0 })
+            .collect();
         let h = series(0, 3_600_000, &gaps);
-        let b = backtest_gap_carry(&h, 8.0 / 100.0 / 365.0 / 3.0, 10.0 / 10_000.0, 50_000.0, 168.0, 20)
-            .expect("backtest");
+        let b = backtest_gap_carry(
+            &h,
+            8.0 / 100.0 / 365.0 / 3.0,
+            10.0 / 10_000.0,
+            50_000.0,
+            168.0,
+            20,
+        )
+        .expect("backtest");
         assert!(b.win_rate < 0.5, "win_rate={}", b.win_rate);
         assert!(b.expected_usd < 0.0, "expected={}", b.expected_usd);
         assert!(b.mean_hold_hours < 24.0, "hold={}", b.mean_hold_hours);
@@ -1120,7 +1247,15 @@ mod gap_backtest_tests {
         // Never-enterable series (all below threshold) -> no trials -> None.
         let flat = series(0, 3_600_000, &[0.0; 200]);
         assert!(backtest_gap_carry(&flat, 1e-6, 0.001, 50_000.0, 168.0, 20).is_none());
-        assert!(backtest_gap_carry(&series(0, 3_600_000, &[0.0008; 200]), f64::NAN, 0.001, 50_000.0, 168.0, 20).is_none());
+        assert!(backtest_gap_carry(
+            &series(0, 3_600_000, &[0.0008; 200]),
+            f64::NAN,
+            0.001,
+            50_000.0,
+            168.0,
+            20
+        )
+        .is_none());
     }
 }
 
@@ -1174,7 +1309,6 @@ mod funding_capacity_tests {
         assert!(approx(rep.optimal_size_usd.unwrap(), big.filled_usd));
     }
 
-
     #[test]
     fn expected_return_decays_to_threshold_over_hold() {
         // net 0.0008/8h, 8% APR threshold (7.3e-5), 80h hold, $50k, 10 bps fees.
@@ -1183,7 +1317,10 @@ mod funding_capacity_tests {
         let avg = (0.0008 + 8.0 / 100.0 / 365.0 / 3.0) / 2.0;
         let want = 50_000.0 * avg * 10.0 - 50.0;
         assert!((v - want).abs() < 1e-6, "got {v}, want {want}");
-        assert!(v > 100.0, "decay-aware value well below the flat $400 extrapolation");
+        assert!(
+            v > 100.0,
+            "decay-aware value well below the flat $400 extrapolation"
+        );
     }
 
     #[test]
@@ -1198,13 +1335,21 @@ mod funding_capacity_tests {
     #[test]
     fn expected_return_refuses_unknown_hold_and_garbage() {
         assert!(expected_carry_return_usd(0.0008, 10.0, None, None, Some(8.0), 50_000.0).is_none());
-        assert!(expected_carry_return_usd(0.0, 10.0, None, Some(80.0), Some(8.0), 50_000.0).is_none());
-        assert!(expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 0.0).is_none());
-        assert!(expected_carry_return_usd(f64::NAN, 10.0, None, Some(80.0), Some(8.0), 50_000.0).is_none());
+        assert!(
+            expected_carry_return_usd(0.0, 10.0, None, Some(80.0), Some(8.0), 50_000.0).is_none()
+        );
+        assert!(
+            expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 0.0).is_none()
+        );
+        assert!(
+            expected_carry_return_usd(f64::NAN, 10.0, None, Some(80.0), Some(8.0), 50_000.0)
+                .is_none()
+        );
         // Breakeven sanity: hold exactly one 8h period at 10 bps with 10 bps
         // costs nets ~zero.
-        let v = expected_carry_return_usd(0.001, 10.0, None, Some(8.0), Some(1_000_000.0), 10_000.0)
-            .expect("value");
+        let v =
+            expected_carry_return_usd(0.001, 10.0, None, Some(8.0), Some(1_000_000.0), 10_000.0)
+                .expect("value");
         assert!(v.abs() < 1e-6, "{v}");
     }
 }

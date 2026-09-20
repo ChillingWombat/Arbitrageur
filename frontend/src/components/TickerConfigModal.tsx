@@ -826,7 +826,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           type="button"
           onClick={handleOpenAutotune}
           disabled={autotuneDisabledReason != null}
-          title={autotuneDisabledReason ?? "Walk-forward recommend-only preview (70/30 split, validated per parameter)"}
+          title={autotuneDisabledReason ?? "Walk-forward AutoTune preview (70/30 split; selected READY rows can be applied)"}
           className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-slate-400 shadow-2xs"
         >
           AutoTune

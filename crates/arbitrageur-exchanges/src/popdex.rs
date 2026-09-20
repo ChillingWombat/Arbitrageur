@@ -43,7 +43,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::Duration;
 
-use alloy::primitives::{Address, B256, Bytes, U256};
+use alloy::primitives::{Address, Bytes, B256, U256};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -323,8 +323,7 @@ fn dec_to_wad(d: Decimal) -> anyhow::Result<U256> {
     let digits = format!("{int}{frac18}");
     let digits = digits.trim_start_matches('0');
     let digits = if digits.is_empty() { "0" } else { digits };
-    U256::from_str_radix(digits, 10)
-        .map_err(|e| anyhow::anyhow!("wad overflow for {d}: {e}"))
+    U256::from_str_radix(digits, 10).map_err(|e| anyhow::anyhow!("wad overflow for {d}: {e}"))
 }
 
 /// Pack `placeOrder` flags per the unified `orderParams` layout (bytes 0-7).
@@ -361,21 +360,19 @@ fn pack_order_params(
     b
 }
 
-/// Build a random 32-byte client order id (raw bytes; PopDEX right-pads).
-fn random_client_oid() -> [u8; 32] {
-    use rand::RngCore;
-    let mut b = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut b);
-    b[0] |= 0x01; // never the zero id (reserved for "unused")
-    b
-}
-
-/// Encode a UTF-8 client id into right-padded `bytes32`.
+/// Encode a UTF-8 client id into deterministic nonzero `bytes32`.
+/// Short ids are right-padded for venue-side readability; longer ids are
+/// hashed so a UUID cannot silently collide after truncation.
 fn client_oid_bytes(s: &str) -> [u8; 32] {
-    let mut b = [0u8; 32];
     let raw = s.as_bytes();
-    let n = raw.len().min(32);
-    b[..n].copy_from_slice(&raw[..n]);
+    if raw.len() > 32 {
+        let hash = alloy::primitives::keccak256(raw);
+        let mut b = [0u8; 32];
+        b.copy_from_slice(hash.as_slice());
+        return b;
+    }
+    let mut b = [0u8; 32];
+    b[..raw.len()].copy_from_slice(raw);
     if b == [0u8; 32] {
         b[0] = 0x01;
     }
@@ -473,8 +470,9 @@ impl PopDexAdapter {
         agent_key_hex: Option<String>,
     ) -> anyhow::Result<()> {
         if let Some(n) = network {
-            let net = PopDexNetwork::parse(&n)
-                .ok_or_else(|| anyhow::anyhow!("PopDEX network must be 'mainnet' or 'testnet', got '{n}'"))?;
+            let net = PopDexNetwork::parse(&n).ok_or_else(|| {
+                anyhow::anyhow!("PopDEX network must be 'mainnet' or 'testnet', got '{n}'")
+            })?;
             *self.network.write() = net;
         }
         let addr = wallet_address
@@ -528,22 +526,20 @@ impl PopDexAdapter {
     }
 
     fn agent_key_guarded(&self) -> anyhow::Result<Zeroizing<String>> {
-        self.agent_key
-            .read()
-            .clone()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "PopDEX live trading needs an approved agent key: paste the agent private key \
+        self.agent_key.read().clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "PopDEX live trading needs an approved agent key: paste the agent private key \
                      in System Settings → Exchange Accounts (PopDEX), after the one-time \
                      approveAgent setup in the official guide"
-                )
-            })
+            )
+        })
     }
 
     fn main_account(&self) -> anyhow::Result<String> {
-        self.wallet_address.read().clone().ok_or_else(|| {
-            anyhow::anyhow!("PopDEX main account address is not configured")
-        })
+        self.wallet_address
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("PopDEX main account address is not configured"))
     }
 
     // ----- REST layer (public, no auth) -----
@@ -572,7 +568,8 @@ impl PopDexAdapter {
         if env.code.trim() != "200" {
             anyhow::bail!("PopDEX API error {} on {}: {}", env.code, path, env.msg);
         }
-        env.data.ok_or_else(|| anyhow::anyhow!("PopDEX API returned no data for {path}"))
+        env.data
+            .ok_or_else(|| anyhow::anyhow!("PopDEX API returned no data for {path}"))
     }
 
     /// All futures tickers (paginated; 66 symbols mainnet as of 2026-09-19).
@@ -622,16 +619,13 @@ impl PopDexAdapter {
             return Ok(()); // bare base keeps the legacy `{BASE}USDT` mapping
         }
         let quote = parts[1];
-        if quote.eq_ignore_ascii_case("USD")
-            || quote.eq_ignore_ascii_case("USDC")
-            || quote.eq_ignore_ascii_case("USDT")
-        {
+        if quote.eq_ignore_ascii_case("USDT") {
             return Ok(());
         }
         anyhow::bail!("PopDEX lists USDT-quoted futures only; no market for '{symbol}'")
     }
 
-    /// Venue pair code for an engine symbol (`BTC-USDC` → `BTCUSDT`).
+    /// Venue pair code for an engine symbol (`BTC-USDT` → `BTCUSDT`).
     fn venue_symbol(symbol: &str) -> String {
         let base = symbol
             .split(['-', '/', ':', '_'])
@@ -640,6 +634,36 @@ impl PopDexAdapter {
             .trim()
             .to_uppercase();
         format!("{base}USDT")
+    }
+
+    /// PopDEX account rows are either the bare base (`BTC`) or concatenated
+    /// venue pair (`BTCUSDT`). The venue only lists USDT futures, so the
+    /// canonical engine spelling is always `BASE-USDT`; anything else is
+    /// rejected instead of guessed.
+    fn canonical_account_symbol(symbol: &str) -> anyhow::Result<String> {
+        let clean = symbol.trim().to_uppercase().replace(['/', ':', '_'], "-");
+        if clean.is_empty() {
+            anyhow::bail!("PopDEX account symbol is empty");
+        }
+        if clean.contains('-') {
+            let parts: Vec<&str> = clean.split('-').filter(|p| !p.is_empty()).collect();
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("PopDEX account symbol '{symbol}' is not BASE-QUOTE");
+            };
+            if !quote.eq_ignore_ascii_case("USDT") {
+                anyhow::bail!("PopDEX account symbol '{symbol}' is not a USDT future");
+            }
+            return Ok(format!("{base}-USDT"));
+        }
+        if let Some(base) = clean.strip_suffix("USDT") {
+            if !base.is_empty() {
+                return Ok(format!("{base}-USDT"));
+            }
+        }
+        if clean.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Ok(format!("{clean}-USDT"));
+        }
+        anyhow::bail!("PopDEX account symbol '{symbol}' is malformed")
     }
 
     async fn symbol_id(&self, venue_symbol: &str) -> anyhow::Result<u16> {
@@ -690,7 +714,11 @@ impl PopDexAdapter {
     }
 }
 
-fn parse_book_side(levels: &[[String; 2]], venue: &VenueId, symbol: &str) -> anyhow::Result<Vec<BookLevel>> {
+fn parse_book_side(
+    levels: &[[String; 2]],
+    venue: &VenueId,
+    symbol: &str,
+) -> anyhow::Result<Vec<BookLevel>> {
     let mut out = Vec::with_capacity(levels.len());
     for [p, q] in levels {
         let price = dec_of(p)?;
@@ -728,9 +756,12 @@ impl ExchangeAdapter for PopDexAdapter {
             self.rest_base(),
             nonce
         );
-        let resp = self.client.get(&url).send().await.map_err(|e| {
-            anyhow::anyhow!("PopDEX ping transport error: {e}")
-        })?;
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("PopDEX ping transport error: {e}"))?;
         if !resp.status().is_success() {
             anyhow::bail!("PopDEX ping failed: {}", resp.status());
         }
@@ -759,7 +790,10 @@ impl ExchangeAdapter for PopDexAdapter {
                 ))
                 .await
             {
-                if let Some(row) = fees.iter().find(|r| r.symbol.eq_ignore_ascii_case(&venue_symbol)) {
+                if let Some(row) = fees
+                    .iter()
+                    .find(|r| r.symbol.eq_ignore_ascii_case(&venue_symbol))
+                {
                     if let Some(vip0) = row.fee_rates.first() {
                         if let (Ok(m), Ok(tk)) = (
                             Decimal::from_str(&vip0.maker_fee_rate),
@@ -859,11 +893,12 @@ impl ExchangeAdapter for PopDexAdapter {
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let mut out = HashMap::new();
         for t in self.fetch_all_tickers().await? {
-            let venue_symbol = t.symbol.trim().to_uppercase();
-            let base = venue_symbol.strip_suffix("USDT").unwrap_or(&venue_symbol);
+            let Ok(canonical) = Self::canonical_account_symbol(&t.symbol) else {
+                continue;
+            };
             if let Ok(turnover) = Decimal::from_str(t.turnover24h.trim()) {
                 if turnover > dec!(0.0) {
-                    out.insert(base.to_string(), turnover);
+                    out.insert(canonical, turnover);
                 }
             }
         }
@@ -957,6 +992,12 @@ impl ExchangeAdapter for PopDexAdapter {
         })
     }
 
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        position.symbol = Self::canonical_account_symbol(&position.symbol)?;
+        Ok(Some(position))
+    }
+
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         let (main, agent_key) = self.require_approved_agent()?;
         if !self.agent_approved().await? {
@@ -966,12 +1007,15 @@ impl ExchangeAdapter for PopDexAdapter {
                 approve_agent_instructions(&main, &agent)
             );
         }
+        Self::require_usd_quote(&order.symbol)?;
         let venue_symbol = Self::venue_symbol(&order.symbol);
         let symbol_id = self.symbol_id(&venue_symbol).await?;
         let (is_market, tif_byte, price_wad) = match order.order_type {
             OrderType::Market | OrderType::ImmediateOrCancel => (true, 2u8, U256::ZERO),
             OrderType::PostOnly => {
-                let p = order.price.ok_or_else(|| anyhow::anyhow!("post-only order needs a price"))?;
+                let p = order
+                    .price
+                    .ok_or_else(|| anyhow::anyhow!("post-only order needs a price"))?;
                 (false, 4u8, dec_to_wad(p)?)
             }
             OrderType::Limit => {
@@ -982,7 +1026,9 @@ impl ExchangeAdapter for PopDexAdapter {
                     TimeInForce::GoodTilCancelled => 1u8,
                 };
                 let tif = if order.post_only { 4u8 } else { tif };
-                let p = order.price.ok_or_else(|| anyhow::anyhow!("limit order needs a price"))?;
+                let p = order
+                    .price
+                    .ok_or_else(|| anyhow::anyhow!("limit order needs a price"))?;
                 (false, tif, dec_to_wad(p)?)
             }
         };
@@ -1001,9 +1047,14 @@ impl ExchangeAdapter for PopDexAdapter {
         if qty_wad.is_zero() {
             anyhow::bail!("PopDEX order quantity converts to zero wad");
         }
-        let client_oid = random_client_oid();
+        if order.client_order_id.trim().is_empty() {
+            anyhow::bail!("PopDEX order requires a non-empty client_order_id");
+        }
+        let client_oid = client_oid_bytes(order.client_order_id.trim());
         let calldata = IOrder::placeOrderCall {
-            account: main.parse().map_err(|e| anyhow::anyhow!("bad main address: {e}"))?,
+            account: main
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad main address: {e}"))?,
             clientOrderId: client_oid.into(),
             symbolId: symbol_id,
             orderParams: params.into(),
@@ -1017,12 +1068,13 @@ impl ExchangeAdapter for PopDexAdapter {
         let receipt = self
             .send_agent_tx(&agent_key, POPDEX_ORDER_PRECOMPILE, calldata)
             .await?;
-        let order_id = decode_order_create(&receipt, &main, symbol_id)?.unwrap_or_else(|| {
-            // Accepted but the event wasn't in the receipt logs (e.g. a node
-            // anomaly) — surface the tx hash so the order can be traced via
-            // the explorer instead of fabricating an id.
-            format!("tx:{}", receipt.hash)
-        });
+        let order_id = decode_order_create(&receipt, &main, symbol_id, &client_oid)?
+            .unwrap_or_else(|| {
+                // Accepted but the event wasn't in the receipt logs (e.g. a node
+                // anomaly) — surface the tx hash so the order can be traced via
+                // the explorer instead of fabricating an id.
+                format!("tx:{}", receipt.hash)
+            });
         Ok(OrderResponse {
             order_id,
             client_order_id: order.client_order_id.clone(),
@@ -1045,7 +1097,9 @@ impl ExchangeAdapter for PopDexAdapter {
         if !self.agent_approved().await? {
             anyhow::bail!("PopDEX agent is not approved for the main account — run one-time approveAgent first");
         }
-        let account: Address = main.parse().map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
+        let account: Address = main
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
         let calldata = if let Some(id) = req.order_id.as_deref().filter(|s| !s.trim().is_empty()) {
             let order_id: u128 = id.trim().parse().map_err(|_| {
                 anyhow::anyhow!("PopDEX order id must be a uint128 integer, got '{id}'")
@@ -1056,7 +1110,11 @@ impl ExchangeAdapter for PopDexAdapter {
                 clientOrderId: B256::ZERO,
             }
             .abi_encode()
-        } else if let Some(coid) = req.client_order_id.as_deref().filter(|s| !s.trim().is_empty()) {
+        } else if let Some(coid) = req
+            .client_order_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             IOrder::cancelOrderCall {
                 account,
                 orderId: 0,
@@ -1104,7 +1162,9 @@ impl ExchangeAdapter for PopDexAdapter {
         }
         let venue_symbol = Self::venue_symbol(symbol);
         let symbol_id = self.symbol_id(&venue_symbol).await?;
-        let account: Address = main.parse().map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
+        let account: Address = main
+            .parse()
+            .map_err(|e| anyhow::anyhow!("bad main address: {e}"))?;
         let token: Address = POPDEX_USDT_TACHYON
             .parse()
             .map_err(|e| anyhow::anyhow!("bad USDT address: {e}"))?;
@@ -1195,9 +1255,17 @@ struct ReceiptLog {
 
 /// Extract the `orderId` from an `OrderCreate` event for `(account, symbol)`.
 /// Returns `None` when the event is absent (caller must not invent an id).
-fn decode_order_create(receipt: &TxReceipt, account: &str, symbol_id: u16) -> anyhow::Result<Option<String>> {
+fn decode_order_create(
+    receipt: &TxReceipt,
+    account: &str,
+    symbol_id: u16,
+    expected_client_oid: &[u8; 32],
+) -> anyhow::Result<Option<String>> {
     let topic0 = format!("0x{}", hex::encode(order_create_topic()));
-    let account_topic = format!("0x000000000000000000000000{}", account.trim().trim_start_matches("0x").to_lowercase());
+    let account_topic = format!(
+        "0x000000000000000000000000{}",
+        account.trim().trim_start_matches("0x").to_lowercase()
+    );
     let symbol_topic = format!("0x{:064x}", symbol_id);
     for log in &receipt.logs {
         if !log.address.eq_ignore_ascii_case(POPDEX_ORDER_PRECOMPILE) || log.topics.len() < 3 {
@@ -1213,13 +1281,18 @@ fn decode_order_create(receipt: &TxReceipt, account: &str, symbol_id: u16) -> an
             continue;
         }
         let data = log.data.trim().trim_start_matches("0x");
-        if data.len() < 64 {
+        if data.len() < 128 {
+            continue;
+        }
+        let logged_client_oid = hex::decode(&data[64..128])
+            .map_err(|e| anyhow::anyhow!("bad clientOrderId word: {e}"))?;
+        if logged_client_oid.as_slice() != expected_client_oid {
             continue;
         }
         let order_id = U256::from_str_radix(&data[..64], 16)
             .map_err(|e| anyhow::anyhow!("bad orderId word: {e}"))?;
-        let id128 = u128::try_from(order_id)
-            .map_err(|_| anyhow::anyhow!("orderId overflows u128"))?;
+        let id128 =
+            u128::try_from(order_id).map_err(|_| anyhow::anyhow!("orderId overflows u128"))?;
         if id128 == 0 {
             continue;
         }
@@ -1236,7 +1309,11 @@ impl PopDexAdapter {
         let now_ms = Utc::now().timestamp_millis().max(0) as u64;
         let mut guard = self.last_agent_nonce.write();
         let next = (*guard).max(now_ms);
-        let next = if next <= *guard && *guard != 0 { *guard + 1 } else { next.max(*guard + (*guard != 0) as u64) };
+        let next = if next <= *guard && *guard != 0 {
+            *guard + 1
+        } else {
+            next.max(*guard + (*guard != 0) as u64)
+        };
         *guard = next;
         next
     }
@@ -1256,12 +1333,16 @@ impl PopDexAdapter {
         let expected_agent = signer.address();
         if let Some(bound) = self.agent_address_hex() {
             if !bound.eq_ignore_ascii_case(&expected_agent.to_string()) {
-                anyhow::bail!("bound agent address does not match the signing key — rebind credentials");
+                anyhow::bail!(
+                    "bound agent address does not match the signing key — rebind credentials"
+                );
             }
         }
-        let provider = ProviderBuilder::new()
-            .wallet(signer)
-            .connect_http(self.rpc_url().parse().map_err(|e| anyhow::anyhow!("bad RPC url: {e}"))?);
+        let provider = ProviderBuilder::new().wallet(signer).connect_http(
+            self.rpc_url()
+                .parse()
+                .map_err(|e| anyhow::anyhow!("bad RPC url: {e}"))?,
+        );
         let chain_id = provider
             .get_chain_id()
             .await
@@ -1289,7 +1370,10 @@ impl PopDexAdapter {
             .estimate_gas(estimate_tx)
             .await
             .map_err(|e| anyhow::anyhow!("PopDEX estimateGas reverted (call would fail): {e}"))?;
-        let gas_limit = gas_limit.saturating_mul(125).saturating_div(100).max(100_000);
+        let gas_limit = gas_limit
+            .saturating_mul(125)
+            .saturating_div(100)
+            .max(100_000);
         let nonce = self.next_agent_nonce();
         let tx = TransactionRequest::default()
             .with_to(to_addr)
@@ -1305,10 +1389,16 @@ impl PopDexAdapter {
         let tx_hash = format!("{:#x}", pending.tx_hash());
         let receipt = tokio::time::timeout(Duration::from_secs(30), pending.get_receipt())
             .await
-            .map_err(|_| anyhow::anyhow!("PopDEX receipt timeout for {tx_hash} — check the explorer before retrying"))?
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "PopDEX receipt timeout for {tx_hash} — check the explorer before retrying"
+                )
+            })?
             .map_err(|e| anyhow::anyhow!("PopDEX receipt query failed for {tx_hash}: {e}"))?;
         if !receipt.status() {
-            anyhow::bail!("PopDEX transaction reverted: {tx_hash} — see the explorer for the error code");
+            anyhow::bail!(
+                "PopDEX transaction reverted: {tx_hash} — see the explorer for the error code"
+            );
         }
         let logs = receipt
             .inner
@@ -1439,7 +1529,10 @@ async fn assert_main_initialized(network: PopDexNetwork, main: &str) -> anyhow::
         return Ok(());
     }
     let body = resp.text().await.unwrap_or_default();
-    if body.contains("11100") || body.contains("does not exist") || body.contains("Core account not found") {
+    if body.contains("11100")
+        || body.contains("does not exist")
+        || body.contains("Core account not found")
+    {
         anyhow::bail!("{}", uninitialized_account_msg(main, network));
     }
     Ok(())
@@ -1483,7 +1576,9 @@ pub async fn submit_approve_agent_with_main(
         .parse()
         .map_err(|_| anyhow::anyhow!("bad main private key (want 0x-hex secp256k1)"))?;
     if signer.address() != main_addr {
-        anyhow::bail!("the pasted private key does not match the main account address — refusing to sign");
+        anyhow::bail!(
+            "the pasted private key does not match the main account address — refusing to sign"
+        );
     }
     // Preflight: the chain rejects every transaction (including approveAgent)
     // from a core account that was never initialized (no deposit yet) with
@@ -1491,14 +1586,10 @@ pub async fn submit_approve_agent_with_main(
     // BEFORE touching the main key's signature, and say what to do.
     assert_main_initialized(network, main.trim()).await?;
     let now_ms = Utc::now().timestamp_millis().max(0) as u64;
-    let calldata_hex = build_approve_agent_calldata(
-        &agent_addr.to_string(),
-        &main_addr.to_string(),
-        now_ms,
-    )?;
-    let calldata =
-        hex::decode(calldata_hex.trim().trim_start_matches("0x"))
-            .map_err(|e| anyhow::anyhow!("calldata encode failed: {e}"))?;
+    let calldata_hex =
+        build_approve_agent_calldata(&agent_addr.to_string(), &main_addr.to_string(), now_ms)?;
+    let calldata = hex::decode(calldata_hex.trim().trim_start_matches("0x"))
+        .map_err(|e| anyhow::anyhow!("calldata encode failed: {e}"))?;
 
     let provider = ProviderBuilder::new().wallet(signer).connect_http(
         network
@@ -1533,7 +1624,10 @@ pub async fn submit_approve_agent_with_main(
         .estimate_gas(estimate_tx)
         .await
         .map_err(|e| anyhow::anyhow!("{}", map_send_error(&e.to_string(), main.trim(), network)))?;
-    let gas_limit = gas_limit.saturating_mul(125).saturating_div(100).max(100_000);
+    let gas_limit = gas_limit
+        .saturating_mul(125)
+        .saturating_div(100)
+        .max(100_000);
     // The Ethereum transaction nonce is the sequential account nonce
     // (NOT the millisecond timestamp — that lives only in the calldata
     // `initialNonce` field). A timestamp-sized nonce is trillions ahead of
@@ -1558,11 +1652,15 @@ pub async fn submit_approve_agent_with_main(
     let receipt = tokio::time::timeout(Duration::from_secs(30), pending.get_receipt())
         .await
         .map_err(|_| {
-            anyhow::anyhow!("PopDEX receipt timeout for {tx_hash} — check the explorer before retrying")
+            anyhow::anyhow!(
+                "PopDEX receipt timeout for {tx_hash} — check the explorer before retrying"
+            )
         })?
         .map_err(|e| anyhow::anyhow!("PopDEX receipt query failed for {tx_hash}: {e}"))?;
     if !receipt.status() {
-        anyhow::bail!("PopDEX transaction reverted: {tx_hash} — see the explorer for the error code");
+        anyhow::bail!(
+            "PopDEX transaction reverted: {tx_hash} — see the explorer for the error code"
+        );
     }
     Ok(tx_hash)
 }
@@ -1608,7 +1706,11 @@ pub async fn check_agent_approval(
         .timeout(Duration::from_secs(15))
         .build()
         .unwrap_or_default();
-    let url = format!("{}/api/v1/account/{}/agents", network.rest_base(), main.trim());
+    let url = format!(
+        "{}/api/v1/account/{}/agents",
+        network.rest_base(),
+        main.trim()
+    );
     let resp = client.get(&url).send().await?;
     if !resp.status().is_success() {
         anyhow::bail!("PopDEX REST error: {}", resp.status());
@@ -1654,8 +1756,14 @@ mod tests {
 
     #[test]
     fn network_parse() {
-        assert_eq!(PopDexNetwork::parse("mainnet"), Some(PopDexNetwork::Mainnet));
-        assert_eq!(PopDexNetwork::parse("TESTNET"), Some(PopDexNetwork::Testnet));
+        assert_eq!(
+            PopDexNetwork::parse("mainnet"),
+            Some(PopDexNetwork::Mainnet)
+        );
+        assert_eq!(
+            PopDexNetwork::parse("TESTNET"),
+            Some(PopDexNetwork::Testnet)
+        );
         assert_eq!(PopDexNetwork::parse("beta"), None);
         assert_eq!(PopDexNetwork::default(), PopDexNetwork::Mainnet);
         assert_eq!(PopDexNetwork::Mainnet.chain_id(), 2184);
@@ -1672,17 +1780,23 @@ mod tests {
         let wrong = Zeroizing::new(
             "0x0000000000000000000000000000000000000000000000000000000000000001".to_string(),
         );
-        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, main, agent, &wrong)
-            .await
-            .is_err());
+        assert!(
+            submit_approve_agent_with_main(PopDexNetwork::Testnet, main, agent, &wrong)
+                .await
+                .is_err()
+        );
         // Agent == main is refused even with a matching key shape.
         let bad = Zeroizing::new("0xnope".to_string());
-        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, main, main, &bad)
-            .await
-            .is_err());
-        assert!(submit_approve_agent_with_main(PopDexNetwork::Testnet, "nope", agent, &bad)
-            .await
-            .is_err());
+        assert!(
+            submit_approve_agent_with_main(PopDexNetwork::Testnet, main, main, &bad)
+                .await
+                .is_err()
+        );
+        assert!(
+            submit_approve_agent_with_main(PopDexNetwork::Testnet, "nope", agent, &bad)
+                .await
+                .is_err()
+        );
     }
 
     #[test]
@@ -1693,11 +1807,20 @@ mod tests {
             main,
             PopDexNetwork::Testnet,
         );
-        assert!(rewritten.contains("rejected the approval transaction"), "got: {rewritten}");
-        assert!(rewritten.contains("wrong network selected"), "got: {rewritten}");
+        assert!(
+            rewritten.contains("rejected the approval transaction"),
+            "got: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("wrong network selected"),
+            "got: {rewritten}"
+        );
         assert!(rewritten.contains("popdex.xyz/docs"), "got: {rewritten}");
         let passthrough = map_send_error("insufficient funds", main, PopDexNetwork::Mainnet);
-        assert!(passthrough.contains("insufficient funds"), "got: {passthrough}");
+        assert!(
+            passthrough.contains("insufficient funds"),
+            "got: {passthrough}"
+        );
         assert!(uninitialized_account_msg(main, PopDexNetwork::Mainnet).contains("mainnet"));
     }
 
@@ -1715,24 +1838,41 @@ mod tests {
         ] {
             assert!(cmd.contains(marker), "cast command missing {marker}");
         }
-        assert!(approve_agent_cast_command(PopDexNetwork::Mainnet, main, agent, 42)
-            .contains("app.popdex.xyz"));
+        assert!(
+            approve_agent_cast_command(PopDexNetwork::Mainnet, main, agent, 42)
+                .contains("app.popdex.xyz")
+        );
     }
 
     #[test]
     fn venue_symbol_mapping() {
-        assert_eq!(PopDexAdapter::venue_symbol("BTC-USDC"), "BTCUSDT");
+        assert_eq!(PopDexAdapter::venue_symbol("BTC-USDT"), "BTCUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("eth"), "ETHUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("QQQ"), "QQQUSDT");
+    }
+
+    #[test]
+    fn canonical_account_symbol_maps_bare_and_concatenated_rows() {
+        assert_eq!(
+            PopDexAdapter::canonical_account_symbol("BTC").unwrap(),
+            "BTC-USDT"
+        );
+        assert_eq!(
+            PopDexAdapter::canonical_account_symbol("ETHUSDT").unwrap(),
+            "ETH-USDT"
+        );
+        assert!(PopDexAdapter::canonical_account_symbol("BTC-USDC").is_err());
     }
 
     #[test]
     fn cross_quoted_symbols_fail_closed() {
         // Regression: `BTC-XRP` used to resolve to the BTCUSDT book and price
         // the middle triangle leg off the wrong market (+3800 BPS phantoms).
-        assert!(PopDexAdapter::require_usd_quote("BTC-USDC").is_ok());
+        assert!(PopDexAdapter::require_usd_quote("BTC-USDT").is_ok());
         assert!(PopDexAdapter::require_usd_quote("XRP-USDT").is_ok());
         assert!(PopDexAdapter::require_usd_quote("eth").is_ok());
+        assert!(PopDexAdapter::require_usd_quote("BTC-USD").is_err());
+        assert!(PopDexAdapter::require_usd_quote("BTC-USDC").is_err());
         assert!(PopDexAdapter::require_usd_quote("BTC-XRP").is_err());
         assert!(PopDexAdapter::require_usd_quote("ETH-BTC").is_err());
     }
@@ -1741,7 +1881,9 @@ mod tests {
     fn credentials_require_delegated_agent() {
         let a = PopDexAdapter::new(None);
         assert!(!a.has_live_credentials());
-        assert!(a.update_credentials(None, Some("not-an-address".into()), None).is_err());
+        assert!(a
+            .update_credentials(None, Some("not-an-address".into()), None)
+            .is_err());
         // Scalar-1 agent key derives 0x7e5f…; binding it against itself
         // (i.e. the MAIN key) must be refused.
         let agent_key = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -1793,7 +1935,10 @@ mod tests {
 
     #[test]
     fn wad_conversions() {
-        assert_eq!(dec_to_wad(dec!(81289)).unwrap(), U256::from(81_289u64) * U256::from(1_000_000_000_000_000_000u64));
+        assert_eq!(
+            dec_to_wad(dec!(81289)).unwrap(),
+            U256::from(81_289u64) * U256::from(1_000_000_000_000_000_000u64)
+        );
         assert_eq!(
             dec_to_wad(Decimal::from_str("0.008").unwrap()).unwrap(),
             U256::from(8_000_000_000_000_000u64)
@@ -1801,25 +1946,32 @@ mod tests {
         assert_eq!(dec_to_wad(dec!(0.0)).unwrap(), U256::ZERO);
         assert!(dec_to_wad(dec!(-1.0)).is_err());
         // Dust past 18dp truncates rather than errors.
-        assert_eq!(dec_to_wad(Decimal::from_str("1.0000000000000000009").unwrap()).unwrap(), U256::from(1_000_000_000_000_000_000u64));
+        assert_eq!(
+            dec_to_wad(Decimal::from_str("1.0000000000000000009").unwrap()).unwrap(),
+            U256::from(1_000_000_000_000_000_000u64)
+        );
     }
 
     #[test]
     fn client_oid_shapes() {
-        let r = random_client_oid();
-        assert_ne!(r, [0u8; 32]);
         let e = client_oid_bytes("");
         assert_ne!(e, [0u8; 32]);
         let s = client_oid_bytes("abc");
         assert_eq!(&s[..3], b"abc");
         assert!(s[3..].iter().all(|&x| x == 0));
+        let uuid = client_oid_bytes("12345678-1234-1234-1234-123456789abc");
+        let expect =
+            alloy::primitives::keccak256(b"12345678-1234-1234-1234-123456789abc".as_slice());
+        assert_eq!(&uuid[..], expect.as_slice());
     }
 
     #[test]
     fn order_create_topic_matches_sha3() {
         use sha3::{Digest, Keccak256};
         let mut h = Keccak256::new();
-        h.update(b"OrderCreate(address,uint16,uint128,bytes32,int256,int256,int256,uint8,bool,uint32)");
+        h.update(
+            b"OrderCreate(address,uint16,uint128,bytes32,int256,int256,int256,uint8,bool,uint32)",
+        );
         let expect = B256::from_slice(&h.finalize());
         assert_eq!(order_create_topic(), expect);
     }
@@ -1830,8 +1982,10 @@ mod tests {
         let account = "0x1111111111111111111111111111111111111111";
         let account_topic = format!("0x000000000000000000000000{}", &account[2..]);
         let symbol_topic = format!("0x{:064x}", 20000u16);
+        let client_oid = client_oid_bytes("synthetic-client");
         let mut data = format!("{:064x}", 12345u128);
-        data.push_str(&"00".repeat(32 * 8));
+        data.push_str(&hex::encode(client_oid));
+        data.push_str(&"00".repeat(32 * 7));
         let receipt = TxReceipt {
             hash: "0xabc".into(),
             logs: vec![ReceiptLog {
@@ -1841,19 +1995,25 @@ mod tests {
             }],
         };
         assert_eq!(
-            decode_order_create(&receipt, account, 20000).unwrap(),
+            decode_order_create(&receipt, account, 20000, &client_oid).unwrap(),
             Some("12345".to_string())
         );
-        // Wrong symbol → no match, never an invented id.
-        assert_eq!(decode_order_create(&receipt, account, 20001).unwrap(), None);
+        // Wrong symbol/client id → no match, never an invented id.
+        assert_eq!(
+            decode_order_create(&receipt, account, 20001, &client_oid).unwrap(),
+            None
+        );
+        assert_eq!(
+            decode_order_create(&receipt, account, 20000, &client_oid_bytes("other")).unwrap(),
+            None
+        );
     }
 
     #[test]
     fn envelope_rejects_non_200() {
-        let env: Envelope<Vec<TickerRow>> = serde_json::from_str(
-            r#"{"code":"11100","msg":"Account does not exist","data":null}"#,
-        )
-        .unwrap();
+        let env: Envelope<Vec<TickerRow>> =
+            serde_json::from_str(r#"{"code":"11100","msg":"Account does not exist","data":null}"#)
+                .unwrap();
         assert_ne!(env.code.trim(), "200");
     }
 
@@ -1881,7 +2041,9 @@ mod tests {
         let (addr, key) = generate_agent_keypair().unwrap();
         assert!(is_valid_evm_address(&addr));
         let k = key.trim();
-        assert!(k.len() == 66 && k.starts_with("0x") && k[2..].chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(
+            k.len() == 66 && k.starts_with("0x") && k[2..].chars().all(|c| c.is_ascii_hexdigit())
+        );
         // Two generations must differ (fresh randomness).
         let (addr2, _) = generate_agent_keypair().unwrap();
         assert_ne!(addr, addr2);
@@ -1913,7 +2075,9 @@ mod tests {
     #[test]
     fn approve_eip681_shape() {
         let u = approve_agent_eip681("0xMAIN", "0xAGENT", 42, 2184);
-        assert!(u.starts_with("ethereum:0x0000000000000000000000000000000000001008@2184/approveAgent?"));
+        assert!(
+            u.starts_with("ethereum:0x0000000000000000000000000000000000001008@2184/approveAgent?")
+        );
         assert!(u.contains("uint256=42"));
     }
 

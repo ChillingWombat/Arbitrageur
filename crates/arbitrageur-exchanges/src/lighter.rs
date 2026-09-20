@@ -1,16 +1,16 @@
-use std::collections::HashMap;
-use std::str::FromStr;
-use async_trait::async_trait;
-use chrono::Utc;
-use reqwest::Client;
+use crate::rate_limiter::AccountRequestCoordinator;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
+use async_trait::async_trait;
+use chrono::Utc;
 use parking_lot::RwLock;
+use reqwest::Client;
+use std::collections::HashMap;
+use std::str::FromStr;
 use zeroize::Zeroizing;
 
 /// Lighter zk-Rollup DEX adapter.
@@ -59,7 +59,8 @@ impl LighterAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -97,18 +98,16 @@ impl LighterAdapter {
         if account == 0 {
             anyhow::bail!("Lighter live orders require a non-zero account index");
         }
-        let key_idx = self
-            .api_key_index
-            .read()
-            .ok_or_else(|| anyhow::anyhow!("Lighter live orders require an API Key Index (2-254)"))?;
+        let key_idx = self.api_key_index.read().ok_or_else(|| {
+            anyhow::anyhow!("Lighter live orders require an API Key Index (2-254)")
+        })?;
         if key_idx > 254 {
             anyhow::bail!("Lighter API Key Index must be 0-254");
         }
-        let key = self
-            .api_key_private_key
-            .read()
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Lighter live orders require the API private key"))?;
+        let key =
+            self.api_key_private_key.read().clone().ok_or_else(|| {
+                anyhow::anyhow!("Lighter live orders require the API private key")
+            })?;
         if key.trim().is_empty() {
             anyhow::bail!("Lighter live orders require a non-empty API private key");
         }
@@ -129,7 +128,13 @@ impl LighterAdapter {
         let resp = self.client.get(&url).send().await?;
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(256).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(256)
+                .collect();
             anyhow::bail!("Lighter nextNonce failed: {} {}", status, snippet);
         }
         let v: serde_json::Value = resp.json().await?;
@@ -141,7 +146,10 @@ impl LighterAdapter {
     /// Submit a signed L2 transaction exactly like the official Python SDK:
     /// `POST /api/v1/sendTx` as `application/x-www-form-urlencoded` with
     /// `tx_type` + `tx_info`. `code == 200` is the only accepted outcome.
-    async fn submit_signed_tx(&self, signed: &crate::lighter_signer::SignedLighterTx) -> anyhow::Result<String> {
+    async fn submit_signed_tx(
+        &self,
+        signed: &crate::lighter_signer::SignedLighterTx,
+    ) -> anyhow::Result<String> {
         let body = format!(
             "tx_type={}&tx_info={}",
             signed.tx_type,
@@ -150,7 +158,10 @@ impl LighterAdapter {
         let resp = self
             .client
             .post(format!("{}/api/v1/sendTx", self.base_url))
-            .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
             .body(body)
             .send()
             .await?;
@@ -181,7 +192,13 @@ impl LighterAdapter {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("Lighter edge challenge (WAF) on {} — cooling down", path);
@@ -220,7 +237,13 @@ impl ExchangeAdapter for LighterAdapter {
         if !resp.status().is_success() {
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("Lighter ping hit edge challenge — cooling down");
@@ -243,16 +266,23 @@ impl ExchangeAdapter for LighterAdapter {
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let res = self.get_json("/api/v1/orderBookDetails").await?;
-        let details = res.get("order_book_details").and_then(|d| d.as_array()).ok_or_else(|| {
-            anyhow::anyhow!("Missing order_book_details in Lighter response")
-        })?;
+        let details = res
+            .get("order_book_details")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
 
         let mut markets = Vec::new();
         for item in details {
             let symbol_str = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
             let market_id = item.get("market_id").and_then(|m| m.as_u64()).unwrap_or(0);
-            let price_dec = item.get("price_decimals").and_then(|p| p.as_u64()).unwrap_or(4) as u32;
-            let size_dec = item.get("size_decimals").and_then(|s| s.as_u64()).unwrap_or(2) as u32;
+            let price_dec = item
+                .get("price_decimals")
+                .and_then(|p| p.as_u64())
+                .unwrap_or(4) as u32;
+            let size_dec = item
+                .get("size_decimals")
+                .and_then(|s| s.as_u64())
+                .unwrap_or(2) as u32;
 
             let is_spot = item
                 .get("market_type")
@@ -349,8 +379,8 @@ impl ExchangeAdapter for LighterAdapter {
         let parts: Vec<&str> = clean.split('-').collect();
         if parts.len() >= 2 {
             let quote = parts[1];
-            if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("USD") {
-                anyhow::bail!("Lighter markets are quoted in USDC/USD; '{symbol}' is not supported");
+            if !quote.eq_ignore_ascii_case("USDC") {
+                anyhow::bail!("Lighter markets are quoted in USDC; '{symbol}' is not supported");
             }
         }
         let coin = parts.first().copied().unwrap_or("").to_uppercase();
@@ -392,9 +422,10 @@ impl ExchangeAdapter for LighterAdapter {
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let res = self.get_json("/api/v1/orderBookDetails").await?;
-        let details = res.get("order_book_details").and_then(|d| d.as_array()).ok_or_else(|| {
-            anyhow::anyhow!("Missing order_book_details in Lighter response")
-        })?;
+        let details = res
+            .get("order_book_details")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?;
 
         fn as_decimal(v: &serde_json::Value) -> Option<Decimal> {
             v.as_str()
@@ -408,6 +439,11 @@ impl ExchangeAdapter for LighterAdapter {
             if symbol_str.is_empty() {
                 continue;
             }
+            // Only perp rows feed the perp-ticker volume filters; spot rows
+            // share the base name and would inflate the wrong market class.
+            if item.get("market_type").and_then(|t| t.as_str()) != Some("perp") {
+                continue;
+            }
             let quote_vol = item.get("daily_quote_token_volume").and_then(as_decimal);
             let base_vol = item.get("daily_base_token_volume").and_then(as_decimal);
             let last_px = item.get("last_trade_price").and_then(as_decimal);
@@ -416,7 +452,8 @@ impl ExchangeAdapter for LighterAdapter {
                 _ => None,
             });
             if let Some(v) = vol {
-                volumes.insert(symbol_str.to_string(), v);
+                // Canonical BASE-QUOTE keys match what hub consumers look up.
+                volumes.insert(format!("{symbol_str}-USDC"), v);
             }
         }
         Ok(volumes)
@@ -447,68 +484,119 @@ impl ExchangeAdapter for LighterAdapter {
         };
 
         let account = data.get("account").or_else(|| {
-            data.get("accounts").and_then(|a| a.as_array()).and_then(|arr| arr.first())
+            data.get("accounts")
+                .and_then(|a| a.as_array())
+                .and_then(|arr| arr.first())
         });
 
         let total_val = account
-            .and_then(|a| a.get("total_asset_value").or_else(|| a.get("portfolio_value")))
+            .and_then(|a| {
+                a.get("total_asset_value")
+                    .or_else(|| a.get("portfolio_value"))
+            })
             .and_then(|v| v.as_str())
             .and_then(|s| Decimal::from_str(s).ok())
             .unwrap_or(dec!(0));
 
         let free_val = account
-            .and_then(|a| a.get("free_collateral").or_else(|| a.get("available_balance")))
+            .and_then(|a| {
+                a.get("free_collateral")
+                    .or_else(|| a.get("available_balance"))
+            })
             .and_then(|v| v.as_str())
             .and_then(|s| Decimal::from_str(s).ok())
             .unwrap_or(total_val);
 
-        let mut positions = Vec::new();
-        if let Some(acc) = account {
-            if let Some(pos_list) = acc.get("positions").and_then(|p| p.as_array()) {
-                for p in pos_list {
-                    let sym = p.get("symbol").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
-                    // Lighter `position` is unsigned; direction comes from `sign` (1/-1).
-                    let sz_str = p.get("position").and_then(|s| s.as_str()).unwrap_or("0");
-                    let sz = Decimal::from_str(sz_str).unwrap_or(dec!(0));
-                    let sign = p.get("sign").and_then(|s| s.as_i64()).unwrap_or(1);
-                    let parse_str = |key: &str| {
-                        p.get(key)
-                            .and_then(|v| v.as_str())
-                            .and_then(|s| Decimal::from_str(s).ok())
-                    };
-                    let entry_px = parse_str("avg_entry_price").unwrap_or(dec!(0));
-                    let position_value = parse_str("position_value").unwrap_or(dec!(0));
-                    let allocated = parse_str("allocated_margin").unwrap_or(dec!(0));
-
-                    if sz != dec!(0) {
-                        let qty = sz.abs();
-                        positions.push(Position {
-                            venue: self.venue_id.clone(),
-                            symbol: sym.to_string(),
-                            side: if sign < 0 { Side::Sell } else { Side::Buy },
-                            quantity: qty,
-                            entry_price: entry_px,
-                            mark_price: if position_value > dec!(0) {
-                                position_value / qty
-                            } else {
-                                entry_px
-                            },
-                            unrealized_pnl: parse_str("unrealized_pnl").unwrap_or(dec!(0)),
-                            realized_pnl: parse_str("realized_pnl").unwrap_or(dec!(0)),
-                            liquidation_price: parse_str("liquidation_price").filter(|p| *p > dec!(0)),
-                            leverage: if allocated > dec!(0) {
-                                position_value / allocated
-                            } else {
-                                dec!(0)
-                            },
-                            initial_margin: allocated,
-                            // Lighter does not expose maintenance margin; using allocated
-                            // (initial) margin overstates it toward earlier risk warnings.
-                            maintenance_margin: allocated,
-                            updated_at: Utc::now(),
-                        });
-                    }
+        let pos_list = account
+            .and_then(|acc| acc.get("positions"))
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut market_symbols = HashMap::new();
+        if !pos_list.is_empty() {
+            let details = self.get_json("/api/v1/orderBookDetails").await?;
+            for item in details
+                .get("order_book_details")
+                .and_then(|d| d.as_array())
+                .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?
+            {
+                let Some(market_id) = item.get("market_id").and_then(|m| m.as_u64()) else {
+                    continue;
+                };
+                let base = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                if base.is_empty() {
+                    continue;
                 }
+                let is_spot = item
+                    .get("market_type")
+                    .and_then(|t| t.as_str())
+                    .map(|t| t.eq_ignore_ascii_case("spot"))
+                    .unwrap_or(false);
+                market_symbols.insert(
+                    market_id,
+                    if is_spot {
+                        format!("{}-SPOT", base.to_uppercase())
+                    } else {
+                        format!("{}-USDC", base.to_uppercase())
+                    },
+                );
+            }
+        }
+
+        let mut positions = Vec::new();
+        for p in &pos_list {
+            let raw_sym = p
+                .get("symbol")
+                .and_then(|s| s.as_str())
+                .unwrap_or("UNKNOWN");
+            let market_id = p
+                .get("market_id")
+                .or_else(|| p.get("market_index"))
+                .and_then(|m| m.as_u64().or_else(|| m.as_str()?.parse().ok()));
+            let sym = market_id
+                .and_then(|id| market_symbols.get(&id))
+                .map(String::as_str)
+                .unwrap_or(raw_sym);
+            // Lighter `position` is unsigned; direction comes from `sign` (1/-1).
+            let sz_str = p.get("position").and_then(|s| s.as_str()).unwrap_or("0");
+            let sz = Decimal::from_str(sz_str).unwrap_or(dec!(0));
+            let sign = p.get("sign").and_then(|s| s.as_i64()).unwrap_or(1);
+            let parse_str = |key: &str| {
+                p.get(key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| Decimal::from_str(s).ok())
+            };
+            let entry_px = parse_str("avg_entry_price").unwrap_or(dec!(0));
+            let position_value = parse_str("position_value").unwrap_or(dec!(0));
+            let allocated = parse_str("allocated_margin").unwrap_or(dec!(0));
+
+            if sz != dec!(0) {
+                let qty = sz.abs();
+                positions.push(Position {
+                    venue: self.venue_id.clone(),
+                    symbol: sym.to_string(),
+                    side: if sign < 0 { Side::Sell } else { Side::Buy },
+                    quantity: qty,
+                    entry_price: entry_px,
+                    mark_price: if position_value > dec!(0) {
+                        position_value / qty
+                    } else {
+                        entry_px
+                    },
+                    unrealized_pnl: parse_str("unrealized_pnl").unwrap_or(dec!(0)),
+                    realized_pnl: parse_str("realized_pnl").unwrap_or(dec!(0)),
+                    liquidation_price: parse_str("liquidation_price").filter(|p| *p > dec!(0)),
+                    leverage: if allocated > dec!(0) {
+                        position_value / allocated
+                    } else {
+                        dec!(0)
+                    },
+                    initial_margin: allocated,
+                    // Lighter does not expose maintenance margin; using allocated
+                    // (initial) margin overstates it toward earlier risk warnings.
+                    maintenance_margin: allocated,
+                    updated_at: Utc::now(),
+                });
             }
         }
 
@@ -517,7 +605,11 @@ impl ExchangeAdapter for LighterAdapter {
             equity: total_val,
             free_margin: free_val,
             maintenance_margin: total_val - free_val,
-            margin_usage_pct: if total_val > dec!(0) { ((total_val - free_val) / total_val) * dec!(100) } else { dec!(0) },
+            margin_usage_pct: if total_val > dec!(0) {
+                ((total_val - free_val) / total_val) * dec!(100)
+            } else {
+                dec!(0)
+            },
             balances: vec![Balance {
                 venue: self.venue_id.clone(),
                 currency: "USD".to_string(),
@@ -528,6 +620,39 @@ impl ExchangeAdapter for LighterAdapter {
             positions,
             timestamp: Utc::now(),
         })
+    }
+
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        let symbol = position
+            .symbol
+            .trim()
+            .to_uppercase()
+            .replace(['/', ':'], "-");
+        if symbol.ends_with("-SPOT") {
+            position.symbol = symbol;
+        } else if let Some(base) = symbol.strip_suffix("-PERP") {
+            if base.is_empty() {
+                anyhow::bail!("Lighter account symbol has an empty base");
+            }
+            position.symbol = format!("{base}-USDC");
+        } else if let Some(base) = symbol.strip_suffix("-USDC") {
+            if base.is_empty() {
+                anyhow::bail!("Lighter account symbol has an empty base");
+            }
+            position.symbol = symbol;
+        } else if symbol.contains('-') {
+            anyhow::bail!(
+                "Lighter account symbol '{}' is not a USDC perp or SPOT market",
+                position.symbol
+            );
+        } else {
+            anyhow::bail!(
+                "Lighter account symbol '{}' does not identify spot vs perpetual exposure",
+                position.symbol
+            );
+        }
+        Ok(Some(position))
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -554,13 +679,17 @@ impl ExchangeAdapter for LighterAdapter {
         if order.side != Side::Buy && order.side != Side::Sell {
             anyhow::bail!("Lighter order side must be buy or sell");
         }
+        if order.client_order_id.trim().is_empty() {
+            anyhow::bail!("Lighter order requires a non-empty client_order_id");
+        }
         let is_ask = order.side == Side::Sell;
 
         // Market id + fixed-point scales come from the same payload so a
         // mid-update market list cannot mix an id with another market's
         // decimals (which would silently move the price ~10x per digit).
         let details = self.get_json("/api/v1/orderBookDetails").await?;
-        let (market_id, price_dec, size_dec) = resolve_market_order_params(&details, &order.symbol)?;
+        let (market_id, price_dec, size_dec) =
+            resolve_market_order_params(&details, &order.symbol)?;
 
         let base_amount = scale_lighter_amount(order.quantity, size_dec, &order.symbol)?;
         let (l2_type, tif, expiry_ms, limit_px) = match order.order_type {
@@ -574,9 +703,9 @@ impl ExchangeAdapter for LighterAdapter {
                 (1u8, 0u8, 0i64, worst_px)
             }
             OrderType::Limit | OrderType::ImmediateOrCancel => {
-                let px = order.price.ok_or_else(|| {
-                    anyhow::anyhow!("Lighter limit orders require a price")
-                })?;
+                let px = order
+                    .price
+                    .ok_or_else(|| anyhow::anyhow!("Lighter limit orders require a price"))?;
                 if px <= dec!(0) {
                     anyhow::bail!("Lighter order limit price must be positive");
                 }
@@ -596,9 +725,9 @@ impl ExchangeAdapter for LighterAdapter {
                 (0u8, tif, expiry_ms, px)
             }
             OrderType::PostOnly => {
-                let px = order.price.ok_or_else(|| {
-                    anyhow::anyhow!("Lighter post-only orders require a price")
-                })?;
+                let px = order
+                    .price
+                    .ok_or_else(|| anyhow::anyhow!("Lighter post-only orders require a price"))?;
                 if px <= dec!(0) {
                     anyhow::bail!("Lighter order limit price must be positive");
                 }
@@ -608,8 +737,7 @@ impl ExchangeAdapter for LighterAdapter {
         let price = scale_lighter_price(limit_px, price_dec, order.side, &order.symbol)?;
 
         let nonce = self.fetch_next_nonce(account, api_key_index).await?;
-        let client_order_index =
-            lighter_client_order_index(&order.client_order_id);
+        let client_order_index = lighter_client_order_index(&order.client_order_id);
         let params = crate::lighter_signer::CreateOrderParams {
             market_index: market_id as i64,
             client_order_index,
@@ -684,7 +812,10 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+        anyhow::bail!(
+            "Leverage updates are not implemented for venue {}",
+            self.name()
+        )
     }
 }
 
@@ -759,7 +890,12 @@ fn resolve_market_order_params(
             .and_then(|x| x.as_u64())
             .ok_or_else(|| anyhow::anyhow!("Lighter market {} lacks '{}'", market_id, key))?;
         if v > 18 {
-            anyhow::bail!("Lighter market {} '{}' scale {} is absurd", market_id, key, v);
+            anyhow::bail!(
+                "Lighter market {} '{}' scale {} is absurd",
+                market_id,
+                key,
+                v
+            );
         }
         Ok(v as u32)
     };
@@ -793,8 +929,10 @@ pub fn scale_lighter_price(
     Ok(rounded.to_string().parse::<u32>().unwrap_or(0))
 }
 
-/// Scale a human size to the L2 integer (`human x 10^size_decimals`),
-/// always rounding down so the order never exceeds the requested size.
+/// Scale a human size to the L2 integer (`human x 10^size_decimals`).
+/// Fail closed on sub-integer dust: silently flooring a hedge or close can
+/// leave residual venue exposure while the local ledger believes the full
+/// quantity was submitted.
 pub fn scale_lighter_amount(
     human: Decimal,
     size_decimals: u32,
@@ -807,11 +945,19 @@ pub fn scale_lighter_amount(
         anyhow::bail!("Lighter size scale {} is absurd", size_decimals);
     }
     const MAX_BASE_AMOUNT: i64 = (1 << 48) - 1;
-    let scaled = (human * Decimal::from(10u64.pow(size_decimals))).floor();
+    let scaled = human * Decimal::from(10u64.pow(size_decimals));
+    if !scaled.fract().is_zero() {
+        anyhow::bail!(
+            "Lighter quantity {} for '{}' is not representable at size scale {} without rounding",
+            human,
+            symbol,
+            size_decimals
+        );
+    }
     if scaled < dec!(1) || scaled > Decimal::from(MAX_BASE_AMOUNT) {
         anyhow::bail!("Lighter quantity {} for '{}' out of range", human, symbol);
     }
-    Ok(scaled.to_string().parse::<i64>().unwrap_or(0))
+    Ok(scaled.trunc().to_string().parse::<i64>().unwrap_or(0))
 }
 
 /// Deterministic L2 client order index (1..=2^48-1) from the hex/uuid client
@@ -849,7 +995,11 @@ pub fn market_limit_price(
         Side::Sell => book.bids.iter().map(|l| (l.price, l.size)).collect(),
     };
     if levels.is_empty() {
-        anyhow::bail!("No Lighter {} book to price a market order for '{}'", side_name(side), symbol);
+        anyhow::bail!(
+            "No Lighter {} book to price a market order for '{}'",
+            side_name(side),
+            symbol
+        );
     }
     match side {
         Side::Buy => levels.sort_by_key(|l| l.0),
@@ -907,8 +1057,7 @@ pub fn parse_send_tx_result(
     body: &str,
     expected_tx_hash: &str,
 ) -> anyhow::Result<String> {
-    let v: serde_json::Value =
-        serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
     let code = v.get("code").and_then(|c| c.as_i64());
     if http_ok && code == Some(200) {
         let tx_hash = v
@@ -920,7 +1069,9 @@ pub fn parse_send_tx_result(
             anyhow::bail!("Lighter sendTx accepted but returned no tx_hash");
         }
         if tx_hash != expected_tx_hash {
-            anyhow::bail!("Lighter sendTx returned a different tx_hash than signed — refusing to track");
+            anyhow::bail!(
+                "Lighter sendTx returned a different tx_hash than signed — refusing to track"
+            );
         }
         return Ok(tx_hash);
     }
@@ -986,8 +1137,8 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
     let parts: Vec<&str> = lookup.split('-').collect();
     if parts.len() >= 2 {
         let quote = parts[1];
-        if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("USD") {
-            anyhow::bail!("Lighter markets are quoted in USDC/USD; '{symbol}' is not supported");
+        if !quote.eq_ignore_ascii_case("USDC") {
+            anyhow::bail!("Lighter markets are quoted in USDC; '{symbol}' is not supported");
         }
     }
     let base = parts.first().copied().unwrap_or(lookup.as_str());
@@ -1017,10 +1168,7 @@ fn resolve_market_id(details: &serde_json::Value, symbol: &str) -> anyhow::Resul
 /// Pure parse of Lighter `/api/v1/funding-rates` rows into venue-owned
 /// [`FundingRate`] prints. Split out for unit testing: the venue `rate` is
 /// an 8-hour print, hence `interval_hours = 8`.
-fn parse_lighter_funding_rates(
-    rows: &[serde_json::Value],
-    venue_id: &VenueId,
-) -> Vec<FundingRate> {
+fn parse_lighter_funding_rates(rows: &[serde_json::Value], venue_id: &VenueId) -> Vec<FundingRate> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for row in rows {
@@ -1143,6 +1291,7 @@ mod tests {
             { "symbol": "SOL", "market_id": 2, "market_type": "perp" }
         ]));
         assert_eq!(resolve_market_id(&d, "BTC-USDC").unwrap(), 1);
+        assert!(resolve_market_id(&d, "BTC-USD").is_err());
         assert!(resolve_market_id(&d, "BTC-SOL").is_err());
         assert!(resolve_market_id(&d, "BTC-ETH").is_err());
     }
@@ -1170,9 +1319,18 @@ mod tests {
 
     #[test]
     fn chain_id_mapping() {
-        assert_eq!(lighter_chain_id_for_url("https://mainnet.zklighter.elliot.ai"), 304);
-        assert_eq!(lighter_chain_id_for_url("https://testnet.zklighter.elliot.ai"), 300);
-        assert_eq!(lighter_chain_id_for_url("https://api.rh.lighter.xyz"), 466324);
+        assert_eq!(
+            lighter_chain_id_for_url("https://mainnet.zklighter.elliot.ai"),
+            304
+        );
+        assert_eq!(
+            lighter_chain_id_for_url("https://testnet.zklighter.elliot.ai"),
+            300
+        );
+        assert_eq!(
+            lighter_chain_id_for_url("https://api.rh.lighter.xyz"),
+            466324
+        );
         assert_eq!(lighter_chain_id_for_url("https://example.com"), 304);
     }
 
@@ -1192,9 +1350,10 @@ mod tests {
     }
 
     #[test]
-    fn scale_amount_floors() {
-        // 3dp market: 1.2349 -> 1234 (never rounds the size up).
-        assert_eq!(scale_lighter_amount(dec!(1.2349), 3, "T").unwrap(), 1234);
+    fn scale_amount_requires_exact_size_precision() {
+        // 3dp market: 1.234 -> 1234; sub-lot dust is rejected, never floored.
+        assert_eq!(scale_lighter_amount(dec!(1.234), 3, "T").unwrap(), 1234);
+        assert!(scale_lighter_amount(dec!(1.2349), 3, "T").is_err());
         assert!(scale_lighter_amount(dec!(0.0001), 3, "T").is_err());
         assert!(scale_lighter_amount(dec!(0), 3, "T").is_err());
     }
@@ -1282,5 +1441,59 @@ mod tests {
             err.to_string(),
             "Lighter account fetch requires an account index"
         );
+    }
+    #[test]
+    fn account_position_for_matches_labeled_market_and_rejects_ambiguity() {
+        let adapter = LighterAdapter::new(None, None, None);
+        let mk_pos = |symbol: &str| Position {
+            venue: VenueId::new("lighter"),
+            symbol: symbol.to_string(),
+            side: Side::Buy,
+            quantity: dec!(0.5),
+            entry_price: dec!(50000),
+            mark_price: dec!(51000),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(1),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: Utc::now(),
+        };
+        let mut account = AccountSnapshot {
+            venue: VenueId::new("lighter"),
+            equity: dec!(100),
+            free_margin: dec!(100),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: vec![mk_pos("BTC-USDC"), mk_pos("ETH-SPOT")],
+            timestamp: Utc::now(),
+        };
+        let btc = adapter
+            .account_position_for(&account, "BTC-USDC")
+            .unwrap()
+            .expect("perp label should resolve");
+        assert_eq!(btc.symbol, "BTC-USDC");
+        assert!(adapter
+            .account_position_for(&account, "BTC-SPOT")
+            .unwrap()
+            .is_none());
+        let eth = adapter
+            .account_position_for(&account, "ETH-SPOT")
+            .unwrap()
+            .expect("spot label should resolve");
+        assert_eq!(eth.symbol, "ETH-SPOT");
+
+        account.positions = vec![mk_pos("BTC-USDC"), mk_pos("BTC-USDC")];
+        assert!(adapter.account_position_for(&account, "BTC-USDC").is_err());
+
+        account.positions = vec![mk_pos("BTC")];
+        let err = adapter
+            .account_position_for(&account, "BTC-USDC")
+            .expect_err("unlabelled same-base position must not be treated as flat or perp");
+        assert!(err
+            .to_string()
+            .contains("does not identify spot vs perpetual exposure"));
     }
 }

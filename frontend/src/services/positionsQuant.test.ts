@@ -20,8 +20,8 @@ const pos = (
   symbol,
   signalCount: 1,
   venues: [
-    { venue: "hyperliquid", netQty: 1 },
-    { venue: "lighter", netQty: -1 },
+    { venue: "hyperliquid", symbol, netQty: 1 },
+    { venue: "lighter", symbol, netQty: -1 },
   ],
   expectedNetUsd: null,
   unrealizedPnlUsd: pnl,

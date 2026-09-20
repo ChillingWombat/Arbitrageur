@@ -99,7 +99,7 @@ Example:
 - Lighter normalized hourly rate = $0.01\% / 8 = 0.0000125$
 - $\Delta r = 0.0003 - 0.0000125 = 0.0002875$ / hour (APR = $251.8\%$)
 - $T_{\text{breakeven}} = \frac{0.0007}{0.0002875} \approx 2.43\text{ hours}$
-After only 2.43 hours, all transaction friction is amortized, and the trade generates pure risk-free yield.
+After only 2.43 hours, the modelled transaction friction is amortized. This is a carry estimate, not “risk-free” yield: funding can flip, margin/liquidation buffers can bind, either leg can fail or depeg, fees can change, and venue/counterparty risk remains.
 
 ---
 
@@ -169,7 +169,7 @@ Let Venue $A$ (Polymarket) and Venue $B$ (Kalshi) trade contracts on the identic
 - Strategy 2: Buy YES on Venue $B$ at $P_{B,\text{yes}}$, Buy NO on Venue $A$ at $P_{A,\text{no}}$.
   $$\Pi_{\text{net}} = \$1.00 - (P_{B,\text{yes}} + P_{A,\text{no}}) - \text{Fees}$$
 
-If either $\Pi_{\text{net}} > 0$, risk-free synthetic arbitrage is guaranteed at settlement regardless of which outcome occurs!
+If either $\Pi_{\text{net}} > 0$, the two contracts create a theoretical synthetic payoff edge **only if they settle the same event under materially identical rules**. Real parity still carries settlement-definition, oracle/resolution, liquidity, execution, custody, fee, and counterparty risk, so no return is guaranteed.
 
 ---
 

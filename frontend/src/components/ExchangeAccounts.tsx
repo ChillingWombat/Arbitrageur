@@ -407,7 +407,19 @@ export const VenueBalancePanel: React.FC<{
 
       {bal?.status === "NO_CREDENTIALS" && (
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 flex items-start space-x-2">
-          <span>No live API credentials configured. Add credentials in the accounts section below and unlock the vault to view live balances.</span>
+          <span>{bal.recommended_action || "No live API credentials configured. Add credentials in the accounts section below and unlock the vault to view live balances."}</span>
+        </div>
+      )}
+
+      {bal?.status === "LOCKED" && (
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 flex items-start space-x-2">
+          <span>{bal.recommended_action || "Vault is locked — unlock to read live balances."}</span>
+        </div>
+      )}
+
+      {bal?.status === "STALE" && bal?.recommended_action && (
+        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-500 flex items-start space-x-2">
+          <span>{bal.recommended_action}</span>
         </div>
       )}
 

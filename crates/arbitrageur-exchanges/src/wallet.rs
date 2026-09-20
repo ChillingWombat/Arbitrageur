@@ -24,9 +24,9 @@
 //!   venue's RFQ/contract flow is implemented and audited. Use
 //!   [`wallet_execution_unavailable`] for the standard refusal message.
 
-use k256::ecdsa::{RecoveryId, SigningKey};
 #[cfg(test)]
 use k256::ecdsa::VerifyingKey;
+use k256::ecdsa::{RecoveryId, SigningKey};
 use sha3::{Digest, Keccak256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -176,7 +176,10 @@ mod tests {
     fn rejects_bad_keys_without_retaining() {
         assert!(EvmWalletSigner::from_hex("not-hex").is_err());
         assert!(EvmWalletSigner::from_hex("0x1234").is_err());
-        assert!(EvmWalletSigner::from_hex("0x0000000000000000000000000000000000000000000000000000000000000000").is_err());
+        assert!(EvmWalletSigner::from_hex(
+            "0x0000000000000000000000000000000000000000000000000000000000000000"
+        )
+        .is_err());
     }
 
     #[test]
@@ -193,13 +196,19 @@ mod tests {
         buf.extend_from_slice(msg);
         let digest = keccak256(&buf);
         let recid = RecoveryId::from_byte(sig[64] - 27).unwrap();
-        let recovered =
-            VerifyingKey::recover_from_prehash(&digest, &k256::ecdsa::Signature::from_slice(&sig[..64]).unwrap(), recid)
-                .unwrap();
+        let recovered = VerifyingKey::recover_from_prehash(
+            &digest,
+            &k256::ecdsa::Signature::from_slice(&sig[..64]).unwrap(),
+            recid,
+        )
+        .unwrap();
         let pt = recovered.to_encoded_point(false);
         let mut raw = [0u8; 64];
         raw.copy_from_slice(&pt.as_bytes()[1..65]);
-        assert_eq!(eth_address_from_pubkey_uncompressed(&raw), w.address_bytes());
+        assert_eq!(
+            eth_address_from_pubkey_uncompressed(&raw),
+            w.address_bytes()
+        );
     }
 
     #[test]

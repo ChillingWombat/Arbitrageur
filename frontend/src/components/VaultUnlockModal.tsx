@@ -104,7 +104,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
               </h3>
               <p className="text-xs text-slate-500 font-sans mt-0.5">
                 {isInitializing
-                  ? "Set a master password to encrypt and protect your trading workspace"
+                  ? "Set a master password to encrypt and protect your credential vault"
                   : "Enter your master password to unlock trading and credentials"}
               </p>
             </div>
@@ -163,7 +163,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
           <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-xs text-slate-600">
             <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
             <span className="font-sans leading-relaxed text-[11px]">
-              All API keys and workspace data are encrypted at rest with AES-256-GCM and Argon2id. Decrypted exclusively in-memory on your local device.
+              Credentials are encrypted at rest in vault.enc with AES-256-GCM and Argon2id, and decrypted exclusively in-memory on your local device. Operational state and history are stored locally in SQLite and protected by filesystem permissions, not by vault encryption.
             </span>
           </div>
 

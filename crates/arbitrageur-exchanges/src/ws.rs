@@ -153,10 +153,7 @@ pub fn lighter_subscribe_message(market_id: u64) -> serde_json::Value {
 /// no symbol ever aliases onto the wrong market.
 pub fn lighter_market_symbol_map(details: &serde_json::Value) -> HashMap<u64, String> {
     let mut out = HashMap::new();
-    let Some(entries) = details
-        .get("order_book_details")
-        .and_then(|d| d.as_array())
-    else {
+    let Some(entries) = details.get("order_book_details").and_then(|d| d.as_array()) else {
         return out;
     };
     let mut seen: HashMap<String, u64> = HashMap::new();
@@ -252,10 +249,8 @@ fn parse_lighter_ws_levels(payload: &serde_json::Value, side: &str) -> Vec<(Deci
     for lvl in levels {
         if lvl.is_array() {
             let arr = lvl.as_array().cloned().unwrap_or_default();
-            let (Some(p), Some(s)) = (
-                dec_from_value(arr.first()),
-                dec_from_value(arr.get(1)),
-            ) else {
+            let (Some(p), Some(s)) = (dec_from_value(arr.first()), dec_from_value(arr.get(1)))
+            else {
                 continue;
             };
             out.push((p, s));
@@ -283,8 +278,12 @@ pub fn parse_lighter_delta(payload: &serde_json::Value) -> anyhow::Result<Lighte
         .ok_or_else(|| anyhow::anyhow!("Lighter WS delta missing market_id"))?;
     let nonce = u64_from_value(payload.get("nonce"))
         .ok_or_else(|| anyhow::anyhow!("Lighter WS delta missing nonce"))?;
-    let begin_nonce = u64_from_value(payload.get("begin_nonce").or_else(|| payload.get("beginNonce")))
-        .ok_or_else(|| anyhow::anyhow!("Lighter WS delta missing begin_nonce"))?;
+    let begin_nonce = u64_from_value(
+        payload
+            .get("begin_nonce")
+            .or_else(|| payload.get("beginNonce")),
+    )
+    .ok_or_else(|| anyhow::anyhow!("Lighter WS delta missing begin_nonce"))?;
     Ok(LighterBookDelta {
         market_id,
         nonce,
@@ -407,7 +406,9 @@ pub fn parse_vanta_ws_book(
     vanta_standard_base(returned).ok_or_else(|| {
         anyhow::anyhow!("Vanta WS symbol '{returned}' is not a standard PERP_<BASE>_USDC market")
     })?;
-    let expected_orderly = expected_topic.strip_suffix("@orderbook").unwrap_or(expected_topic);
+    let expected_orderly = expected_topic
+        .strip_suffix("@orderbook")
+        .unwrap_or(expected_topic);
     if returned != expected_orderly {
         anyhow::bail!("Vanta WS returned symbol {returned} for subscribed {expected_orderly}");
     }
@@ -487,9 +488,13 @@ mod tests {
         });
         assert!(parse_hyperliquid_l2book_data(&venue("hyperliquid"), "BTC", "BTC", &data).is_err());
         let no_levels = serde_json::json!({"coin": "BTC"});
-        assert!(parse_hyperliquid_l2book_data(&venue("hyperliquid"), "BTC", "BTC", &no_levels).is_err());
+        assert!(
+            parse_hyperliquid_l2book_data(&venue("hyperliquid"), "BTC", "BTC", &no_levels).is_err()
+        );
         let no_coin = serde_json::json!({"levels": [[], []]});
-        assert!(parse_hyperliquid_l2book_data(&venue("hyperliquid"), "BTC", "BTC", &no_coin).is_err());
+        assert!(
+            parse_hyperliquid_l2book_data(&venue("hyperliquid"), "BTC", "BTC", &no_coin).is_err()
+        );
     }
 
     #[test]
@@ -556,7 +561,8 @@ mod tests {
         apply_lighter_delta(&mut asks, &[(dec!(79570.2), dec!(0))], false);
         assert!(asks.is_empty());
 
-        let rebuilt = lighter_book_from_sides(&venue_id, "BTC", &bids, &[(dec!(79571.0), dec!(1.0))]);
+        let rebuilt =
+            lighter_book_from_sides(&venue_id, "BTC", &bids, &[(dec!(79571.0), dec!(1.0))]);
         assert!(rebuilt.validate_for_execution().is_ok());
     }
 
@@ -593,9 +599,8 @@ mod tests {
                 "asks": [["64301.0", "0.75"]],
             },
         });
-        let book =
-            parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &msg)
-                .expect("snapshot parses");
+        let book = parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &msg)
+            .expect("snapshot parses");
         assert_eq!(book.bids.len(), 2);
         assert_eq!(book.bids[0].price, dec!(64299.5));
         assert_eq!(book.bids[1].price, dec!(64200.0));
@@ -609,7 +614,9 @@ mod tests {
                 "asks": [["64201.0", "0.75"]],
             },
         });
-        assert!(parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &suffixed).is_err());
+        assert!(
+            parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &suffixed).is_err()
+        );
 
         let wrong_topic = serde_json::json!({
             "topic": "PERP_ETH_USDC@orderbook",
@@ -619,7 +626,9 @@ mod tests {
                 "asks": [["3001.0", "1.0"]],
             },
         });
-        assert!(parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &wrong_topic).is_err());
+        assert!(
+            parse_vanta_ws_book(&venue_id, "BTC", "PERP_BTC_USDC@orderbook", &wrong_topic).is_err()
+        );
 
         assert!(vanta_standard_base("PERP_BTC_USDC_BRK").is_none());
         assert!(vanta_standard_base("SPOT_BTC_USDC").is_none());
@@ -678,7 +687,10 @@ mod tests {
         }
         for _ in 0..50 {
             let capped = jittered_reconnect_backoff_secs(30);
-            assert!((96..=144).contains(&capped), "capped 120s ±20% got {capped}");
+            assert!(
+                (96..=144).contains(&capped),
+                "capped 120s ±20% got {capped}"
+            );
         }
     }
 }

@@ -40,7 +40,6 @@ import type {
   WfoOptimizationResult,
   AccountDto,
   AccountUpsertInput,
-  AccountCredentialInput,
   StrategyAccountRouteDto,
   StrategyRouteUpsertInput,
   StrategyTickerDto,
@@ -175,7 +174,6 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "upsert_account",
   "delete_account",
   "delete_account_credentials",
-  "get_account_credentials",
   "get_account_credential_field",
   "set_default_account",
   "list_strategy_routes",
@@ -809,10 +807,6 @@ export const api = {
     return invokeDesktop<boolean>("delete_account_credentials", { accountId });
   },
 
-  /** Full decrypted credentials for one account. Requires unlocked vault; desktop only. */
-  async getAccountCredentials(accountId: string): Promise<AccountCredentialInput> {
-    return invokeDesktop<AccountCredentialInput>("get_account_credentials", { accountId });
-  },
   /** Field-scoped reveal: fetches ONE secret field on explicit user reveal,
    *  so the full credential bundle never sits in renderer memory. */
   async getAccountCredentialField(accountId: string, field: string): Promise<string> {

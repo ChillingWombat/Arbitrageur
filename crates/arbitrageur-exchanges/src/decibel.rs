@@ -1,14 +1,4 @@
-use async_trait::async_trait;
-use chrono::Utc;
-use parking_lot::RwLock;
-use reqwest::Client;
-use sha3::{Digest, Sha3_256};
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
+use crate::rate_limiter::AccountRequestCoordinator;
 use aptos_sdk::{
     account::Ed25519Account,
     api::fullnode::FullnodeClient,
@@ -16,7 +6,17 @@ use aptos_sdk::{
     types::{AccountAddress, ChainId},
     AptosConfig,
 };
-use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
+use async_trait::async_trait;
+use chrono::Utc;
+use parking_lot::RwLock;
+use reqwest::Client;
+use sha3::{Digest, Sha3_256};
 use std::str::FromStr;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -57,14 +57,11 @@ fn as_array(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
 // Decibel / Aptos deployment constants (from the official `decibeltrade/sdk`
 // `PACKAGE` / `MAINNET_CONFIG` / `TESTNET_CONFIG`).
 // ---------------------------------------------------------------------------
-const PACKAGE_MAINNET: &str =
-    "0x50ead22afd6ffd9769e3b3d6e0e64a2a350d68e8b102c4e72e33d0b8cfdfdb06";
-const PACKAGE_TESTNET: &str =
-    "0xe7da2794b1d8af76532ed95f38bfdf1136abfd8ea3a240189971988a83101b7f";
+const PACKAGE_MAINNET: &str = "0x50ead22afd6ffd9769e3b3d6e0e64a2a350d68e8b102c4e72e33d0b8cfdfdb06";
+const PACKAGE_TESTNET: &str = "0xe7da2794b1d8af76532ed95f38bfdf1136abfd8ea3a240189971988a83101b7f";
 const FN_PLACE_ORDER: &str = "dex_accounts_entry::place_order_to_subaccount";
 const FN_CANCEL_ORDER: &str = "dex_accounts_entry::cancel_order_to_subaccount";
-const FN_CANCEL_CLIENT_ORDER: &str =
-    "dex_accounts_entry::cancel_client_order_to_subaccount";
+const FN_CANCEL_CLIENT_ORDER: &str = "dex_accounts_entry::cancel_client_order_to_subaccount";
 /// Aptos object derivation scheme byte (`object::create_object_address`).
 const OBJECT_DERIVATION_SCHEME: u8 = 0xFE;
 /// Sender-paid gas cap for Decibel writes. Unused gas is not charged; the cap
@@ -81,7 +78,10 @@ const FALLBACK_GAS_UNIT_PRICE: u64 = 100;
 /// into 32 raw bytes.
 fn parse_address_bytes(s: &str) -> anyhow::Result<[u8; 32]> {
     let t = s.trim();
-    let h = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+    let h = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
     if h.is_empty() || h.len() > 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!("invalid Aptos address: {s}");
     }
@@ -142,10 +142,7 @@ fn perp_engine_global_addr(package_hex: &str) -> anyhow::Result<String> {
 
 /// Market object address = named object under the perp-engine global keyed by
 /// the BCS bytes of the market name (mirrors SDK `getMarketAddr`).
-fn market_addr_for(
-    perp_engine_global_hex: &str,
-    market_name: &str,
-) -> anyhow::Result<String> {
+fn market_addr_for(perp_engine_global_hex: &str, market_name: &str) -> anyhow::Result<String> {
     let engine = parse_address_bytes(perp_engine_global_hex)?;
     let seed = bcs_move_string_bytes(market_name);
     Ok(format!(
@@ -171,24 +168,33 @@ fn primary_subaccount_addr(owner_hex: &str, package_hex: &str) -> anyhow::Result
 }
 
 /// Map an Arbitrageur venue symbol to a Decibel perp market name.
-/// Decibel perp markets are named like `BTC-PERP`.
-fn resolve_market_name(symbol: &str) -> String {
+/// Decibel perp markets are USDC-quoted and named like `BTC-PERP`; a foreign
+/// quote must never silently resolve onto the USDC market.
+fn resolve_market_name(symbol: &str) -> anyhow::Result<String> {
     let s = symbol.trim().to_uppercase().replace(['/', ':'], "-");
-    if s.ends_with("-PERP") {
-        return s;
-    }
-    // Strip common quote suffixes, keep the base.
-    for q in ["-USDC", "-USDT", "-USD"] {
-        if let Some(base) = s.strip_suffix(q) {
-            if !base.is_empty() {
-                return format!("{base}-PERP");
-            }
+    if let Some(base) = s.strip_suffix("-PERP") {
+        if base.is_empty() || base.contains('-') {
+            anyhow::bail!("Decibel market name '{symbol}' is malformed");
         }
+        return Ok(s);
     }
     if s.contains('-') {
-        return s;
+        let parts: Vec<&str> = s.split('-').collect();
+        let [base, quote] = parts.as_slice() else {
+            anyhow::bail!("Decibel symbol '{symbol}' is not BASE-QUOTE");
+        };
+        if !quote.eq_ignore_ascii_case("USDC") {
+            anyhow::bail!("Decibel perpetual markets are USDC-quoted; '{symbol}' is not supported");
+        }
+        if base.is_empty() {
+            anyhow::bail!("Decibel symbol '{symbol}' has an empty base");
+        }
+        return Ok(format!("{base}-PERP"));
     }
-    format!("{s}-PERP")
+    if s.is_empty() {
+        anyhow::bail!("Decibel symbol is empty");
+    }
+    Ok(format!("{s}-PERP"))
 }
 
 /// Scale a human price into chain units: `round(price * 10^px_decimals)`.
@@ -253,7 +259,8 @@ impl DecibelAdapter {
         api_key: Option<String>,
         api_secret: Option<String>,
     ) -> Self {
-        let base = base_url.unwrap_or_else(|| "https://api.mainnet.aptoslabs.com/decibel".to_string());
+        let base =
+            base_url.unwrap_or_else(|| "https://api.mainnet.aptoslabs.com/decibel".to_string());
         Self {
             venue_id: VenueId::new("decibel"),
             client: {
@@ -266,7 +273,8 @@ impl DecibelAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -327,11 +335,13 @@ impl DecibelAdapter {
             anyhow::bail!("Decibel live orders require the Aptos wallet private key (Settings > Exchange Accounts); refusing to submit without a signer");
         };
         let t = k.trim();
-        let h = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
+        let h = t
+            .strip_prefix("0x")
+            .or_else(|| t.strip_prefix("0X"))
+            .unwrap_or(t);
         let clean: String = h.chars().filter(|c| !c.is_whitespace()).collect();
-        Ed25519Account::from_private_key_hex(&clean).map_err(|e| {
-            anyhow::anyhow!("Decibel private key is not a valid Ed25519 key: {e}")
-        })
+        Ed25519Account::from_private_key_hex(&clean)
+            .map_err(|e| anyhow::anyhow!("Decibel private key is not a valid Ed25519 key: {e}"))
     }
 
     /// Owner wallet address: explicit setting wins, otherwise derived from
@@ -389,7 +399,7 @@ impl DecibelAdapter {
     /// Fails closed when the market cannot be resolved — chain-unit scaling
     /// without authoritative decimals would submit a wrongly-sized order.
     async fn fetch_market_row(&self, symbol: &str) -> anyhow::Result<DecibelMarketRow> {
-        let want = resolve_market_name(symbol);
+        let want = resolve_market_name(symbol)?;
         let mut last_err = String::new();
         for path in ["/api/v1/markets", "/v1/markets"] {
             let val = match self.get_json(path).await {
@@ -432,9 +442,9 @@ impl DecibelAdapter {
                         .and_then(|v| v.as_str())
                         .and_then(|s| Decimal::from_str_exact(s).ok())
                         .or_else(|| {
-                            r.get(k).and_then(|v| v.as_f64()).and_then(|f| {
-                                Decimal::from_f64_retain(f)
-                            })
+                            r.get(k)
+                                .and_then(|v| v.as_f64())
+                                .and_then(Decimal::from_f64_retain)
                         })
                         .unwrap_or(dec!(0))
                 };
@@ -490,11 +500,14 @@ impl DecibelAdapter {
         }
         let pick = rows
             .iter()
-            .find(|r| r.get("is_primary").and_then(|b| b.as_bool()).unwrap_or(false))
+            .find(|r| {
+                r.get("is_primary")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false)
+            })
             .or_else(|| {
-                rows.iter().find(|r| {
-                    r.get("is_active").and_then(|b| b.as_bool()).unwrap_or(true)
-                })
+                rows.iter()
+                    .find(|r| r.get("is_active").and_then(|b| b.as_bool()).unwrap_or(true))
             })
             .or_else(|| rows.first())
             .expect("non-empty");
@@ -668,7 +681,11 @@ impl ExchangeAdapter for DecibelAdapter {
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
-        let resp = self.client.get("https://fullnode.mainnet.aptoslabs.com/v1").send().await?;
+        let resp = self
+            .client
+            .get("https://fullnode.mainnet.aptoslabs.com/v1")
+            .send()
+            .await?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -702,7 +719,7 @@ impl ExchangeAdapter for DecibelAdapter {
         // official SDK's commented-out `/api/v1/depth` reader). Try the
         // documented path once in case it was reintroduced; otherwise fail
         // closed — a book must never be synthesized.
-        let market_name = resolve_market_name(symbol);
+        let market_name = resolve_market_name(symbol)?;
         let engine = perp_engine_global_addr(self.deployment_package())?;
         let market_addr = market_addr_for(&engine, &market_name)?;
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
@@ -715,12 +732,14 @@ impl ExchangeAdapter for DecibelAdapter {
                 if let Some(levels) = d.get(key).and_then(|v| v.as_array()) {
                     for lvl in levels {
                         let (px, sz) = match lvl {
-                            serde_json::Value::Array(a) => {
-                                (dec_f64(a.first()), dec_f64(a.get(1)))
-                            }
+                            serde_json::Value::Array(a) => (dec_f64(a.first()), dec_f64(a.get(1))),
                             serde_json::Value::Object(o) => (
                                 dec_f64(o.get("price").or_else(|| o.get("px"))),
-                                dec_f64(o.get("size").or_else(|| o.get("sz")).or_else(|| o.get("quantity"))),
+                                dec_f64(
+                                    o.get("size")
+                                        .or_else(|| o.get("sz"))
+                                        .or_else(|| o.get("quantity")),
+                                ),
                             ),
                             _ => (None, None),
                         };
@@ -758,7 +777,7 @@ impl ExchangeAdapter for DecibelAdapter {
         // `MarketPricesSchema`). Normalized to an 8h print; missing fields
         // fail closed, never zero-filled (a silent zero would mint phantom
         // carry against any nonzero leg).
-        let market_name = resolve_market_name(symbol);
+        let market_name = resolve_market_name(symbol)?;
         let engine = perp_engine_global_addr(self.deployment_package())?;
         let market_addr = market_addr_for(&engine, &market_name)?;
         let val = self
@@ -787,8 +806,8 @@ impl ExchangeAdapter for DecibelAdapter {
             anyhow::bail!("Decibel prices row for {symbol} has an unusable funding_period_s");
         }
         let period_h = period_s / 3600.0;
-        let rate_8h = Decimal::from_f64_retain(bps / 10_000.0 * (8.0 / period_h))
-            .unwrap_or(dec!(0));
+        let rate_8h =
+            Decimal::from_f64_retain(bps / 10_000.0 * (8.0 / period_h)).unwrap_or(dec!(0));
         Ok(FundingRate {
             venue: self.venue_id.clone(),
             symbol: symbol.to_string(),
@@ -816,8 +835,7 @@ impl ExchangeAdapter for DecibelAdapter {
             .await
             .map(|v| envelope_data(&v).clone())
             .unwrap_or(serde_json::Value::Null);
-        let total_equity =
-            dec_f64(overview.get("perp_equity_balance")).unwrap_or(dec!(0));
+        let total_equity = dec_f64(overview.get("perp_equity_balance")).unwrap_or(dec!(0));
         let free_margin = dec_f64(overview.get("usdc_cross_withdrawable_balance"))
             .or_else(|| dec_f64(overview.get("usdc_cross_balance")))
             .unwrap_or(total_equity);
@@ -873,14 +891,12 @@ impl ExchangeAdapter for DecibelAdapter {
                         .filter(|m| *m > dec!(0))
                         .unwrap_or(entry);
                     let upnl = if mark > dec!(0) && entry > dec!(0) {
-                        (mark - entry)
-                            * qty
-                            * if size > 0.0 { dec!(1) } else { dec!(-1) }
+                        (mark - entry) * qty * if size > 0.0 { dec!(1) } else { dec!(-1) }
                     } else {
                         dec!(0)
                     };
-                    let liq = dec_f64(r.get("estimated_liquidation_price"))
-                        .filter(|p| *p > dec!(0));
+                    let liq =
+                        dec_f64(r.get("estimated_liquidation_price")).filter(|p| *p > dec!(0));
                     positions.push(Position {
                         venue: self.venue_id.clone(),
                         symbol: label,
@@ -918,6 +934,32 @@ impl ExchangeAdapter for DecibelAdapter {
             positions,
             timestamp: Utc::now(),
         })
+    }
+
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        if let Some(base) = position.symbol.strip_suffix("-PERP") {
+            if base.is_empty() {
+                anyhow::bail!(
+                    "Decibel account symbol '{}' has an empty base",
+                    position.symbol
+                );
+            }
+            position.symbol = format!("{}-USDC", base.to_uppercase());
+        } else if position.symbol.contains('-') {
+            position.symbol = position.symbol.to_uppercase();
+            let market = resolve_market_name(&position.symbol)?;
+            position.symbol = market
+                .strip_suffix("-PERP")
+                .map(|base| format!("{base}-USDC"))
+                .unwrap_or(position.symbol);
+        } else {
+            anyhow::bail!(
+                "Decibel account symbol '{}' is not a *-PERP market",
+                position.symbol
+            );
+        }
+        Ok(Some(position))
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -996,14 +1038,14 @@ impl ExchangeAdapter for DecibelAdapter {
         }
 
         let price_chain = price_to_chain_units(price_adj, row.px_decimals)?;
-        // Floor size to the market lot multiple when the feed publishes one.
-        let mut qty = order.quantity;
+        // Refuse non-exact lot sizes rather than silently under-submitting a
+        // hedge or risk-reducing close.
+        let qty = order.quantity;
         if row.lot_size > dec!(0) {
-            let lots = (qty / row.lot_size).floor();
-            qty = lots * row.lot_size;
-            if qty <= dec!(0) {
+            let lots = qty / row.lot_size;
+            if lots < dec!(1) || !lots.fract().is_zero() {
                 anyhow::bail!(
-                    "Decibel order size {} below one lot {} for {}",
+                    "Decibel order size {} is not an exact lot multiple {} for {}",
                     order.quantity,
                     row.lot_size,
                     row.market_name
@@ -1034,11 +1076,10 @@ impl ExchangeAdapter for DecibelAdapter {
         let mkt_addr = AccountAddress::from_str(&market_addr)
             .map_err(|e| anyhow::anyhow!("Decibel market address invalid: {e}"))?;
 
-        let client_id: Option<String> = if order.client_order_id.trim().is_empty() {
-            None
-        } else {
-            Some(order.client_order_id.clone())
-        };
+        if order.client_order_id.trim().is_empty() {
+            anyhow::bail!("Decibel order requires a non-empty client_order_id");
+        }
+        let client_id = Some(order.client_order_id.clone());
         let payload = InputEntryFunctionData::new(&format!("{package}::{FN_PLACE_ORDER}"))
             .arg(sub_addr)
             .arg(mkt_addr)
@@ -1101,7 +1142,7 @@ impl ExchangeAdapter for DecibelAdapter {
         let signer = self.wallet_key()?;
         let package = self.deployment_package();
         let engine = perp_engine_global_addr(package)?;
-        let market_name = resolve_market_name(&req.symbol);
+        let market_name = resolve_market_name(&req.symbol)?;
         let market_addr = market_addr_for(&engine, &market_name)?;
         let owner = self.owner_address(&signer)?;
         let subaccount = primary_subaccount_addr(&owner, package)?;
@@ -1133,7 +1174,12 @@ impl ExchangeAdapter for DecibelAdapter {
             anyhow::bail!("Decibel cancel requires an order id or client order id");
         };
         let tx = self.submit_payload(payload).await?;
-        if tx.get("hash").and_then(|h| h.as_str()).unwrap_or("").is_empty() {
+        if tx
+            .get("hash")
+            .and_then(|h| h.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
             anyhow::bail!("Decibel cancel returned no transaction hash: {tx}");
         }
         Ok(())
@@ -1218,10 +1264,13 @@ mod tests {
 
     #[test]
     fn test_decibel_symbol_and_scaling() {
-        assert_eq!(resolve_market_name("BTC-PERP"), "BTC-PERP");
-        assert_eq!(resolve_market_name("btc/usdc"), "BTC-PERP");
-        assert_eq!(resolve_market_name("ETH-USDC"), "ETH-PERP");
-        assert_eq!(resolve_market_name("SOL"), "SOL-PERP");
+        assert_eq!(resolve_market_name("BTC-PERP").unwrap(), "BTC-PERP");
+        assert_eq!(resolve_market_name("btc/usdc").unwrap(), "BTC-PERP");
+        assert_eq!(resolve_market_name("ETH-USDC").unwrap(), "ETH-PERP");
+        assert_eq!(resolve_market_name("SOL").unwrap(), "SOL-PERP");
+        assert!(resolve_market_name("BTC-USDT").is_err());
+        assert!(resolve_market_name("BTC-USD").is_err());
+        assert!(resolve_market_name("BTC-ETH").is_err());
         assert_eq!(
             price_to_chain_units(Decimal::from_str_exact("65000.5").unwrap(), 2).unwrap(),
             6_500_050
@@ -1249,8 +1298,14 @@ mod tests {
         assert!(as_array(&serde_json::json!({"code": "200"})).is_none());
         // Overview equity fields parse from either numbers or strings.
         let ov = serde_json::json!({"perp_equity_balance": 123.5, "usdc_cross_withdrawable_balance": "100.25"});
-        assert_eq!(dec_f64(ov.get("perp_equity_balance")), Decimal::from_str_exact("123.5").ok());
-        assert_eq!(dec_f64(ov.get("usdc_cross_withdrawable_balance")), Decimal::from_str_exact("100.25").ok());
+        assert_eq!(
+            dec_f64(ov.get("perp_equity_balance")),
+            Decimal::from_str_exact("123.5").ok()
+        );
+        assert_eq!(
+            dec_f64(ov.get("usdc_cross_withdrawable_balance")),
+            Decimal::from_str_exact("100.25").ok()
+        );
     }
 
     #[test]
@@ -1264,5 +1319,44 @@ mod tests {
         let b = bcs_move_string_bytes("BTC-PERP");
         assert_eq!(b[0], 8);
         assert_eq!(&b[1..], b"BTC-PERP");
+    }
+
+    #[test]
+    fn account_position_for_maps_market_name() {
+        let adapter = DecibelAdapter::new(None, None, None);
+        let account = AccountSnapshot {
+            venue: VenueId::new("decibel"),
+            equity: dec!(100),
+            free_margin: dec!(100),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: vec![Position {
+                venue: VenueId::new("decibel"),
+                symbol: "BTC-PERP".to_string(),
+                side: Side::Sell,
+                quantity: dec!(0.2),
+                entry_price: dec!(50000),
+                mark_price: dec!(49000),
+                unrealized_pnl: dec!(0),
+                realized_pnl: dec!(0),
+                liquidation_price: None,
+                leverage: dec!(1),
+                initial_margin: dec!(0),
+                maintenance_margin: dec!(0),
+                updated_at: Utc::now(),
+            }],
+            timestamp: Utc::now(),
+        };
+        let pos = adapter
+            .account_position_for(&account, "BTC-USDC")
+            .unwrap()
+            .expect("BTC-PERP should resolve");
+        assert_eq!(pos.symbol, "BTC-USDC");
+        assert_eq!(pos.quantity, dec!(0.2));
+        assert!(adapter
+            .account_position_for(&account, "ETH-USDC")
+            .unwrap()
+            .is_none());
     }
 }

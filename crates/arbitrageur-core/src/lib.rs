@@ -1,18 +1,18 @@
-pub mod types;
-pub mod market;
-pub mod quote;
-pub mod order;
-pub mod position;
 pub mod exchange;
 pub mod hub;
+pub mod market;
+pub mod order;
+pub mod position;
+pub mod quote;
+pub mod types;
 
-pub use types::*;
-pub use market::*;
-pub use quote::*;
-pub use order::*;
-pub use position::*;
 pub use exchange::*;
 pub use hub::*;
+pub use market::*;
+pub use order::*;
+pub use position::*;
+pub use quote::*;
+pub use types::*;
 
 #[cfg(test)]
 mod tests {
@@ -28,13 +28,15 @@ mod tests {
         book.bids.push(BookLevel::new(dec!(90.0), dec!(2.0)));
 
         // Buy 2.0: 1.0 @ 100 + 1.0 @ 110 = 210 / 2 = 105.0 VWAP
-        let (vwap_buy, unfilled_buy, slippage_buy) = book.buy_execution_vwap(dec!(2.0)).expect("buy vwap");
+        let (vwap_buy, unfilled_buy, slippage_buy) =
+            book.buy_execution_vwap(dec!(2.0)).expect("buy vwap");
         assert_eq!(vwap_buy, dec!(105.0));
         assert_eq!(unfilled_buy, dec!(0.0));
         assert_eq!(slippage_buy, (dec!(105.0) - dec!(100.0)) / dec!(100.0));
 
         // Sell 2.0: 1.0 @ 99 + 1.0 @ 90 = 189 / 2 = 94.5 VWAP
-        let (vwap_sell, unfilled_sell, slippage_sell) = book.sell_execution_vwap(dec!(2.0)).expect("sell vwap");
+        let (vwap_sell, unfilled_sell, slippage_sell) =
+            book.sell_execution_vwap(dec!(2.0)).expect("sell vwap");
         assert_eq!(vwap_sell, dec!(94.5));
         assert_eq!(unfilled_sell, dec!(0.0));
         assert_eq!(slippage_sell, (dec!(99.0) - dec!(94.5)) / dec!(99.0));
@@ -113,9 +115,10 @@ mod tests {
         assert_eq!(received.venue_id, VenueId::new("hyperliquid"));
 
         // Verify cache retrieval
-        let cached = hub.get_orderbook(&VenueId::new("hyperliquid"), "BTC-USDC").expect("cached book");
+        let cached = hub
+            .get_orderbook(&VenueId::new("hyperliquid"), "BTC-USDC")
+            .expect("cached book");
         assert_eq!(cached.best_bid_price(), Some(dec!(60000.0)));
         assert_eq!(cached.best_ask_price(), Some(dec!(60005.0)));
     }
 }
-

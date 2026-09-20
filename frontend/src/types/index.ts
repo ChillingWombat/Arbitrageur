@@ -27,6 +27,8 @@ export interface VenueCapabilityDto {
   supportsLive: boolean;
   hasCredentials: boolean;
   liveReady: boolean;
+  submissionReady: boolean;
+  strategyEntryReady: boolean;
 }
 
 export interface VenueVolumesDto {
@@ -313,8 +315,9 @@ export interface MatrixBaselineSnapshotDto {
   pairs: PairBaselineDto[];
 }
 
-/** Auto-tune Phase 1 (recommend-only) preview DTOs. `recommended` is null
- * exactly when `status === "HELD"` — the manual value stays authoritative. */
+/** AutoTune preview DTOs. `recommended` is null exactly when
+ * `status === "HELD"` — the manual value stays authoritative unless the user
+ * explicitly applies a READY row. */
 export interface AutotuneRowDto {
   param: string;
   current: number;
@@ -376,6 +379,18 @@ export interface FundingOpportunityDto {
   symbol: string;
   long_venue: string;
   short_venue: string;
+  /** Canonical venue ID of the long leg (adapter key, never a display label). */
+  long_venue_id: string;
+  /** Canonical venue ID of the short leg. */
+  short_venue_id: string;
+  /** Exact execution symbol of the long leg (requested perp, or discovered *-SPOT for basis). */
+  long_symbol: string;
+  /** Exact execution symbol of the short leg (always the requested perp). */
+  short_symbol: string;
+  /** Market type of the long leg: "perpetual" (carry) or "spot" (basis). */
+  long_market_type: string;
+  /** Market type of the short leg: always "perpetual". */
+  short_market_type: string;
   net_rate_8h_pct: number;
   net_apr_pct: number;
   net_apy_pct: number;
@@ -455,7 +470,7 @@ export interface PredictionOpportunityDto {
   yes_price_cents: number;
   no_price_cents: number;
   total_cost_cents: number;
-  guaranteed_payout_cents: number;
+  conditional_payout_cents: number;
   net_profit_cents: number;
   roi_pct: number;
   has_arbitrage: boolean;
@@ -926,6 +941,8 @@ export interface MarginSnapshot {
  *  Positive = net long (buy side), negative = net short (sell side). */
 export interface PositionVenueDto {
   venue: string;
+  /** Exact leg symbol behind this row's net quantity. */
+  symbol: string;
   netQty: number;
 }
 

@@ -1,15 +1,15 @@
+use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, OrderType, Side, TimeInForce, VenueId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use reqwest::Client;
 use std::collections::{BTreeMap, HashMap};
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::AccountSnapshot;
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, OrderType, Side, TimeInForce, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
 use zeroize::Zeroizing;
 
 /// Binance USDT-M Futures connector (https://fapi.binance.com).
@@ -70,7 +70,8 @@ impl BinanceAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -107,7 +108,13 @@ impl BinanceAdapter {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("Binance edge challenge on {} — cooling down", path);
@@ -140,7 +147,9 @@ impl BinanceAdapter {
             (sym.as_str(), "USDT")
         };
         if !quote.is_empty() && quote != "USDT" && quote != "USDC" && quote != "USD" {
-            anyhow::bail!("Binance futures markets are quoted in USDT/USDC; '{symbol}' is not supported");
+            anyhow::bail!(
+                "Binance futures markets are quoted in USDT/USDC; '{symbol}' is not supported"
+            );
         }
         // Canonical inputs may already carry the venue's 1000x prefix
         // (universe spells it `1000PEPE-USDT` from exchangeInfo baseAsset);
@@ -148,8 +157,10 @@ impl BinanceAdapter {
         let base_norm = base
             .strip_prefix("1000")
             .filter(|r| {
-                ["PEPE", "BONK", "SHIB", "FLOKI", "LUNC", "XEC", "RATS", "SATS", "CAT", "CHEEMS"]
-                    .contains(r)
+                [
+                    "PEPE", "BONK", "SHIB", "FLOKI", "LUNC", "XEC", "RATS", "SATS", "CAT", "CHEEMS",
+                ]
+                .contains(r)
             })
             .unwrap_or(base);
         let res = match base_norm {
@@ -166,6 +177,31 @@ impl BinanceAdapter {
             b => (format!("{}USDT", b), false),
         };
         Ok(res)
+    }
+
+    /// Convert an account row such as `BTCUSDT` or `1000PEPEUSDT` back to the
+    /// engine's `BASE-QUOTE` spelling. Bare bases and malformed rows are
+    /// rejected rather than guessed onto a USDT market.
+    fn canonical_account_symbol(symbol: &str) -> anyhow::Result<String> {
+        let sym = symbol.trim().to_uppercase().replace('/', "-");
+        if sym.contains('-') {
+            let parts: Vec<&str> = sym.split('-').filter(|p| !p.is_empty()).collect();
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("Binance account symbol '{symbol}' is not BASE-QUOTE");
+            };
+            if !matches!(*quote, "USDT" | "USDC" | "USD") {
+                anyhow::bail!("Binance account symbol '{symbol}' has unsupported quote");
+            }
+            return Ok(format!("{base}-{quote}"));
+        }
+        for quote in ["USDT", "USDC", "USD"] {
+            if let Some(base) = sym.strip_suffix(quote) {
+                if !base.is_empty() {
+                    return Ok(format!("{base}-{quote}"));
+                }
+            }
+        }
+        anyhow::bail!("Binance account symbol '{symbol}' has no supported quote suffix")
     }
 
     fn credentials(&self) -> anyhow::Result<(Zeroizing<String>, Zeroizing<String>)> {
@@ -201,10 +237,7 @@ impl BinanceAdapter {
         Ok(format!("{query}&signature={signature}"))
     }
 
-    fn sign_params(
-        &self,
-        params: &BTreeMap<&str, String>,
-    ) -> anyhow::Result<(String, String)> {
+    fn sign_params(&self, params: &BTreeMap<&str, String>) -> anyhow::Result<(String, String)> {
         let (api_key, api_secret) = self.credentials()?;
         let mut query = String::new();
         for (i, (k, v)) in params.iter().enumerate() {
@@ -230,43 +263,119 @@ impl BinanceAdapter {
 
     /// Pure parse of a USDT-M `/fapi/v1/order` response. Split out so the
     /// wire mapping (statuses, fills, 1000-contract economics) is unit-tested
-    /// without touching the network.
+    /// without touching the network. Malformed responses fail closed: an
+    /// acknowledgement is never converted into an invented order id, client
+    /// id, fill quantity, price, or fee.
     fn parse_order_response(
         v: &serde_json::Value,
         order: &OrderRequest,
     ) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
-        let order_id = v
-            .get("orderId")
-            .map(|id| id.to_string())
-            .unwrap_or_default();
+        let (expected_venue_symbol, is_1000x) = Self::to_venue_symbol(&order.symbol)?;
+        let venue_symbol = v
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Binance order response missing symbol: {v}"))?;
+        if venue_symbol != expected_venue_symbol {
+            anyhow::bail!(
+                "Binance order response symbol '{venue_symbol}' does not match expected '{expected_venue_symbol}': {v}"
+            );
+        }
+        let order_id = match v.get("orderId") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            _ => String::new(),
+        };
+        if order_id.is_empty() || order_id == "0" {
+            anyhow::bail!("Binance order response missing valid orderId: {v}");
+        }
         let client_order_id = v
             .get("clientOrderId")
             .and_then(|s| s.as_str())
-            .unwrap_or(&order.client_order_id)
-            .to_string();
-        let raw_status = v.get("status").and_then(|s| s.as_str()).unwrap_or("NEW");
-        let orig_qty = dec_from_json(v.get("origQty")).unwrap_or(order.quantity);
-        let executed_qty = dec_from_json(v.get("executedQty")).unwrap_or(dec!(0));
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Binance order response missing clientOrderId: {v}"))?;
+        if client_order_id != order.client_order_id {
+            anyhow::bail!(
+                "Binance order response clientOrderId '{client_order_id}' does not match request '{}': {v}",
+                order.client_order_id
+            );
+        }
+        let raw_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Binance order response missing status: {v}"))?;
+        let scale = if is_1000x { dec!(1000) } else { dec!(1) };
+        let venue_orig_qty = dec_from_json(v.get("origQty"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Binance order response missing valid origQty: {v}"))?;
+        let expected_venue_qty = Self::scale_order_qty(order.quantity, is_1000x);
+        if venue_orig_qty != expected_venue_qty {
+            anyhow::bail!(
+                "Binance order response origQty {venue_orig_qty} does not match request {expected_venue_qty}: {v}"
+            );
+        }
+        let venue_executed_qty = dec_from_json(v.get("executedQty"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Binance order response missing valid executedQty: {v}")
+            })?;
+        if venue_executed_qty > venue_orig_qty {
+            anyhow::bail!(
+                "Binance order response executedQty {venue_executed_qty} exceeds origQty {venue_orig_qty}: {v}"
+            );
+        }
+        let orig_qty = venue_orig_qty / scale;
+        let executed_qty = venue_executed_qty / scale;
         let remaining_qty = orig_qty.saturating_sub(executed_qty);
-        let avg_price = dec_from_json(v.get("avgPrice"))
-            .or_else(|| dec_from_json(v.get("price")))
-            .filter(|p| *p > dec!(0));
         let order_status = match raw_status {
             "FILLED" => OrderStatus::Filled,
             "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
-            "EXPIRED" if executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "EXPIRED" if venue_executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
             "EXPIRED" => OrderStatus::Cancelled,
             "CANCELED" => OrderStatus::Cancelled,
             "REJECTED" => OrderStatus::Rejected,
-            _ => OrderStatus::New,
+            "NEW" => OrderStatus::New,
+            other => anyhow::bail!("Binance order response has unknown status '{other}': {v}"),
+        };
+        let status_consistent = match order_status {
+            OrderStatus::Filled => venue_executed_qty == venue_orig_qty && remaining_qty == dec!(0),
+            OrderStatus::PartiallyFilled => {
+                venue_executed_qty > dec!(0) && venue_executed_qty < venue_orig_qty
+            }
+            OrderStatus::New => venue_executed_qty == dec!(0) && remaining_qty == orig_qty,
+            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
+                venue_executed_qty == dec!(0) && remaining_qty == orig_qty
+            }
+        };
+        if !status_consistent {
+            anyhow::bail!(
+                "Binance order response status {order_status:?} is inconsistent with executedQty {venue_executed_qty}/{venue_orig_qty}: {v}"
+            );
+        }
+        let avg_price = if venue_executed_qty > dec!(0) {
+            let venue_px = dec_from_json(v.get("avgPrice"))
+                .filter(|p| *p > dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Binance filled order response missing valid avgPrice: {v}")
+                })?;
+            Some(venue_px * scale)
+        } else {
+            None
+        };
+        let cum_quote = if venue_executed_qty > dec!(0) {
+            dec_from_json(v.get("cumQuote"))
+                .filter(|q| *q >= dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Binance filled order response missing valid cumQuote: {v}")
+                })?
+        } else {
+            dec!(0)
         };
         // Binance USDT-M VIP0 taker fee: 5 BPS of notional.
-        let cum_quote = dec_from_json(v.get("cumQuote")).unwrap_or_default();
         let fee = cum_quote * Decimal::new(5, 4);
         Ok(OrderResponse {
             order_id,
-            client_order_id,
+            client_order_id: client_order_id.to_string(),
             venue: VenueId::new("binance"),
             symbol: order.symbol.clone(),
             status: order_status,
@@ -281,7 +390,11 @@ impl BinanceAdapter {
         })
     }
 
-    async fn signed_post(&self, path: &str, params: &BTreeMap<&str, String>) -> anyhow::Result<serde_json::Value> {
+    async fn signed_post(
+        &self,
+        path: &str,
+        params: &BTreeMap<&str, String>,
+    ) -> anyhow::Result<serde_json::Value> {
         let (api_key, query_string) = self.sign_params(params)?;
         let url = format!("{}{}?{}", self.base_url, path, query_string);
         let resp = self
@@ -301,11 +414,16 @@ impl BinanceAdapter {
                 .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Binance POST {path} failed (HTTP {status}): {text}");
         }
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}"))
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}")
+        })
     }
 
-    async fn signed_get(&self, path: &str, params: &BTreeMap<&str, String>) -> anyhow::Result<serde_json::Value> {
+    async fn signed_get(
+        &self,
+        path: &str,
+        params: &BTreeMap<&str, String>,
+    ) -> anyhow::Result<serde_json::Value> {
         let (api_key, query_string) = self.sign_params(params)?;
         let url = format!("{}{}?{}", self.base_url, path, query_string);
         let resp = self
@@ -325,8 +443,9 @@ impl BinanceAdapter {
                 .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Binance GET {path} failed (HTTP {status}): {text}");
         }
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}"))
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Binance {path} response: {e}; body: {text}")
+        })
     }
 
     /// Pure parse of a USDT-M `GET /fapi/v2/account` envelope into an
@@ -371,7 +490,11 @@ impl BinanceAdapter {
                 let side = if amt > dec!(0) { Side::Buy } else { Side::Sell };
                 let qty = amt.abs();
                 let notional = qty * entry_px;
-                let im = if lev > dec!(0) { notional / lev } else { notional };
+                let im = if lev > dec!(0) {
+                    notional / lev
+                } else {
+                    notional
+                };
 
                 positions.push(arbitrageur_core::position::Position {
                     venue: self.venue_id.clone(),
@@ -442,7 +565,10 @@ impl ExchangeAdapter for BinanceAdapter {
         let mut out = Vec::new();
         for item in symbols {
             let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
-            let contract_type = item.get("contractType").and_then(|s| s.as_str()).unwrap_or("");
+            let contract_type = item
+                .get("contractType")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
             if status != "TRADING" || contract_type != "PERPETUAL" {
                 continue;
             }
@@ -452,13 +578,22 @@ impl ExchangeAdapter for BinanceAdapter {
                 _ => continue,
             };
             let base_asset = item.get("baseAsset").and_then(|s| s.as_str()).unwrap_or("");
-            let quote_asset = item.get("quoteAsset").and_then(|s| s.as_str()).unwrap_or("");
+            let quote_asset = item
+                .get("quoteAsset")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
             if base_asset.is_empty() || quote_asset.is_empty() {
                 continue;
             }
 
-            let price_decimals = item.get("pricePrecision").and_then(|n| n.as_u64()).unwrap_or(2) as u32;
-            let size_decimals = item.get("quantityPrecision").and_then(|n| n.as_u64()).unwrap_or(3) as u32;
+            let price_decimals = item
+                .get("pricePrecision")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(2) as u32;
+            let size_decimals = item
+                .get("quantityPrecision")
+                .and_then(|n| n.as_u64())
+                .unwrap_or(3) as u32;
 
             let mut min_order_size = dec!(0.001);
             let mut min_notional = dec!(5.0);
@@ -519,7 +654,10 @@ impl ExchangeAdapter for BinanceAdapter {
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let (venue_sym, is_1000x) = Self::to_venue_symbol(symbol)?;
-        let path = format!("/fapi/v1/depth?symbol={}&limit={}", venue_sym, ORDERBOOK_LIMIT);
+        let path = format!(
+            "/fapi/v1/depth?symbol={}&limit={}",
+            venue_sym, ORDERBOOK_LIMIT
+        );
         let val = self.get_json(&path).await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
@@ -578,8 +716,12 @@ impl ExchangeAdapter for BinanceAdapter {
 
         let rate = dec_from_json(val.get("lastFundingRate"))
             .ok_or_else(|| anyhow::anyhow!("Binance missing lastFundingRate for {}", symbol))?;
-        let next_time_ms = val.get("nextFundingTime").and_then(|n| n.as_i64()).unwrap_or(0);
-        let next_funding_time = DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
+        let next_time_ms = val
+            .get("nextFundingTime")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0);
+        let next_funding_time =
+            DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
 
         Ok(FundingRate {
             venue: self.venue_id.clone(),
@@ -634,8 +776,12 @@ impl ExchangeAdapter for BinanceAdapter {
                 continue;
             };
             if let Some(rate) = dec_from_json(item.get("lastFundingRate")) {
-                let next_time_ms = item.get("nextFundingTime").and_then(|n| n.as_i64()).unwrap_or(0);
-                let next_funding_time = DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
+                let next_time_ms = item
+                    .get("nextFundingTime")
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(0);
+                let next_funding_time =
+                    DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
                 out.push(FundingRate {
                     venue: self.venue_id.clone(),
                     symbol,
@@ -679,6 +825,12 @@ impl ExchangeAdapter for BinanceAdapter {
         self.parse_account_response(&v)
     }
 
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        position.symbol = Self::canonical_account_symbol(&position.symbol)?;
+        Ok(Some(position))
+    }
+
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot place live order on Binance: API credentials are not configured or vault is locked");
@@ -698,8 +850,7 @@ impl ExchangeAdapter for BinanceAdapter {
         let (type_str, tif_str) = match order.order_type {
             OrderType::Market => ("MARKET", None),
             OrderType::PostOnly => ("LIMIT", Some("GTX")),
-            OrderType::Limit
-            | OrderType::ImmediateOrCancel => {
+            OrderType::Limit | OrderType::ImmediateOrCancel => {
                 let tif = match order.time_in_force {
                     TimeInForce::ImmediateOrCancel => "IOC",
                     TimeInForce::FillOrKill => "FOK",
@@ -817,42 +968,33 @@ mod tests {
     #[test]
     fn sign_query_matches_verified_hmac_vector() {
         // Cross-checked with `openssl dgst -sha256 -hmac` and Python hmac.
-        let secret = Zeroizing::new(
-            "NhqPtmdSJgDdgUiO4H5tzsCKM2HUAngnh".to_string(),
-        );
+        let secret = Zeroizing::new("NhqPtmdSJgDdgUiO4H5tzsCKM2HUAngnh".to_string());
         let query = "symbol=LTCBTC&side=BUY&type=LIMIT&timeInForce=GTC&quantity=1&price=0.1&recvWindow=5000&timestamp=1499827319559";
         let signed = BinanceAdapter::sign_query(&secret, query).unwrap();
         assert!(
-            signed.ends_with("&signature=8a926a3f21039123592b924588745b6d3fa7de4aa613870fe8dc657ff047706a"),
+            signed.ends_with(
+                "&signature=8a926a3f21039123592b924588745b6d3fa7de4aa613870fe8dc657ff047706a"
+            ),
             "unexpected signed query: {signed}"
         );
     }
 
     #[test]
     fn order_qty_scales_on_1000_contracts() {
-        assert_eq!(
-            BinanceAdapter::scale_order_qty(dec!(0.5), false),
-            dec!(0.5)
-        );
-        assert_eq!(
-            BinanceAdapter::scale_order_qty(dec!(0.5), true),
-            dec!(500)
-        );
+        assert_eq!(BinanceAdapter::scale_order_qty(dec!(0.5), false), dec!(0.5));
+        assert_eq!(BinanceAdapter::scale_order_qty(dec!(0.5), true), dec!(500));
     }
 
     #[test]
     fn parse_order_response_maps_statuses_and_fees() {
         use arbitrageur_core::order::OrderRequest;
         use arbitrageur_core::types::{OrderStatus, Side};
-        let order = OrderRequest::new_market(
-            VenueId::new("binance"),
-            "BTC-USDC",
-            Side::Buy,
-            dec!(0.01),
-        );
+        let order =
+            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDC", Side::Buy, dec!(0.01));
         let v: serde_json::Value = serde_json::json!({
+            "symbol": "BTCUSDT",
             "orderId": 12345,
-            "clientOrderId": "x",
+            "clientOrderId": order.client_order_id,
             "status": "FILLED",
             "origQty": "0.010",
             "executedQty": "0.010",
@@ -865,10 +1007,47 @@ mod tests {
         assert_eq!(resp.avg_fill_price, Some(dec!(80000.5)));
         // 5 BPS taker of 800.005 notional.
         assert!((resp.fee - dec!(0.4000025)).abs() < dec!(0.0000001));
-        let rej: serde_json::Value = serde_json::json!({"status": "REJECTED"});
+        let rej: serde_json::Value = serde_json::json!({
+            "symbol": "BTCUSDT",
+            "orderId": 12346,
+            "clientOrderId": order.client_order_id,
+            "status": "REJECTED",
+            "origQty": "0.010",
+            "executedQty": "0"
+        });
         let resp = BinanceAdapter::parse_order_response(&rej, &order).unwrap();
         assert_eq!(resp.status, OrderStatus::Rejected);
         assert_eq!(resp.filled_qty, dec!(0));
+    }
+
+    #[test]
+    fn parse_order_response_rejects_mismatched_identity_and_inconsistent_fill() {
+        use arbitrageur_core::order::OrderRequest;
+        use arbitrageur_core::types::Side;
+        let order =
+            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDC", Side::Buy, dec!(0.01));
+        let base = serde_json::json!({
+            "symbol": "BTCUSDT",
+            "orderId": 12345,
+            "clientOrderId": order.client_order_id,
+            "status": "FILLED",
+            "origQty": "0.010",
+            "executedQty": "0.010",
+            "avgPrice": "80000.5",
+            "cumQuote": "800.005"
+        });
+        let mut wrong_symbol = base.clone();
+        wrong_symbol["symbol"] = serde_json::json!("ETHUSDT");
+        assert!(BinanceAdapter::parse_order_response(&wrong_symbol, &order).is_err());
+        let mut wrong_client = base.clone();
+        wrong_client["clientOrderId"] = serde_json::json!("other-client-id");
+        assert!(BinanceAdapter::parse_order_response(&wrong_client, &order).is_err());
+        let mut inconsistent = base.clone();
+        inconsistent["executedQty"] = serde_json::json!("0");
+        assert!(BinanceAdapter::parse_order_response(&inconsistent, &order).is_err());
+        let mut unknown_status = base.clone();
+        unknown_status["status"] = serde_json::json!("PENDING_NEW");
+        assert!(BinanceAdapter::parse_order_response(&unknown_status, &order).is_err());
     }
 
     #[test]
@@ -899,6 +1078,15 @@ mod tests {
         assert_eq!(acc.positions[0].quantity, dec!(0.5));
         assert_eq!(acc.balances.len(), 1);
         assert_eq!(acc.balances[0].currency, "USDT");
+        let pos = adapter
+            .account_position_for(&acc, "BTC-USDT")
+            .unwrap()
+            .expect("venue-native symbol should normalize");
+        assert_eq!(pos.symbol, "BTC-USDT");
+        assert!(adapter
+            .account_position_for(&acc, "BTC-USDC")
+            .unwrap()
+            .is_none());
     }
 
     #[test]

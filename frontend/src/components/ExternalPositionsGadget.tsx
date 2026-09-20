@@ -43,6 +43,22 @@ const usd = (v: number) =>
   `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const num = (v: number, d = 4) =>
   v == null || !Number.isFinite(v) ? "—" : v.toLocaleString(undefined, { maximumFractionDigits: d });
+const closeStatusLabel = (status: string) =>
+  status === "filled"
+    ? "Closed"
+    : status === "partial"
+      ? "Partial close"
+      : status === "submitted"
+        ? "Order working"
+        : status === "unverified"
+          ? "Unverified"
+          : "Not filled";
+const closeStatusClass = (status: string) =>
+  status === "filled"
+    ? "bg-profit-dim/40 border-profit-border text-slate-900"
+    : status === "not_filled"
+      ? "bg-loss-dim/40 border-loss-border text-slate-900"
+      : "bg-amber-500/10 border-amber-500/30 text-slate-900";
 
 export const ExternalPositionsGadget: React.FC = () => {
   // --- List state ------------------------------------------------------------
@@ -437,8 +453,8 @@ export const ExternalPositionsGadget: React.FC = () => {
                 </div>
               )}
               {result && (
-                <div className="px-3 py-2 rounded-lg border bg-profit-dim/40 border-profit-border text-xs font-mono text-slate-900">
-                  {result.status === "filled" ? "Closed" : "Submitted"}: {result.note}
+                <div className={`px-3 py-2 rounded-lg border text-xs font-mono ${closeStatusClass(result.status)}`}>
+                  {closeStatusLabel(result.status)}: {result.note}
                   {result.orderId && <span className="text-slate-500"> · order {result.orderId}</span>}
                 </div>
               )}

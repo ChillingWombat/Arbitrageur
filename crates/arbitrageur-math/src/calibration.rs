@@ -27,13 +27,7 @@ impl BaselineEstimatorType {
     }
 
     pub fn all() -> &'static [BaselineEstimatorType] {
-        &[
-            Self::SMA,
-            Self::EMA,
-            Self::WMA,
-            Self::VWMA,
-            Self::SMMA,
-        ]
+        &[Self::SMA, Self::EMA, Self::WMA, Self::VWMA, Self::SMMA]
     }
 }
 
@@ -268,7 +262,11 @@ pub fn simulate_estimator_performance(
     };
 
     // Tracking error (standard deviation of spread difference)
-    let mean_err: f64 = if !errors.is_empty() { errors.iter().sum::<f64>() / errors.len() as f64 } else { 0.0 };
+    let mean_err: f64 = if !errors.is_empty() {
+        errors.iter().sum::<f64>() / errors.len() as f64
+    } else {
+        0.0
+    };
     let var_err: f64 = if errors.len() > 1 {
         errors.iter().map(|e| (e - mean_err).powi(2)).sum::<f64>() / (errors.len() - 1) as f64
     } else {
@@ -277,14 +275,26 @@ pub fn simulate_estimator_performance(
     let tracking_error = var_err.sqrt();
 
     // Sharpe ratio of simulated trade PnL
-    let mean_pnl = if !pnl_series.is_empty() { total_profit / pnl_series.len() as f64 } else { 0.0 };
+    let mean_pnl = if !pnl_series.is_empty() {
+        total_profit / pnl_series.len() as f64
+    } else {
+        0.0
+    };
     let std_pnl = if pnl_series.len() > 1 {
-        let var: f64 = pnl_series.iter().map(|p| (p - mean_pnl).powi(2)).sum::<f64>() / (pnl_series.len() - 1) as f64;
+        let var: f64 = pnl_series
+            .iter()
+            .map(|p| (p - mean_pnl).powi(2))
+            .sum::<f64>()
+            / (pnl_series.len() - 1) as f64;
         var.sqrt().max(0.001)
     } else {
         1.0
     };
-    let sharpe = if std_pnl > 0.0 { (mean_pnl / std_pnl) * (trades as f64).sqrt() } else { 0.0 };
+    let sharpe = if std_pnl > 0.0 {
+        (mean_pnl / std_pnl) * (trades as f64).sqrt()
+    } else {
+        0.0
+    };
 
     EstimatorEvaluation {
         estimator,
@@ -331,8 +341,15 @@ pub fn run_walk_forward_optimization(
             continue;
         }
         for &est in estimators {
-            let eval_is = simulate_estimator_performance(in_sample, est, w, target_profit_bps, friction_bps);
-            let eval_oos = simulate_estimator_performance(out_of_sample, est, w, target_profit_bps, friction_bps);
+            let eval_is =
+                simulate_estimator_performance(in_sample, est, w, target_profit_bps, friction_bps);
+            let eval_oos = simulate_estimator_performance(
+                out_of_sample,
+                est,
+                w,
+                target_profit_bps,
+                friction_bps,
+            );
 
             evaluations.push(EstimatorEvaluation {
                 estimator: est,
@@ -349,9 +366,13 @@ pub fn run_walk_forward_optimization(
 
     // Score based on Out-of-Sample Sharpe, Net Profit, and minimum tracking error penalty
     evaluations.sort_by(|a, b| {
-        let score_a = a.out_of_sample_sharpe * 0.5 + (a.simulated_net_profit_bps * 0.1) - (a.tracking_error_bps * 0.05);
-        let score_b = b.out_of_sample_sharpe * 0.5 + (b.simulated_net_profit_bps * 0.1) - (b.tracking_error_bps * 0.05);
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        let score_a = a.out_of_sample_sharpe * 0.5 + (a.simulated_net_profit_bps * 0.1)
+            - (a.tracking_error_bps * 0.05);
+        let score_b = b.out_of_sample_sharpe * 0.5 + (b.simulated_net_profit_bps * 0.1)
+            - (b.tracking_error_bps * 0.05);
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let best = evaluations.first().cloned().unwrap_or(EstimatorEvaluation {
@@ -400,11 +421,26 @@ mod tests {
 
     #[test]
     fn test_baseline_estimator_from_str() {
-        assert_eq!("SMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::SMA);
-        assert_eq!("ema".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::EMA);
-        assert_eq!("Vwma".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::VWMA);
-        assert_eq!("WMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::WMA);
-        assert_eq!("SMMA".parse::<BaselineEstimatorType>().unwrap(), BaselineEstimatorType::SMMA);
+        assert_eq!(
+            "SMA".parse::<BaselineEstimatorType>().unwrap(),
+            BaselineEstimatorType::SMA
+        );
+        assert_eq!(
+            "ema".parse::<BaselineEstimatorType>().unwrap(),
+            BaselineEstimatorType::EMA
+        );
+        assert_eq!(
+            "Vwma".parse::<BaselineEstimatorType>().unwrap(),
+            BaselineEstimatorType::VWMA
+        );
+        assert_eq!(
+            "WMA".parse::<BaselineEstimatorType>().unwrap(),
+            BaselineEstimatorType::WMA
+        );
+        assert_eq!(
+            "SMMA".parse::<BaselineEstimatorType>().unwrap(),
+            BaselineEstimatorType::SMMA
+        );
     }
 
     #[test]
@@ -440,13 +476,17 @@ mod tests {
         let quotes = vec![
             QuoteObservation::new(1, 10.0, 500_000.0), // Massive legitimate depth
             QuoteObservation::new(2, 10.0, 500_000.0), // Massive legitimate depth
-            QuoteObservation::new(3, 100.0, 10.0),      // $10 dust phantom spike
+            QuoteObservation::new(3, 100.0, 10.0),     // $10 dust phantom spike
         ];
         let sma = compute_sma(&quotes); // (10 + 10 + 100) / 3 = 40.0 BPS (heavily distorted!)
         let vwma = compute_vwma(&quotes); // Heavily anchored to legitimate 10 BPS depth
 
         assert_eq!(sma, 40.0);
-        assert!(vwma < 10.01, "VWMA must filter out dust depth: was {}", vwma);
+        assert!(
+            vwma < 10.01,
+            "VWMA must filter out dust depth: was {}",
+            vwma
+        );
     }
 
     #[test]
@@ -476,7 +516,8 @@ mod tests {
             BaselineEstimatorType::WMA,
             BaselineEstimatorType::VWMA,
             BaselineEstimatorType::SMMA
-        ].contains(&wfo.optimal_estimator));
+        ]
+        .contains(&wfo.optimal_estimator));
         assert!(wfo.optimal_window_size == 10 || wfo.optimal_window_size == 20);
         assert!(!wfo.recommendation_notes.is_empty());
     }

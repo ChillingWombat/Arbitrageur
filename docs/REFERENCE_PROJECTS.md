@@ -67,14 +67,14 @@ The repository provides a single compiled Linux x86_64 ELF binary: `panda-arb-0.
 
 ### 5.1 Synthetic Parity Principle
 - Targets Polymarket and Kalshi.
-- Recognizes that buying YES on Polymarket and NO on Kalshi for identical binary outcomes forms an Arrow-Debreu portfolio with guaranteed $\$1.00$ terminal payoff.
+- Recognizes that buying YES on Polymarket and NO on Kalshi for identical binary outcomes forms an Arrow-Debreu portfolio with a conditional $\$1.00$ terminal payoff, valid only when both contracts settle the same event under materially identical rules.
 - Uses Levenshtein distance and fuzzy title matching to pair cross-platform markets automatically.
 - Trades via aggressive market/IOC orders to lock in the spread before liquidity is consumed.
 
 ### 5.2 Pitfalls Identified in Reference
 - The reference bot ignores platform settlement fees and withdrawal fees.
 - Lacked orderbook depth verification: placed full trade sizes without computing price impact across orderbook levels.
-- **Arbitrageur Improvement:** Added full fee subtraction, VWAP depth calculation, and automated emergency rollback if one leg rejects.
+- **Arbitrageur Improvement:** Added full fee subtraction, VWAP depth calculation, and best-effort emergency compensation/flatten paths when one leg rejects.
 
 ---
 

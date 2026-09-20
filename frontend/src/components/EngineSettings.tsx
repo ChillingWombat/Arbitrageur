@@ -547,8 +547,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
   }, [vaultStatus]);
 
-  const liveReadyVenues = venueCapabilities.filter((c) => c.liveReady);
-  const canSwitchToLive = (vaultStatus?.is_unlocked ?? false) && liveReadyVenues.length >= 2;
+  const submissionReadyVenues = venueCapabilities.filter((c) => c.submissionReady);
+  const canSwitchToLive = (vaultStatus?.is_unlocked ?? false) && submissionReadyVenues.length >= 2;
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1281,7 +1281,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading submits signed orders to your connected exchange accounts on supported API venues. Live execution requires an unlocked credential vault and at least two live-ready venues."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Strategy entries remain disabled until terminal two-leg fill reconciliation, cancellation recovery, and restart reconciliation are implemented. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1313,8 +1313,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     title={
                       !vaultStatus?.is_unlocked
                         ? "Vault is locked. Click to enter password and unlock the vault."
-                        : liveReadyVenues.length < 2
-                        ? `Requires at least 2 live-ready venues (currently ${liveReadyVenues.length}: ${liveReadyVenues.map(v => v.name).join(", ") || "none"}). Configure and enable API keys in the Exchanges tab.`
+                        : submissionReadyVenues.length < 2
+                        ? `Requires at least 2 submission-capable venues (currently ${submissionReadyVenues.length}: ${submissionReadyVenues.map(v => v.name).join(", ") || "none"}). Configure and enable API keys in the Exchanges tab.`
                         : "Switch to Live Trading"
                     }
                     onClick={() => {
@@ -1350,6 +1350,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </label>
                 </div>
 
+                <p className="text-xs text-warn">
+                  Strategy entries remain disabled in Live mode. Live Trading is limited to account monitoring and risk-reducing closes, such as flattening existing positions.
+                </p>
 
               </div>
 
@@ -1849,7 +1852,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <span>REAL CAPITAL AT RISK</span>
             </p>
             <p className="text-slate-700 leading-normal font-sans text-xs">
-              You are enabling real-money automated order execution. Live orders will be submitted directly to connected exchange order books using your real account balances.
+              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. New live strategy entries remain disabled until terminal fill and restart reconciliation are implemented.
             </p>
           </div>
 
@@ -1859,7 +1862,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 1
               </span>
               <div>
-                <strong className="text-slate-900 font-semibold">Authenticated Venues Only:</strong> Orders are routed exclusively between venues with authenticated API credentials in your unlocked vault. Routes involving unauthenticated or read-only venues automatically fail closed to prevent unhedged exposure.
+                <strong className="text-slate-900 font-semibold">Authenticated Venues Only:</strong> Close submissions are routed only to venues with authenticated API credentials in your unlocked vault. Routes involving unauthenticated or read-only venues automatically fail closed to prevent unhedged exposure.
               </div>
             </div>
 
@@ -1877,7 +1880,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 3
               </span>
               <div>
-                <strong className="text-slate-900 font-semibold">Safety Controls &amp; Emergency Stop:</strong> Delta guards, max grid steps, and minimum profit hurdles remain enforced. Use <span className="font-mono font-bold text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200">PAUSE</span> in the header to freeze new submissions while preserving open positions, or <span className="font-mono font-bold text-loss bg-loss-dim px-1 py-0.5 rounded border border-loss-border">EMERGENCY STOP</span> to immediately halt the engine and flatten open legs.
+                <strong className="text-slate-900 font-semibold">Safety Controls &amp; Emergency Stop:</strong> Delta guards, max grid steps, and minimum profit hurdles remain enforced. Use <span className="font-mono font-bold text-amber-700 bg-amber-50 px-1 py-0.5 rounded border border-amber-200">PAUSE</span> to freeze new submissions while preserving positions, <span className="font-mono font-bold text-loss bg-loss-dim px-1 py-0.5 rounded border border-loss-border">STOP ALL</span> to trip the circuit breaker, and explicit position close actions for risk-reducing submissions. Order acknowledgements are not proof of terminal fill; verify venue state.
               </div>
             </div>
 
@@ -1886,7 +1889,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 4
               </span>
               <div>
-                <strong className="text-slate-900 font-semibold">Vault Security:</strong> All API keys remain encrypted on-device. Relocking the vault or closing the application immediately stops live execution.
+                <strong className="text-slate-900 font-semibold">Vault Security:</strong> API credentials remain encrypted on-device in the vault. Relocking or closing the app clears local access and stops new local submissions, but it does not cancel or prove the state of orders already accepted by a venue.
               </div>
             </div>
           </div>
@@ -1900,7 +1903,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 className="mt-0.5 rounded text-loss focus:ring-loss border-surface-border"
               />
               <span className="text-[11px] text-slate-700 font-medium leading-normal">
-                I acknowledge the risks of automated real-money trading and confirm my risk parameters and exchange credentials.
+                I acknowledge the risks of real-account monitoring and explicit risk-reducing submissions, and I confirm my risk parameters and exchange credentials.
               </span>
             </label>
 

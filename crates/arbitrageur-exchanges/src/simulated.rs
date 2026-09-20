@@ -1,16 +1,16 @@
-use std::sync::Arc;
-use std::time::Duration;
-use async_trait::async_trait;
-use chrono::Utc;
-use dashmap::DashMap;
-use parking_lot::RwLock;
-use tokio::time::sleep;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side, VenueId};
+use async_trait::async_trait;
+use chrono::Utc;
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::time::sleep;
 
 /// In-memory microsecond simulated exchange for rigorous testing and live replay.
 pub struct SimulatedExchange {
@@ -106,7 +106,12 @@ impl SimulatedExchange {
     /// Effective booking leverage for a symbol: min(configured, cap).
     /// Strategy default is 5x; no venue term and no 5x ceiling.
     fn effective_leverage_for(&self, symbol: &str) -> u32 {
-        let configured = self.leverages.get(symbol).map(|v| *v).unwrap_or(5).clamp(1, 125);
+        let configured = self
+            .leverages
+            .get(symbol)
+            .map(|v| *v)
+            .unwrap_or(5)
+            .clamp(1, 125);
         match self.max_leverage_cap() {
             Some(cap) => configured.min(cap.clamp(1, 125)),
             None => configured,
@@ -125,11 +130,18 @@ impl SimulatedExchange {
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
         for i in 0..10 {
             let offset = Decimal::from(i) * dec!(0.5);
-            book.bids.push(BookLevel::new(best_bid - offset, size_per_level * (dec!(1) + Decimal::from(i) * dec!(0.2))));
-            book.asks.push(BookLevel::new(best_ask + offset, size_per_level * (dec!(1) + Decimal::from(i) * dec!(0.2))));
+            book.bids.push(BookLevel::new(
+                best_bid - offset,
+                size_per_level * (dec!(1) + Decimal::from(i) * dec!(0.2)),
+            ));
+            book.asks.push(BookLevel::new(
+                best_ask + offset,
+                size_per_level * (dec!(1) + Decimal::from(i) * dec!(0.2)),
+            ));
         }
         book.timestamp = Utc::now();
-        self.books.insert(symbol.to_string(), Arc::new(RwLock::new(book)));
+        self.books
+            .insert(symbol.to_string(), Arc::new(RwLock::new(book)));
 
         self.funding_rates.insert(
             symbol.to_string(),
@@ -194,7 +206,8 @@ impl SimulatedExchange {
             );
         }
         book.validate_for_execution().map_err(anyhow::Error::msg)?;
-        self.books.insert(book.symbol.clone(), Arc::new(RwLock::new(book)));
+        self.books
+            .insert(book.symbol.clone(), Arc::new(RwLock::new(book)));
         Ok(())
     }
 }
@@ -463,7 +476,8 @@ impl ExchangeAdapter for SimulatedExchange {
                         pos.mark_price = fill_px;
                         pos.realized_pnl += realized_pnl;
                         pos.initial_margin = (pos.quantity * fill_px) / pos.leverage;
-                        pos.maintenance_margin = (pos.quantity * fill_px) / (pos.leverage * dec!(2));
+                        pos.maintenance_margin =
+                            (pos.quantity * fill_px) / (pos.leverage * dec!(2));
                     } else {
                         let remaining_new_qty = filled_qty - pos.quantity;
                         pos.side = order.side;
@@ -473,7 +487,8 @@ impl ExchangeAdapter for SimulatedExchange {
                         pos.realized_pnl += realized_pnl;
                         pos.leverage = leverage_dec;
                         pos.initial_margin = (remaining_new_qty * fill_px) / pos.leverage;
-                        pos.maintenance_margin = (remaining_new_qty * fill_px) / (pos.leverage * dec!(2));
+                        pos.maintenance_margin =
+                            (remaining_new_qty * fill_px) / (pos.leverage * dec!(2));
                     }
                 }
             } else {
@@ -532,10 +547,17 @@ impl ExchangeAdapter for SimulatedExchange {
 
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
         if symbol.trim().is_empty() {
-            anyhow::bail!("[{}] Symbol must be nonempty for leverage update", self.name);
+            anyhow::bail!(
+                "[{}] Symbol must be nonempty for leverage update",
+                self.name
+            );
         }
         if !(1..=125).contains(&leverage) {
-            anyhow::bail!("[{}] Leverage {} out of range; must be 1..=125", self.name, leverage);
+            anyhow::bail!(
+                "[{}] Leverage {} out of range; must be 1..=125",
+                self.name,
+                leverage
+            );
         }
         if let Some(cap) = self.max_leverage_cap() {
             if leverage > cap {
@@ -634,7 +656,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reduce_only_oversized_close_caps_at_position() {        let ex = seeded();
+    async fn reduce_only_oversized_close_caps_at_position() {
+        let ex = seeded();
         ex.place_order(market_order(&ex, Side::Buy, dec!(0.5), false))
             .await
             .expect("opening order");
@@ -666,8 +689,10 @@ mod tests {
         assert_eq!(ex.max_leverage_cap(), None);
         assert!(ex.set_max_leverage_cap(Some(0)).is_err());
         assert!(ex.set_max_leverage_cap(Some(126)).is_err());
-        ex.set_max_leverage_cap(Some(6)).expect("above old 5x ceiling ok");
-        ex.set_max_leverage_cap(Some(50)).expect("venue-scale cap ok");
+        ex.set_max_leverage_cap(Some(6))
+            .expect("above old 5x ceiling ok");
+        ex.set_max_leverage_cap(Some(50))
+            .expect("venue-scale cap ok");
         ex.set_max_leverage_cap(Some(3)).expect("valid cap");
         assert_eq!(ex.max_leverage_cap(), Some(3));
         ex.set_max_leverage_cap(None).expect("clear");
@@ -693,7 +718,11 @@ mod tests {
             .expect("opening order");
         let acc = ex.fetch_account().await.expect("account");
         let pos = acc.get_position("BTC-USDC").expect("position");
-        assert_eq!(pos.leverage, dec!(2), "booking must use min(configured, cap)");
+        assert_eq!(
+            pos.leverage,
+            dec!(2),
+            "booking must use min(configured, cap)"
+        );
         let px = pos.entry_price;
         assert_eq!(
             pos.initial_margin,
@@ -737,7 +766,12 @@ mod tests {
             start - open_fee - close_fee + realized,
             "equity moves only by fills (realized PnL) minus fees"
         );
-        assert!(ex.fetch_account().await.expect("account").positions.is_empty());
+        assert!(ex
+            .fetch_account()
+            .await
+            .expect("account")
+            .positions
+            .is_empty());
 
         ex.reset_account(dec!(250000.0));
         let reset = ex.fetch_account().await.expect("account");

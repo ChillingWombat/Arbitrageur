@@ -1,17 +1,17 @@
-use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use reqwest::Client;
-use std::collections::HashMap;
+use crate::rate_limiter::AccountRequestCoordinator;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
+use async_trait::async_trait;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signer, SigningKey};
+use reqwest::Client;
+use std::collections::HashMap;
 
 /// Vanta Exchange (Orderly Network broker protocol) connector.
 /// Vanta's perpetual API is hosted on Orderly; public read-only calls use
@@ -97,7 +97,9 @@ fn parse_market_summary_volumes(data: &serde_json::Value) -> HashMap<String, Dec
                         _ => None,
                     });
                 if let Some(n) = notional {
-                    out.insert(base.to_string(), n);
+                    // Canonical BASE-QUOTE keys match what hub consumers
+                    // look up; Vanta perps are all USDC-quoted.
+                    out.insert(format!("{}-USDC", base.to_uppercase()), n);
                 }
             }
         }
@@ -128,9 +130,7 @@ fn parse_orderbook_data(
         .and_then(|s| s.as_str())
         .ok_or_else(|| anyhow::anyhow!("Vanta orderbook response missing data.symbol"))?;
     if returned != vanta_sym {
-        anyhow::bail!(
-            "Vanta orderbook returned symbol {returned} for requested {vanta_sym}"
-        );
+        anyhow::bail!("Vanta orderbook returned symbol {returned} for requested {vanta_sym}");
     }
     let mut book = OrderBook::new(venue.clone(), symbol.to_string());
     if let Some(levels) = data.get("bids").and_then(|l| l.as_array()) {
@@ -241,7 +241,9 @@ fn decode_orderly_secret(raw: &str) -> anyhow::Result<[u8; 32]> {
             return Ok(arr);
         }
     }
-    anyhow::bail!("Invalid Orderly secret format: expected 32-byte Base58 or Hex Ed25519 private key")
+    anyhow::bail!(
+        "Invalid Orderly secret format: expected 32-byte Base58 or Hex Ed25519 private key"
+    )
 }
 
 /// Sign message for Orderly Network: Ed25519 signature over message bytes, URL-safe base64 encoded (no padding).
@@ -299,11 +301,7 @@ fn parse_orderly_account_data(
                 continue;
             }
 
-            let side = if qty > dec!(0) {
-                Side::Buy
-            } else {
-                Side::Sell
-            };
+            let side = if qty > dec!(0) { Side::Buy } else { Side::Sell };
 
             let entry_price = dec_from_json(p.get("average_open_price"))
                 .or_else(|| dec_from_json(p.get("averageOpenPrice")))
@@ -378,7 +376,8 @@ impl VantaAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -417,7 +416,7 @@ impl VantaAdapter {
         }
         let clean = symbol.replace('-', "_");
         if clean.starts_with("PERP_") {
-            if !clean.ends_with("_USDC") && !clean.ends_with("_USD") {
+            if !clean.ends_with("_USDC") {
                 anyhow::bail!(
                     "Vanta perpetual markets are only quoted in USDC; '{symbol}' is not supported"
                 );
@@ -426,7 +425,7 @@ impl VantaAdapter {
         } else {
             if tokens.len() >= 2 {
                 let quote = tokens[1];
-                if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("USD") {
+                if !quote.eq_ignore_ascii_case("USDC") {
                     anyhow::bail!(
                         "Vanta perpetual markets are only quoted in USDC; '{symbol}' is not supported"
                     );
@@ -452,7 +451,9 @@ impl VantaAdapter {
         let acc = self.account_id.read().clone().unwrap_or_default();
         let clean = acc.trim().trim_matches('"').trim_matches('\'').trim();
         if clean.is_empty() {
-            anyhow::bail!("Vanta live trading requires an Orderly Account ID configured in credentials");
+            anyhow::bail!(
+                "Vanta live trading requires an Orderly Account ID configured in credentials"
+            );
         }
         Ok(clean.to_string())
     }
@@ -460,7 +461,9 @@ impl VantaAdapter {
     fn orderly_secret(&self) -> anyhow::Result<String> {
         let sec = self.orderly_secret.read().clone().unwrap_or_default();
         if sec.trim().is_empty() {
-            anyhow::bail!("Vanta live trading requires the Orderly Secret configured in credentials");
+            anyhow::bail!(
+                "Vanta live trading requires the Orderly Secret configured in credentials"
+            );
         }
         Ok(sec)
     }
@@ -546,10 +549,9 @@ impl VantaAdapter {
             if !body.is_empty() {
                 req = req.body(body.to_string());
             }
-            let resp = req
-                .send()
-                .await
-                .map_err(|e| anyhow::anyhow!("Vanta {method} {sign_path} transport failure: {e}"))?;
+            let resp = req.send().await.map_err(|e| {
+                anyhow::anyhow!("Vanta {method} {sign_path} transport failure: {e}")
+            })?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
@@ -559,11 +561,15 @@ impl VantaAdapter {
                 }
                 anyhow::bail!("{last_err}");
             }
-            let v: serde_json::Value = resp.json().await.map_err(|e| {
-                anyhow::anyhow!("Vanta {method} {sign_path} bad JSON: {e}")
-            })?;
+            let v: serde_json::Value = resp
+                .json()
+                .await
+                .map_err(|e| anyhow::anyhow!("Vanta {method} {sign_path} bad JSON: {e}"))?;
             if v.get("success").and_then(|s| s.as_bool()) != Some(true) {
-                let msg = v.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                let msg = v
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown error");
                 last_err = format!("Vanta {method} {sign_path} error: {msg} ({v})");
                 if v.to_string().contains("-1004") {
                     continue;
@@ -624,7 +630,11 @@ impl VantaAdapter {
     /// Returns the `data` payload; requires HTTP success and `success: true`.
     async fn public_query(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let cache_key = body.to_string();
-        if let Some(cached_str) = self.rate_limiter.acquire_or_cache_path(&cache_key, true).await? {
+        if let Some(cached_str) = self
+            .rate_limiter
+            .acquire_or_cache_path(&cache_key, true)
+            .await?
+        {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
                 return Ok(val);
             }
@@ -656,7 +666,8 @@ impl VantaAdapter {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Vanta public query response missing data"))?;
 
-        self.rate_limiter.record_success_path(&cache_key, data.to_string());
+        self.rate_limiter
+            .record_success_path(&cache_key, data.to_string());
         Ok(data)
     }
 }
@@ -678,9 +689,7 @@ impl ExchangeAdapter for VantaAdapter {
         let markets = data
             .get("markets")
             .and_then(|m| m.as_array())
-            .ok_or_else(|| {
-                anyhow::anyhow!("Vanta marketSummary response missing data.markets")
-            })?;
+            .ok_or_else(|| anyhow::anyhow!("Vanta marketSummary response missing data.markets"))?;
         Ok(markets
             .iter()
             .filter_map(|m| parse_market_summary_entry(&self.venue_id, m))
@@ -701,7 +710,8 @@ impl ExchangeAdapter for VantaAdapter {
             let Some(symbol) = market.get("symbol").and_then(|s| s.as_str()) else {
                 continue;
             };
-            let Some(price) = dec_from_json(market.get("mark_price")).filter(|p| *p > dec!(0)) else {
+            let Some(price) = dec_from_json(market.get("mark_price")).filter(|p| *p > dec!(0))
+            else {
                 continue;
             };
             out.insert(symbol.to_string(), price);
@@ -724,7 +734,9 @@ impl ExchangeAdapter for VantaAdapter {
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
         let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let data = self
-            .public_query(serde_json::json!({"type": "marketSummary", "symbols": [vanta_sym.clone()]}))
+            .public_query(
+                serde_json::json!({"type": "marketSummary", "symbols": [vanta_sym.clone()]}),
+            )
             .await?;
         parse_ticker_data(&self.venue_id, symbol, &vanta_sym, &data)
     }
@@ -732,7 +744,9 @@ impl ExchangeAdapter for VantaAdapter {
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
         let vanta_sym = Self::to_vanta_symbol(symbol)?;
         let data = self
-            .public_query(serde_json::json!({"type": "marketSummary", "symbols": [vanta_sym.clone()]}))
+            .public_query(
+                serde_json::json!({"type": "marketSummary", "symbols": [vanta_sym.clone()]}),
+            )
             .await?;
         parse_funding_data(&self.venue_id, symbol, &vanta_sym, &data)
     }
@@ -753,9 +767,15 @@ impl ExchangeAdapter for VantaAdapter {
         let orderly_key = self.orderly_key.read().clone().unwrap_or_default();
         let orderly_secret = self.orderly_secret.read().clone().unwrap_or_default();
 
-        let clean_acc = account_id.trim().trim_matches('"').trim_matches('\'').trim();
+        let clean_acc = account_id
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim();
         if clean_acc.is_empty() {
-            anyhow::bail!("Vanta live balance requires an Orderly Account ID configured in credentials");
+            anyhow::bail!(
+                "Vanta live balance requires an Orderly Account ID configured in credentials"
+            );
         }
 
         // 1. Authenticated query if orderly_secret is present
@@ -805,7 +825,9 @@ impl ExchangeAdapter for VantaAdapter {
             let mut last_err = String::new();
 
             for k in candidate_keys {
-                let resp = self.client.get(&url)
+                let resp = self
+                    .client
+                    .get(&url)
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .header("orderly-account-id", clean_acc)
                     .header("orderly-key", &k)
@@ -827,12 +849,17 @@ impl ExchangeAdapter for VantaAdapter {
 
                 let json_val = resp.json::<serde_json::Value>().await?;
                 if json_val.get("success").and_then(|s| s.as_bool()) != Some(true) {
-                    let msg = json_val.get("message").and_then(|m| m.as_str()).unwrap_or("unknown error");
+                    let msg = json_val
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown error");
                     last_err = format!("Vanta /v1/positions error: {msg}");
                     continue;
                 }
 
-                let data = json_val.get("data").ok_or_else(|| anyhow::anyhow!("Vanta /v1/positions missing data"))?;
+                let data = json_val
+                    .get("data")
+                    .ok_or_else(|| anyhow::anyhow!("Vanta /v1/positions missing data"))?;
                 return parse_orderly_account_data(&self.venue_id, data);
             }
 
@@ -850,6 +877,22 @@ impl ExchangeAdapter for VantaAdapter {
         }
 
         anyhow::bail!("Vanta live balance requires Orderly Secret configured in credentials")
+    }
+
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        if let Some(base) = standard_symbol_base(&position.symbol) {
+            position.symbol = format!("{base}-USDC");
+        } else if position.symbol.contains('-') {
+            position.symbol = position.symbol.to_uppercase();
+            Self::to_vanta_symbol(&position.symbol)?;
+        } else {
+            anyhow::bail!(
+                "Vanta account symbol '{}' is not a standard PERP_BASE_USDC market",
+                position.symbol
+            );
+        }
+        Ok(Some(position))
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -870,8 +913,27 @@ impl ExchangeAdapter for VantaAdapter {
                     .map(|s| s.to_string())
             })
             .unwrap_or_default();
-        if order_id.is_empty() || order_id == "0" {
-            anyhow::bail!("Vanta order returned no order_id: {v}");
+        if !order_id.parse::<u64>().map(|id| id > 0).unwrap_or(false) {
+            anyhow::bail!("Vanta order returned no valid positive order_id: {v}");
+        }
+        if let Some(returned_symbol) = data.get("symbol").and_then(|s| s.as_str()) {
+            if returned_symbol != venue_symbol {
+                anyhow::bail!(
+                    "Vanta order response symbol '{returned_symbol}' does not match expected '{venue_symbol}': {v}"
+                );
+            }
+        }
+        if let Some(returned_client) = data
+            .get("client_order_id")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if returned_client != order.client_order_id {
+                anyhow::bail!(
+                    "Vanta order response client_order_id '{returned_client}' does not match request '{}': {v}",
+                    order.client_order_id
+                );
+            }
         }
         Ok(OrderResponse {
             order_id,
@@ -973,12 +1035,8 @@ mod tests {
         use arbitrageur_core::order::OrderRequest;
         use arbitrageur_core::types::{Side, TimeInForce};
         let mk = |t: arbitrageur_core::types::OrderType, tif: TimeInForce, px: Option<Decimal>| {
-            let mut o = OrderRequest::new_market(
-                VenueId::new("vanta"),
-                "BTC-USDC",
-                Side::Buy,
-                dec!(0.01),
-            );
+            let mut o =
+                OrderRequest::new_market(VenueId::new("vanta"), "BTC-USDC", Side::Buy, dec!(0.01));
             o.order_type = t;
             o.time_in_force = tif;
             o.price = px;
@@ -1050,7 +1108,10 @@ mod tests {
         assert!(parse_market_summary_entry(&venue, &missing_tick).is_none());
 
         let mut missing_notional = market_row("PERP_ETH_USDC");
-        missing_notional.as_object_mut().unwrap().remove("min_notional");
+        missing_notional
+            .as_object_mut()
+            .unwrap()
+            .remove("min_notional");
         assert!(parse_market_summary_entry(&venue, &missing_notional).is_none());
     }
 
@@ -1110,16 +1171,17 @@ mod tests {
         assert!(parse_ticker_data(&venue, "BTC-USDC", "PERP_BTC_USDC", &wrap(no_ask)).is_err());
 
         let mut no_funding = market_row("PERP_BTC_USDC");
-        no_funding.as_object_mut().unwrap().remove("last_funding_rate");
+        no_funding
+            .as_object_mut()
+            .unwrap()
+            .remove("last_funding_rate");
         assert!(
             parse_funding_data(&venue, "BTC-USDC", "PERP_BTC_USDC", &wrap(no_funding)).is_err()
         );
 
         let mut no_next = market_row("PERP_BTC_USDC");
         no_next.as_object_mut().unwrap().remove("next_funding_time");
-        assert!(
-            parse_funding_data(&venue, "BTC-USDC", "PERP_BTC_USDC", &wrap(no_next)).is_err()
-        );
+        assert!(parse_funding_data(&venue, "BTC-USDC", "PERP_BTC_USDC", &wrap(no_next)).is_err());
 
         let absent = wrap(serde_json::json!({"symbol": "PERP_ETH_USDC"}));
         assert!(parse_ticker_data(&venue, "BTC-USDC", "PERP_BTC_USDC", &absent).is_err());
@@ -1138,8 +1200,10 @@ mod tests {
         assert!(VantaAdapter::to_vanta_symbol("BTC-SPOT").is_err());
         assert!(VantaAdapter::to_vanta_symbol("eth/spot").is_err());
         assert!(VantaAdapter::to_vanta_symbol("SPOT_BTC_USDC").is_err());
+        assert!(VantaAdapter::to_vanta_symbol("BTC-USD").is_err());
         assert!(VantaAdapter::to_vanta_symbol("BTC-SOL").is_err());
         assert!(VantaAdapter::to_vanta_symbol("BTC-ETH").is_err());
+        assert!(VantaAdapter::to_vanta_symbol("PERP_BTC_USD").is_err());
         assert!(VantaAdapter::to_vanta_symbol("PERP_BTC_SOL").is_err());
     }
 
@@ -1156,10 +1220,12 @@ mod tests {
         let decoded_hex = decode_orderly_secret(&hex_key).expect("decode hex");
         assert_eq!(decoded_hex, raw_key);
 
-        let decoded_prefixed = decode_orderly_secret(&format!("ed25519:{base58_key}")).expect("decode prefixed");
+        let decoded_prefixed =
+            decode_orderly_secret(&format!("ed25519:{base58_key}")).expect("decode prefixed");
         assert_eq!(decoded_prefixed, raw_key);
 
-        let sig = sign_orderly_message(&base58_key, "1710000000000GET/v1/positions").expect("sign message");
+        let sig = sign_orderly_message(&base58_key, "1710000000000GET/v1/positions")
+            .expect("sign message");
         assert!(!sig.is_empty());
         assert!(!sig.contains('+'));
         assert!(!sig.contains('/'));
@@ -1225,6 +1291,31 @@ mod tests {
     }
 
     #[test]
+    fn account_position_for_maps_orderly_perp_symbol() {
+        let adapter = VantaAdapter::new(None, None, None, None);
+        let data = serde_json::json!({
+            "total_collateral_value": "100",
+            "rows": [{
+                "symbol": "PERP_BTC_USDC",
+                "position_qty": "0.15",
+                "average_open_price": "65000.0",
+                "mark_price": "65500.0"
+            }]
+        });
+        let account = parse_orderly_account_data(&VenueId::new("vanta"), &data).unwrap();
+        let pos = adapter
+            .account_position_for(&account, "BTC-USDC")
+            .unwrap()
+            .expect("PERP_BTC_USDC should resolve");
+        assert_eq!(pos.symbol, "BTC-USDC");
+        assert_eq!(pos.quantity, dec!(0.15));
+        assert!(adapter
+            .account_position_for(&account, "ETH-USDC")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn parse_market_summary_volumes_extracts_notional() {
         let data = serde_json::json!({
             "markets": [
@@ -1249,9 +1340,8 @@ mod tests {
             ]
         });
         let vols = parse_market_summary_volumes(&data);
-        assert_eq!(vols.get("BTC"), Some(&dec!(50000000.0)));
-        assert_eq!(vols.get("ETH"), Some(&dec!(250000.0)));
-        assert_eq!(vols.get("SOL"), None);
+        assert_eq!(vols.get("BTC-USDC"), Some(&dec!(50000000.0)));
+        assert_eq!(vols.get("ETH-USDC"), Some(&dec!(250000.0)));
+        assert_eq!(vols.get("SOL-USDC"), None);
     }
 }
-

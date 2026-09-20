@@ -1,12 +1,12 @@
+use crate::funding_rate_arb::FundingRateArbStrategy;
+use crate::spatial_price_arb::SpatialPriceArbStrategy;
+use arbitrageur_core::types::dec;
+use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
-use arbitrageur_core::types::dec;
-use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
-use crate::spatial_price_arb::SpatialPriceArbStrategy;
-use crate::funding_rate_arb::FundingRateArbStrategy;
 
 pub struct ArbitrageEngine {
     is_running: Arc<AtomicBool>,

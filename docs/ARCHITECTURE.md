@@ -34,12 +34,10 @@ The **Arbitrageur** system is engineered in Rust with high-performance concurren
                      |
          +-----------v------------+                       +------------------------+
          |  arbitrageur-exchanges  |                       |    arbitrageur-math     |
-         |  - Hyperliquid L1      |                       |  - Kalman Filter (2D)  |
-         |  - Lighter (zk-DEX)    |                       |  - OU Process MLE      |
-         |  - Vanta.exchange      |                       |  - Bertram Thresholds  |
-         |  - Robinhood EVM       |                       |  - Cointegration (ADF) |
-         |  - Prediction Markets  |                       |  - Synthetic Parity    |
-         |  - Simulated Engine    |                       |  - Welford Online      |
+         |  - CEX + DEX adapters |                       |  - Kalman Filter (2D) |
+         |  - Lighter + RH lane  |                       |  - OU Process MLE     |
+         |  - Prediction research|                       |  - Bertram Thresholds |
+         |  - Simulated Engine   |                       |  - Carry / Parity     |
          +-----------+------------+                       +-----------+------------+
                      |                                                |
                      +------------------------+-----------------------+
@@ -58,11 +56,12 @@ The **Arbitrageur** system is engineered in Rust with high-performance concurren
 |---|---|---|
 | `arbitrageur-core` | Core domain types, precision decimal arithmetic, market specifications, and unified interfaces. | `OrderBook`, `Ticker`, `FundingRate`, `OrderRequest`, `Position`, `ExchangeAdapter` |
 | `arbitrageur-math` | Pure quantitative finance algorithms, time series models, statistical arbitrage solvers. | `HedgeRatioKalmanFilter`, `OuModelParams`, `compute_bertram_thresholds`, `evaluate_funding_carry` |
-| `arbitrageur-exchanges` | High-throughput asynchronous venue connectors with rate-limiting and session management. | `HyperliquidAdapter`, `LighterAdapter`, `VantaAdapter`, `RobinhoodAdapter`, `SimulatedExchange` |
+| `arbitrageur-exchanges` | Venue connectors with capability-specific public/account reads, submission transports, and the simulator. | `HyperliquidAdapter`, `LighterAdapter`, `VantaAdapter`, `RobinhoodAdapter`, `AsterAdapter`, `BinanceAdapter`, `OkxAdapter`, `CoinbaseAdapter`, `KrakenAdapter`, `DecibelAdapter`, `PopDexAdapter`, `SimulatedExchange` |
 | `arbitrageur-risk` | Real-time circuit breakers, liquidation buffers, and portfolio delta neutrality enforcement. | `CircuitBreaker`, `DeltaGuard`, `MarginMonitor` |
-| `arbitrageur-execution` | Atomic multi-leg concurrent execution, smart routing, and automated rollback/unwind handlers. | `AtomicArbitrageCoordinator`, `EmergencyUnwindHandler`, `SmartOrderRouter` |
-| `arbitrageur-strategy` | Autonomous trading strategies consuming normalized market events and generating actionable signals. | `SpatialPriceArbStrategy`, `FundingRateArbStrategy`, `StatArbPairsStrategy`, `ArbitrageEngine` |
-| `arbitrageur-app` | Command-line interface, benchmarking suite, telemetry, and live interactive runners. | `Cli`, `run_monitor`, `run_simulate`, `run_funding_scan`, `run_benchmarks` |
+| `arbitrageur-execution` | Atomic multi-leg concurrent execution, smart routing, and automated rollback/unwind handlers. | `AtomicArbitrageCoordinator`, `EmergencyUnwindHandler`, `SmartOrderRouter`, `PassiveUnwindEngine` |
+| `arbitrageur-strategy` | Autonomous trading strategies consuming normalized market events and generating actionable signals. | `SpatialPriceArbStrategy`, `FundingRateArbStrategy`, `StatArbPairsStrategy`, `ConvergenceAuto`, `ArbitrageEngine` |
+| `arbitrageur-app` | CLI research commands, benchmarks, and a loopback-only headless placeholder daemon. | `Cli`, `run_monitor`, `run_simulate`, `run_funding_scan`, `run_benchmarks`, `run_serve` |
+| `arbitrageur-desktop` (`frontend/src-tauri`) | Tauri command surface, durable SQLite state, vault, live/paper mode policy, feed supervisors, and UI DTO mapping. | `AppEngineState`, `StateStore`, `SecureVault`, `execute_*_impl`, `SignalExecution` |
 
 ---
 
@@ -80,6 +79,7 @@ The **Arbitrageur** system is engineered in Rust with high-performance concurren
 
 ## 4. Security & Key Management
 
-1. **Environment Isolation:** Secrets and API keys are loaded strictly via environment variables or encrypted keychain files (`.env` is strictly gitignored).
-2. **Permission Hardening:** Sensitive configuration files are saved with POSIX `0o600` permissions (read/write by owner only).
-3. **Remote Signer Compatibility:** Full architectural parity with `taoli-tools-signer`, allowing the engine to offload order signing to a private hardware security module or container.
+1. **Encrypted credential vault:** Exchange secrets are entered through the desktop vault and stored in `~/.arbitrageur/vault.enc` using AES-256-GCM with an Argon2id-derived key. Reveal is field-scoped; there is no whole-account credential-read IPC.
+2. **Permission hardening:** On Unix the data directory is `0700`; vault and SQLite files are `0600`. SQLite operational state is local plaintext at the application layer and must be protected by filesystem permissions/backups.
+3. **Live-order boundary:** Adapter signing/submission is transport capability only. New live strategy entries are disabled until terminal fill reconciliation, cancellation recovery, and restart recovery are implemented and evidenced.
+4. **Vendored signer integrity:** `liblighter_signer.so` is hashed before FFI load; a custom `LIGHTER_SIGNER_LIB` requires an explicit `LIGHTER_SIGNER_SHA256`. Remote HSM signing remains a design direction, not an implemented runtime backend.

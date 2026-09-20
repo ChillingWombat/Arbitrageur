@@ -1,10 +1,10 @@
-use std::sync::Arc;
-use tracing::debug;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrageur_math::rolling_stats::RollingWindowStats;
 use arbitrageur_math::spatial_spread::evaluate_spatial_spread;
+use std::sync::Arc;
+use tracing::debug;
 
 /// Direction of spatial price spread arbitrage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,7 +104,13 @@ impl SpatialPriceArbStrategy {
         }
 
         // Evaluate depth-weighted executable opportunity Direction 1: Buy A, Sell B
-        if let Some(opp1) = evaluate_spatial_spread(&book_a, &book_b, self.fee_a_bps, self.fee_b_bps, self.order_qty) {
+        if let Some(opp1) = evaluate_spatial_spread(
+            &book_a,
+            &book_b,
+            self.fee_a_bps,
+            self.fee_b_bps,
+            self.order_qty,
+        ) {
             if opp1.net_profit_bps >= self.target_profit_bps {
                 return Ok(Some(SpatialSignal {
                     direction: SpatialDirection::BuyASellB,
@@ -118,7 +124,13 @@ impl SpatialPriceArbStrategy {
         }
 
         // Evaluate depth-weighted executable opportunity Direction 2: Buy B, Sell A
-        if let Some(opp2) = evaluate_spatial_spread(&book_b, &book_a, self.fee_b_bps, self.fee_a_bps, self.order_qty) {
+        if let Some(opp2) = evaluate_spatial_spread(
+            &book_b,
+            &book_a,
+            self.fee_b_bps,
+            self.fee_a_bps,
+            self.order_qty,
+        ) {
             if opp2.net_profit_bps >= self.target_profit_bps {
                 return Ok(Some(SpatialSignal {
                     direction: SpatialDirection::BuyBSellA,
@@ -174,7 +186,9 @@ impl SpatialPriceArbStrategy {
                     signal.executable_qty,
                 );
 
-                coordinator.execute_two_leg(&self.exchange_a, order_a, &self.exchange_b, order_b).await
+                coordinator
+                    .execute_two_leg(&self.exchange_a, order_a, &self.exchange_b, order_b)
+                    .await
             }
             SpatialDirection::BuyBSellA => {
                 let (ticker_b, ticker_a) = tokio::join!(
@@ -207,7 +221,9 @@ impl SpatialPriceArbStrategy {
                     signal.executable_qty,
                 );
 
-                coordinator.execute_two_leg(&self.exchange_b, order_b, &self.exchange_a, order_a).await
+                coordinator
+                    .execute_two_leg(&self.exchange_b, order_b, &self.exchange_a, order_a)
+                    .await
             }
         }
     }

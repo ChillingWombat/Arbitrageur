@@ -1,24 +1,24 @@
-pub mod smart_routing;
-pub mod emergency_unwind;
 pub mod coordinator;
-pub mod virtual_ledger;
+pub mod emergency_unwind;
 pub mod passive_unwind;
+pub mod smart_routing;
+pub mod virtual_ledger;
 
-pub use smart_routing::*;
-pub use emergency_unwind::*;
 pub use coordinator::*;
-pub use virtual_ledger::*;
+pub use emergency_unwind::*;
 pub use passive_unwind::*;
+pub use smart_routing::*;
+pub use virtual_ledger::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-    use async_trait::async_trait;
     use arbitrageur_core::exchange::ExchangeAdapter;
     use arbitrageur_core::order::{OrderRequest, OrderResponse};
     use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side};
     use arbitrageur_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
 
     /// Per-call scripted behavior for MockExchange::place_order.
     #[derive(Clone)]
@@ -68,13 +68,24 @@ mod tests {
         fn name(&self) -> &str {
             &self.name
         }
-        async fn fetch_markets(&self) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
             Ok(vec![])
         }
-        async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
-            Ok(arbitrageur_core::quote::OrderBook::new(self.venue_id(), symbol.to_string()))
+        async fn fetch_orderbook(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+            Ok(arbitrageur_core::quote::OrderBook::new(
+                self.venue_id(),
+                symbol.to_string(),
+            ))
         }
-        async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+        async fn fetch_ticker(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
             Ok(arbitrageur_core::quote::Ticker {
                 venue: self.venue_id(),
                 symbol: symbol.to_string(),
@@ -84,7 +95,10 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             })
         }
-        async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+        async fn fetch_funding_rate(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
             Ok(arbitrageur_core::quote::FundingRate {
                 venue: self.venue_id(),
                 symbol: symbol.to_string(),
@@ -95,7 +109,9 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             })
         }
-        async fn fetch_account(&self) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
             Ok(arbitrageur_core::position::AccountSnapshot {
                 venue: self.venue_id(),
                 equity: dec!(10000),
@@ -159,13 +175,19 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             })
         }
-        async fn cancel_order(&self, _req: arbitrageur_core::order::CancelRequest) -> anyhow::Result<()> {
+        async fn cancel_order(
+            &self,
+            _req: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
     }
 
     fn make_coordinator() -> (AtomicArbitrageCoordinator, Arc<CircuitBreaker>) {
-        let cb = Arc::new(CircuitBreaker::new(CircuitBreakerConfig::default(), dec!(10000)));
+        let cb = Arc::new(CircuitBreaker::new(
+            CircuitBreakerConfig::default(),
+            dec!(10000),
+        ));
         let router = SmartOrderRouter::new(dec!(10));
         (AtomicArbitrageCoordinator::new(router, cb.clone()), cb)
     }
@@ -180,12 +202,30 @@ mod tests {
 
         let (coordinator, _cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::Success { realized_profit, leg_a, leg_b } => {
+            ArbitrageExecutionResult::Success {
+                realized_profit,
+                leg_a,
+                leg_b,
+            } => {
                 // Generic coordinator reports immediate realized cash P&L: negative reported fees only
                 assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
                 assert_eq!(realized_profit, dec!(-0.2));
@@ -201,14 +241,29 @@ mod tests {
         let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
         let log_a = mock_a.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
 
         let (coordinator, _cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
             ArbitrageExecutionResult::LegBFailedUnwound { unwind_resp, .. } => {
                 assert_eq!(unwind_resp.status, OrderStatus::Filled);
@@ -227,7 +282,11 @@ mod tests {
     async fn test_incomplete_fills_trim_to_matched_pair() {
         // Leg A partially fills 0.4 of 1.0; Leg B fills fully -> B's 0.6
         // excess is trimmed and the matched 0.4 pair stays open.
-        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
         let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
         let log_a = mock_a.call_log();
         let log_b = mock_b.call_log();
@@ -236,12 +295,31 @@ mod tests {
 
         let (coordinator, cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+            ArbitrageExecutionResult::PartialPairKept {
+                matched_qty,
+                unwind_a,
+                unwind_b,
+                ..
+            } => {
                 assert_eq!(matched_qty, dec!(0.4));
                 assert!(unwind_a.is_none());
                 assert_eq!(unwind_b.expect("B excess must trim").filled_qty, dec!(0.6));
@@ -266,19 +344,41 @@ mod tests {
     async fn test_partial_pair_kept_includes_trim_price_pnl() {
         // Same shape as above: A buys 0.4 @60000, B sells 1.0 @60100, the
         // 0.6 short excess is bought back by the market trim (mock: @100).
-        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
         let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
 
         let (coordinator, _) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::PartialPairKept { matched_qty, realized_profit, .. } => {
+            ArbitrageExecutionResult::PartialPairKept {
+                matched_qty,
+                realized_profit,
+                ..
+            } => {
                 assert_eq!(matched_qty, dec!(0.4));
                 assert_eq!(realized_profit, dec!(36000) - dec!(0.3));
             }
@@ -291,17 +391,36 @@ mod tests {
         let mock_a = MockExchange::new("ex_a", vec![MockResponse::ZeroFill], MockResponse::Full);
         let log_a = mock_a.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
 
         let (coordinator, _cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
             ArbitrageExecutionResult::BothFailed { error_a, .. } => {
-                assert!(error_a.contains("zero filled quantity"), "error_a: {}", error_a);
+                assert!(
+                    error_a.contains("zero filled quantity"),
+                    "error_a: {}",
+                    error_a
+                );
             }
             other => panic!("Expected BothFailed, got {:?}", other),
         }
@@ -319,16 +438,36 @@ mod tests {
             MockResponse::Full,
         );
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
 
         let (coordinator, cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, leg_b_fill, error_a, error_b } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                leg_b_fill,
+                error_a,
+                error_b,
+            } => {
                 let fill = leg_a_fill.expect("leg A fill should be reported");
                 assert_eq!(fill.filled_qty, dec!(1.0));
                 assert!(leg_b_fill.is_none());
@@ -344,7 +483,8 @@ mod tests {
     #[tokio::test]
     async fn test_unresolved_exposure_mirror_leg() {
         // Leg B fills fully, Leg A errors; Leg B's unwind fails outright
-        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_a", vec![], MockResponse::Fail));
+        let ex_a: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_a", vec![], MockResponse::Fail));
         let mock_b = MockExchange::new(
             "ex_b",
             vec![MockResponse::Full, MockResponse::Fail],
@@ -354,12 +494,31 @@ mod tests {
 
         let (coordinator, cb) = make_coordinator();
 
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, leg_b_fill, error_b, .. } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                leg_b_fill,
+                error_b,
+                ..
+            } => {
                 assert!(leg_a_fill.is_none());
                 let fill = leg_b_fill.expect("leg B fill should be reported");
                 assert_eq!(fill.filled_qty, dec!(1.0));
@@ -408,19 +567,27 @@ mod tests {
     }
 
     async fn assert_malformed_fill_unwound(mutate: impl FnOnce(&mut OrderResponse)) {
-        let order_a = OrderRequest::new_limit(
-            "ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0),
-        );
+        let order_a =
+            OrderRequest::new_limit("ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
         let mut resp = attributed_fill(&order_a, dec!(1.0));
         mutate(&mut resp);
         let mock_a = MockExchange::new("ex_a", vec![MockResponse::Raw(resp)], MockResponse::Full);
         let log_a = mock_a.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Full));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Full));
         let (coordinator, _cb) = make_coordinator();
 
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
             ArbitrageExecutionResult::BothFailed { error_a, .. } => {
                 assert!(error_a.contains("Filled"), "error_a: {}", error_a);
@@ -434,9 +601,8 @@ mod tests {
     }
 
     async fn assert_ambiguous_fill_unresolved(mutate: impl FnOnce(&mut OrderResponse)) {
-        let order_a = OrderRequest::new_limit(
-            "ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0),
-        );
+        let order_a =
+            OrderRequest::new_limit("ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
         let mut resp = attributed_fill(&order_a, dec!(1.0));
         mutate(&mut resp);
         let mock_a = MockExchange::new("ex_a", vec![MockResponse::Raw(resp)], MockResponse::Full);
@@ -447,18 +613,39 @@ mod tests {
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
         let (coordinator, cb) = make_coordinator();
 
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, error_a, error_b, .. } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                error_a,
+                error_b,
+                ..
+            } => {
                 assert!(leg_a_fill.is_some());
-                assert!(error_a.contains("identity mismatch"), "error_a: {}", error_a);
+                assert!(
+                    error_a.contains("identity mismatch"),
+                    "error_a: {}",
+                    error_a
+                );
                 assert!(error_b.contains("unwound"), "error_b: {}", error_b);
             }
             other => panic!("Expected UnresolvedExposure, got {:?}", other),
         }
         assert!(cb.is_tripped());
-        assert_eq!(log_a.lock().unwrap().len(), 1, "ambiguous leg must not be unwound");
+        assert_eq!(
+            log_a.lock().unwrap().len(),
+            1,
+            "ambiguous leg must not be unwound"
+        );
         let calls_b = log_b.lock().unwrap();
         assert_eq!(calls_b.len(), 2, "known counterleg must be unwound");
         assert_eq!(calls_b[1].side, Side::Buy);
@@ -486,23 +673,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_ambiguous_fill_with_failed_counterleg_is_unresolved() {
-        let order_a = OrderRequest::new_limit(
-            "ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0),
-        );
+        let order_a =
+            OrderRequest::new_limit("ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
         let mut resp = attributed_fill(&order_a, dec!(1.0));
         resp.venue = "evil_venue".into();
         let mock_a = MockExchange::new("ex_a", vec![MockResponse::Raw(resp)], MockResponse::Full);
         let log_a = mock_a.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
         let (coordinator, cb) = make_coordinator();
 
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, error_a, .. } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                error_a,
+                ..
+            } => {
                 assert!(leg_a_fill.is_some());
-                assert!(error_a.contains("identity mismatch"), "error_a: {}", error_a);
+                assert!(
+                    error_a.contains("identity mismatch"),
+                    "error_a: {}",
+                    error_a
+                );
             }
             other => panic!("Expected UnresolvedExposure, got {:?}", other),
         }
@@ -533,17 +736,40 @@ mod tests {
             MockResponse::Full,
         );
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
-        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
 
         let (coordinator, cb) = make_coordinator();
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, error_a, .. } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                error_a,
+                ..
+            } => {
                 assert!(leg_a_fill.is_some());
                 assert!(error_a.contains("unwind failed"), "error_a: {}", error_a);
-                assert!(error_a.contains("Emergency unwind incomplete"), "error_a: {}", error_a);
+                assert!(
+                    error_a.contains("Emergency unwind incomplete"),
+                    "error_a: {}",
+                    error_a
+                );
             }
             other => panic!("Expected UnresolvedExposure, got {:?}", other),
         }
@@ -567,20 +793,47 @@ mod tests {
     #[tokio::test]
     async fn test_both_partial_keeps_min_fill() {
         // A 0.4/1.0, B 0.6/1.0: matched 0.4 kept; only B's 0.2 excess unwinds.
-        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
         let log_a = mock_a.call_log();
-        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Partial(dec!(0.6))], MockResponse::Full);
+        let mock_b = MockExchange::new(
+            "ex_b",
+            vec![MockResponse::Partial(dec!(0.6))],
+            MockResponse::Full,
+        );
         let log_b = mock_b.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
 
         let (coordinator, cb) = make_coordinator();
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+            ArbitrageExecutionResult::PartialPairKept {
+                matched_qty,
+                unwind_a,
+                unwind_b,
+                ..
+            } => {
                 assert_eq!(matched_qty, dec!(0.4));
                 assert!(unwind_a.is_none());
                 assert_eq!(unwind_b.expect("B excess must trim").filled_qty, dec!(0.2));
@@ -597,7 +850,11 @@ mod tests {
     #[tokio::test]
     async fn test_trim_of_excess_failure_is_unresolved_exposure() {
         // A partial 0.4, B full 1.0, but B's 0.6 trim fails outright.
-        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
         let mock_b = MockExchange::new(
             "ex_b",
             vec![MockResponse::Full, MockResponse::Fail],
@@ -607,12 +864,31 @@ mod tests {
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
 
         let (coordinator, cb) = make_coordinator();
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::UnresolvedExposure { leg_a_fill, leg_b_fill, error_b, .. } => {
+            ArbitrageExecutionResult::UnresolvedExposure {
+                leg_a_fill,
+                leg_b_fill,
+                error_b,
+                ..
+            } => {
                 assert_eq!(leg_a_fill.expect("A fill reported").filled_qty, dec!(0.4));
                 assert_eq!(leg_b_fill.expect("B fill reported").filled_qty, dec!(1.0));
                 assert!(error_b.contains("unwind failed"), "error_b: {}", error_b);
@@ -625,20 +901,47 @@ mod tests {
     #[tokio::test]
     async fn test_equal_partial_fills_keep_pair_without_trim() {
         // Both legs partial at the same 0.4: matched 0.4, no excess to trim.
-        let mock_a = MockExchange::new("ex_a", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
-        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Partial(dec!(0.4))], MockResponse::Full);
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
+        let mock_b = MockExchange::new(
+            "ex_b",
+            vec![MockResponse::Partial(dec!(0.4))],
+            MockResponse::Full,
+        );
         let log_a = mock_a.call_log();
         let log_b = mock_b.call_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
 
         let (coordinator, cb) = make_coordinator();
-        let order_a = OrderRequest::new_limit(ex_a.venue_id(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
-        let order_b = OrderRequest::new_limit(ex_b.venue_id(), "BTC-USDC", Side::Sell, dec!(60100), dec!(1.0));
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
 
-        let res = coordinator.execute_two_leg(&ex_a, order_a, &ex_b, order_b).await;
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
         match res {
-            ArbitrageExecutionResult::PartialPairKept { matched_qty, unwind_a, unwind_b, .. } => {
+            ArbitrageExecutionResult::PartialPairKept {
+                matched_qty,
+                unwind_a,
+                unwind_b,
+                ..
+            } => {
                 assert_eq!(matched_qty, dec!(0.4));
                 assert!(unwind_a.is_none());
                 assert!(unwind_b.is_none());

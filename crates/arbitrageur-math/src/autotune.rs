@@ -1,4 +1,4 @@
-//! Auto-tune Phase 1 (recommend-only) walk-forward parameter recommender.
+//! Auto-tune Phase 1 walk-forward parameter recommender.
 //!
 //! Single Spread (futures) only. The caller splits trailing pair-spread
 //! history chronologically into 70% Fit / 30% Validate and passes both
@@ -215,7 +215,8 @@ pub fn norm_cdf(x: f64) -> Option<f64> {
     }
     let t = 1.0 / (1.0 + 0.2316419 * x.abs());
     let poly = t
-        * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+        * (0.319381530
+            + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
     let phi = (-x * x / 2.0).exp() / (2.0 * std::f64::consts::PI).sqrt();
     let c = 1.0 - phi * poly;
     Some(if x >= 0.0 { c } else { 1.0 - c })
@@ -238,7 +239,10 @@ pub fn percentile_for_hurdle(hurdle_bps: f64, sigma_bps: f64) -> Option<u32> {
         return None;
     }
     let pct = norm_cdf(hurdle_bps / sigma_bps)? * 100.0;
-    Some(pct.floor().clamp(AUTOTUNE_PCT_MIN as f64, AUTOTUNE_PCT_MAX as f64) as u32)
+    Some(
+        pct.floor()
+            .clamp(AUTOTUNE_PCT_MIN as f64, AUTOTUNE_PCT_MAX as f64) as u32,
+    )
 }
 
 struct RowArgs<'a> {
@@ -367,13 +371,69 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         };
         let c = &h.current;
         let rows = vec![
-            held("slidingWindowSecs", c.window_secs as f64, "n/a".into(), "n/a".into(), total, rationale.clone(), "window=2*hl"),
-            held("targetProfitBps", c.target_bps, "n/a".into(), "n/a".into(), total, rationale.clone(), "target=friction+k*sigma+carry"),
-            held("windowPercentile", c.percentile as f64, "n/a".into(), "n/a".into(), total, rationale.clone(), "pct=invCDF(hurdle)"),
-            held("stepSizeMult", c.step_mult, "n/a".into(), "n/a".into(), total, rationale.clone(), "step=capacity-ladder"),
-            held("maxStepUsd", c.max_step_usd, "n/a".into(), "n/a".into(), total, rationale.clone(), "maxStep=ladder-optimal"),
-            held("maxTickerEquityPct", c.equity_pct, "n/a".into(), "n/a".into(), total, rationale.clone(), "equity=inv-vol"),
-            held("userTargetLeverage", c.leverage as f64, "n/a".into(), "n/a".into(), total, rationale, "leverage=decrease-only"),
+            held(
+                "slidingWindowSecs",
+                c.window_secs as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "window=2*hl",
+            ),
+            held(
+                "targetProfitBps",
+                c.target_bps,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "target=friction+k*sigma+carry",
+            ),
+            held(
+                "windowPercentile",
+                c.percentile as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "pct=invCDF(hurdle)",
+            ),
+            held(
+                "stepSizeMult",
+                c.step_mult,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "step=capacity-ladder",
+            ),
+            held(
+                "maxStepUsd",
+                c.max_step_usd,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "maxStep=ladder-optimal",
+            ),
+            held(
+                "maxTickerEquityPct",
+                c.equity_pct,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale.clone(),
+                "equity=inv-vol",
+            ),
+            held(
+                "userTargetLeverage",
+                c.leverage as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                rationale,
+                "leverage=decrease-only",
+            ),
         ];
         return finish(rows, RegimeVerdict::INSUFFICIENT);
     }
@@ -382,10 +442,9 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     let val_vals = spread_vals(&h.validate);
     let fit_ms = mean_sigma(&fit_vals);
     let val_ms = mean_sigma(&val_vals);
-    let fit_ou = seg_dt(&h.fit, h.dt_fit_secs)
-        .and_then(|dt| OuModelParams::fit(&fit_vals, dt));
-    let val_ou = seg_dt(&h.validate, h.dt_val_secs)
-        .and_then(|dt| OuModelParams::fit(&val_vals, dt));
+    let fit_ou = seg_dt(&h.fit, h.dt_fit_secs).and_then(|dt| OuModelParams::fit(&fit_vals, dt));
+    let val_ou =
+        seg_dt(&h.validate, h.dt_val_secs).and_then(|dt| OuModelParams::fit(&val_vals, dt));
 
     // Regime gate: any shift aborts everything.
     let regime_shift: Option<String> = match (fit_ms, val_ms) {
@@ -434,13 +493,69 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         };
         let c = &h.current;
         let rows = vec![
-            held("slidingWindowSecs", c.window_secs as f64, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "window=2*hl"),
-            held("targetProfitBps", c.target_bps, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "target=friction+k*sigma+carry"),
-            held("windowPercentile", c.percentile as f64, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "pct=invCDF(hurdle)"),
-            held("stepSizeMult", c.step_mult, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "step=capacity-ladder"),
-            held("maxStepUsd", c.max_step_usd, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "maxStep=ladder-optimal"),
-            held("maxTickerEquityPct", c.equity_pct, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "equity=inv-vol"),
-            held("userTargetLeverage", c.leverage as f64, "n/a".into(), "n/a".into(), total, format!("regime gate: {rationale}"), "leverage=decrease-only"),
+            held(
+                "slidingWindowSecs",
+                c.window_secs as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "window=2*hl",
+            ),
+            held(
+                "targetProfitBps",
+                c.target_bps,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "target=friction+k*sigma+carry",
+            ),
+            held(
+                "windowPercentile",
+                c.percentile as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "pct=invCDF(hurdle)",
+            ),
+            held(
+                "stepSizeMult",
+                c.step_mult,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "step=capacity-ladder",
+            ),
+            held(
+                "maxStepUsd",
+                c.max_step_usd,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "maxStep=ladder-optimal",
+            ),
+            held(
+                "maxTickerEquityPct",
+                c.equity_pct,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "equity=inv-vol",
+            ),
+            held(
+                "userTargetLeverage",
+                c.leverage as f64,
+                "n/a".into(),
+                "n/a".into(),
+                total,
+                format!("regime gate: {rationale}"),
+                "leverage=decrease-only",
+            ),
         ];
         return finish(rows, verdict);
     }
@@ -509,9 +624,11 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
             None
         }
     });
-    let step_supported =
-        h.fit_optimal_size_usd.is_some_and(|o| o.is_finite() && o > 0.0)
-            && h.fit_breakeven_size_usd.is_some_and(|b| b.is_finite() && b > 0.0);
+    let step_supported = h
+        .fit_optimal_size_usd
+        .is_some_and(|o| o.is_finite() && o > 0.0)
+        && h.fit_breakeven_size_usd
+            .is_some_and(|b| b.is_finite() && b > 0.0);
 
     let lev_cand: u32 = if sig_f > AUTOTUNE_LEV_SIGMA_MULT * h.friction_fit_bps.max(0.5) {
         h.current.leverage.saturating_sub(1).max(1)
@@ -551,12 +668,18 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         let p_win = wins as f64 / n as f64;
         let wilson = wilson_lower(wins, n)?;
         let e_net = p_win * t - h.friction_val_bps;
-        Some(ValEcon { n, wins, p_win, wilson, e_net })
+        Some(ValEcon {
+            n,
+            wins,
+            p_win,
+            wilson,
+            e_net,
+        })
     });
     let target_ok = target_cand.is_some_and(|_| {
-        val_econ.as_ref().is_some_and(|v| {
-            v.n >= AUTOTUNE_MIN_EPISODES && v.e_net > 0.0 && v.wilson >= 0.5
-        })
+        val_econ
+            .as_ref()
+            .is_some_and(|v| v.n >= AUTOTUNE_MIN_EPISODES && v.e_net > 0.0 && v.wilson >= 0.5)
     });
 
     let val_hl_ok = match (fit_ou, val_ou) {
@@ -577,7 +700,11 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
 
     let val_ep_n = val_econ.as_ref().map(|v| v.n).unwrap_or(0);
     let conf = confidence_for(h.fit.len(), val_ep_n, h.carry_known);
-    let carry_note = if h.carry_known { "" } else { "; funding carry unknown (term=0)" };
+    let carry_note = if h.carry_known {
+        ""
+    } else {
+        "; funding carry unknown (term=0)"
+    };
 
     let c = &h.current;
     let mut rows = Vec::with_capacity(7);
@@ -587,14 +714,18 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         let fit_m = match fit_ou {
             Some(p) => format!(
                 "R²={:.2} hl={:.0}s (n={})",
-                p.r_squared, p.half_life, h.fit.len()
+                p.r_squared,
+                p.half_life,
+                h.fit.len()
             ),
             None => "OU unmeasurable on fit".to_string(),
         };
         let val_m = match val_ou {
             Some(p) => format!(
                 "R²={:.2} hl={:.0}s (n={})",
-                p.r_squared, p.half_life, h.validate.len()
+                p.r_squared,
+                p.half_life,
+                h.validate.len()
             ),
             None => "OU unmeasurable on validate".to_string(),
         };
@@ -714,7 +845,10 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     // stepMult (validated hold — ladder confirms the current step)
     {
         let fit_m = match h.fit_optimal_size_usd {
-            Some(o) => format!("ladder optimal=${o:.0} breakeven={:?}", h.fit_breakeven_size_usd),
+            Some(o) => format!(
+                "ladder optimal=${o:.0} breakeven={:?}",
+                h.fit_breakeven_size_usd
+            ),
             None => "no live-book ladder on fit".to_string(),
         };
         let val_m = match &val_econ {
@@ -816,7 +950,11 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
 
     // leverage (decrease-only)
     {
-        let fit_m = format!("σ={:.1} vs 3×friction={:.1}", sig_f, 3.0 * h.friction_fit_bps.max(0.5));
+        let fit_m = format!(
+            "σ={:.1} vs 3×friction={:.1}",
+            sig_f,
+            3.0 * h.friction_fit_bps.max(0.5)
+        );
         let val_m = match &val_econ {
             Some(v) => format!("shared target gate: E[net]={:+.1} (n={})", v.e_net, v.n),
             None => "no validated economics".to_string(),
@@ -881,7 +1019,13 @@ mod tests {
     use super::*;
     use crate::pair_monitor::PairObservation;
 
-    fn obs_series(n: usize, mu: f64, amp: f64, period: usize, ts_step_ms: i64) -> Vec<PairObservation> {
+    fn obs_series(
+        n: usize,
+        mu: f64,
+        amp: f64,
+        period: usize,
+        ts_step_ms: i64,
+    ) -> Vec<PairObservation> {
         (0..n)
             .map(|i| {
                 let phase = 2.0 * std::f64::consts::PI * (i % period) as f64 / period as f64;
@@ -937,7 +1081,11 @@ mod tests {
         assert_eq!(rep.rows.len(), 7);
         assert_eq!(rep.banner.total, 7);
         assert_eq!(rep.banner.regime_verdict, RegimeVerdict::STABLE);
-        let target = rep.rows.iter().find(|r| r.param == "targetProfitBps").unwrap();
+        let target = rep
+            .rows
+            .iter()
+            .find(|r| r.param == "targetProfitBps")
+            .unwrap();
         assert_eq!(target.status, RowStatus::READY);
         assert!(target.recommended.unwrap_or(0.0) > 0.0);
         assert!(rep.banner.ready_count >= 1);
@@ -955,7 +1103,11 @@ mod tests {
         let mut h = history_for(fit, val);
         h.friction_val_bps = 30.0; // friction above any achievable edge
         let rep = recommend(&h);
-        let target = rep.rows.iter().find(|r| r.param == "targetProfitBps").unwrap();
+        let target = rep
+            .rows
+            .iter()
+            .find(|r| r.param == "targetProfitBps")
+            .unwrap();
         assert_eq!(target.status, RowStatus::HELD);
         assert_eq!(target.recommended, None);
     }
@@ -1016,7 +1168,11 @@ mod tests {
         let mut h = history_for(fit, val);
         h.current.leverage = 2;
         let rep = recommend(&h);
-        let lev = rep.rows.iter().find(|r| r.param == "userTargetLeverage").unwrap();
+        let lev = rep
+            .rows
+            .iter()
+            .find(|r| r.param == "userTargetLeverage")
+            .unwrap();
         if let Some(rec) = lev.recommended {
             assert!(rec <= 2.0, "leverage must never increase");
         }
@@ -1028,7 +1184,11 @@ mod tests {
         h2.friction_val_bps = 0.5;
         h2.current.leverage = 5;
         let rep2 = recommend(&h2);
-        let lev2 = rep2.rows.iter().find(|r| r.param == "userTargetLeverage").unwrap();
+        let lev2 = rep2
+            .rows
+            .iter()
+            .find(|r| r.param == "userTargetLeverage")
+            .unwrap();
         if let Some(rec) = lev2.recommended {
             assert!(rec <= 5.0, "leverage must never increase");
             assert!(rec >= 1.0);

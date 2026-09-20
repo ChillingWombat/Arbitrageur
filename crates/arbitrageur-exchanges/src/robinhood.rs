@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use std::collections::HashMap;
+use crate::lighter::LighterAdapter;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::MarketMetadata;
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{Decimal, VenueId};
-use crate::lighter::LighterAdapter;
+use async_trait::async_trait;
+use std::collections::HashMap;
 
 /// Robinhood DEX adapter, serving the Lighter protocol on Robinhood Chain
 /// (at https://api.rh.lighter.xyz).
@@ -38,7 +38,8 @@ impl RobinhoodAdapter {
         account_index: Option<u64>,
         api_key_private_key: Option<String>,
     ) {
-        self.inner.update_credentials(account_index, api_key_private_key);
+        self.inner
+            .update_credentials(account_index, api_key_private_key);
     }
 }
 
@@ -78,6 +79,21 @@ impl ExchangeAdapter for RobinhoodAdapter {
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
         self.inner.fetch_account().await
+    }
+
+    fn normalize_account_position(
+        &self,
+        position: &arbitrageur_core::position::Position,
+    ) -> anyhow::Result<Option<arbitrageur_core::position::Position>> {
+        self.inner.normalize_account_position(position)
+    }
+
+    fn account_position_for(
+        &self,
+        account: &AccountSnapshot,
+        symbol: &str,
+    ) -> anyhow::Result<Option<arbitrageur_core::position::Position>> {
+        self.inner.account_position_for(account, symbol)
     }
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {

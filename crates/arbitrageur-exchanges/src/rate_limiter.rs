@@ -1,9 +1,9 @@
+use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use parking_lot::Mutex;
 use tokio::time::sleep;
-use tracing::{warn, debug};
+use tracing::{debug, warn};
 
 /// Rate limit backoff and cached request coordinator with path-level request coalescing.
 /// Pattern reverse-engineered from high-frequency DEX arbitrage production tools (e.g. PopDEX / Lighter bot).
@@ -52,7 +52,11 @@ impl AccountRequestCoordinator {
 
     /// Pre-request check for a specific API path/query:
     /// Returns Some(cached_json) if fresh in cache (request coalescing), or throttles and permits request.
-    pub async fn acquire_or_cache_path(&self, path: &str, allow_cache: bool) -> Result<Option<String>, anyhow::Error> {
+    pub async fn acquire_or_cache_path(
+        &self,
+        path: &str,
+        allow_cache: bool,
+    ) -> Result<Option<String>, anyhow::Error> {
         let now = Instant::now();
         let wait_dur;
 
@@ -116,7 +120,10 @@ impl AccountRequestCoordinator {
     }
 
     /// Pre-request check: Wait if needed, or return cached payload if within TTL.
-    pub async fn acquire_or_cache(&self, allow_cache: bool) -> Result<Option<String>, anyhow::Error> {
+    pub async fn acquire_or_cache(
+        &self,
+        allow_cache: bool,
+    ) -> Result<Option<String>, anyhow::Error> {
         self.acquire_or_cache_path("default", allow_cache).await
     }
 
@@ -125,7 +132,9 @@ impl AccountRequestCoordinator {
         let mut state = self.state.lock();
         state.consecutive_failures = 0;
         state.backoff_until = None;
-        state.cached_paths.insert(path.to_string(), (Instant::now(), payload.clone()));
+        state
+            .cached_paths
+            .insert(path.to_string(), (Instant::now(), payload.clone()));
         state.cached_data = Some((Instant::now(), payload));
     }
 

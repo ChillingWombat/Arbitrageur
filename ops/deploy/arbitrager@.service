@@ -1,18 +1,17 @@
 [Unit]
-Description=Arbitrageur headless paper daemon (port %i)
+Description=Arbitrageur headless paper daemon (legacy template name; port %i)
 Documentation=file:///opt/arbitrageur/ops/deploy/README.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# Instance name is the health-listener port: systemctl start arbitrageur@8787
-ExecStart=/usr/local/bin/arbitrageur serve --bind ${ARBITRAGEUR_BIND:-127.0.0.1} --port %i
+# Legacy filename kept for compatibility. New installs should copy
+# arbitrageur@.service and enable arbitrageur@<port>.service instead.
+Environment=ARBITRAGEUR_BIND=127.0.0.1
 EnvironmentFile=-/etc/arbitrageur/arbitrageur.env
-# Per-instance data isolation: each port gets its own HOME so its SQLite
-# state (~/.arbitrageur/state.sqlite3) and vault (~/.arbitrageur/vault.enc)
-# are never shared between writers. Sharing one state.sqlite3 across
-# processes risks SQLITE_BUSY writer contention and WAL recovery races.
+EnvironmentFile=-/etc/arbitrageur/arbitrageur-%i.env
+ExecStart=/usr/local/bin/arbitrageur serve --port %i
 Environment=HOME=/var/lib/arbitrageur-%i
 StateDirectory=arbitrageur-%i
 StateDirectoryMode=0700
@@ -22,13 +21,9 @@ UMask=0077
 WorkingDirectory=/var/lib/arbitrageur-%i
 Restart=on-failure
 RestartSec=10
-# Keep one daemon per port: a second start on the same port fails fast on
-# bind instead of double-driving one database.
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=arbitrageur-%i
-# Paper-only hardening: no new privileges, private /tmp, read-only system.
-# HOME (/var/lib/arbitrageur-%i) stays writable for SQLite + vault.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

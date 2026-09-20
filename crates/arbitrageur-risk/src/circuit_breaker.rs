@@ -1,9 +1,9 @@
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use arbitrageur_core::types::{dec, Decimal};
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
 use tracing::{error, warn};
-use arbitrageur_core::types::{dec, Decimal};
 
 /// Configuration parameters for emergency trading halts and circuit breakers.
 #[derive(Debug, Clone)]
@@ -59,7 +59,11 @@ impl CircuitBreaker {
     /// Check if trading is allowed right now.
     pub fn is_trading_allowed(&self) -> Result<(), String> {
         if self.is_tripped.load(Ordering::Relaxed) {
-            let reason = self.trip_reason.read().clone().unwrap_or_else(|| "Unknown".to_string());
+            let reason = self
+                .trip_reason
+                .read()
+                .clone()
+                .unwrap_or_else(|| "Unknown".to_string());
             Err(format!("Circuit breaker TRIPPED: {}", reason))
         } else {
             Ok(())
@@ -105,11 +109,18 @@ impl CircuitBreaker {
     /// Record an execution error (e.g. unhedged leg, API timeout).
     pub fn record_error(&self, details: &str) {
         let count = self.consecutive_errors.fetch_add(1, Ordering::SeqCst) + 1;
-        warn!("Consecutive execution error #{} / {}: {}", count, self.config.read().max_consecutive_errors, details);
+        warn!(
+            "Consecutive execution error #{} / {}: {}",
+            count,
+            self.config.read().max_consecutive_errors,
+            details
+        );
         if count >= self.config.read().max_consecutive_errors {
             self.trip(format!(
                 "Exceeded maximum consecutive execution errors ({}/{}): {}",
-                count, self.config.read().max_consecutive_errors, details
+                count,
+                self.config.read().max_consecutive_errors,
+                details
             ));
         }
     }
@@ -136,12 +147,14 @@ impl CircuitBreaker {
             if dollar_loss >= self.config.read().max_daily_drawdown_usd {
                 self.trip(format!(
                     "Daily dollar drawdown limit breached: -${} (max ${})",
-                    dollar_loss, self.config.read().max_daily_drawdown_usd
+                    dollar_loss,
+                    self.config.read().max_daily_drawdown_usd
                 ));
             } else if loss_pct >= self.config.read().max_daily_drawdown_pct {
                 self.trip(format!(
                     "Daily percentage drawdown limit breached: -{}% (max {}%)",
-                    loss_pct, self.config.read().max_daily_drawdown_pct
+                    loss_pct,
+                    self.config.read().max_daily_drawdown_pct
                 ));
             }
         }

@@ -1,10 +1,12 @@
-use std::sync::Arc;
-use tracing::info;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
-use arbitrageur_math::prediction_synthetic::{evaluate_prediction_cross_venue, PredictionArbitrageOpportunity};
+use arbitrageur_math::prediction_synthetic::{
+    evaluate_prediction_cross_venue, PredictionArbitrageOpportunity,
+};
+use std::sync::Arc;
+use tracing::info;
 
 pub struct PredictionMarketArbStrategy {
     pub poly_exchange: Arc<dyn ExchangeAdapter>,
@@ -31,10 +33,22 @@ impl PredictionMarketArbStrategy {
         Self {
             poly_exchange,
             kalshi_exchange,
-            poly_yes_symbol: format!("{}-YES", p_sym.trim_end_matches("-YES").trim_end_matches("-NO")),
-            poly_no_symbol: format!("{}-NO", p_sym.trim_end_matches("-YES").trim_end_matches("-NO")),
-            kalshi_yes_symbol: format!("{}-YES", k_sym.trim_end_matches("-YES").trim_end_matches("-NO")),
-            kalshi_no_symbol: format!("{}-NO", k_sym.trim_end_matches("-YES").trim_end_matches("-NO")),
+            poly_yes_symbol: format!(
+                "{}-YES",
+                p_sym.trim_end_matches("-YES").trim_end_matches("-NO")
+            ),
+            poly_no_symbol: format!(
+                "{}-NO",
+                p_sym.trim_end_matches("-YES").trim_end_matches("-NO")
+            ),
+            kalshi_yes_symbol: format!(
+                "{}-YES",
+                k_sym.trim_end_matches("-YES").trim_end_matches("-NO")
+            ),
+            kalshi_no_symbol: format!(
+                "{}-NO",
+                k_sym.trim_end_matches("-YES").trim_end_matches("-NO")
+            ),
             fee_bps,
             trade_qty,
         }
@@ -64,18 +78,28 @@ impl PredictionMarketArbStrategy {
     }
 
     /// Check orderbooks on Polymarket and Kalshi for synthetic arbitrage.
-    pub async fn check_opportunity(&self) -> anyhow::Result<Option<PredictionArbitrageOpportunity>> {
+    pub async fn check_opportunity(
+        &self,
+    ) -> anyhow::Result<Option<PredictionArbitrageOpportunity>> {
         let (poly_book, kalshi_book) = tokio::try_join!(
             self.poly_exchange.fetch_orderbook(&self.poly_yes_symbol),
             self.kalshi_exchange.fetch_orderbook(&self.kalshi_no_symbol)
         )?;
 
-        let Some(poly_yes_ask) = poly_book.best_ask_price() else { return Ok(None) };
-        let Some(poly_bid) = poly_book.best_bid_price() else { return Ok(None) };
+        let Some(poly_yes_ask) = poly_book.best_ask_price() else {
+            return Ok(None);
+        };
+        let Some(poly_bid) = poly_book.best_bid_price() else {
+            return Ok(None);
+        };
         let poly_no_ask = (dec!(1.0) - poly_bid).min(dec!(1.0));
 
-        let Some(kalshi_no_ask) = kalshi_book.best_ask_price() else { return Ok(None) };
-        let Some(kalshi_bid) = kalshi_book.best_bid_price() else { return Ok(None) };
+        let Some(kalshi_no_ask) = kalshi_book.best_ask_price() else {
+            return Ok(None);
+        };
+        let Some(kalshi_bid) = kalshi_book.best_bid_price() else {
+            return Ok(None);
+        };
         let kalshi_yes_ask = (dec!(1.0) - kalshi_bid).min(dec!(1.0));
 
         if let Some(opp) = evaluate_prediction_cross_venue(
@@ -101,16 +125,35 @@ impl PredictionMarketArbStrategy {
     ) -> ArbitrageExecutionResult {
         info!(
             "🎯 Executing Prediction Market Arbitrage: {}. Expected Net Profit: ${:.4} ({:.2}%)",
-            opp.strategy_name, opp.net_profit * self.trade_qty, opp.net_return_pct
+            opp.strategy_name,
+            opp.net_profit * self.trade_qty,
+            opp.net_return_pct
         );
 
-        let is_yes_on_poly = self.poly_exchange.venue_id().as_str().eq_ignore_ascii_case(&opp.buy_yes_venue)
-            || self.poly_exchange.name().eq_ignore_ascii_case(&opp.buy_yes_venue);
+        let is_yes_on_poly = self
+            .poly_exchange
+            .venue_id()
+            .as_str()
+            .eq_ignore_ascii_case(&opp.buy_yes_venue)
+            || self
+                .poly_exchange
+                .name()
+                .eq_ignore_ascii_case(&opp.buy_yes_venue);
 
         let (poly_price, kalshi_price, poly_sym, kalshi_sym) = if is_yes_on_poly {
-            (opp.yes_price, opp.no_price, &self.poly_yes_symbol, &self.kalshi_no_symbol)
+            (
+                opp.yes_price,
+                opp.no_price,
+                &self.poly_yes_symbol,
+                &self.kalshi_no_symbol,
+            )
         } else {
-            (opp.no_price, opp.yes_price, &self.poly_no_symbol, &self.kalshi_yes_symbol)
+            (
+                opp.no_price,
+                opp.yes_price,
+                &self.poly_no_symbol,
+                &self.kalshi_yes_symbol,
+            )
         };
 
         let order_poly = OrderRequest::new_limit(
@@ -129,6 +172,13 @@ impl PredictionMarketArbStrategy {
             self.trade_qty,
         );
 
-        coordinator.execute_two_leg(&self.poly_exchange, order_poly, &self.kalshi_exchange, order_kalshi).await
+        coordinator
+            .execute_two_leg(
+                &self.poly_exchange,
+                order_poly,
+                &self.kalshi_exchange,
+                order_kalshi,
+            )
+            .await
     }
 }

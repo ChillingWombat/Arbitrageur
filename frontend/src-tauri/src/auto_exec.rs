@@ -245,9 +245,12 @@ impl BotDispatch for PaperDispatch {
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
-            let res =
-                crate::commands::flatten_ticker_positions_impl(Some(symbol), BOT_STRATEGY_ID, state)
-                    .await?;
+            let res = crate::commands::flatten_ticker_positions_impl(
+                Some(symbol),
+                BOT_STRATEGY_ID,
+                state,
+            )
+            .await?;
             if res.residual_signals > 0 {
                 return Err(format!(
                     "flatten left {} residual signal(s) on {symbol}",
@@ -343,11 +346,7 @@ impl OpportunityExecutor {
     /// Reload persisted config; any failure (missing row, bad JSON, failed
     /// validation) resolves to inert — never to permissive.
     pub fn load_config(state: &AppEngineState) -> (AutoExecConfig, BotMode) {
-        let raw = state
-            .state_store
-            .radar_bot_config_json()
-            .ok()
-            .flatten();
+        let raw = state.state_store.radar_bot_config_json().ok().flatten();
         let Some(json) = raw else {
             return (AutoExecConfig::default(), BotMode::Off);
         };
@@ -364,8 +363,7 @@ impl OpportunityExecutor {
         // leaves the previous config untouched.
         let (cfg, mode) = dto.to_policy()?;
         let canonical = RadarBotConfigDto::from_policy(&cfg, mode);
-        let json =
-            serde_json::to_string(&canonical).map_err(|e| format!("config encode: {e}"))?;
+        let json = serde_json::to_string(&canonical).map_err(|e| format!("config encode: {e}"))?;
         state
             .state_store
             .save_radar_bot_config_json(&json)
@@ -494,9 +492,11 @@ impl OpportunityExecutor {
                     },
                 );
             } else {
-                let _ = state
-                    .state_store
-                    .delete_bot_position(&row.symbol, &row.buy_venue, &row.sell_venue);
+                let _ = state.state_store.delete_bot_position(
+                    &row.symbol,
+                    &row.buy_venue,
+                    &row.sell_venue,
+                );
                 self.audit(
                     state,
                     &key,
@@ -547,8 +547,7 @@ impl OpportunityExecutor {
                 s.strategy_id.eq_ignore_ascii_case(BOT_STRATEGY_ID) && s.status.counts_as_open()
             })
             .any(|s| {
-                let venues: Vec<String> =
-                    s.legs.iter().map(|l| l.venue.to_lowercase()).collect();
+                let venues: Vec<String> = s.legs.iter().map(|l| l.venue.to_lowercase()).collect();
                 venues.contains(&key.buy_venue) && venues.contains(&key.sell_venue)
             })
     }
@@ -582,7 +581,10 @@ impl OpportunityExecutor {
         );
         if res.is_err() {
             self.audit_errors.fetch_add(1, Ordering::Relaxed);
-            tracing::warn!("radar bot: audit write failed for {} ({decision})", key.label());
+            tracing::warn!(
+                "radar bot: audit write failed for {} ({decision})",
+                key.label()
+            );
         }
         *self.last_decision.lock() = Some(BotDecisionDto {
             ts_ms: now_ms,
@@ -674,9 +676,10 @@ impl OpportunityExecutor {
         let positions = open.len();
         drop(open);
         let key = PairKey::new(&signal.symbol, &signal.buy_venue, &signal.sell_venue);
-        let cooldown_remaining_secs = self.cooldowns.lock().get(&key).map(|last| {
-            (cfg.pair_cooldown_secs as i64 * 1000 - (now_ms - last)) as f64 / 1000.0
-        });
+        let cooldown_remaining_secs =
+            self.cooldowns.lock().get(&key).map(|last| {
+                (cfg.pair_cooldown_secs as i64 * 1000 - (now_ms - last)) as f64 / 1000.0
+            });
         // DB errors fail closed: an unreadable ledger blocks the symbol.
         let blocking_signal = state
             .state_store
@@ -710,11 +713,7 @@ impl OpportunityExecutor {
 
     /// One poll iteration. Returns the sleep interval in seconds. Never holds
     /// a lock across dispatch awaits; per-pair failures never abort the tick.
-    pub async fn tick_once(
-        &self,
-        state: &AppEngineState,
-        dispatch: &dyn BotDispatch,
-    ) -> u64 {
+    pub async fn tick_once(&self, state: &AppEngineState, dispatch: &dyn BotDispatch) -> u64 {
         let now_ms = Utc::now().timestamp_millis();
         let (cfg, mode) = Self::load_config(state);
         if !mode.exits_allowed() {
@@ -782,7 +781,9 @@ impl OpportunityExecutor {
                 ) {
                     ExitEval::Hold | ExitEval::Unwatched { .. } => {
                         self.open.lock().insert(key.clone(), pos.clone());
-                        let _ = state.state_store.upsert_bot_position(&pos.persist_row(&key));
+                        let _ = state
+                            .state_store
+                            .upsert_bot_position(&pos.persist_row(&key));
                     }
                     ExitEval::Exit { trigger, reason } => {
                         self.exit_position(state, dispatch, &key, &pos, trigger, &reason, now_ms)
@@ -801,14 +802,7 @@ impl OpportunityExecutor {
                 let signal = Self::signal_of(&row);
                 let key = PairKey::new(&signal.symbol, &signal.buy_venue, &signal.sell_venue);
                 if self.open.lock().contains_key(&key) {
-                    self.audit_skip(
-                        state,
-                        &key,
-                        now_ms,
-                        &signal,
-                        "position already open",
-                        None,
-                    );
+                    self.audit_skip(state, &key, now_ms, &signal, "position already open", None);
                     continue;
                 }
                 // Size before gates so notional caps evaluate the candidate.
@@ -821,7 +815,14 @@ impl OpportunityExecutor {
                 ctx.snapshot_present = snapshot_present;
                 let verdict = evaluate_entry_gates(&signal, &cfg, &ctx);
                 if !verdict.allow {
-                    self.audit_skip(state, &key, now_ms, &signal, &verdict.reason, Some(size_usd));
+                    self.audit_skip(
+                        state,
+                        &key,
+                        now_ms,
+                        &signal,
+                        &verdict.reason,
+                        Some(size_usd),
+                    );
                     continue;
                 }
                 let plan = match plan_entry(&signal, &cfg, now_ms) {
@@ -832,7 +833,13 @@ impl OpportunityExecutor {
                     }
                 };
                 match dispatch
-                    .enter(&signal.symbol, &signal.buy_venue, &signal.sell_venue, plan.size_usd, state)
+                    .enter(
+                        &signal.symbol,
+                        &signal.buy_venue,
+                        &signal.sell_venue,
+                        plan.size_usd,
+                        state,
+                    )
                     .await
                 {
                     Ok(note) => {
@@ -848,7 +855,9 @@ impl OpportunityExecutor {
                             last_seen_ms: now_ms,
                         };
                         self.open.lock().insert(key.clone(), pos.clone());
-                        let _ = state.state_store.upsert_bot_position(&pos.persist_row(&key));
+                        let _ = state
+                            .state_store
+                            .upsert_bot_position(&pos.persist_row(&key));
                         self.audit(
                             state,
                             &key,
@@ -895,9 +904,11 @@ impl OpportunityExecutor {
         match dispatch.exit(&key.symbol, state).await {
             Ok(note) => {
                 self.open.lock().remove(key);
-                let _ = state
-                    .state_store
-                    .delete_bot_position(&key.symbol, &key.buy_venue, &key.sell_venue);
+                let _ = state.state_store.delete_bot_position(
+                    &key.symbol,
+                    &key.buy_venue,
+                    &key.sell_venue,
+                );
                 let exit_json = serde_json::json!({
                     "trigger": trigger.as_str(),
                     "sizeUsd": pos.size_usd,
@@ -906,21 +917,11 @@ impl OpportunityExecutor {
                 })
                 .to_string();
                 self.audit(
-                    state,
-                    key,
-                    now_ms,
-                    None,
-                    "bot_exit",
-                    reason,
-                    None,
-                    None,
-                    None,
-                    &exit_json,
+                    state, key, now_ms, None, "bot_exit", reason, None, None, None, &exit_json,
                 );
             }
             Err(e) => {
-                *self.last_error.lock() =
-                    Some(format!("exit failed for {}: {e}", key.label()));
+                *self.last_error.lock() = Some(format!("exit failed for {}: {e}", key.label()));
                 tracing::warn!("radar bot: exit failed for {}: {e}", key.label());
             }
         }
@@ -991,7 +992,10 @@ impl OpportunityExecutor {
             last_decision: self.last_decision.lock().clone(),
             last_error: self.last_error.lock().clone(),
             audit_errors: self.audit_errors.load(Ordering::Relaxed),
-            monitor_running: engine.as_ref().map(|e| e.snapshot().is_some()).unwrap_or(false),
+            monitor_running: engine
+                .as_ref()
+                .map(|e| e.snapshot().is_some())
+                .unwrap_or(false),
             snapshot_present: snap.is_some(),
         }
     }
@@ -1076,9 +1080,7 @@ pub async fn get_radar_bot_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::{
-        CapacityTierDto, MonitorRowDto, MonitorSnapshotDto, SpreadMonitorEngine,
-    };
+    use crate::monitor::{CapacityTierDto, MonitorRowDto, MonitorSnapshotDto, SpreadMonitorEngine};
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
     use std::sync::Mutex as StdMutex;
 
@@ -1118,12 +1120,28 @@ mod tests {
             _state: &'a AppEngineState,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
             Box::pin(async move {
-                self.enters.lock().map(|mut v| {
-                    v.push((symbol.to_string(), buy_venue.to_string(), sell_venue.to_string(), size_usd))
-                }).ok();
-                self.enter_results.lock().ok().and_then(|mut q| {
-                    if q.is_empty() { None } else { Some(q.remove(0)) }
-                }).unwrap_or(Ok("mock fill".to_string()))
+                self.enters
+                    .lock()
+                    .map(|mut v| {
+                        v.push((
+                            symbol.to_string(),
+                            buy_venue.to_string(),
+                            sell_venue.to_string(),
+                            size_usd,
+                        ))
+                    })
+                    .ok();
+                self.enter_results
+                    .lock()
+                    .ok()
+                    .and_then(|mut q| {
+                        if q.is_empty() {
+                            None
+                        } else {
+                            Some(q.remove(0))
+                        }
+                    })
+                    .unwrap_or(Ok("mock fill".to_string()))
             })
         }
 
@@ -1133,10 +1151,21 @@ mod tests {
             _state: &'a AppEngineState,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
             Box::pin(async move {
-                self.exits.lock().map(|mut v| v.push(symbol.to_string())).ok();
-                self.exit_results.lock().ok().and_then(|mut q| {
-                    if q.is_empty() { None } else { Some(q.remove(0)) }
-                }).unwrap_or(Ok("mock unwind".to_string()))
+                self.exits
+                    .lock()
+                    .map(|mut v| v.push(symbol.to_string()))
+                    .ok();
+                self.exit_results
+                    .lock()
+                    .ok()
+                    .and_then(|mut q| {
+                        if q.is_empty() {
+                            None
+                        } else {
+                            Some(q.remove(0))
+                        }
+                    })
+                    .unwrap_or(Ok("mock unwind".to_string()))
             })
         }
     }
@@ -1208,7 +1237,10 @@ mod tests {
         (state, bot)
     }
 
-    fn bot_events(state: &AppEngineState, decision: &str) -> Vec<crate::state_store::MonitorSignalEventRow> {
+    fn bot_events(
+        state: &AppEngineState,
+        decision: &str,
+    ) -> Vec<crate::state_store::MonitorSignalEventRow> {
         state
             .state_store
             .recent_monitor_signal_events(None, None, None, 10_000)
@@ -1218,7 +1250,14 @@ mod tests {
             .collect()
     }
 
-    fn record_radar_ledger(state: &AppEngineState, id: &str, symbol: &str, buy: &str, sell: &str, status: SignalStatus) {
+    fn record_radar_ledger(
+        state: &AppEngineState,
+        id: &str,
+        symbol: &str,
+        buy: &str,
+        sell: &str,
+        status: SignalStatus,
+    ) {
         state
             .state_store
             .record_signal_execution(&NewSignalExecution {
@@ -1233,12 +1272,14 @@ mod tests {
                         account_id: None,
                         venue: buy.to_string(),
                         side: LegSide::Long,
+                        symbol: None,
                         intended_qty: 0.01,
                     },
                     NewSignalLeg {
                         account_id: None,
                         venue: sell.to_string(),
                         side: LegSide::Short,
+                        symbol: None,
                         intended_qty: 0.01,
                     },
                 ],
@@ -1259,13 +1300,21 @@ mod tests {
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 1);
         assert_eq!(bot.open_count(), 1);
-        assert_eq!(state.state_store.list_bot_positions().unwrap_or_default().len(), 1);
+        assert_eq!(
+            state
+                .state_store
+                .list_bot_positions()
+                .unwrap_or_default()
+                .len(),
+            1
+        );
         let enters = bot_events(&state, "bot_enter");
         assert_eq!(enters.len(), 1);
         let e = &enters[0];
         assert_eq!(e.p_win, Some(0.95));
         let econ: serde_json::Value =
-            serde_json::from_str(e.economics_json.as_deref().unwrap_or("{}")).expect("valid snapshot json");
+            serde_json::from_str(e.economics_json.as_deref().unwrap_or("{}"))
+                .expect("valid snapshot json");
         assert_eq!(econ["pWin"], serde_json::json!(0.95));
         assert_eq!(econ["sizeUsd"], serde_json::json!(1000.0));
     }
@@ -1276,7 +1325,11 @@ mod tests {
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         bot.tick_once(&state, &dispatch).await;
-        assert_eq!(dispatch.enter_calls(), 1, "same pair must not re-enter while open");
+        assert_eq!(
+            dispatch.enter_calls(),
+            1,
+            "same pair must not re-enter while open"
+        );
         assert_eq!(bot.open_count(), 1);
     }
 
@@ -1300,7 +1353,8 @@ mod tests {
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
-        assert!(bot_events(&state, "bot_skip").iter().any(|e| e.economics_json
+        assert!(bot_events(&state, "bot_skip").iter().any(|e| e
+            .economics_json
             .as_deref()
             .unwrap_or("")
             .contains("paper-only")));
@@ -1323,7 +1377,8 @@ mod tests {
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
-        assert!(bot_events(&state, "bot_skip").iter().any(|e| e.economics_json
+        assert!(bot_events(&state, "bot_skip").iter().any(|e| e
+            .economics_json
             .as_deref()
             .unwrap_or("")
             .contains("floor")));
@@ -1340,7 +1395,14 @@ mod tests {
 
         // Blocking ledger signal collides.
         let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
-        record_radar_ledger(&state, "sig-block-1", "BTC", "hyperliquid", "lighter", SignalStatus::InFlight);
+        record_radar_ledger(
+            &state,
+            "sig-block-1",
+            "BTC",
+            "hyperliquid",
+            "lighter",
+            SignalStatus::InFlight,
+        );
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
@@ -1377,7 +1439,8 @@ mod tests {
         };
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(bot.open_count(), 0);
-        assert!(bot_events(&state, "bot_skip").iter().any(|e| e.economics_json
+        assert!(bot_events(&state, "bot_skip").iter().any(|e| e
+            .economics_json
             .as_deref()
             .unwrap_or("")
             .contains("entry rejected")));
@@ -1410,7 +1473,11 @@ mod tests {
         assert_eq!(bot.open_count(), 0);
         let exits = bot_events(&state, "bot_exit");
         assert_eq!(exits.len(), 1);
-        assert!(exits[0].economics_json.as_deref().unwrap_or("").contains("converged"));
+        assert!(exits[0]
+            .economics_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("converged"));
 
         // Stop: live dev past 1.5x entry.
         let (state, bot) = harness(vec![{
@@ -1552,7 +1619,8 @@ mod tests {
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
-        assert!(bot_events(&state, "bot_skip").iter().any(|e| e.economics_json
+        assert!(bot_events(&state, "bot_skip").iter().any(|e| e
+            .economics_json
             .as_deref()
             .unwrap_or("")
             .contains("cooling down")));
@@ -1600,7 +1668,14 @@ mod tests {
         OpportunityExecutor::save_config(&state, &armed_config()).expect("save armed");
         let now = Utc::now().timestamp_millis();
         // Backed by an open radar ledger signal -> survives.
-        record_radar_ledger(&state, "sig-keep-1", "BTC", "hyperliquid", "lighter", SignalStatus::Balanced);
+        record_radar_ledger(
+            &state,
+            "sig-keep-1",
+            "BTC",
+            "hyperliquid",
+            "lighter",
+            SignalStatus::Balanced,
+        );
         state
             .state_store
             .upsert_bot_position(&BotPositionRow {
@@ -1637,11 +1712,16 @@ mod tests {
         let bot = OpportunityExecutor::new();
         bot.rehydrate(&state);
         assert_eq!(bot.open_count(), 1);
-        assert!(bot.open.lock().contains_key(&PairKey::new("BTC", "hyperliquid", "lighter")));
+        assert!(bot
+            .open
+            .lock()
+            .contains_key(&PairKey::new("BTC", "hyperliquid", "lighter")));
         let remaining = state.state_store.list_bot_positions().unwrap_or_default();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].symbol, "BTC");
-        assert!(bot_events(&state, "bot_exit").iter().any(|e| e.symbol == "ETH"));
+        assert!(bot_events(&state, "bot_exit")
+            .iter()
+            .any(|e| e.symbol == "ETH"));
     }
 
     #[tokio::test]
@@ -1666,16 +1746,13 @@ mod tests {
 
     #[tokio::test]
     async fn audit_trail_covers_enter_skip_exit_with_belief() {
-        let (state, bot) = harness(vec![
-            ready_row("BTC", "hyperliquid", "lighter"),
-            {
-                let mut r = ready_row("ETH", "hyperliquid", "lighter");
-                r.p_win = Some(0.5);
-                r.reversion_probability = Some(0.5);
-                r.win_probability = Some(0.5);
-                r
-            },
-        ]);
+        let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter"), {
+            let mut r = ready_row("ETH", "hyperliquid", "lighter");
+            r.p_win = Some(0.5);
+            r.reversion_probability = Some(0.5);
+            r.win_probability = Some(0.5);
+            r
+        }]);
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(bot_events(&state, "bot_enter").len(), 1);
@@ -1732,7 +1809,10 @@ mod tests {
         assert_eq!(bot.open_count(), 1);
 
         // Verify persisted to DB
-        let persisted = state.state_store.list_bot_positions().expect("list bot positions");
+        let persisted = state
+            .state_store
+            .list_bot_positions()
+            .expect("list bot positions");
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].symbol, "BTC");
         assert_eq!(persisted[0].size_usd, 500.0);
@@ -1777,4 +1857,3 @@ mod tests {
             .contains("converged"));
     }
 }
-

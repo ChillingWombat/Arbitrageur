@@ -222,13 +222,16 @@ mod tests {
         let adapter: Arc<dyn ExchangeAdapter> = inner.clone();
         hub.update_orderbook_from_ws(fixture_book(&VenueId::new("mock"), "BTC"));
         tokio::time::sleep(Duration::from_millis(60)).await;
-        let resolved = resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(20)).await;
+        let resolved =
+            resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(20)).await;
         assert!(matches!(resolved, Some(ResolvedBook::Fresh(_))));
         assert_eq!(inner.calls(), 1);
         if let Some(ResolvedBook::Fresh(book)) = resolved {
             hub.update_orderbook(book);
         }
-        let again = resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(350)).await;
+        let again =
+            resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(350))
+                .await;
         assert!(matches!(again, Some(ResolvedBook::Cached(_))));
         assert_eq!(inner.calls(), 1);
     }
@@ -240,7 +243,9 @@ mod tests {
         let inner = Arc::new(CountingAdapter::new("mock", 0, false));
         let adapter: Arc<dyn ExchangeAdapter> = inner.clone();
         hub.update_orderbook(fixture_book(&VenueId::new("mock"), "BTC"));
-        let resolved = resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(350)).await;
+        let resolved =
+            resolve_book_ws_first(&hub, &flights, &adapter, "BTC", Duration::from_millis(350))
+                .await;
         assert!(matches!(resolved, Some(ResolvedBook::Cached(_))));
         assert_eq!(inner.calls(), 0);
     }
@@ -267,7 +272,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn single_flight_propagates_errors_to_all_waiters() {        let flights = Arc::new(OrderbookSingleFlight::new());
+    async fn single_flight_propagates_errors_to_all_waiters() {
+        let flights = Arc::new(OrderbookSingleFlight::new());
         let inner = Arc::new(CountingAdapter::new("mock", 50, true));
         let adapter: Arc<dyn ExchangeAdapter> = inner.clone();
         let mut set = tokio::task::JoinSet::new();

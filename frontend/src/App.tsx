@@ -15,6 +15,7 @@ import { TriangularArbitrage } from "./components/TriangularArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api, withTimeoutFallback } from "./services/api";
+import { scheduleVaultLock } from "./services/vaultLock";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
@@ -188,6 +189,7 @@ export const App: React.FC = () => {
   // Vault state & startup unlock prompt
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
+  const vaultLockCancelRef = useRef<(() => void) | null>(null);
 
   // Check vault status on app startup: if running in desktop app and vault is locked,
   // prompt user immediately to unlock or create master password.
@@ -213,6 +215,13 @@ export const App: React.FC = () => {
     window.addEventListener("beforeunload", handleBeforeUnload);
     return () => {
       window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      vaultLockCancelRef.current?.();
+      vaultLockCancelRef.current = null;
     };
   }, []);
 
@@ -454,7 +463,18 @@ export const App: React.FC = () => {
 
   // Stable callbacks for the settings modal — inline closures change
   // identity every render and defeat EngineSettings' memo.
-  const handleSettingsClose = useCallback(() => setIsSettingsOpen(false), []);
+  const handleSettingsClose = useCallback(() => {
+    setIsSettingsOpen(false);
+    vaultLockCancelRef.current?.();
+    vaultLockCancelRef.current = scheduleVaultLock(() => {
+      vaultLockCancelRef.current = null;
+      if (!api.isTauri) return;
+      api
+        .lockVault()
+        .then((status) => setVaultStatus(status))
+        .catch(() => {});
+    }, 60_000);
+  }, []);
   const handleSettingsSaved = useCallback(
     (newSettings: EngineSettingsDto) => {
       setEngineSettings(newSettings);
@@ -673,7 +693,11 @@ export const App: React.FC = () => {
 
   // Stable child callbacks — inline closures below would defeat memo on the
   // hot panels re-rendered by the 3s fan-out.
-  const handleOpenSettings = useCallback(() => setIsSettingsOpen(true), []);
+  const handleOpenSettings = useCallback(() => {
+    vaultLockCancelRef.current?.();
+    vaultLockCancelRef.current = null;
+    setIsSettingsOpen(true);
+  }, []);
   const handleSelectPosition = useCallback(
     (pos: OpenPositionDto) => {
       setSelectedPositionKey(pos.key);

@@ -150,7 +150,11 @@ impl PassiveUnwindConfig {
 /// avoids `from_f64_retain` binary-expansion dust). `None` on garbage.
 fn dec_to_f64_opt(value: Decimal) -> Option<f64> {
     let f: f64 = value.to_string().parse().ok()?;
-    if f.is_finite() { Some(f) } else { None }
+    if f.is_finite() {
+        Some(f)
+    } else {
+        None
+    }
 }
 
 /// f64 → Decimal through the shortest string rendering. `None` on garbage.
@@ -180,12 +184,7 @@ pub fn spread_bps(bid: Decimal, ask: Decimal) -> Option<f64> {
 /// the aggressive touch: 0 = far side (buy→ask, sell→bid), 50 = mid,
 /// 100 = passive edge (buy→bid, sell→ask). `None` on invalid inputs
 /// (bad percentile, missing/nonpositive/crossed touch) — fail closed.
-pub fn limit_price_for(
-    side: Side,
-    bid: Decimal,
-    ask: Decimal,
-    percentile: f64,
-) -> Option<Decimal> {
+pub fn limit_price_for(side: Side, bid: Decimal, ask: Decimal, percentile: f64) -> Option<Decimal> {
     if !percentile.is_finite() || !(0.0..=100.0).contains(&percentile) {
         return None;
     }
@@ -463,8 +462,7 @@ pub async fn execute_passive_reduce(
                 // reduce must not be left working. Either failure below
                 // still returns the partial limit fill — the Err contract
                 // reserves Err for "no fill record exists at all".
-                let mkt =
-                    build_market_fallback_order(paper.venue_id(), symbol, side, remaining);
+                let mkt = build_market_fallback_order(paper.venue_id(), symbol, side, remaining);
                 let mkt_resp = match paper.place_order(mkt).await {
                     Ok(r) => r,
                     Err(e) => {
@@ -573,8 +571,7 @@ fn combine_partial_with_market(
     if total_qty <= Decimal::ZERO {
         anyhow::bail!("cannot blend fills with nonpositive quantity");
     }
-    let vwap =
-        (limit_resp.filled_qty * limit_px + mkt_resp.filled_qty * mkt_px) / total_qty;
+    let vwap = (limit_resp.filled_qty * limit_px + mkt_resp.filled_qty * mkt_px) / total_qty;
     let status = if mkt_resp.status == OrderStatus::Filled {
         OrderStatus::Filled
     } else {
@@ -606,8 +603,10 @@ mod tests {
 
     fn test_book(bid: Decimal, ask: Decimal) -> OrderBook {
         let mut b = OrderBook::new(VenueId::new("test"), "BTC-USDC".to_string());
-        b.bids.push(arbitrageur_core::quote::BookLevel::new(bid, dec!(10)));
-        b.asks.push(arbitrageur_core::quote::BookLevel::new(ask, dec!(10)));
+        b.bids
+            .push(arbitrageur_core::quote::BookLevel::new(bid, dec!(10)));
+        b.asks
+            .push(arbitrageur_core::quote::BookLevel::new(ask, dec!(10)));
         b
     }
 
@@ -639,10 +638,7 @@ mod tests {
         }
 
         fn recorded(&self) -> Vec<OrderRequest> {
-            self.calls
-                .lock()
-                .expect("test mutex")
-                .clone()
+            self.calls.lock().expect("test mutex").clone()
         }
     }
 
@@ -654,13 +650,18 @@ mod tests {
         fn name(&self) -> &str {
             "scripted-paper"
         }
-        async fn fetch_markets(&self) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
             Ok(vec![])
         }
         async fn fetch_orderbook(&self, _symbol: &str) -> anyhow::Result<OrderBook> {
             Ok(test_book(dec!(100), dec!(101)))
         }
-        async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+        async fn fetch_ticker(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
             Ok(arbitrageur_core::quote::Ticker {
                 venue: self.venue.clone(),
                 symbol: symbol.to_string(),
@@ -684,7 +685,9 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             })
         }
-        async fn fetch_account(&self) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
             Ok(arbitrageur_core::position::AccountSnapshot {
                 venue: self.venue.clone(),
                 equity: dec!(10000),
@@ -738,7 +741,10 @@ mod tests {
                 timestamp: chrono::Utc::now(),
             })
         }
-        async fn cancel_order(&self, _req: arbitrageur_core::order::CancelRequest) -> anyhow::Result<()> {
+        async fn cancel_order(
+            &self,
+            _req: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -839,18 +845,30 @@ mod tests {
         );
         // 100 = passive edge (buy→bid, sell→ask).
         assert_eq!(limit_price_for(Side::Buy, bid, ask, 100.0), Some(dec!(100)));
-        assert_eq!(limit_price_for(Side::Sell, bid, ask, 100.0), Some(dec!(101)));
+        assert_eq!(
+            limit_price_for(Side::Sell, bid, ask, 100.0),
+            Some(dec!(101))
+        );
     }
 
     #[test]
     fn pricing_rejects_invalid_inputs() {
         assert_eq!(limit_price_for(Side::Buy, dec!(100), dec!(101), -5.0), None);
-        assert_eq!(limit_price_for(Side::Buy, dec!(100), dec!(101), 101.0), None);
-        assert_eq!(limit_price_for(Side::Buy, dec!(100), dec!(101), f64::NAN), None);
+        assert_eq!(
+            limit_price_for(Side::Buy, dec!(100), dec!(101), 101.0),
+            None
+        );
+        assert_eq!(
+            limit_price_for(Side::Buy, dec!(100), dec!(101), f64::NAN),
+            None
+        );
         // Crossed book fails closed.
         assert_eq!(limit_price_for(Side::Buy, dec!(102), dec!(101), 50.0), None);
         // Missing touch fails closed.
-        assert_eq!(limit_price_for(Side::Buy, Decimal::ZERO, dec!(101), 50.0), None);
+        assert_eq!(
+            limit_price_for(Side::Buy, Decimal::ZERO, dec!(101), 50.0),
+            None
+        );
         assert_eq!(spread_bps(dec!(102), dec!(101)), None);
         assert_eq!(spread_bps(Decimal::ZERO, dec!(101)), None);
     }
@@ -876,7 +894,13 @@ mod tests {
 
     #[test]
     fn limit_orders_are_reduce_only() {
-        let o = build_limit_reduce_order(VenueId::new("test"), "BTC-USDC", Side::Sell, dec!(1), dec!(100));
+        let o = build_limit_reduce_order(
+            VenueId::new("test"),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            dec!(100),
+        );
         assert!(o.reduce_only);
         assert_eq!(o.order_type, arbitrageur_core::types::OrderType::Limit);
         let m = build_market_fallback_order(VenueId::new("test"), "BTC-USDC", Side::Sell, dec!(1));
@@ -993,7 +1017,10 @@ mod tests {
         // Only the market fallback was placed — no limit touched the venue.
         let calls = inner.recorded();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].order_type, arbitrageur_core::types::OrderType::Market);
+        assert_eq!(
+            calls[0].order_type,
+            arbitrageur_core::types::OrderType::Market
+        );
     }
 
     #[tokio::test]
@@ -1022,10 +1049,7 @@ mod tests {
 
     #[tokio::test]
     async fn partial_limit_fill_takes_remainder_at_market() {
-        let inner = ScriptedPaper::new(vec![
-            ScriptStep::Partial(dec!(0.4)),
-            ScriptStep::Full,
-        ]);
+        let inner = ScriptedPaper::new(vec![ScriptStep::Partial(dec!(0.4)), ScriptStep::Full]);
         let paper: Arc<dyn ExchangeAdapter> = Arc::new(inner);
         let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
         let report = execute_passive_reduce(
@@ -1146,14 +1170,21 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_config_and_qty_fail_closed() {
-        let paper: Arc<dyn ExchangeAdapter> =
-            Arc::new(ScriptedPaper::new(vec![ScriptStep::Full]));
+        let paper: Arc<dyn ExchangeAdapter> = Arc::new(ScriptedPaper::new(vec![ScriptStep::Full]));
         let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
         let mut bad = enabled_cfg();
         bad.spread_percentile = 500.0;
-        assert!(execute_passive_reduce(&paper, &refresh, "BTC-USDC", Side::Sell, dec!(1), &bad, None)
-            .await
-            .is_err());
+        assert!(execute_passive_reduce(
+            &paper,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &bad,
+            None
+        )
+        .await
+        .is_err());
         assert!(execute_passive_reduce(
             &paper,
             &refresh,

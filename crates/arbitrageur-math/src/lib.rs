@@ -1,43 +1,43 @@
-pub mod rolling_stats;
-pub mod spatial_spread;
-pub mod funding_carry;
-pub mod ou_process;
-pub mod optimal_thresholds;
-pub mod kalman_filter;
+pub mod autotune;
+pub mod book_gradient;
+pub mod calibration;
 pub mod cointegration;
+pub mod dislocation;
+pub mod funding_carry;
+pub mod kalman_filter;
+pub mod optimal_thresholds;
+pub mod ou_process;
+pub mod pair_monitor;
 pub mod prediction_synthetic;
 pub mod risk_math;
-pub mod calibration;
-pub mod dislocation;
-pub mod pair_monitor;
-pub mod autotune;
-pub mod session;
+pub mod rolling_stats;
 pub mod seasonality;
+pub mod session;
+pub mod spatial_spread;
 pub mod triangular;
-pub mod book_gradient;
 
-pub use rolling_stats::*;
-pub use spatial_spread::*;
-pub use funding_carry::*;
-pub use ou_process::*;
-pub use optimal_thresholds::*;
-pub use kalman_filter::*;
+pub use autotune::*;
+pub use calibration::*;
 pub use cointegration::*;
+pub use dislocation::*;
+pub use funding_carry::*;
+pub use kalman_filter::*;
+pub use optimal_thresholds::*;
+pub use ou_process::*;
+pub use pair_monitor::*;
 pub use prediction_synthetic::*;
 pub use risk_math::*;
-pub use calibration::*;
-pub use dislocation::*;
-pub use pair_monitor::*;
-pub use autotune::*;
-pub use session::*;
+pub use rolling_stats::*;
 pub use seasonality::*;
+pub use session::*;
+pub use spatial_spread::*;
 pub use triangular::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook};
     use arbitrageur_core::types::dec;
-    use arbitrageur_core::quote::{BookLevel, OrderBook, FundingRate};
     use chrono::Utc;
 
     #[test]
@@ -69,7 +69,8 @@ mod tests {
             dec!(2), // 2 bps fee
             dec!(2), // 2 bps fee
             dec!(1.0),
-        ).expect("Opportunity should exist");
+        )
+        .expect("Opportunity should exist");
 
         assert!(opp.gross_spread > dec!(0));
         assert!(opp.net_profit_per_unit > dec!(0));
@@ -130,7 +131,8 @@ mod tests {
             dec!(0.48), // YES
             dec!(0.55), // NO
             dec!(10),   // 10 BPS fee
-        ).expect("Arbitrage should exist: Polymarket YES (0.40) + Kalshi NO (0.55) = 0.95 < 1.00");
+        )
+        .expect("Arbitrage should exist: Polymarket YES (0.40) + Kalshi NO (0.55) = 0.95 < 1.00");
 
         assert_eq!(opp.buy_yes_venue, "Polymarket");
         assert_eq!(opp.buy_no_venue, "Kalshi");
@@ -149,13 +151,8 @@ mod tests {
         sell_book.bids.push(BookLevel::new(dec!(60100), dec!(1.0)));
 
         // Target 10 BTC, but only 1.0 BTC is mutually executable
-        let opp = evaluate_spatial_spread(
-            &buy_book,
-            &sell_book,
-            dec!(0),
-            dec!(0),
-            dec!(10.0),
-        ).expect("Opportunity should exist for 1.0 BTC");
+        let opp = evaluate_spatial_spread(&buy_book, &sell_book, dec!(0), dec!(0), dec!(10.0))
+            .expect("Opportunity should exist for 1.0 BTC");
 
         assert_eq!(opp.executable_qty, dec!(1.0));
         // Buy VWAP must be evaluated on the 1.0 BTC matched quantity (@ 60000), NOT on the 10.0 BTC deep quantity!
@@ -166,9 +163,36 @@ mod tests {
     #[test]
     fn test_prediction_synthetic_price_bounds() {
         // Price <= 0 or >= 1.0 must be rejected
-        assert!(evaluate_prediction_cross_venue("A", dec!(-0.1), dec!(0.5), "B", dec!(0.4), dec!(0.5), dec!(0)).is_none());
-        assert!(evaluate_prediction_cross_venue("A", dec!(1.0), dec!(0.5), "B", dec!(0.4), dec!(0.5), dec!(0)).is_none());
-        assert!(evaluate_prediction_cross_venue("A", dec!(0.4), dec!(0.5), "B", dec!(0.4), dec!(1.5), dec!(0)).is_none());
+        assert!(evaluate_prediction_cross_venue(
+            "A",
+            dec!(-0.1),
+            dec!(0.5),
+            "B",
+            dec!(0.4),
+            dec!(0.5),
+            dec!(0)
+        )
+        .is_none());
+        assert!(evaluate_prediction_cross_venue(
+            "A",
+            dec!(1.0),
+            dec!(0.5),
+            "B",
+            dec!(0.4),
+            dec!(0.5),
+            dec!(0)
+        )
+        .is_none());
+        assert!(evaluate_prediction_cross_venue(
+            "A",
+            dec!(0.4),
+            dec!(0.5),
+            "B",
+            dec!(0.4),
+            dec!(1.5),
+            dec!(0)
+        )
+        .is_none());
     }
 
     #[test]
@@ -183,7 +207,8 @@ mod tests {
             dec!(0.50),
             dec!(0.50),
             dec!(20), // 20 bps
-        ).expect("Arbitrage should exist: 0.45 + 0.50 = 0.95 < 1.0");
+        )
+        .expect("Arbitrage should exist: 0.45 + 0.50 = 0.95 < 1.0");
 
         assert_eq!(opp.buy_yes_venue, "Polymarket");
         assert_eq!(opp.buy_no_venue, "Kalshi");
@@ -199,7 +224,10 @@ mod tests {
             let (_, _) = kf.update(x, y);
             assert!(kf.latest_variance > 0.0);
             assert!(!kf.latest_variance.is_nan());
-            assert!((kf.p[0][1] - kf.p[1][0]).abs() < 1e-10, "Covariance matrix must stay symmetric");
+            assert!(
+                (kf.p[0][1] - kf.p[1][0]).abs() < 1e-10,
+                "Covariance matrix must stay symmetric"
+            );
         }
     }
 }

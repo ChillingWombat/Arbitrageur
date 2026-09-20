@@ -1,11 +1,11 @@
-use std::sync::Arc;
-use tracing::{error, info, warn};
+use crate::emergency_unwind::EmergencyUnwindHandler;
+use crate::smart_routing::SmartOrderRouter;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::order::{OrderRequest, OrderResponse};
 use arbitrageur_core::types::{Decimal, OrderStatus, Side};
 use arbitrageur_risk::circuit_breaker::CircuitBreaker;
-use crate::emergency_unwind::EmergencyUnwindHandler;
-use crate::smart_routing::SmartOrderRouter;
+use std::sync::Arc;
+use tracing::{error, info, warn};
 
 /// Result of an atomic two-leg arbitrage execution attempt.
 #[derive(Debug)]
@@ -45,10 +45,7 @@ pub enum ArbitrageExecutionResult {
     },
     /// Both legs failed with no residual exposure: clean rejects, zero-fill
     /// responses, or fills that were successfully unwound
-    BothFailed {
-        error_a: String,
-        error_b: String,
-    },
+    BothFailed { error_a: String, error_b: String },
     /// Exposure may remain on a filled leg because its compensation order failed
     UnresolvedExposure {
         leg_a_fill: Option<OrderResponse>,
@@ -71,8 +68,9 @@ fn response_identity_matches(
 ) -> bool {
     resp.venue == exchange.venue_id()
         && resp.symbol.as_str() == symbol
+        && !client_order_id.trim().is_empty()
         && resp.client_order_id == client_order_id
-        && !resp.order_id.is_empty()
+        && !resp.order_id.trim().is_empty()
 }
 
 /// A fill is only complete when it is attributed to the expected venue,
@@ -91,7 +89,10 @@ fn is_complete_fill(
         && resp.status == OrderStatus::Filled
         && resp.filled_qty == requested_qty
         && resp.remaining_qty == Decimal::ZERO
-        && resp.avg_fill_price.map(|p| p > Decimal::ZERO).unwrap_or(false)
+        && resp
+            .avg_fill_price
+            .map(|p| p > Decimal::ZERO)
+            .unwrap_or(false)
         && resp.fee >= Decimal::ZERO
 }
 
@@ -114,7 +115,10 @@ fn is_trimmable_partial(
         && resp.filled_qty > Decimal::ZERO
         && resp.filled_qty < requested_qty
         && resp.remaining_qty == requested_qty - resp.filled_qty
-        && resp.avg_fill_price.map(|p| p > Decimal::ZERO).unwrap_or(false)
+        && resp
+            .avg_fill_price
+            .map(|p| p > Decimal::ZERO)
+            .unwrap_or(false)
         && resp.fee >= Decimal::ZERO
 }
 
@@ -209,24 +213,12 @@ impl AtomicArbitrageCoordinator {
         match (res_a, res_b) {
             // Case 1: Both legs executed successfully
             (Ok(fill_a), Ok(fill_b)) => {
-                let identity_a =
-                    response_identity_matches(&fill_a, exchange_a, &sym_a, &cid_a);
-                let identity_b =
-                    response_identity_matches(&fill_b, exchange_b, &sym_b, &cid_b);
-                let complete_a = is_complete_fill(
-                    &fill_a,
-                    exchange_a,
-                    &sym_a,
-                    &cid_a,
-                    requested_qty_a,
-                );
-                let complete_b = is_complete_fill(
-                    &fill_b,
-                    exchange_b,
-                    &sym_b,
-                    &cid_b,
-                    requested_qty_b,
-                );
+                let identity_a = response_identity_matches(&fill_a, exchange_a, &sym_a, &cid_a);
+                let identity_b = response_identity_matches(&fill_b, exchange_b, &sym_b, &cid_b);
+                let complete_a =
+                    is_complete_fill(&fill_a, exchange_a, &sym_a, &cid_a, requested_qty_a);
+                let complete_b =
+                    is_complete_fill(&fill_b, exchange_b, &sym_b, &cid_b, requested_qty_b);
 
                 if complete_a && complete_b {
                     self.circuit_breaker.record_success();
@@ -245,11 +237,10 @@ impl AtomicArbitrageCoordinator {
                     // Incomplete fill on one or both legs. A nonzero fill whose
                     // identity cannot be correlated to the dispatched order is
                     // never compensated: its true exposure is unknown.
-                    self.circuit_breaker.record_error("Incomplete or partial fill status on one or both legs");
-                    let ambiguous_a =
-                        fill_a.filled_qty > Decimal::ZERO && !identity_a;
-                    let ambiguous_b =
-                        fill_b.filled_qty > Decimal::ZERO && !identity_b;
+                    self.circuit_breaker
+                        .record_error("Incomplete or partial fill status on one or both legs");
+                    let ambiguous_a = fill_a.filled_qty > Decimal::ZERO && !identity_a;
+                    let ambiguous_b = fill_b.filled_qty > Decimal::ZERO && !identity_b;
 
                     // Partial-fill trim: both legs returned Ok with
                     // attributable nonzero fills, but at least one leg is
@@ -295,10 +286,7 @@ impl AtomicArbitrageCoordinator {
                                 if excess_a > Decimal::ZERO {
                                     Some(
                                         EmergencyUnwindHandler::unwind_leg(
-                                            exchange_a,
-                                            &sym_a,
-                                            side_a,
-                                            excess_a,
+                                            exchange_a, &sym_a, side_a, excess_a,
                                         )
                                         .await,
                                     )
@@ -310,10 +298,7 @@ impl AtomicArbitrageCoordinator {
                                 if excess_b > Decimal::ZERO {
                                     Some(
                                         EmergencyUnwindHandler::unwind_leg(
-                                            exchange_b,
-                                            &sym_b,
-                                            side_b,
-                                            excess_b,
+                                            exchange_b, &sym_b, side_b, excess_b,
                                         )
                                         .await,
                                     )
@@ -350,12 +335,10 @@ impl AtomicArbitrageCoordinator {
                             )
                         };
 
-                        let trim_failed = matches!(trim_a, Some(Err(_)))
-                            || matches!(trim_b, Some(Err(_)));
-                        let error_a =
-                            describe_trim(&fill_a, requested_qty_a, excess_a, &trim_a);
-                        let error_b =
-                            describe_trim(&fill_b, requested_qty_b, excess_b, &trim_b);
+                        let trim_failed =
+                            matches!(trim_a, Some(Err(_))) || matches!(trim_b, Some(Err(_)));
+                        let error_a = describe_trim(&fill_a, requested_qty_a, excess_a, &trim_a);
+                        let error_b = describe_trim(&fill_b, requested_qty_b, excess_b, &trim_b);
 
                         if trim_failed {
                             self.circuit_breaker.trip(format!(
@@ -414,8 +397,7 @@ impl AtomicArbitrageCoordinator {
                             matched_qty, excess_a, excess_b
                         );
                         return ArbitrageExecutionResult::PartialPairKept {
-                            realized_profit: trim_pnl
-                                - (fill_a.fee + fill_b.fee + trim_fee),
+                            realized_profit: trim_pnl - (fill_a.fee + fill_b.fee + trim_fee),
                             leg_a_fill: fill_a,
                             leg_b_fill: fill_b,
                             matched_qty,
@@ -457,37 +439,39 @@ impl AtomicArbitrageCoordinator {
                         },
                     );
 
-                    let describe_leg = |fill: &OrderResponse,
-                                        requested_qty: Decimal,
-                                        ambiguous: bool,
-                                        unwind: &Option<anyhow::Result<OrderResponse>>| {
-                        let unwind_outcome = if ambiguous {
-                            "response identity mismatch; no unwind attempted".to_string()
-                        } else {
-                            match unwind {
-                                Some(Ok(resp)) => {
-                                    format!("unwound {} via order {}", resp.filled_qty, resp.order_id)
+                    let describe_leg =
+                        |fill: &OrderResponse,
+                         requested_qty: Decimal,
+                         ambiguous: bool,
+                         unwind: &Option<anyhow::Result<OrderResponse>>| {
+                            let unwind_outcome = if ambiguous {
+                                "response identity mismatch; no unwind attempted".to_string()
+                            } else {
+                                match unwind {
+                                    Some(Ok(resp)) => {
+                                        format!(
+                                            "unwound {} via order {}",
+                                            resp.filled_qty, resp.order_id
+                                        )
+                                    }
+                                    Some(Err(e)) => format!("unwind failed: {}", e),
+                                    None => "no unwind required (zero filled quantity)".to_string(),
                                 }
-                                Some(Err(e)) => format!("unwind failed: {}", e),
-                                None => "no unwind required (zero filled quantity)".to_string(),
-                            }
+                            };
+                            format!(
+                                "status={:?} filled_qty={}/{} remaining_qty={}; {}",
+                                fill.status,
+                                fill.filled_qty,
+                                requested_qty,
+                                fill.remaining_qty,
+                                unwind_outcome
+                            )
                         };
-                        format!(
-                            "status={:?} filled_qty={}/{} remaining_qty={}; {}",
-                            fill.status,
-                            fill.filled_qty,
-                            requested_qty,
-                            fill.remaining_qty,
-                            unwind_outcome
-                        )
-                    };
 
-                    let unwind_failed = matches!(unwind_a, Some(Err(_)))
-                        || matches!(unwind_b, Some(Err(_)));
-                    let error_a =
-                        describe_leg(&fill_a, requested_qty_a, ambiguous_a, &unwind_a);
-                    let error_b =
-                        describe_leg(&fill_b, requested_qty_b, ambiguous_b, &unwind_b);
+                    let unwind_failed =
+                        matches!(unwind_a, Some(Err(_))) || matches!(unwind_b, Some(Err(_)));
+                    let error_a = describe_leg(&fill_a, requested_qty_a, ambiguous_a, &unwind_a);
+                    let error_b = describe_leg(&fill_b, requested_qty_b, ambiguous_b, &unwind_b);
 
                     if ambiguous_a || ambiguous_b || unwind_failed {
                         self.circuit_breaker.trip(format!(
@@ -509,7 +493,8 @@ impl AtomicArbitrageCoordinator {
             // Case 2: Leg A filled, Leg B failed -> EMERGENCY UNWIND Leg A
             (Ok(fill_a), Err(err_b)) => {
                 let err_str = err_b.to_string();
-                self.circuit_breaker.record_error(&format!("Leg B failed: {}", err_str));
+                self.circuit_breaker
+                    .record_error(&format!("Leg B failed: {}", err_str));
 
                 if fill_a.filled_qty <= Decimal::ZERO {
                     error!("Leg B failed and Leg A reported zero filled quantity; no exposure to unwind: {}", err_str);
@@ -538,9 +523,19 @@ impl AtomicArbitrageCoordinator {
                     };
                 }
 
-                error!("Leg A filled but Leg B failed: {}. Triggering rollback on Leg A!", err_str);
+                error!(
+                    "Leg A filled but Leg B failed: {}. Triggering rollback on Leg A!",
+                    err_str
+                );
 
-                match EmergencyUnwindHandler::unwind_leg(exchange_a, &sym_a, side_a, fill_a.filled_qty).await {
+                match EmergencyUnwindHandler::unwind_leg(
+                    exchange_a,
+                    &sym_a,
+                    side_a,
+                    fill_a.filled_qty,
+                )
+                .await
+                {
                     Ok(unwind_resp) => ArbitrageExecutionResult::LegBFailedUnwound {
                         leg_a_fill: fill_a,
                         unwind_resp,
@@ -564,7 +559,8 @@ impl AtomicArbitrageCoordinator {
             // Case 3: Leg B filled, Leg A failed -> EMERGENCY UNWIND Leg B
             (Err(err_a), Ok(fill_b)) => {
                 let err_str = err_a.to_string();
-                self.circuit_breaker.record_error(&format!("Leg A failed: {}", err_str));
+                self.circuit_breaker
+                    .record_error(&format!("Leg A failed: {}", err_str));
 
                 if fill_b.filled_qty <= Decimal::ZERO {
                     error!("Leg A failed and Leg B reported zero filled quantity; no exposure to unwind: {}", err_str);
@@ -593,9 +589,19 @@ impl AtomicArbitrageCoordinator {
                     };
                 }
 
-                error!("Leg B filled but Leg A failed: {}. Triggering rollback on Leg B!", err_str);
+                error!(
+                    "Leg B filled but Leg A failed: {}. Triggering rollback on Leg B!",
+                    err_str
+                );
 
-                match EmergencyUnwindHandler::unwind_leg(exchange_b, &sym_b, side_b, fill_b.filled_qty).await {
+                match EmergencyUnwindHandler::unwind_leg(
+                    exchange_b,
+                    &sym_b,
+                    side_b,
+                    fill_b.filled_qty,
+                )
+                .await
+                {
                     Ok(unwind_resp) => ArbitrageExecutionResult::LegAFailedUnwound {
                         leg_b_fill: fill_b,
                         unwind_resp,
@@ -619,7 +625,8 @@ impl AtomicArbitrageCoordinator {
             // Case 4: Both legs failed cleanly
             (Err(err_a), Err(err_b)) => {
                 warn!("Both legs failed to place: A={}, B={}", err_a, err_b);
-                self.circuit_breaker.record_error(&format!("Both legs rejected: A={}, B={}", err_a, err_b));
+                self.circuit_breaker
+                    .record_error(&format!("Both legs rejected: A={}, B={}", err_a, err_b));
                 ArbitrageExecutionResult::BothFailed {
                     error_a: err_a.to_string(),
                     error_b: err_b.to_string(),

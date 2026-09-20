@@ -1,8 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::types::{dec, Decimal, Side};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use arbitrageur_core::types::{dec, Decimal, Side};
-use arbitrageur_core::quote::OrderBook;
+use std::collections::{HashMap, HashSet};
 
 /// A candidate opportunity evaluated for execution across venues.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,7 +154,8 @@ pub fn check_divergence_catastrophic_stop(
     let adverse_move = (current_spread_bps - entry_spread_bps).abs();
     let distance_from_baseline = (current_spread_bps - baseline_mean_bps).abs();
 
-    adverse_move >= max_adverse_divergence_bps || distance_from_baseline >= (max_adverse_divergence_bps * 1.5)
+    adverse_move >= max_adverse_divergence_bps
+        || distance_from_baseline >= (max_adverse_divergence_bps * 1.5)
 }
 
 /// Recommendation for manual balance rebalancing across exchanges (Requirement 9).
@@ -193,7 +194,11 @@ pub fn evaluate_venue_rebalance_needs(
         let allocation_pct = (bal / total_balance) * dec!(100);
         if allocation_pct < min_allocation_threshold_pct {
             let target_bal = total_balance / Decimal::from(balances.len());
-            let deficit = if target_bal > bal { target_bal - bal } else { dec!(0) };
+            let deficit = if target_bal > bal {
+                target_bal - bal
+            } else {
+                dec!(0)
+            };
 
             let bal_f = bal.to_string().parse::<f64>().unwrap_or(0.0);
             let alloc_f = allocation_pct.to_string().parse::<f64>().unwrap_or(0.0);
@@ -333,6 +338,8 @@ mod tests {
         assert_eq!(recs[0].low_venue, "Lighter");
         assert_eq!(recs[0].high_venue, "Hyperliquid");
         assert!(recs[0].suggested_transfer_usd > 3000.0);
-        assert!(recs[0].warning_message.contains("Asymmetric Margin Depletion"));
+        assert!(recs[0]
+            .warning_message
+            .contains("Asymmetric Margin Depletion"));
     }
 }

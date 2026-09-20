@@ -1,7 +1,7 @@
-use std::collections::HashMap;
-use tracing::warn;
 use arbitrageur_core::position::Position;
 use arbitrageur_core::types::{dec, Decimal, Side};
+use std::collections::HashMap;
+use tracing::warn;
 
 /// Portfolio delta neutrality tracker.
 #[derive(Debug, Clone)]
@@ -31,12 +31,20 @@ impl DeltaGuard {
     /// Signed base quantities are netted first, then the residual quantity is
     /// valued at the maximum positive mark observed for that base, so equal
     /// long/short quantities remain delta-neutral even when venue marks differ.
-    pub fn calculate_net_delta(&self, positions: &[Position]) -> HashMap<String, (Decimal, Decimal)> {
+    pub fn calculate_net_delta(
+        &self,
+        positions: &[Position],
+    ) -> HashMap<String, (Decimal, Decimal)> {
         let mut delta_map: HashMap<String, (Decimal, Decimal)> = HashMap::new();
         let mut max_mark: HashMap<String, Decimal> = HashMap::new();
 
         for pos in positions {
-            let base = pos.symbol.split('-').next().unwrap_or(&pos.symbol).to_uppercase();
+            let base = pos
+                .symbol
+                .split('-')
+                .next()
+                .unwrap_or(&pos.symbol)
+                .to_uppercase();
             let entry = delta_map.entry(base.clone()).or_insert((dec!(0), dec!(0)));
             entry.0 += pos.signed_quantity();
             if pos.mark_price > dec!(0) {
@@ -92,11 +100,19 @@ impl DeltaGuard {
     ) -> Result<(), (String, Decimal)> {
         let sentinel = self.max_unhedged_usd_per_asset.abs() + dec!(1);
 
-        let base_a = symbol_a.split('-').next().unwrap_or(symbol_a).to_uppercase();
+        let base_a = symbol_a
+            .split('-')
+            .next()
+            .unwrap_or(symbol_a)
+            .to_uppercase();
         if qty_a <= dec!(0) || price_a <= dec!(0) {
             return Err((base_a, sentinel));
         }
-        let base_b = symbol_b.split('-').next().unwrap_or(symbol_b).to_uppercase();
+        let base_b = symbol_b
+            .split('-')
+            .next()
+            .unwrap_or(symbol_b)
+            .to_uppercase();
         if qty_b <= dec!(0) || price_b <= dec!(0) {
             return Err((base_b, sentinel));
         }
@@ -112,10 +128,7 @@ impl DeltaGuard {
 
         let mut net_qty: HashMap<String, Decimal> = HashMap::new();
         let mut max_px: HashMap<String, Decimal> = HashMap::new();
-        for (base, signed, price) in [
-            (base_a, signed_a, price_a),
-            (base_b, signed_b, price_b),
-        ] {
+        for (base, signed, price) in [(base_a, signed_a, price_a), (base_b, signed_b, price_b)] {
             *net_qty.entry(base.clone()).or_insert(dec!(0)) += signed;
             let m = max_px.entry(base).or_insert(dec!(0));
             if price > *m {
@@ -146,8 +159,14 @@ mod tests {
     fn test_check_proposed_pair_balanced_passes() {
         let guard = DeltaGuard::new(dec!(1000.0));
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(1.0), dec!(60000.0),
-            "BTC-USDC", Side::Sell, dec!(1.0), dec!(60000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(1.0),
+            dec!(60000.0),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1.0),
+            dec!(60000.0),
         );
         assert!(res.is_ok());
     }
@@ -157,8 +176,14 @@ mod tests {
         let guard = DeltaGuard::new(dec!(1000.0));
         // Equal quantities hedge fully even when venue marks differ materially
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(1.0), dec!(60000.0),
-            "BTC-USDC", Side::Sell, dec!(1.0), dec!(62000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(1.0),
+            dec!(60000.0),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1.0),
+            dec!(62000.0),
         );
         assert!(res.is_ok());
     }
@@ -195,8 +220,14 @@ mod tests {
         let guard = DeltaGuard::new(dec!(1000.0));
         // Buy 1.0 @ 60000 vs sell 0.5 @ 70000 leaves +0.5 BTC valued at max leg price
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(1.0), dec!(60000.0),
-            "BTC-USDC", Side::Sell, dec!(0.5), dec!(70000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(1.0),
+            dec!(60000.0),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(0.5),
+            dec!(70000.0),
         );
         let (base, exposure) = res.expect_err("mismatched pair must fail");
         assert_eq!(base, "BTC");
@@ -208,15 +239,27 @@ mod tests {
         let guard = DeltaGuard::new(dec!(1000.0));
         // Different base assets cannot hedge each other; each leg over limit
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(1.0), dec!(60000.0),
-            "ETH-USDC", Side::Sell, dec!(1.0), dec!(3000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(1.0),
+            dec!(60000.0),
+            "ETH-USDC",
+            Side::Sell,
+            dec!(1.0),
+            dec!(3000.0),
         );
         assert!(res.is_err());
 
         // Small balanced cross-asset pair within limit still passes each asset
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(0.01), dec!(60000.0),
-            "ETH-USDC", Side::Sell, dec!(0.1), dec!(3000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.01),
+            dec!(60000.0),
+            "ETH-USDC",
+            Side::Sell,
+            dec!(0.1),
+            dec!(3000.0),
         );
         assert!(res.is_ok());
     }
@@ -225,8 +268,14 @@ mod tests {
     fn test_check_proposed_pair_nonpositive_rejected() {
         let guard = DeltaGuard::new(dec!(1000.0));
         let res = guard.check_proposed_pair(
-            "BTC-USDC", Side::Buy, dec!(0.0), dec!(60000.0),
-            "BTC-USDC", Side::Sell, dec!(1.0), dec!(60000.0),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.0),
+            dec!(60000.0),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1.0),
+            dec!(60000.0),
         );
         let (base, exposure) = res.expect_err("zero qty must fail");
         assert_eq!(base, "BTC");

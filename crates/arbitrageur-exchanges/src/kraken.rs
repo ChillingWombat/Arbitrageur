@@ -1,15 +1,15 @@
+use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, VenueId};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
 use reqwest::Client;
 use std::collections::HashMap;
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::AccountSnapshot;
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
 use zeroize::Zeroizing;
 
 /// Kraken Futures and Spot connector (https://futures.kraken.com/derivatives/api/v3).
@@ -53,7 +53,8 @@ impl KrakenAdapter {
         api_key: Option<String>,
         api_secret: Option<String>,
     ) -> Self {
-        let f_url = futures_url.unwrap_or_else(|| "https://futures.kraken.com/derivatives/api/v3".to_string());
+        let f_url = futures_url
+            .unwrap_or_else(|| "https://futures.kraken.com/derivatives/api/v3".to_string());
         let s_url = spot_url.unwrap_or_else(|| "https://api.kraken.com/0/public".to_string());
         let venue_id = VenueId::new("kraken");
         Self {
@@ -68,7 +69,8 @@ impl KrakenAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -106,7 +108,13 @@ impl KrakenAdapter {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("Kraken edge challenge on {} — cooling down", path);
@@ -190,9 +198,7 @@ impl KrakenAdapter {
         for (k, v) in params {
             let _ = write!(post_data, "&{k}={v}");
         }
-        let endpoint = path
-            .strip_prefix("/derivatives")
-            .unwrap_or(path);
+        let endpoint = path.strip_prefix("/derivatives").unwrap_or(path);
         let authent = Self::sign_futures(&api_secret, endpoint, &nonce, &post_data)?;
         let url = format!("{}{}", self.futures_base_url, path);
         let resp = self
@@ -211,8 +217,9 @@ impl KrakenAdapter {
         if !status.is_success() {
             anyhow::bail!("Kraken POST {path} failed (HTTP {status}): {text}");
         }
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}")
+        })?;
         if v.get("result").and_then(|r| r.as_str()) != Some("success") {
             anyhow::bail!("Kraken POST {path} error response: {text}");
         }
@@ -225,9 +232,7 @@ impl KrakenAdapter {
         let (api_key, api_secret) = self.credentials()?;
         let nonce = Utc::now().timestamp_millis().to_string();
         let post_data = format!("nonce={nonce}");
-        let endpoint = path
-            .strip_prefix("/derivatives")
-            .unwrap_or(path);
+        let endpoint = path.strip_prefix("/derivatives").unwrap_or(path);
         let authent = Self::sign_futures(&api_secret, endpoint, &nonce, &post_data)?;
         let url = format!("{}{}?nonce={}", self.futures_base_url, path, nonce);
         let resp = self
@@ -244,8 +249,9 @@ impl KrakenAdapter {
         if !status.is_success() {
             anyhow::bail!("Kraken GET {path} failed (HTTP {status}): {text}");
         }
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}")
+        })?;
         if v.get("result").and_then(|r| r.as_str()) != Some("success") {
             anyhow::bail!("Kraken GET {path} error response: {text}");
         }
@@ -296,13 +302,17 @@ impl KrakenAdapter {
                             continue;
                         }
                         let code = ccy.to_uppercase();
-                        let mark = if ["USD", "USDT", "USDC", "DAI", "ZUSD"].contains(&code.as_str()) {
-                            dec!(1)
-                        } else {
-                            marks_usd.get(&code).copied().unwrap_or(dec!(0))
-                        };
+                        let mark =
+                            if ["USD", "USDT", "USDC", "DAI", "ZUSD"].contains(&code.as_str()) {
+                                dec!(1)
+                            } else {
+                                marks_usd.get(&code).copied().unwrap_or(dec!(0))
+                            };
                         equity += amt * mark;
-                        if let Some(entry) = balances.iter_mut().find(|b: &&mut arbitrageur_core::position::Balance| b.currency == code) {
+                        if let Some(entry) = balances
+                            .iter_mut()
+                            .find(|b: &&mut arbitrageur_core::position::Balance| b.currency == code)
+                        {
                             entry.total += amt;
                             entry.free += amt;
                         } else {
@@ -339,15 +349,28 @@ impl KrakenAdapter {
         let mut positions = Vec::new();
         if let Some(arr) = positions_v.get("openPositions").and_then(|p| p.as_array()) {
             for leg in arr {
-                let sym = leg.get("symbol").and_then(|s| s.as_str()).unwrap_or_default();
+                let sym = leg
+                    .get("symbol")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default();
                 if sym.is_empty() {
                     continue;
                 }
                 // Size is in contracts; scale to base units via the venue
                 // symbol's contract size carried in `marks_usd` under
-                // `CT:<venue-symbol>` (populated by the caller).
+                // `CT:<venue-symbol>` (populated by the caller) or an explicit
+                // row-level contractSize. Missing metadata is not a safe `1`.
                 let ct_key = format!("CT:{sym}");
-                let ct = marks_usd.get(&ct_key).copied().unwrap_or(dec!(1));
+                let ct = marks_usd
+                    .get(&ct_key)
+                    .copied()
+                    .or_else(|| dec_from_json(leg.get("contractSize")))
+                    .filter(|ct| *ct > dec!(0))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Kraken position {sym} has no positive contract size; refusing to guess exposure"
+                        )
+                    })?;
                 let size_ct = dec_from_json(leg.get("size")).unwrap_or_default();
                 if size_ct.is_zero() {
                     continue;
@@ -405,37 +428,51 @@ impl KrakenAdapter {
     }
 
     /// Canonical linear-perp symbol for a Kraken Futures venue symbol
-    /// (`PF_XBTUSD` -> `BTC-USD`). Inverse (`PI_*`) prints are excluded:
+    /// (`PF_XBTUSD` -> `BTC-USD`, `PF_XBTUSDT` -> `BTC-USDT`). Inverse
+    /// (`PI_*`) prints are excluded:
     /// this adapter quotes, sizes, and settles the linear book, so mixing
     /// inverse funding into the hub would corrupt carry math.
     fn canonical_linear_symbol(venue_sym: &str) -> Option<String> {
         let core = venue_sym.strip_prefix("PF_")?;
-        let base = core
-            .strip_suffix("USD")
-            .or_else(|| core.strip_suffix("USDT"))
-            .or_else(|| core.strip_suffix("USDC"))?;
+        let (base, quote) = ["USDT", "USDC", "USD"]
+            .iter()
+            .find_map(|quote| core.strip_suffix(quote).map(|base| (base, *quote)))?;
         if base.is_empty() {
             return None;
         }
         let canonical_base = if base == "XBT" { "BTC" } else { base };
-        Some(format!("{canonical_base}-USD"))
+        Some(format!("{canonical_base}-{quote}"))
     }
 
     fn to_futures_symbol(symbol: &str) -> anyhow::Result<String> {
         let sym = symbol.trim().to_uppercase();
-        if sym.starts_with("PF_") || sym.starts_with("PI_") {
-            Ok(sym)
-        } else {
-            if sym.contains('-') {
-                let parts: Vec<&str> = sym.split('-').collect();
-                if parts.len() >= 2 && parts[1] != "USD" && parts[1] != "USDC" && parts[1] != "USDT" {
-                    anyhow::bail!("Kraken futures markets are quoted in USD/USDC; '{symbol}' is not supported");
-                }
-            }
-            let base = sym.split('-').next().unwrap_or(&sym);
-            let coin = if base == "BTC" { "XBT" } else { base };
-            Ok(format!("PF_{}USD", coin))
+        if sym.starts_with("PI_") {
+            anyhow::bail!(
+                "Kraken inverse future '{symbol}' uses quote-currency contracts; this adapter only submits linear-perp quantities"
+            );
         }
+        if sym.starts_with("PF_") {
+            if Self::canonical_linear_symbol(&sym).is_none() {
+                anyhow::bail!("Kraken linear future '{symbol}' has an unsupported quote");
+            }
+            return Ok(sym);
+        }
+        let (base, quote) = if sym.contains('-') {
+            let parts: Vec<&str> = sym.split('-').collect();
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("Kraken symbol '{symbol}' is not BASE-QUOTE");
+            };
+            (*base, *quote)
+        } else {
+            (sym.as_str(), "USD")
+        };
+        if !matches!(quote, "USD" | "USDC" | "USDT") {
+            anyhow::bail!(
+                "Kraken futures markets are quoted in USD/USDC/USDT; '{symbol}' is not supported"
+            );
+        }
+        let coin = if base == "BTC" { "XBT" } else { base };
+        Ok(format!("PF_{coin}{quote}"))
     }
 }
 
@@ -467,8 +504,14 @@ impl ExchangeAdapter for KrakenAdapter {
 
         let mut out = Vec::new();
         for item in instruments {
-            let tradeable = item.get("tradeable").and_then(|t| t.as_bool()).unwrap_or(false);
-            let is_expired = item.get("isExpired").and_then(|t| t.as_bool()).unwrap_or(false);
+            let tradeable = item
+                .get("tradeable")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false);
+            let is_expired = item
+                .get("isExpired")
+                .and_then(|t| t.as_bool())
+                .unwrap_or(false);
             if !tradeable || is_expired {
                 continue;
             }
@@ -539,7 +582,9 @@ impl ExchangeAdapter for KrakenAdapter {
         let path = format!("/orderbook?symbol={}", venue_sym);
         let val = self.get_futures_json(&path).await?;
 
-        let ob = val.get("orderBook").ok_or_else(|| anyhow::anyhow!("Kraken missing orderBook"))?;
+        let ob = val
+            .get("orderBook")
+            .ok_or_else(|| anyhow::anyhow!("Kraken missing orderBook"))?;
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
 
         if let Some(bids) = ob.get("bids").and_then(|b| b.as_array()) {
@@ -567,11 +612,15 @@ impl ExchangeAdapter for KrakenAdapter {
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
         let venue_sym = Self::to_futures_symbol(symbol)?;
         let val = self.get_futures_json("/tickers").await?;
-        let tickers = val.get("tickers").and_then(|t| t.as_array()).ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
+        let tickers = val
+            .get("tickers")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
 
-        let item = tickers.iter().find(|t| {
-            t.get("symbol").and_then(|s| s.as_str()) == Some(&venue_sym)
-        }).ok_or_else(|| anyhow::anyhow!("Kraken ticker not found for {}", symbol))?;
+        let item = tickers
+            .iter()
+            .find(|t| t.get("symbol").and_then(|s| s.as_str()) == Some(&venue_sym))
+            .ok_or_else(|| anyhow::anyhow!("Kraken ticker not found for {}", symbol))?;
 
         let bid = dec_from_json(item.get("bid")).unwrap_or(dec!(0));
         let ask = dec_from_json(item.get("ask")).unwrap_or(dec!(0));
@@ -596,11 +645,15 @@ impl ExchangeAdapter for KrakenAdapter {
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
         let venue_sym = Self::to_futures_symbol(symbol)?;
         let val = self.get_futures_json("/tickers").await?;
-        let tickers = val.get("tickers").and_then(|t| t.as_array()).ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
+        let tickers = val
+            .get("tickers")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
 
-        let item = tickers.iter().find(|t| {
-            t.get("symbol").and_then(|s| s.as_str()) == Some(&venue_sym)
-        }).ok_or_else(|| anyhow::anyhow!("Kraken funding rate not found for {}", symbol))?;
+        let item = tickers
+            .iter()
+            .find(|t| t.get("symbol").and_then(|s| s.as_str()) == Some(&venue_sym))
+            .ok_or_else(|| anyhow::anyhow!("Kraken funding rate not found for {}", symbol))?;
 
         let rate = dec_from_json(item.get("fundingRate")).unwrap_or(dec!(0));
         let pred = dec_from_json(item.get("fundingRatePrediction"));
@@ -618,7 +671,10 @@ impl ExchangeAdapter for KrakenAdapter {
 
     async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
         let val = self.get_futures_json("/tickers").await?;
-        let tickers = val.get("tickers").and_then(|t| t.as_array()).ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
+        let tickers = val
+            .get("tickers")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
 
         let mut out = Vec::new();
         for item in tickers {
@@ -648,13 +704,17 @@ impl ExchangeAdapter for KrakenAdapter {
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let val = self.get_futures_json("/tickers").await?;
-        let tickers = val.get("tickers").and_then(|t| t.as_array()).ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
+        let tickers = val
+            .get("tickers")
+            .and_then(|t| t.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Kraken missing tickers"))?;
 
         let mut out = HashMap::new();
         for item in tickers {
             if let (Some(sym), Some(vol)) = (
                 item.get("symbol").and_then(|s| s.as_str()),
-                dec_from_json(item.get("volumeQuote")).or_else(|| dec_from_json(item.get("vol24h"))),
+                dec_from_json(item.get("volumeQuote"))
+                    .or_else(|| dec_from_json(item.get("vol24h"))),
             ) {
                 out.insert(sym.to_string(), vol);
             }
@@ -681,7 +741,8 @@ impl ExchangeAdapter for KrakenAdapter {
                         continue;
                     }
                     // PF_XBTUSD -> XBT, PF_ETHUSD -> ETH, ...
-                    if let Some(core) = vsym.strip_prefix("PF_").and_then(|s| s.strip_suffix("USD")) {
+                    if let Some(core) = vsym.strip_prefix("PF_").and_then(|s| s.strip_suffix("USD"))
+                    {
                         marks.insert(core.to_string(), last);
                     }
                     if let Some(ct) = t.get("contractSize").and_then(|c| c.as_str()) {
@@ -708,6 +769,27 @@ impl ExchangeAdapter for KrakenAdapter {
         self.parse_account_response(&accounts_v, &positions_v, &marks)
     }
 
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        if position.symbol.contains('-') {
+            let mut position = position.clone();
+            position.symbol = position.symbol.to_uppercase();
+            Self::to_futures_symbol(&position.symbol)?;
+            return Ok(Some(position));
+        }
+        let Some(symbol) = Self::canonical_linear_symbol(&position.symbol) else {
+            if position.symbol.starts_with("PI_") {
+                return Ok(None);
+            }
+            anyhow::bail!(
+                "Kraken account symbol '{}' is not a supported linear perpetual",
+                position.symbol
+            );
+        };
+        let mut position = position.clone();
+        position.symbol = symbol;
+        Ok(Some(position))
+    }
+
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
         if !self.has_credentials() {
@@ -718,10 +800,10 @@ impl ExchangeAdapter for KrakenAdapter {
         }
         let venue_symbol = Self::to_futures_symbol(&order.symbol)?;
         let ct = self.contract_size_for(&order.symbol).await?;
-        let contracts = (order.quantity / ct).trunc();
-        if contracts <= dec!(0) {
+        let contracts = order.quantity / ct;
+        if contracts < dec!(1) || !contracts.fract().is_zero() {
             anyhow::bail!(
-                "Kraken order {qty} {sym} is below one contract ({ct} base units)",
+                "Kraken order {qty} {sym} is not an exact whole-contract multiple ({ct} base units)",
                 qty = order.quantity,
                 sym = order.symbol,
                 ct = ct
@@ -760,23 +842,49 @@ impl ExchangeAdapter for KrakenAdapter {
         if !order.client_order_id.is_empty() {
             params.insert("cliOrdId", order.client_order_id.clone());
         }
-        let v = self.authed_post("/derivatives/api/v3/sendorder", &params).await?;
+        let v = self
+            .authed_post("/derivatives/api/v3/sendorder", &params)
+            .await?;
         let st = v
             .get("sendStatus")
             .ok_or_else(|| anyhow::anyhow!("Kraken sendorder missing sendStatus: {v}"))?;
         let order_id = st
             .get("order_id")
             .and_then(|o| o.as_str())
-            .unwrap_or("")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Kraken sendorder returned no order_id: {v}"))?
             .to_string();
-        if order_id.is_empty() {
-            anyhow::bail!("Kraken sendorder returned no order_id: {v}");
+        if let Some(returned_symbol) = st.get("symbol").and_then(|s| s.as_str()) {
+            if returned_symbol != venue_symbol {
+                anyhow::bail!(
+                    "Kraken sendorder symbol '{returned_symbol}' does not match expected '{venue_symbol}': {v}"
+                );
+            }
         }
-        let status = match st.get("status").and_then(|s| s.as_str()).unwrap_or("placed") {
-            "filled" => OrderStatus::Filled,
-            "cancelled" | "rejected" | "expired" => OrderStatus::Rejected,
-            "partiallyFilled" => OrderStatus::PartiallyFilled,
-            _ => OrderStatus::New,
+        if let Some(returned_client) = st.get("cliOrdId").and_then(|s| s.as_str()) {
+            if returned_client != order.client_order_id {
+                anyhow::bail!(
+                    "Kraken sendorder cliOrdId '{returned_client}' does not match request '{}': {v}",
+                    order.client_order_id
+                );
+            }
+        }
+        let raw_status = st
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Kraken sendorder missing status: {v}"))?;
+        let status = match raw_status {
+            // These terminal/nonzero-fill states carry no fill quantity or
+            // price in the send acknowledgement. Refuse to fabricate them as
+            // either fills or harmless zero-fill states.
+            "filled" | "partiallyFilled" => anyhow::bail!(
+                "Kraken sendorder returned '{raw_status}' without fill detail; reconcile order {order_id} manually: {v}"
+            ),
+            "cancelled" | "expired" => OrderStatus::Cancelled,
+            "rejected" => OrderStatus::Rejected,
+            "placed" | "open" | "pending" => OrderStatus::New,
+            other => anyhow::bail!("Kraken sendorder returned unknown status '{other}': {v}"),
         };
         Ok(OrderResponse {
             order_id,
@@ -811,7 +919,8 @@ impl ExchangeAdapter for KrakenAdapter {
         if let Ok(vsym) = Self::to_futures_symbol(&req.symbol) {
             params.insert("symbol", vsym);
         }
-        self.authed_post("/derivatives/api/v3/cancelorder", &params).await?;
+        self.authed_post("/derivatives/api/v3/cancelorder", &params)
+            .await?;
         Ok(())
     }
 
@@ -879,9 +988,8 @@ mod tests {
     fn sign_futures_matches_independent_hmac_vector() {
         // Cross-checked with Python hmac/hashlib/base64 over the same
         // endpoint + nonce + body (see commit message for the script).
-        let secret = Zeroizing::new(
-            "c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string(),
-        );
+        let secret =
+            Zeroizing::new("c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string());
         let authent = KrakenAdapter::sign_futures(
             &secret,
             "/api/v3/sendorder",
@@ -902,6 +1010,14 @@ mod tests {
             KrakenAdapter::canonical_linear_symbol("PF_ETHUSD"),
             Some("ETH-USD".to_string())
         );
+        assert_eq!(
+            KrakenAdapter::canonical_linear_symbol("PF_ETHUSDT"),
+            Some("ETH-USDT".to_string())
+        );
+        assert_eq!(
+            KrakenAdapter::canonical_linear_symbol("PF_ETHUSDC"),
+            Some("ETH-USDC".to_string())
+        );
         assert_eq!(KrakenAdapter::canonical_linear_symbol("PI_XBTUSD"), None);
         assert_eq!(KrakenAdapter::canonical_linear_symbol("BTC-USD"), None);
     }
@@ -916,7 +1032,56 @@ mod tests {
             KrakenAdapter::to_futures_symbol("ETH-USD").unwrap(),
             "PF_ETHUSD"
         );
+        assert_eq!(
+            KrakenAdapter::to_futures_symbol("ETH-USDT").unwrap(),
+            "PF_ETHUSDT"
+        );
+        assert_eq!(
+            KrakenAdapter::to_futures_symbol("ETH-USDC").unwrap(),
+            "PF_ETHUSDC"
+        );
+        assert!(KrakenAdapter::to_futures_symbol("PI_XBTUSD").is_err());
         assert!(KrakenAdapter::to_futures_symbol("BTC-SOL").is_err());
         assert!(KrakenAdapter::to_futures_symbol("BTC-ETH").is_err());
+    }
+
+    #[test]
+    fn account_position_for_maps_pf_xbt_symbol() {
+        use arbitrageur_core::types::Side;
+        let adapter = KrakenAdapter::new(None, None, None, None);
+        let account = AccountSnapshot {
+            venue: VenueId::new("kraken"),
+            equity: dec!(100),
+            free_margin: dec!(100),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: vec![Position {
+                venue: VenueId::new("kraken"),
+                symbol: "PF_XBTUSD".to_string(),
+                side: Side::Buy,
+                quantity: dec!(0.1),
+                entry_price: dec!(50000),
+                mark_price: dec!(51000),
+                unrealized_pnl: dec!(0),
+                realized_pnl: dec!(0),
+                liquidation_price: None,
+                leverage: dec!(1),
+                initial_margin: dec!(0),
+                maintenance_margin: dec!(0),
+                updated_at: Utc::now(),
+            }],
+            timestamp: Utc::now(),
+        };
+        let pos = adapter
+            .account_position_for(&account, "BTC-USD")
+            .unwrap()
+            .expect("PF_XBTUSD should resolve to BTC-USD");
+        assert_eq!(pos.symbol, "BTC-USD");
+        assert_eq!(pos.quantity, dec!(0.1));
+        assert!(adapter
+            .account_position_for(&account, "ETH-USD")
+            .unwrap()
+            .is_none());
     }
 }

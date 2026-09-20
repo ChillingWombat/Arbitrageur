@@ -1,15 +1,15 @@
+use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use reqwest::Client;
 use std::collections::{BTreeMap, HashMap};
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::AccountSnapshot;
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
 use zeroize::Zeroizing;
 
 /// Aster (asterdex.com, Binance-style USDT-margined futures) connector.
@@ -69,10 +69,7 @@ fn preferred_quote<'a>(quotes: &[&'a str]) -> Option<&'a str> {
 /// Resolve a bare base to its venue symbol using live `exchangeInfo`
 /// entries as `(symbol, base_asset, quote_asset)` triples. Never hardcodes
 /// a quote suffix: the quote always comes from the venue's own listing.
-fn resolve_bare_base<'a>(
-    base: &str,
-    entries: &'a [(String, String, String)],
-) -> Option<&'a str> {
+fn resolve_bare_base<'a>(base: &str, entries: &'a [(String, String, String)]) -> Option<&'a str> {
     let mut quotes: Vec<&str> = entries
         .iter()
         .filter(|(_, b, _)| b.eq_ignore_ascii_case(base))
@@ -191,9 +188,7 @@ fn parse_premium_index(
 ) -> anyhow::Result<FundingRate> {
     let returned = data.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
     if !returned.eq_ignore_ascii_case(venue_symbol) {
-        anyhow::bail!(
-            "Aster premiumIndex returned symbol {returned} for requested {venue_symbol}"
-        );
+        anyhow::bail!("Aster premiumIndex returned symbol {returned} for requested {venue_symbol}");
     }
     let rate = dec_from_json(data.get("lastFundingRate")).ok_or_else(|| {
         anyhow::anyhow!("Aster premiumIndex for {venue_symbol} has no parseable lastFundingRate")
@@ -242,7 +237,10 @@ impl AsterAdapter {
         let base = base_url.unwrap_or_else(|| "https://fapi.asterdex.com".to_string());
         Self {
             venue_id: VenueId::new(venue_id),
-            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: base,
             api_key: RwLock::new(api_key.map(Zeroizing::new)),
             api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
@@ -333,11 +331,7 @@ impl AsterAdapter {
             {
                 anyhow::bail!("Aster symbol '{symbol}' must be ASCII alphanumeric");
             }
-            return Ok(format!(
-                "{}{}",
-                base.to_uppercase(),
-                quote.to_uppercase()
-            ));
+            return Ok(format!("{}{}", base.to_uppercase(), quote.to_uppercase()));
         }
         let upper = trimmed.to_uppercase();
         if !upper.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -348,14 +342,40 @@ impl AsterAdapter {
         Ok(upper)
     }
 
-    /// Resolve any UI symbol to the venue spelling, reading the quote for
-    /// bare bases from live `exchangeInfo`. Prefers USDT-margined, then
-    /// USD1, then U, then first alphabetical — among listings the venue
-    /// actually reports.
+    /// Convert an account row such as `BTCUSDT` back to `BTC-USDT`. Bare
+    /// bases and malformed symbols stay unresolved rather than guessing a
+    /// quote asset.
+    fn canonical_account_symbol(symbol: &str) -> anyhow::Result<String> {
+        let sym = symbol.trim().to_uppercase().replace(['/', '_', ' '], "-");
+        if sym.contains('-') {
+            let parts: Vec<&str> = sym.split('-').filter(|p| !p.is_empty()).collect();
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("Aster account symbol '{symbol}' is not BASE-QUOTE");
+            };
+            if !matches!(*quote, "USDT" | "USDC" | "USD1" | "USD" | "U") {
+                anyhow::bail!("Aster account symbol '{symbol}' has unsupported quote");
+            }
+            return Ok(format!("{base}-{quote}"));
+        }
+        for quote in ["USDT", "USDC", "USD1", "USD", "U"] {
+            if let Some(base) = sym.strip_suffix(quote) {
+                if !base.is_empty() {
+                    return Ok(format!("{base}-{quote}"));
+                }
+            }
+        }
+        anyhow::bail!("Aster account symbol '{symbol}' has no supported quote suffix")
+    }
+
+    /// Resolve any UI symbol to the venue spelling. Qualified inputs map
+    /// directly; unseparated inputs (bare bases like `BTC`/`1000PEPE`, or
+    /// concatenated venue spellings like `BTCUSDT`) resolve through live
+    /// `exchangeInfo` — a listed venue symbol wins verbatim, otherwise the
+    /// base resolves to its preferred-listed quote (USDT, then USD1, then
+    /// U, then first alphabetical among listings the venue actually reports).
     async fn resolve_venue_symbol(&self, symbol: &str) -> anyhow::Result<String> {
         let candidate = Self::to_venue_symbol(symbol)?;
-        let looks_bare = !symbol.trim().contains(['-', '/', '_', ' ']) && candidate.len() <= 6;
-        if !looks_bare {
+        if symbol.trim().contains(['-', '/', '_', ' ']) {
             return Ok(candidate);
         }
         let info = self.get_json("/fapi/v3/exchangeInfo").await?;
@@ -366,8 +386,7 @@ impl AsterAdapter {
                 arr.iter()
                     .filter(|s| {
                         s.get("status").and_then(|v| v.as_str()) == Some("TRADING")
-                            && s.get("contractType").and_then(|v| v.as_str())
-                                == Some("PERPETUAL")
+                            && s.get("contractType").and_then(|v| v.as_str()) == Some("PERPETUAL")
                     })
                     .filter_map(|s| {
                         Some((
@@ -598,28 +617,19 @@ impl ExchangeAdapter for AsterAdapter {
         let arr = all
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("Aster 24hr ticker response is not an array"))?;
-        let mut usdt: HashMap<String, Decimal> = HashMap::new();
-        let mut other: HashMap<String, Decimal> = HashMap::new();
+        let mut volumes: HashMap<String, Decimal> = HashMap::new();
         for entry in arr {
             let venue_symbol = entry.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let vol = dec_from_json(entry.get("quoteVolume"));
-            let Some(vol) = vol else { continue };
-            if let Some(base) = venue_symbol.strip_suffix("USDT") {
-                if !base.is_empty() {
-                    usdt.insert(base.to_string(), vol);
-                }
-            } else {
-                // Non-USDT quotes keyed by full venue spelling so bases
-                // never collide across margin assets.
-                other.insert(venue_symbol.to_string(), vol);
-            }
-        }
-        let mut volumes: HashMap<String, Decimal> = HashMap::new();
-        for (base, vol) in usdt {
-            volumes.insert(base, vol);
-        }
-        for (sym, vol) in other {
-            volumes.entry(sym).or_insert(vol);
+            let Some(vol) = dec_from_json(entry.get("quoteVolume")) else {
+                continue;
+            };
+            // Canonical BASE-QUOTE keys keep quotes distinct across margin
+            // assets and match what hub consumers look up; unmappable rows
+            // are skipped rather than keyed under the venue spelling.
+            let Ok(canonical) = Self::canonical_account_symbol(venue_symbol) else {
+                continue;
+            };
+            volumes.insert(canonical, vol);
         }
         Ok(volumes)
     }
@@ -647,7 +657,9 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/account?{}", self.base_url, query_string);
 
-        let resp = self.client.get(&url)
+        let resp = self
+            .client
+            .get(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
             .await?;
@@ -658,12 +670,14 @@ impl ExchangeAdapter for AsterAdapter {
             anyhow::bail!("Aster fetch_account failed (HTTP {status}): {text}");
         }
 
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Aster account response: {e}; body: {text}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Aster account response: {e}; body: {text}")
+        })?;
 
         let wallet_balance = dec_from_json(v.get("totalWalletBalance")).unwrap_or_default();
         let unrealized_pnl = dec_from_json(v.get("totalUnrealizedProfit")).unwrap_or_default();
-        let equity = dec_from_json(v.get("totalMarginBalance")).unwrap_or(wallet_balance + unrealized_pnl);
+        let equity =
+            dec_from_json(v.get("totalMarginBalance")).unwrap_or(wallet_balance + unrealized_pnl);
         let free_margin = dec_from_json(v.get("availableBalance")).unwrap_or_default();
         let maint_margin = dec_from_json(v.get("totalMaintMargin")).unwrap_or_default();
         let initial_margin = dec_from_json(v.get("totalInitialMargin")).unwrap_or_default();
@@ -685,9 +699,12 @@ impl ExchangeAdapter for AsterAdapter {
                 let entry_px = dec_from_json(p.get("entryPrice")).unwrap_or_default();
                 let upnl = dec_from_json(p.get("unrealizedProfit")).unwrap_or_default();
                 let liq_px = dec_from_json(p.get("liquidationPrice")).filter(|p| *p > dec!(0));
-                let lev = p.get("leverage")
+                let lev = p
+                    .get("leverage")
                     .and_then(|l| match l {
-                        serde_json::Value::Number(n) => n.as_f64().and_then(Decimal::from_f64_retain),
+                        serde_json::Value::Number(n) => {
+                            n.as_f64().and_then(Decimal::from_f64_retain)
+                        }
                         serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
                         _ => None,
                     })
@@ -696,7 +713,11 @@ impl ExchangeAdapter for AsterAdapter {
                 let side = if amt > dec!(0) { Side::Buy } else { Side::Sell };
                 let qty = amt.abs();
                 let notional = qty * entry_px;
-                let im = if lev > dec!(0) { notional / lev } else { notional };
+                let im = if lev > dec!(0) {
+                    notional / lev
+                } else {
+                    notional
+                };
 
                 positions.push(arbitrageur_core::position::Position {
                     venue: self.venue_id.clone(),
@@ -736,9 +757,18 @@ impl ExchangeAdapter for AsterAdapter {
         })
     }
 
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        position.symbol = Self::canonical_account_symbol(&position.symbol)?;
+        Ok(Some(position))
+    }
+
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot place live order on Aster: API credentials are not configured or vault is locked");
+        }
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("Aster order quantity must be positive");
         }
         let venue_symbol = self.resolve_venue_symbol(&order.symbol).await?;
         let mut params = BTreeMap::new();
@@ -768,6 +798,9 @@ impl ExchangeAdapter for AsterAdapter {
         }
         params.insert("quantity", order.quantity.to_string());
         if let Some(p) = order.price {
+            if p <= dec!(0) {
+                anyhow::bail!("Aster order limit price must be positive");
+            }
             params.insert("price", p.to_string());
         }
         if order.reduce_only {
@@ -782,7 +815,9 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
 
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
             .await?;
@@ -793,24 +828,63 @@ impl ExchangeAdapter for AsterAdapter {
             anyhow::bail!("Aster place_order failed (HTTP {status}): {text}");
         }
 
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Aster order response: {e}; body: {text}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Aster order response: {e}; body: {text}")
+        })?;
 
-        let order_id = v.get("orderId")
-            .map(|id| id.to_string())
-            .unwrap_or_default();
-        let client_order_id = v.get("clientOrderId")
+        let returned_symbol = v
+            .get("symbol")
             .and_then(|s| s.as_str())
-            .unwrap_or(&order.client_order_id)
-            .to_string();
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing symbol: {v}"))?;
+        if !returned_symbol.eq_ignore_ascii_case(&venue_symbol) {
+            anyhow::bail!(
+                "Aster order response symbol '{returned_symbol}' does not match expected '{venue_symbol}': {v}"
+            );
+        }
+        let order_id = match v.get("orderId") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            _ => String::new(),
+        };
+        if order_id.is_empty() || order_id == "0" {
+            anyhow::bail!("Aster order response missing valid orderId: {v}");
+        }
+        let client_order_id = v
+            .get("clientOrderId")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing clientOrderId: {v}"))?;
+        if client_order_id != order.client_order_id {
+            anyhow::bail!(
+                "Aster order response clientOrderId '{client_order_id}' does not match request '{}': {v}",
+                order.client_order_id
+            );
+        }
 
-        let raw_status = v.get("status").and_then(|s| s.as_str()).unwrap_or("NEW");
-        let orig_qty = dec_from_json(v.get("origQty")).unwrap_or(order.quantity);
-        let executed_qty = dec_from_json(v.get("executedQty")).unwrap_or(dec!(0));
+        let raw_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing status: {v}"))?;
+        let orig_qty = dec_from_json(v.get("origQty"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing valid origQty: {v}"))?;
+        if orig_qty != order.quantity {
+            anyhow::bail!(
+                "Aster order response origQty {orig_qty} does not match request {}: {v}",
+                order.quantity
+            );
+        }
+        let executed_qty = dec_from_json(v.get("executedQty"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Aster order response missing valid executedQty: {v}")
+            })?;
+        if executed_qty > orig_qty {
+            anyhow::bail!(
+                "Aster order response executedQty {executed_qty} exceeds origQty {orig_qty}: {v}"
+            );
+        }
         let remaining_qty = orig_qty.saturating_sub(executed_qty);
-        let avg_price = dec_from_json(v.get("avgPrice"))
-            .or_else(|| dec_from_json(v.get("price")))
-            .filter(|p| *p > dec!(0));
 
         let order_status = match raw_status {
             "FILLED" => OrderStatus::Filled,
@@ -819,16 +893,49 @@ impl ExchangeAdapter for AsterAdapter {
             "EXPIRED" => OrderStatus::Cancelled,
             "CANCELED" => OrderStatus::Cancelled,
             "REJECTED" => OrderStatus::Rejected,
-            _ => OrderStatus::New,
+            "NEW" => OrderStatus::New,
+            other => anyhow::bail!("Aster order response has unknown status '{other}': {v}"),
+        };
+        let status_consistent = match order_status {
+            OrderStatus::Filled => executed_qty == orig_qty && remaining_qty == dec!(0),
+            OrderStatus::PartiallyFilled => executed_qty > dec!(0) && executed_qty < orig_qty,
+            OrderStatus::New => executed_qty == dec!(0) && remaining_qty == orig_qty,
+            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
+                executed_qty == dec!(0) && remaining_qty == orig_qty
+            }
+        };
+        if !status_consistent {
+            anyhow::bail!(
+                "Aster order response status {order_status:?} is inconsistent with executedQty {executed_qty}/{orig_qty}: {v}"
+            );
+        }
+        let avg_price = if executed_qty > dec!(0) {
+            Some(
+                dec_from_json(v.get("avgPrice"))
+                    .filter(|p| *p > dec!(0))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Aster filled order response missing valid avgPrice: {v}")
+                    })?,
+            )
+        } else {
+            None
         };
 
         // Aster taker fee: 3.5 BPS
-        let cum_quote = dec_from_json(v.get("cumQuote")).unwrap_or_default();
+        let cum_quote = if executed_qty > dec!(0) {
+            dec_from_json(v.get("cumQuote"))
+                .filter(|q| *q >= dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Aster filled order response missing valid cumQuote: {v}")
+                })?
+        } else {
+            dec!(0)
+        };
         let fee = cum_quote * Decimal::new(35, 5);
 
         Ok(OrderResponse {
             order_id,
-            client_order_id,
+            client_order_id: client_order_id.to_string(),
             venue: self.venue_id.clone(),
             symbol: order.symbol,
             status: order_status,
@@ -862,7 +969,9 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
 
-        let resp = self.client.delete(&url)
+        let resp = self
+            .client
+            .delete(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
             .await?;
@@ -888,7 +997,9 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/leverage?{}", self.base_url, query_string);
 
-        let resp = self.client.post(&url)
+        let resp = self
+            .client
+            .post(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
             .await?;
@@ -966,6 +1077,83 @@ mod tests {
     }
 
     #[test]
+    fn scaled_1000x_entry_and_bare_base_resolve_in_venue_units() {
+        // Live Aster exchangeInfo (verified): `1000PEPEUSDT` lists
+        // baseAsset `1000PEPE`, quantityPrecision 0, LOT_SIZE minQty/stepSize 1.
+        // The canonical engine unit IS the venue-native `1000PEPE` unit —
+        // no 1000x rescaling anywhere in the adapter.
+        let venue = VenueId::new("aster");
+        let mut scaled = btc_entry();
+        scaled["symbol"] = serde_json::json!("1000PEPEUSDT");
+        scaled["baseAsset"] = serde_json::json!("1000PEPE");
+        scaled["quantityPrecision"] = serde_json::json!(0);
+        scaled["filters"] = serde_json::json!([
+            {"filterType": "PRICE_FILTER", "tickSize": "0.0000001"},
+            {"filterType": "LOT_SIZE", "minQty": "1", "stepSize": "1"},
+            {"filterType": "MIN_NOTIONAL", "notional": "5"}
+        ]);
+        let meta = parse_exchange_info_entry(&venue, &scaled).expect("scaled entry");
+        assert_eq!(meta.symbol.raw, "1000PEPE-USDT");
+        assert_eq!(meta.venue_symbol, "1000PEPEUSDT");
+        assert_eq!(meta.size_decimals, 0);
+        assert_eq!(meta.min_order_size, dec!(1));
+        assert_eq!(meta.contract_size, dec!(1));
+
+        let entries = vec![(
+            "1000PEPEUSDT".to_string(),
+            "1000PEPE".to_string(),
+            "USDT".to_string(),
+        )];
+        assert_eq!(
+            resolve_bare_base("1000PEPE", &entries),
+            Some("1000PEPEUSDT")
+        );
+        // A bare `PEPE` must NOT alias onto the 1000x contract.
+        assert_eq!(resolve_bare_base("PEPE", &entries), None);
+    }
+
+    #[test]
+    fn account_position_for_normalizes_1000x_in_venue_units() {
+        let adapter = AsterAdapter::new(None, None, None);
+        let raw = Position {
+            venue: adapter.venue_id(),
+            symbol: "1000PEPEUSDT".to_string(),
+            side: Side::Buy,
+            quantity: dec!(2),
+            entry_price: dec!(0.01),
+            mark_price: dec!(0.01),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: Some(dec!(0.005)),
+            leverage: dec!(5),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: Utc::now(),
+        };
+        let acc = AccountSnapshot {
+            venue: adapter.venue_id(),
+            equity: dec!(1000),
+            free_margin: dec!(900),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: vec![raw],
+            timestamp: Utc::now(),
+        };
+        let pos = adapter
+            .account_position_for(&acc, "1000PEPE-USDT")
+            .unwrap()
+            .expect("1000x account row should normalize");
+        assert_eq!(pos.symbol, "1000PEPE-USDT");
+        assert_eq!(pos.quantity, dec!(2));
+        assert_eq!(pos.entry_price, dec!(0.01));
+        assert!(adapter
+            .account_position_for(&acc, "PEPE-USDT")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
     fn to_venue_symbol_maps_qualified_and_passes_through_concatenated() {
         assert_eq!(to_venue_symbol_helper("BTC-USDT"), "BTCUSDT");
         assert_eq!(to_venue_symbol_helper("btc/usdt"), "BTCUSDT");
@@ -1017,35 +1205,45 @@ mod tests {
         assert!(parse_premium_index(&venue, "BTC-USDT", "BTCUSDT", &no_rate).is_err());
     }
 
+    #[test]
+    fn canonical_account_symbol_maps_concatenated_venue_rows() {
+        assert_eq!(
+            AsterAdapter::canonical_account_symbol("BTCUSDT").unwrap(),
+            "BTC-USDT"
+        );
+        assert_eq!(
+            AsterAdapter::canonical_account_symbol("ETHUSD1").unwrap(),
+            "ETH-USD1"
+        );
+        assert!(AsterAdapter::canonical_account_symbol("BTC").is_err());
+        assert!(AsterAdapter::canonical_account_symbol("BTC-ETH").is_err());
+    }
+
     #[tokio::test]
     async fn fail_closed_account_order_leverage_paths() {
         let adapter = AsterAdapter::new(None, None, None);
         assert_eq!(adapter.name(), "Aster");
         assert_eq!(adapter.venue_id(), VenueId::new("aster"));
         assert!(adapter.fetch_account().await.is_err());
-        assert!(
-            adapter
-                .place_order(OrderRequest::new_limit(
-                    adapter.venue_id(),
-                    "BTC-USDT",
-                    arbitrageur_core::types::Side::Buy,
-                    dec!(70000.0),
-                    dec!(0.1),
-                ))
-                .await
-                .is_err()
-        );
-        assert!(
-            adapter
-                .cancel_order(CancelRequest {
-                    venue: adapter.venue_id(),
-                    order_id: Some("x".into()),
-                    client_order_id: None,
-                    symbol: "BTC-USDT".into(),
-                })
-                .await
-                .is_err()
-        );
+        assert!(adapter
+            .place_order(OrderRequest::new_limit(
+                adapter.venue_id(),
+                "BTC-USDT",
+                arbitrageur_core::types::Side::Buy,
+                dec!(70000.0),
+                dec!(0.1),
+            ))
+            .await
+            .is_err());
+        assert!(adapter
+            .cancel_order(CancelRequest {
+                venue: adapter.venue_id(),
+                order_id: Some("x".into()),
+                client_order_id: None,
+                symbol: "BTC-USDT".into(),
+            })
+            .await
+            .is_err());
         assert!(adapter.set_leverage("BTC-USDT", 5).await.is_err());
     }
 
@@ -1055,7 +1253,10 @@ mod tests {
         assert!(adapter.supports_live_execution());
         assert!(!adapter.has_live_credentials());
 
-        adapter.update_credentials(Some("test_key".to_string()), Some("test_secret".to_string()));
+        adapter.update_credentials(
+            Some("test_key".to_string()),
+            Some("test_secret".to_string()),
+        );
         assert!(adapter.has_live_credentials());
 
         let mut params = BTreeMap::new();

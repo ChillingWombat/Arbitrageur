@@ -125,10 +125,7 @@ pub enum OverweightLeg {
 /// Auto-rebalance to neutral: reduce the overweight leg by the full
 /// overweight amount so both legs match again. Returns `None` when the pair
 /// is already neutral (within dust) or inputs are invalid.
-pub fn rebalance_to_neutral(
-    long_qty: f64,
-    short_qty: f64,
-) -> Option<(OverweightLeg, f64)> {
+pub fn rebalance_to_neutral(long_qty: f64, short_qty: f64) -> Option<(OverweightLeg, f64)> {
     if !long_qty.is_finite() || !short_qty.is_finite() || long_qty < 0.0 || short_qty < 0.0 {
         return None;
     }

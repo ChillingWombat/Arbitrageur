@@ -182,7 +182,9 @@ pub fn in_funding_mask(ts_ms: i64, venue_intervals_h: &[u32]) -> bool {
             continue;
         }
         let stamp_secs = h as i64 * 3600;
-        let diff = (secs_of_day - stamp_secs).abs().min(86400 - (secs_of_day - stamp_secs).abs());
+        let diff = (secs_of_day - stamp_secs)
+            .abs()
+            .min(86400 - (secs_of_day - stamp_secs).abs());
         if diff <= FUNDING_MASK_HALF_WIDTH_SECS {
             return true;
         }
@@ -342,11 +344,7 @@ pub fn us_cash_open(ts_ms: i64) -> bool {
 /* ------------------------------------------------------------------------ */
 
 fn sorted_finite(values: &[f64]) -> Vec<f64> {
-    let mut v: Vec<f64> = values
-        .iter()
-        .copied()
-        .filter(|x| x.is_finite())
-        .collect();
+    let mut v: Vec<f64> = values.iter().copied().filter(|x| x.is_finite()).collect();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     v
 }
@@ -605,11 +603,7 @@ pub fn apply_entry_adjust_bps(base_bps: f64, session_delta_bps: f64) -> f64 {
 /// Inverse-vol sizing factor `clamp(sigma_med / sigma_h, 0.5, 1.5)`;
 /// unusable inputs degrade to neutral 1.0.
 pub fn inverse_vol_mult(sigma_med: f64, sigma_h: f64) -> f64 {
-    if !sigma_med.is_finite()
-        || !sigma_h.is_finite()
-        || sigma_med <= 0.0
-        || sigma_h <= 0.0
-    {
+    if !sigma_med.is_finite() || !sigma_h.is_finite() || sigma_med <= 0.0 || sigma_h <= 0.0 {
         return 1.0;
     }
     (sigma_med / sigma_h).clamp(0.5, 1.5)
@@ -650,11 +644,20 @@ mod tests {
         assert_eq!(session_of(ts_ms(2026, 1, 15, 0, 0, 0)), SessionId::Asia);
         assert_eq!(session_of(ts_ms(2026, 1, 15, 7, 59, 59)), SessionId::Asia);
         assert_eq!(session_of(ts_ms(2026, 1, 15, 8, 0, 0)), SessionId::Europe);
-        assert_eq!(session_of(ts_ms(2026, 1, 15, 12, 59, 59)), SessionId::Europe);
+        assert_eq!(
+            session_of(ts_ms(2026, 1, 15, 12, 59, 59)),
+            SessionId::Europe
+        );
         assert_eq!(session_of(ts_ms(2026, 1, 15, 13, 0, 0)), SessionId::Overlap);
-        assert_eq!(session_of(ts_ms(2026, 1, 15, 16, 59, 59)), SessionId::Overlap);
+        assert_eq!(
+            session_of(ts_ms(2026, 1, 15, 16, 59, 59)),
+            SessionId::Overlap
+        );
         assert_eq!(session_of(ts_ms(2026, 1, 15, 17, 0, 0)), SessionId::UsLate);
-        assert_eq!(session_of(ts_ms(2026, 1, 15, 21, 59, 59)), SessionId::UsLate);
+        assert_eq!(
+            session_of(ts_ms(2026, 1, 15, 21, 59, 59)),
+            SessionId::UsLate
+        );
         assert_eq!(session_of(ts_ms(2026, 1, 15, 22, 0, 0)), SessionId::Dead);
         assert_eq!(session_of(ts_ms(2026, 1, 15, 23, 59, 59)), SessionId::Dead);
     }
@@ -766,7 +769,9 @@ mod tests {
         let deep = vec![20.0; 300];
         let s = session_stats(&deep, 10.0);
         assert!(!s.provisional);
-        assert!((s.shrunk_med.unwrap() - (300.0 / 450.0 * 20.0 + 150.0 / 450.0 * 10.0)).abs() < 1e-9);
+        assert!(
+            (s.shrunk_med.unwrap() - (300.0 / 450.0 * 20.0 + 150.0 / 450.0 * 10.0)).abs() < 1e-9
+        );
         // Zero weight keeps the prior exactly.
         assert_eq!(eb_shrink(20.0, 10.0, 0.0, SHRINK_N0), Some(10.0));
         assert_eq!(eb_weight(-3.0, SHRINK_N0), 0.0);

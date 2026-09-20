@@ -7,6 +7,7 @@ import {
   getTickerActiveVenues,
   getTickerAvgVolumeUsd,
   getTickerMinVolumeUsd,
+  getVenueAssetVolumeUsd,
   getTickerBenchmarkPrice,
   autoFilterBlockReason,
   applyTickerVisibility,
@@ -144,6 +145,27 @@ test("getTickerAvgVolumeUsd averages across reporting venues and normalizes venu
   assert.strictEqual(getTickerAvgVolumeUsd("ETH", withZero), 5_000_000);
 });
 
+test("getVenueAssetVolumeUsd resolves canonical BASE-QUOTE venue keys", () => {
+  // Adapters key volume maps by canonical symbol; the matcher must strip
+  // quote suffixes so every venue's spelling resolves to the plain base.
+  const volumes: Record<string, number> = {
+    "BTC-USDT": 3_000_000_000, // binance/aster/okx/popdex style
+    "ETH-USD": 700_000_000, // kraken style
+    "SOL-USDC": 500_000_000, // hyperliquid/lighter/vanta style
+    "1000PEPE-USDT": 40_000_000,
+    "BTC-USD1": 1,
+  };
+  assert.strictEqual(getVenueAssetVolumeUsd(volumes, "BTC"), 3_000_000_000);
+  assert.strictEqual(getVenueAssetVolumeUsd(volumes, "ETH"), 700_000_000);
+  assert.strictEqual(getVenueAssetVolumeUsd(volumes, "sol"), 500_000_000);
+  assert.strictEqual(getVenueAssetVolumeUsd(volumes, "PEPE"), 40_000_000);
+  // A bare base never matches an unrelated quote row.
+  assert.strictEqual(getVenueAssetVolumeUsd(volumes, "TAO"), undefined);
+  // Bare-base keys (legacy/venue-native) still resolve.
+  assert.strictEqual(getVenueAssetVolumeUsd({ BTC: 5 }, "BTC"), 5);
+  assert.strictEqual(getVenueAssetVolumeUsd({ kPEPE: 7 }, "PEPE"), 7);
+});
+
 test("getTickerActiveVenues returns only active venue subset", () => {
   const ticker: PerpTicker = {
     symbol: "BTC-USDC",
@@ -199,7 +221,7 @@ test("tickerUnavailabilityReason names the real cause of an empty universe", () 
   // Live mode: read-only lanes are not admitted.
   assert.match(
     tickerUnavailabilityReason(mk([{ id: "lighter", status: "UNSUPPORTED" }], true), new Set()),
-    /Real Trading mode/
+    /Live Trading mode/
   );
 
   // Venues enabled but none admitted (UNSUPPORTED ≠ stream-capable).

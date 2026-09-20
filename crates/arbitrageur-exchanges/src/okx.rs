@@ -1,15 +1,15 @@
+use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, VenueId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use reqwest::Client;
 use std::collections::HashMap;
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::AccountSnapshot;
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
 use zeroize::Zeroizing;
 
 /// OKX Perpetual Swaps connector (https://www.okx.com).
@@ -69,7 +69,8 @@ impl OkxAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -113,7 +114,13 @@ impl OkxAdapter {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("OKX edge challenge on {} — cooling down", path);
@@ -211,8 +218,9 @@ impl OkxAdapter {
                 .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("OKX {method} {path} failed (HTTP {status}): {text}");
         }
-        let v: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse OKX {path} response: {e}; body: {text}"))?;
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse OKX {path} response: {e}; body: {text}")
+        })?;
         if v.get("code").and_then(|c| c.as_str()) != Some("0") {
             anyhow::bail!("OKX {method} {path} error response: {text}");
         }
@@ -234,13 +242,15 @@ impl OkxAdapter {
         Ok(ct_val)
     }
 
-    /// Engine base-unit quantity into whole OKX contracts (floor). Pure.
+    /// Engine base-unit quantity into whole OKX contracts. Pure and
+    /// fail-closed: silently rounding down could leave an intended close or
+    /// hedge partially open, so only exact contract multiples are accepted.
     fn contracts_for_qty(qty: Decimal, ct_val: Decimal) -> Option<Decimal> {
         if qty <= dec!(0) || ct_val <= dec!(0) {
             return None;
         }
-        let contracts = (qty / ct_val).trunc();
-        (contracts >= dec!(1)).then_some(contracts)
+        let contracts = qty / ct_val;
+        (contracts >= dec!(1) && contracts.fract().is_zero()).then_some(contracts)
     }
 
     /// Pure parse of a `/trade/order` response envelope.
@@ -256,24 +266,39 @@ impl OkxAdapter {
             .ok_or_else(|| anyhow::anyhow!("OKX order response missing data"))?;
         let code = data.get("sCode").and_then(|c| c.as_str()).unwrap_or("");
         if code != "0" {
-            let msg = data.get("sMsg").and_then(|m| m.as_str()).unwrap_or("unknown");
+            let msg = data
+                .get("sMsg")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
             anyhow::bail!("OKX order rejected (sCode {code}): {msg}");
         }
         let order_id = data
             .get("ordId")
             .and_then(|id| id.as_str())
-            .unwrap_or_default()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OKX order response missing valid ordId: {v}"))?
             .to_string();
         let client_order_id = data
             .get("clOrdId")
             .and_then(|s| s.as_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&order.client_order_id)
-            .to_string();
+            .ok_or_else(|| anyhow::anyhow!("OKX order response missing clOrdId: {v}"))?;
+        if client_order_id != order.client_order_id {
+            anyhow::bail!(
+                "OKX order response clOrdId '{client_order_id}' does not match request '{}': {v}",
+                order.client_order_id
+            );
+        }
         // Market fills report asynchronously; the ack carries no fill price.
+        let fee_currency = Self::to_venue_symbol(&order.symbol)
+            .ok()
+            .filter(|s| s.contains("-USDC-"))
+            .map(|_| "USDC")
+            .unwrap_or("USDT");
         Ok(OrderResponse {
             order_id,
-            client_order_id,
+            client_order_id: client_order_id.to_string(),
             venue: VenueId::new("okx"),
             symbol: order.symbol.clone(),
             status: OrderStatus::New,
@@ -282,7 +307,7 @@ impl OkxAdapter {
             remaining_qty: order.quantity,
             avg_fill_price: None,
             fee: dec!(0),
-            fee_currency: "USDT".to_string(),
+            fee_currency: fee_currency.to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
         })
@@ -291,6 +316,13 @@ impl OkxAdapter {
     fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
         let sym = symbol.trim().to_uppercase();
         if sym.ends_with("-SWAP") {
+            let parts: Vec<&str> = sym.split('-').collect();
+            let quote = parts.get(1).copied().unwrap_or("");
+            if quote != "USDT" && quote != "USDC" {
+                anyhow::bail!(
+                    "OKX linear swap markets are quoted in USDT/USDC; '{symbol}' is not supported"
+                );
+            }
             Ok(sym)
         } else {
             let (base, quote) = if sym.contains('-') {
@@ -303,17 +335,22 @@ impl OkxAdapter {
             } else {
                 (sym.as_str(), "USDT")
             };
-            if !quote.is_empty() && quote != "USDT" && quote != "USDC" && quote != "USD" {
-                anyhow::bail!("OKX swap markets are quoted in USDT/USDC; '{symbol}' is not supported");
+            if quote != "USDT" && quote != "USDC" {
+                anyhow::bail!(
+                    "OKX linear swap markets are quoted in USDT/USDC; '{symbol}' is not supported"
+                );
             }
-            Ok(format!("{}-USDT-SWAP", base))
+            Ok(format!("{}-{}-SWAP", base, quote))
         }
     }
 
     /// Poll a resting order for its true fill state (up to ~5s). Returns
-    /// (status, filled_base_qty, avg_px, fee).
+    /// (status, filled_base_qty, avg_px, fee). Response identity and fill
+    /// consistency are validated because a mismatched fill would corrupt
+    /// ledger attribution.
     async fn poll_order_fill(
         &self,
+        order: &OrderRequest,
         inst_id: &str,
         ord_id: &str,
         ct_val: Decimal,
@@ -332,10 +369,62 @@ impl OkxAdapter {
                 .and_then(|d| d.as_array())
                 .and_then(|a| a.first())
                 .ok_or_else(|| anyhow::anyhow!("OKX order query missing data"))?;
-            let state = data.get("state").and_then(|s| s.as_str()).unwrap_or("live");
-            let acc_contracts = dec_from_json(data.get("accFillSz")).unwrap_or(dec!(0));
+            let returned_inst = data
+                .get("instId")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing instId: {v}"))?;
+            if returned_inst != inst_id {
+                anyhow::bail!(
+                    "OKX order query instId '{returned_inst}' does not match expected '{inst_id}': {v}"
+                );
+            }
+            let returned_ord = data
+                .get("ordId")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing ordId: {v}"))?;
+            if returned_ord != ord_id {
+                anyhow::bail!(
+                    "OKX order query ordId '{returned_ord}' does not match expected '{ord_id}': {v}"
+                );
+            }
+            let returned_client = data
+                .get("clOrdId")
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing clOrdId: {v}"))?;
+            if returned_client != order.client_order_id {
+                anyhow::bail!(
+                    "OKX order query clOrdId '{returned_client}' does not match request '{}': {v}",
+                    order.client_order_id
+                );
+            }
+            let state = data
+                .get("state")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing state: {v}"))?;
+            let acc_contracts = dec_from_json(data.get("accFillSz"))
+                .filter(|q| *q >= dec!(0))
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing valid accFillSz: {v}"))?;
             let filled_base = acc_contracts * ct_val;
-            let avg_px = dec_from_json(data.get("avgPx")).filter(|p| *p > dec!(0));
+            if filled_base > order.quantity {
+                anyhow::bail!(
+                    "OKX order query accFillSz {acc_contracts} exceeds requested quantity {}: {v}",
+                    order.quantity
+                );
+            }
+            let avg_px = if filled_base > dec!(0) {
+                Some(
+                    dec_from_json(data.get("avgPx"))
+                        .filter(|p| *p > dec!(0))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "OKX order query has fill quantity but no valid avgPx: {v}"
+                            )
+                        })?,
+                )
+            } else {
+                None
+            };
             let fee = dec_from_json(data.get("fee")).unwrap_or(dec!(0)).abs();
             let terminal = matches!(
                 state,
@@ -343,13 +432,38 @@ impl OkxAdapter {
             );
             if terminal || filled_base > dec!(0) {
                 let status = match state {
-                    "filled" => OrderStatus::Filled,
-                    "partially_filled" => OrderStatus::PartiallyFilled,
-                    "canceled" | "cancelled" if filled_base > dec!(0) => {
+                    "filled" if filled_base == order.quantity => OrderStatus::Filled,
+                    "filled" => anyhow::bail!(
+                        "OKX order query state 'filled' has inconsistent fill {filled_base}/{}: {v}",
+                        order.quantity
+                    ),
+                    "partially_filled" if filled_base > dec!(0)
+                        && filled_base < order.quantity =>
+                    {
                         OrderStatus::PartiallyFilled
                     }
-                    "canceled" | "cancelled" => OrderStatus::Cancelled,
-                    "failed" => OrderStatus::Rejected,
+                    "partially_filled" => anyhow::bail!(
+                        "OKX order query state 'partially_filled' has inconsistent fill {filled_base}/{}: {v}",
+                        order.quantity
+                    ),
+                    "canceled" | "cancelled" if filled_base > dec!(0)
+                        && filled_base < order.quantity =>
+                    {
+                        OrderStatus::PartiallyFilled
+                    }
+                    "canceled" | "cancelled" if filled_base == dec!(0) => OrderStatus::Cancelled,
+                    "canceled" | "cancelled" => anyhow::bail!(
+                        "OKX order query canceled fill {filled_base}/{} is inconsistent: {v}",
+                        order.quantity
+                    ),
+                    "failed" if filled_base == dec!(0) => OrderStatus::Rejected,
+                    "failed" => anyhow::bail!(
+                        "OKX order query failed with nonzero fill {filled_base}: {v}"
+                    ),
+                    _ if filled_base > dec!(0) && filled_base < order.quantity => {
+                        OrderStatus::PartiallyFilled
+                    }
+                    _ if filled_base == order.quantity => OrderStatus::Filled,
                     _ => OrderStatus::New,
                 };
                 return Ok((status, filled_base, avg_px, fee));
@@ -362,10 +476,7 @@ impl OkxAdapter {
     /// Pure parse of an `/account/balance` `data[0]` envelope into an
     /// [`AccountSnapshot`] with no positions (filled in by the caller).
     /// Split out for unit testing (no network).
-    fn parse_balance_envelope(
-        &self,
-        acct: &serde_json::Value,
-    ) -> anyhow::Result<AccountSnapshot> {
+    fn parse_balance_envelope(&self, acct: &serde_json::Value) -> anyhow::Result<AccountSnapshot> {
         let equity = dec_from_json(acct.get("totalEq")).unwrap_or_default();
         let free_margin = dec_from_json(acct.get("availEq"))
             .or_else(|| dec_from_json(acct.get("availBal")))
@@ -386,8 +497,8 @@ impl OkxAdapter {
                 }
                 let total = dec_from_json(b.get("eq")).unwrap_or_default();
                 let free = dec_from_json(b.get("availBal")).unwrap_or_default();
-                let frozen = dec_from_json(b.get("frozenBal"))
-                    .unwrap_or_else(|| total.saturating_sub(free));
+                let frozen =
+                    dec_from_json(b.get("frozenBal")).unwrap_or_else(|| total.saturating_sub(free));
                 if total.is_zero() && free.is_zero() && frozen.is_zero() {
                     continue;
                 }
@@ -433,7 +544,9 @@ impl ExchangeAdapter for OkxAdapter {
     }
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
-        let val = self.get_json("/api/v5/public/instruments?instType=SWAP").await?;
+        let val = self
+            .get_json("/api/v5/public/instruments?instType=SWAP")
+            .await?;
         let items = val
             .get("data")
             .and_then(|d| d.as_array())
@@ -460,13 +573,24 @@ impl ExchangeAdapter for OkxAdapter {
                 continue;
             }
 
-            let tick_sz = item.get("tickSz").and_then(|s| s.as_str()).unwrap_or("0.01");
+            let tick_sz = item
+                .get("tickSz")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0.01");
             let lot_sz = item.get("lotSz").and_then(|s| s.as_str()).unwrap_or("0.01");
             let min_sz = dec_from_json(item.get("minSz")).unwrap_or(dec!(0.01));
             let ct_val = dec_from_json(item.get("ctVal")).unwrap_or(dec!(1.0));
 
-            let price_decimals = tick_sz.split('.').nth(1).map(|d| d.len() as u32).unwrap_or(2);
-            let size_decimals = lot_sz.split('.').nth(1).map(|d| d.len() as u32).unwrap_or(2);
+            let price_decimals = tick_sz
+                .split('.')
+                .nth(1)
+                .map(|d| d.len() as u32)
+                .unwrap_or(2);
+            let size_decimals = lot_sz
+                .split('.')
+                .nth(1)
+                .map(|d| d.len() as u32)
+                .unwrap_or(2);
 
             out.push(MarketMetadata {
                 symbol: Symbol::perp(base_asset, quote_asset),
@@ -509,7 +633,14 @@ impl ExchangeAdapter for OkxAdapter {
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let inst_id = Self::to_venue_symbol(symbol)?;
-        let path = format!("/api/v5/market/books?instId={}&sz={}", inst_id, ORDERBOOK_LIMIT);
+        // OKX book level sizes are in CONTRACTS; the engine's canonical
+        // quantity unit is the base asset, so convert via ctVal rather
+        // than overstating depth by the contract factor.
+        let ct_val = self.contract_face_value(&inst_id).await?;
+        let path = format!(
+            "/api/v5/market/books?instId={}&sz={}",
+            inst_id, ORDERBOOK_LIMIT
+        );
         let val = self.get_json(&path).await?;
 
         let data = val
@@ -522,14 +653,14 @@ impl ExchangeAdapter for OkxAdapter {
         if let Some(bids) = data.get("bids").and_then(|b| b.as_array()) {
             for b in bids {
                 if let Some((p, q)) = parse_pair(b) {
-                    book.bids.push(BookLevel::new(p, q));
+                    book.bids.push(BookLevel::new(p, q * ct_val));
                 }
             }
         }
         if let Some(asks) = data.get("asks").and_then(|a| a.as_array()) {
             for a in asks {
                 if let Some((p, q)) = parse_pair(a) {
-                    book.asks.push(BookLevel::new(p, q));
+                    book.asks.push(BookLevel::new(p, q * ct_val));
                 }
             }
         }
@@ -584,14 +715,18 @@ impl ExchangeAdapter for OkxAdapter {
 
         let rate = dec_from_json(data.get("fundingRate"))
             .ok_or_else(|| anyhow::anyhow!("OKX missing fundingRate for {}", symbol))?;
-        let next_time_ms = data.get("fundingTime").and_then(|n| {
-            if let Some(s) = n.as_str() {
-                s.parse::<i64>().ok()
-            } else {
-                n.as_i64()
-            }
-        }).unwrap_or(0);
-        let next_funding_time = DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
+        let next_time_ms = data
+            .get("fundingTime")
+            .and_then(|n| {
+                if let Some(s) = n.as_str() {
+                    s.parse::<i64>().ok()
+                } else {
+                    n.as_i64()
+                }
+            })
+            .unwrap_or(0);
+        let next_funding_time =
+            DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
 
         Ok(FundingRate {
             venue: self.venue_id.clone(),
@@ -605,7 +740,9 @@ impl ExchangeAdapter for OkxAdapter {
     }
 
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
-        let val = self.get_json("/api/v5/market/tickers?instType=SWAP").await?;
+        let val = self
+            .get_json("/api/v5/market/tickers?instType=SWAP")
+            .await?;
         let items = val
             .get("data")
             .and_then(|d| d.as_array())
@@ -617,7 +754,11 @@ impl ExchangeAdapter for OkxAdapter {
                 item.get("instId").and_then(|s| s.as_str()),
                 dec_from_json(item.get("volCcy24h")),
             ) {
-                out.insert(sym.to_string(), vol);
+                // instId is `<BASE>-<QUOTE>-SWAP`; hub consumers match on the
+                // canonical BASE-QUOTE key. Non-swap rows are skipped.
+                if let Some(canonical) = sym.strip_suffix("-SWAP").filter(|s| !s.is_empty()) {
+                    out.insert(canonical.to_string(), vol);
+                }
             }
         }
         Ok(out)
@@ -647,7 +788,10 @@ impl ExchangeAdapter for OkxAdapter {
         let mut positions = Vec::new();
         if let Some(arr) = pos_v.get("data").and_then(|d| d.as_array()) {
             for leg in arr {
-                let inst_id = leg.get("instId").and_then(|s| s.as_str()).unwrap_or_default();
+                let inst_id = leg
+                    .get("instId")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or_default();
                 if inst_id.is_empty() {
                     continue;
                 }
@@ -681,7 +825,11 @@ impl ExchangeAdapter for OkxAdapter {
                     arbitrageur_core::types::Side::Sell
                 };
                 let notional = qty * entry_px;
-                let im = if lev > dec!(0) { notional / lev } else { notional };
+                let im = if lev > dec!(0) {
+                    notional / lev
+                } else {
+                    notional
+                };
                 positions.push(arbitrageur_core::position::Position {
                     venue: self.venue_id.clone(),
                     symbol: inst_id.to_string(),
@@ -700,10 +848,29 @@ impl ExchangeAdapter for OkxAdapter {
             }
         }
 
-        Ok(AccountSnapshot {
-            positions,
-            ..snap
-        })
+        Ok(AccountSnapshot { positions, ..snap })
+    }
+
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        if let Some(canonical) = position.symbol.strip_suffix("-SWAP") {
+            if canonical.is_empty() || !canonical.contains('-') {
+                anyhow::bail!(
+                    "OKX account symbol '{}' is not a BASE-QUOTE swap",
+                    position.symbol
+                );
+            }
+            position.symbol = canonical.to_string();
+        } else if position.symbol.contains('-') {
+            position.symbol = position.symbol.to_uppercase();
+            Self::to_venue_symbol(&position.symbol)?;
+        } else {
+            anyhow::bail!(
+                "OKX account symbol '{}' is not a BASE-QUOTE swap",
+                position.symbol
+            );
+        }
+        Ok(Some(position))
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
@@ -715,11 +882,14 @@ impl ExchangeAdapter for OkxAdapter {
         }
         let inst_id = Self::to_venue_symbol(&order.symbol)?;
         let ct_val = self.contract_face_value(&inst_id).await?;
-        // Engine quantities are base units; OKX `sz` is whole contracts.
+        // Engine quantities are base units; OKX `sz` is whole contracts. Refuse
+        // non-exact quantities rather than silently under-submitting a hedge or
+        // risk-reducing close.
         let contracts = Self::contracts_for_qty(order.quantity, ct_val).ok_or_else(|| {
             anyhow::anyhow!(
-                "OKX order quantity {} {} is below one contract ({inst_id} ctVal {ct_val})",
-                order.quantity, order.symbol
+                "OKX order quantity {} {} is not an exact whole-contract multiple ({inst_id} ctVal {ct_val})",
+                order.quantity,
+                order.symbol
             )
         })?;
         let side_str = match order.side {
@@ -731,9 +901,10 @@ impl ExchangeAdapter for OkxAdapter {
             | arbitrageur_core::types::OrderType::ImmediateOrCancel => ("market", None),
             arbitrageur_core::types::OrderType::Limit
             | arbitrageur_core::types::OrderType::PostOnly => {
-                let p = order.price.filter(|p| *p > dec!(0)).ok_or_else(|| {
-                    anyhow::anyhow!("OKX limit order requires a positive price")
-                })?;
+                let p = order
+                    .price
+                    .filter(|p| *p > dec!(0))
+                    .ok_or_else(|| anyhow::anyhow!("OKX limit order requires a positive price"))?;
                 ("limit", Some(p.to_string()))
             }
         };
@@ -763,7 +934,10 @@ impl ExchangeAdapter for OkxAdapter {
         if order.order_type == arbitrageur_core::types::OrderType::Market
             || order.order_type == arbitrageur_core::types::OrderType::ImmediateOrCancel
         {
-            if let Ok(fill) = self.poll_order_fill(&inst_id, &resp.order_id, ct_val).await {
+            if let Ok(fill) = self
+                .poll_order_fill(&order, &inst_id, &resp.order_id, ct_val)
+                .await
+            {
                 resp.status = fill.0;
                 resp.filled_qty = fill.1;
                 resp.remaining_qty = order.quantity.saturating_sub(fill.1);
@@ -773,7 +947,6 @@ impl ExchangeAdapter for OkxAdapter {
         }
         Ok(resp)
     }
-
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if !self.has_credentials() {
@@ -806,7 +979,9 @@ impl ExchangeAdapter for OkxAdapter {
 
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
         if !self.has_credentials() {
-            anyhow::bail!("Cannot set leverage on OKX: API credentials are not configured or vault is locked");
+            anyhow::bail!(
+                "Cannot set leverage on OKX: API credentials are not configured or vault is locked"
+            );
         }
         if !(1..=125).contains(&leverage) {
             anyhow::bail!("OKX leverage {leverage} out of range 1..=125");
@@ -870,15 +1045,13 @@ mod tests {
     }
 
     #[test]
-    fn contracts_for_qty_floors_to_whole_contracts() {
+    fn contracts_for_qty_requires_exact_whole_contracts() {
         assert_eq!(
             OkxAdapter::contracts_for_qty(dec!(0.05), dec!(0.01)),
             Some(dec!(5))
         );
-        assert_eq!(
-            OkxAdapter::contracts_for_qty(dec!(0.015), dec!(0.01)),
-            Some(dec!(1))
-        );
+        // Refuse to silently round down a hedge or close.
+        assert_eq!(OkxAdapter::contracts_for_qty(dec!(0.015), dec!(0.01)), None);
         assert_eq!(OkxAdapter::contracts_for_qty(dec!(0.005), dec!(0.01)), None);
         assert_eq!(OkxAdapter::contracts_for_qty(dec!(0), dec!(0.01)), None);
     }
@@ -887,19 +1060,20 @@ mod tests {
     fn parse_order_response_accepts_and_rejects() {
         use arbitrageur_core::order::OrderRequest;
         use arbitrageur_core::types::{OrderStatus, Side};
-        let order = OrderRequest::new_market(
-            VenueId::new("okx"),
-            "BTC-USDC",
-            Side::Buy,
-            dec!(0.05),
-        );
+        let order =
+            OrderRequest::new_market(VenueId::new("okx"), "BTC-USDC", Side::Buy, dec!(0.05));
         let v: serde_json::Value = serde_json::json!({
             "code": "0",
-            "data": [{ "ordId": "999", "clOrdId": "", "sCode": "0", "sMsg": "" }]
+            "data": [{ "ordId": "999", "clOrdId": order.client_order_id, "sCode": "0", "sMsg": "" }]
         });
         let resp = OkxAdapter::parse_order_response(&v, &order).unwrap();
         assert_eq!(resp.order_id, "999");
         assert_eq!(resp.status, OrderStatus::New);
+        let wrong_client: serde_json::Value = serde_json::json!({
+            "code": "0",
+            "data": [{ "ordId": "999", "clOrdId": "other", "sCode": "0", "sMsg": "" }]
+        });
+        assert!(OkxAdapter::parse_order_response(&wrong_client, &order).is_err());
         let rej: serde_json::Value = serde_json::json!({
             "code": "0",
             "data": [{ "ordId": "", "sCode": "51000", "sMsg": "boom" }]
@@ -940,7 +1114,53 @@ mod tests {
             OkxAdapter::to_venue_symbol("BTC-USDT-SWAP").unwrap(),
             "BTC-USDT-SWAP"
         );
+        assert_eq!(
+            OkxAdapter::to_venue_symbol("BTC-USDC").unwrap(),
+            "BTC-USDC-SWAP"
+        );
+        assert!(OkxAdapter::to_venue_symbol("BTC-USD").is_err());
+        assert!(OkxAdapter::to_venue_symbol("BTC-USD-SWAP").is_err());
         assert!(OkxAdapter::to_venue_symbol("BTC-SOL").is_err());
         assert!(OkxAdapter::to_venue_symbol("BTC-ETH").is_err());
+    }
+
+    #[test]
+    fn account_position_for_maps_swap_symbol() {
+        use arbitrageur_core::types::Side;
+        let adapter = OkxAdapter::new(None, None, None, None);
+        let account = AccountSnapshot {
+            venue: VenueId::new("okx"),
+            equity: dec!(100),
+            free_margin: dec!(100),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: vec![Position {
+                venue: VenueId::new("okx"),
+                symbol: "BTC-USDT-SWAP".to_string(),
+                side: Side::Sell,
+                quantity: dec!(0.4),
+                entry_price: dec!(50000),
+                mark_price: dec!(49000),
+                unrealized_pnl: dec!(0),
+                realized_pnl: dec!(0),
+                liquidation_price: None,
+                leverage: dec!(2),
+                initial_margin: dec!(0),
+                maintenance_margin: dec!(0),
+                updated_at: Utc::now(),
+            }],
+            timestamp: Utc::now(),
+        };
+        let pos = adapter
+            .account_position_for(&account, "BTC-USDT")
+            .unwrap()
+            .expect("swap position should resolve");
+        assert_eq!(pos.symbol, "BTC-USDT");
+        assert_eq!(pos.quantity, dec!(0.4));
+        assert!(adapter
+            .account_position_for(&account, "BTC-USDC")
+            .unwrap()
+            .is_none());
     }
 }

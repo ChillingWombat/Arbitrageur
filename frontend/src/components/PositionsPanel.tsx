@@ -374,8 +374,8 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 {/* Right: per-venue signed net quantities — buy top, sell bottom */}
                 <div className="flex flex-col items-end space-y-0.5 shrink-0 font-mono">
                   {pos.venues.map((v) => (
-                    <div key={v.venue} className="flex items-baseline space-x-1.5 text-xs">
-                      <span className="text-slate-400 font-mono text-[11px]">{venueLabel(v.venue)}</span>
+                    <div key={`${v.venue}|${v.symbol}`} className="flex items-baseline space-x-1.5 text-xs">
+                      <span className="text-slate-400 font-mono text-[11px]">{venueLabel(v.venue)} {v.symbol}</span>
                       <span
                         className={`tabular-nums font-semibold ${
                           v.netQty > 0

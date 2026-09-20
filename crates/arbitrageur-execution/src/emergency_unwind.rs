@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use tracing::{error, info};
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::order::{OrderRequest, OrderResponse};
 use arbitrageur_core::types::{Decimal, OrderStatus, Side};
+use std::sync::Arc;
+use tracing::{error, info};
 
 /// Handles auto-rollback and market unwinding when an atomic multi-leg arbitrage leg fails.
 pub struct EmergencyUnwindHandler;
@@ -25,12 +25,9 @@ impl EmergencyUnwindHandler {
             unwind_side
         );
 
-        let unwind_order = OrderRequest::new_market(
-            exchange.venue_id(),
-            symbol,
-            unwind_side,
-            unhedged_qty,
-        );
+        let mut unwind_order =
+            OrderRequest::new_market(exchange.venue_id(), symbol, unwind_side, unhedged_qty);
+        unwind_order.reduce_only = true;
         let unwind_client_id = unwind_order.client_order_id.clone();
 
         match exchange.place_order(unwind_order).await {
@@ -43,7 +40,10 @@ impl EmergencyUnwindHandler {
                     && resp.original_qty == unhedged_qty
                     && resp.client_order_id == unwind_client_id
                     && !resp.order_id.is_empty()
-                    && resp.avg_fill_price.map(|p| p > Decimal::ZERO).unwrap_or(false)
+                    && resp
+                        .avg_fill_price
+                        .map(|p| p > Decimal::ZERO)
+                        .unwrap_or(false)
                     && resp.fee >= Decimal::ZERO;
                 if valid {
                     info!(
@@ -95,5 +95,110 @@ impl EmergencyUnwindHandler {
                 Err(e)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    struct CaptureExchange {
+        captured: Arc<parking_lot::Mutex<Option<OrderRequest>>>,
+    }
+
+    #[async_trait]
+    impl ExchangeAdapter for CaptureExchange {
+        fn venue_id(&self) -> arbitrageur_core::types::VenueId {
+            "test-venue".into()
+        }
+
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_orderbook(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_ticker(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_funding_rate(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            anyhow::bail!("not used")
+        }
+
+        async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+            let response = OrderResponse {
+                order_id: "unwind_1".to_string(),
+                client_order_id: order.client_order_id.clone(),
+                venue: order.venue.clone(),
+                symbol: order.symbol.clone(),
+                status: OrderStatus::Filled,
+                original_qty: order.quantity,
+                filled_qty: order.quantity,
+                remaining_qty: Decimal::ZERO,
+                avg_fill_price: Some(arbitrageur_core::types::dec!(100)),
+                fee: Decimal::ZERO,
+                fee_currency: "USDC".to_string(),
+                raw_response: None,
+                timestamp: chrono::Utc::now(),
+            };
+            *self.captured.lock() = Some(order);
+            Ok(response)
+        }
+
+        async fn cancel_order(
+            &self,
+            _req: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unwind_leg_places_reduce_only_market_order() {
+        let captured: Arc<parking_lot::Mutex<Option<OrderRequest>>> =
+            Arc::new(parking_lot::Mutex::new(None));
+        let exchange: Arc<dyn ExchangeAdapter> = Arc::new(CaptureExchange {
+            captured: captured.clone(),
+        });
+
+        EmergencyUnwindHandler::unwind_leg(
+            &exchange,
+            "BTC-USDC",
+            Side::Buy,
+            arbitrageur_core::types::dec!(1.0),
+        )
+        .await
+        .unwrap();
+
+        let order = captured.lock().take().expect("place_order must be called");
+        assert!(order.reduce_only, "emergency unwind must be reduce-only");
+        assert_eq!(order.side, Side::Sell);
+        assert_eq!(order.quantity, arbitrageur_core::types::dec!(1.0));
+        assert_eq!(order.symbol, "BTC-USDC");
     }
 }

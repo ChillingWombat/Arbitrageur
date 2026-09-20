@@ -375,9 +375,9 @@ pub fn reversion_stats(
         } else {
             None
         },
-        median_converge_secs: converge_secs.first().map(|_| {
-            converge_secs[converge_secs.len() / 2]
-        }),
+        median_converge_secs: converge_secs
+            .first()
+            .map(|_| converge_secs[converge_secs.len() / 2]),
     }
 }
 
@@ -622,7 +622,9 @@ mod tests {
         ];
         let eps = segment_episodes(&series, 0.0, 4.0, 2.0, 15.0);
         assert_eq!(eps.len(), 3);
-        assert!(matches!(eps[0].outcome, EpisodeOutcome::Win { secs } if (secs - 1.0).abs() < 1e-9));
+        assert!(
+            matches!(eps[0].outcome, EpisodeOutcome::Win { secs } if (secs - 1.0).abs() < 1e-9)
+        );
         assert!(matches!(eps[1].outcome, EpisodeOutcome::Stop));
         assert!(matches!(eps[2].outcome, EpisodeOutcome::Open));
     }
@@ -679,8 +681,8 @@ mod tests {
         assert!((t0.expected_net_bps.unwrap() - 190.0).abs() < 1e-6);
         let t1 = &rep.tiers[1];
         assert!(t1.net_bps.unwrap() < t0.net_bps.unwrap()); // deep level drags
-        // Tier1 exp = 190bps*$100 = $1.90; tier2's negative level drags it
-        // below tier1's expected USD.
+                                                            // Tier1 exp = 190bps*$100 = $1.90; tier2's negative level drags it
+                                                            // below tier1's expected USD.
         assert_eq!(rep.optimal_size_usd, Some(t0.filled_usd));
         assert_eq!(
             rep.breakeven_size_usd,
@@ -747,12 +749,12 @@ mod tests {
         // Same peak (12bps), mu=0, thresh=5: persistent 16/20 above,
         // flicker 1/20 above.
         let persistent = mk(&[
-            12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0,
-            12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0,
+            12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0, 12.0, 12.0, 12.0, 12.0, 0.0,
+            12.0, 12.0, 12.0, 12.0, 0.0,
         ]);
         let flicker = mk(&[
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            0.0, 0.0, 0.0, 0.0, 12.0,
+            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0, 0.0, 12.0,
         ]);
         let rp = above_threshold_ratio(&persistent, 0.0, 5.0, 3600.0, end).unwrap();
         let rf = above_threshold_ratio(&flicker, 0.0, 5.0, 3600.0, end).unwrap();
@@ -765,10 +767,7 @@ mod tests {
     fn threshold_ratio_is_directional_not_abs() {
         let s = vec![obs(1000, -12.0), obs(2000, -12.0), obs(3000, -12.0)];
         // |dev| is 12 everywhere but directional dev (-12) never >= +5.
-        assert_eq!(
-            above_threshold_ratio(&s, 0.0, 5.0, 3600.0, 3000),
-            Some(0.0)
-        );
+        assert_eq!(above_threshold_ratio(&s, 0.0, 5.0, 3600.0, 3000), Some(0.0));
         let s2 = vec![obs(1000, 12.0), obs(2000, 12.0), obs(3000, -12.0)];
         let r = above_threshold_ratio(&s2, 0.0, 5.0, 3600.0, 3000).unwrap();
         assert!((r - 2.0 / 3.0).abs() < 1e-9);
@@ -810,7 +809,11 @@ mod tests {
         assert!(effective_coverage(&s, 60.0, 3000, 0).is_none());
         assert!(effective_coverage(&s, f64::NAN, 3000, 30_000).is_none());
         // Non-finite spreads are skipped, never counted as above.
-        let dirty = vec![obs(1000, f64::NAN), obs(2000, 12.0), obs(3000, f64::INFINITY)];
+        let dirty = vec![
+            obs(1000, f64::NAN),
+            obs(2000, 12.0),
+            obs(3000, f64::INFINITY),
+        ];
         let r = above_threshold_ratio(&dirty, 0.0, 5.0, 3600.0, 3000).unwrap();
         assert!((r - 1.0).abs() < 1e-9);
     }

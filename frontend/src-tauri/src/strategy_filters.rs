@@ -40,7 +40,9 @@ pub fn validate_auto_threshold(value: Option<f64>, field: &str) -> Result<(), St
     match value {
         None => Ok(()),
         Some(v) if v.is_finite() && v >= 0.0 => Ok(()),
-        _ => Err(format!("{field} must be finite and non-negative (None/0 = off)")),
+        _ => Err(format!(
+            "{field} must be finite and non-negative (None/0 = off)"
+        )),
     }
 }
 
@@ -60,6 +62,11 @@ pub fn venue_asset_volume_usd(volumes: &HashMap<String, f64>, base: &str) -> Opt
         return None;
     }
     let wanted = [b.clone(), format!("K{b}"), format!("1000{b}")];
+    // A venue may list the base under several quote assets (e.g. Aster
+    // `BTC-USDT` and `BTC-USD1`). HashMap iteration order is random, so a
+    // first-match pick would be nondeterministic; take the deepest matching
+    // market — it bounds what the venue can source for the base.
+    let mut best: Option<f64> = None;
     for (raw_key, v) in volumes {
         if !v.is_finite() || *v <= 0.0 {
             continue;
@@ -67,25 +74,37 @@ pub fn venue_asset_volume_usd(volumes: &HashMap<String, f64>, base: &str) -> Opt
         let key = raw_key.trim().to_uppercase();
         let stripped = strip_quote_suffix(&key);
         if wanted.iter().any(|w| w == &key || *w == stripped) {
-            return Some(*v);
+            best = Some(best.map_or(*v, |m: f64| m.max(*v)));
         }
     }
-    None
+    best
 }
 
 fn strip_quote_suffix(key: &str) -> String {
-    for suf in [
-        "-USDC", "-USDT", "-USD", "/USDC", "/USDT", "/USD", "-PERP", "USDC", "USDT", "USD",
-    ] {
-        if key.len() > suf.len() && key.ends_with(suf) {
-            let rest = &key[..key.len() - suf.len()];
-            let rest = rest.trim_end_matches(['-', '/']);
-            if rest.len() >= 2 {
-                return rest.to_string();
+    // Strip instrument-class and quote suffixes until stable so compound
+    // spellings (`BTC-USDT-SWAP`, `BTC-USD-PERP`) fully reduce to the base.
+    let mut cur = key.to_string();
+    loop {
+        let mut next: Option<String> = None;
+        for suf in [
+            "-USDC", "-USDT", "-USD1", "-USD", "-PERP", "-SWAP", "-U", "/USDC", "/USDT", "/USD",
+            "USDC", "USDT", "USD",
+        ] {
+            if cur.len() > suf.len() && cur.ends_with(suf) {
+                let rest = cur[..cur.len() - suf.len()]
+                    .trim_end_matches(['-', '/'])
+                    .to_string();
+                if rest.len() >= 2 {
+                    next = Some(rest);
+                }
+                break;
             }
         }
+        match next {
+            Some(n) if n != cur => cur = n,
+            _ => return cur,
+        }
     }
-    key.to_string()
 }
 
 /// Per-strategy auto-filter thresholds resolved from a strategy record.
@@ -152,13 +171,21 @@ pub fn ticker_passes_strategy_filters(
         let floor = filters.min_price_usd.unwrap_or(f64::MAX);
         let mut min_seen: Option<f64> = None;
         for venue in in_scope_venues {
-            if let Some(p) = mids_by_venue.get(venue).copied().filter(|p| p.is_finite() && *p > 0.0) {
+            if let Some(p) = mids_by_venue
+                .get(venue)
+                .copied()
+                .filter(|p| p.is_finite() && *p > 0.0)
+            {
                 min_seen = Some(min_seen.map_or(p, |m: f64| m.min(p)));
             }
         }
         // If in-scope venues had no specific mid price, check any available price passed in mids_by_venue
         if min_seen.is_none() {
-            for p in mids_by_venue.values().copied().filter(|p| p.is_finite() && *p > 0.0) {
+            for p in mids_by_venue
+                .values()
+                .copied()
+                .filter(|p| p.is_finite() && *p > 0.0)
+            {
                 min_seen = Some(min_seen.map_or(p, |m: f64| m.min(p)));
             }
         }
@@ -190,10 +217,7 @@ mod tests {
     use super::*;
 
     fn vols(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), *v))
-            .collect()
+        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
     }
 
     fn by_venue(pairs: &[(&str, HashMap<String, f64>)]) -> HashMap<String, HashMap<String, f64>> {
@@ -204,10 +228,7 @@ mod tests {
     }
 
     fn mids(pairs: &[(&str, f64)]) -> HashMap<String, f64> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), *v))
-            .collect()
+        pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
     }
 
     #[test]
@@ -221,8 +242,20 @@ mod tests {
 
     #[test]
     fn volume_key_matching_tolerates_quote_suffixes() {
-        let m = vols(&[("BTC-USDC", 9.0)]);
+        let m = vols(&[("BTC-USDC", 9.0), ("ETH-USDT-SWAP", 4.0), ("SOL-USD1", 2.0)]);
         assert_eq!(venue_asset_volume_usd(&m, "BTC"), Some(9.0));
+        assert_eq!(venue_asset_volume_usd(&m, "ETH"), Some(4.0));
+        assert_eq!(venue_asset_volume_usd(&m, "SOL"), Some(2.0));
+    }
+
+    #[test]
+    fn volume_key_matching_picks_deepest_multi_quote_market() {
+        // Aster-style multi-quote listings: HashMap order is random, so the
+        // match must deterministically pick the deepest market for the base.
+        let m = vols(&[("BTC-USD1", 1.0), ("BTC-USDT", 9_000.0)]);
+        assert_eq!(venue_asset_volume_usd(&m, "BTC"), Some(9_000.0));
+        let m = vols(&[("BTC-USDT", 9_000.0), ("BTC-USD1", 1.0)]);
+        assert_eq!(venue_asset_volume_usd(&m, "BTC"), Some(9_000.0));
     }
 
     #[test]
@@ -316,13 +349,8 @@ mod tests {
         );
         assert!(ok, "single available price >= floor must pass");
 
-        let (ok, _) = ticker_passes_strategy_filters(
-            "BTC",
-            &scope,
-            &by_venue(&[]),
-            &mids(&[]),
-            filters,
-        );
+        let (ok, _) =
+            ticker_passes_strategy_filters("BTC", &scope, &by_venue(&[]), &mids(&[]), filters);
         assert!(!ok, "missing all mids must block");
     }
 

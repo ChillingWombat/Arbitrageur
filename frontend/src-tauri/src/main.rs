@@ -1,8 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod commands;
 mod attribution;
 mod auto_exec;
+mod commands;
 mod equity_attribution;
 mod external_positions;
 mod feed;
@@ -145,7 +145,6 @@ fn main() {
             commands::upsert_account,
             commands::delete_account,
             commands::delete_account_credentials,
-            commands::get_account_credentials,
             commands::get_account_credential_field,
             commands::set_default_account,
             commands::list_strategy_routes,

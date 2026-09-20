@@ -5,11 +5,11 @@ use std::time::Duration;
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{Decimal, VenueId};
 use arbitrageur_exchanges::ws::{
-    HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS, apply_lighter_delta, hyperliquid_subscribe_message,
-    lighter_book_from_sides, lighter_default_market_symbol_map, lighter_delta_continuous,
-    lighter_market_symbol_map, lighter_subscribe_message, lighter_ws_url,
-    parse_hyperliquid_l2book_data, parse_lighter_delta, parse_lighter_snapshot_book,
-    parse_vanta_ws_book, vanta_public_ws_url, vanta_subscribe_message, vanta_ws_url,
+    apply_lighter_delta, hyperliquid_subscribe_message, lighter_book_from_sides,
+    lighter_default_market_symbol_map, lighter_delta_continuous, lighter_market_symbol_map,
+    lighter_subscribe_message, lighter_ws_url, parse_hyperliquid_l2book_data, parse_lighter_delta,
+    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_public_ws_url, vanta_subscribe_message,
+    vanta_ws_url, HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS,
 };
 use chrono::Utc;
 use futures::{Sink, SinkExt, StreamExt};
@@ -86,7 +86,10 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
     }
 }
 
-async fn run_connection(venue: &'static str, state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
+async fn run_connection(
+    venue: &'static str,
+    state: &AppEngineState,
+) -> anyhow::Result<FeedOutcome> {
     match venue {
         "hyperliquid" => run_hyperliquid(state).await,
         "lighter" => {
@@ -107,9 +110,11 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
     }
     state.market_data_hub.update_orderbook_from_ws(book.clone());
     if let Some(entry) = top_sample(book, venue_id) {
-        let _ = state
-            .state_store
-            .record_spread_samples(symbol, Utc::now().timestamp_millis(), &[entry]);
+        let _ = state.state_store.record_spread_samples(
+            symbol,
+            Utc::now().timestamp_millis(),
+            &[entry],
+        );
     }
 }
 
@@ -147,10 +152,7 @@ fn top_sample(book: &OrderBook, venue_id: &VenueId) -> Option<VenueSampleEntry> 
 
 /// Canonical-base symbols listed on an admitted venue, via the existing
 /// REST `fetch_markets` cold-start path.
-async fn venue_bases(
-    state: &AppEngineState,
-    venue: &str,
-) -> anyhow::Result<Vec<String>> {
+async fn venue_bases(state: &AppEngineState, venue: &str) -> anyhow::Result<Vec<String>> {
     let adapter = state
         .get_adapter(venue)
         .ok_or_else(|| anyhow::anyhow!("{venue} is not admitted; skipping WS lane"))?;
@@ -169,7 +171,13 @@ fn hyperliquid_coin(symbol_base: &str) -> Option<String> {
     if symbol_base.trim().is_empty() || symbol_base.to_uppercase().ends_with("-SPOT") {
         return None;
     }
-    Some(symbol_base.split('-').next().unwrap_or(symbol_base).to_string())
+    Some(
+        symbol_base
+            .split('-')
+            .next()
+            .unwrap_or(symbol_base)
+            .to_string(),
+    )
 }
 
 async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
@@ -202,7 +210,9 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
         }
         let (Some(data), Some(coin)) = (
             val.get("data"),
-            val.get("data").and_then(|d| d.get("coin")).and_then(|c| c.as_str()),
+            val.get("data")
+                .and_then(|d| d.get("coin"))
+                .and_then(|c| c.as_str()),
         ) else {
             continue;
         };
@@ -243,7 +253,8 @@ async fn run_lighter_protocol(
             reqwest::header::ACCEPT,
             "application/json, text/plain, */*".parse().unwrap(),
         );
-        reqwest::Client::builder().timeout(std::time::Duration::from_secs(15))
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
             .default_headers(headers)
             .timeout(Duration::from_secs(5))
             .build()
@@ -334,7 +345,10 @@ where
     let market_id = payload
         .get("market_id")
         .or_else(|| payload.get("marketId"))
-        .and_then(|m| m.as_u64().or_else(|| m.as_str().and_then(|s| s.parse::<u64>().ok())))
+        .and_then(|m| {
+            m.as_u64()
+                .or_else(|| m.as_str().and_then(|s| s.parse::<u64>().ok()))
+        })
         .or_else(|| {
             channel
                 .strip_prefix("order_book/")
@@ -445,10 +459,16 @@ mod tests {
     #[test]
     fn validate_feed_book_enforces_identity_and_structure() {
         let venue = VenueId::new("hyperliquid");
-        assert!(validate_feed_book(&book("hyperliquid", "BTC", 100.0, 101.0), &venue, "BTC").is_ok());
+        assert!(
+            validate_feed_book(&book("hyperliquid", "BTC", 100.0, 101.0), &venue, "BTC").is_ok()
+        );
         assert!(validate_feed_book(&book("lighter", "BTC", 100.0, 101.0), &venue, "BTC").is_err());
-        assert!(validate_feed_book(&book("hyperliquid", "ETH", 100.0, 101.0), &venue, "BTC").is_err());
-        assert!(validate_feed_book(&book("hyperliquid", "BTC", 101.0, 100.0), &venue, "BTC").is_err());
+        assert!(
+            validate_feed_book(&book("hyperliquid", "ETH", 100.0, 101.0), &venue, "BTC").is_err()
+        );
+        assert!(
+            validate_feed_book(&book("hyperliquid", "BTC", 101.0, 100.0), &venue, "BTC").is_err()
+        );
     }
 
     #[test]

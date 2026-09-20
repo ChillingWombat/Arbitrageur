@@ -65,30 +65,107 @@ pub struct SignedLighterTx {
     pub tx_hash: String,
 }
 
+/// Approved SHA-256 digest of the vendored `liblighter_signer.so`.
+/// Only a byte-identical library may be loaded; anything else is a hard
+/// integrity error, never a fallback.
+const APPROVED_LIGHTER_SIGNER_SHA256: &str =
+    "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753";
+
+fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read {} for hashing: {e}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| anyhow::anyhow!("Cannot read {} for hashing: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn verify_signer_digest(path: &std::path::Path, expected_hex: &str) -> anyhow::Result<()> {
+    let expected = expected_hex.trim();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!(
+            "Invalid expected SHA-256 digest '{expected_hex}': must be exactly 64 hex chars"
+        );
+    }
+    let expected_lower = expected.to_lowercase();
+    let actual = sha256_hex(path)?;
+    if actual != expected_lower {
+        anyhow::bail!(
+            "Lighter signer integrity mismatch for {}: expected {expected_lower}, got {actual}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 /// Candidate locations for `liblighter_signer.so`, in priority order:
 /// explicit env override, deployed sidecar next to the executable, then the
 /// vendored copy inside the crate (covers `cargo test` and dev runs).
-fn candidate_lib_paths() -> Vec<PathBuf> {
+/// The flag marks the explicit `LIGHTER_SIGNER_LIB` override, which
+/// `load_library` verifies against `LIGHTER_SIGNER_SHA256` instead of the
+/// approved constant and never falls back from.
+fn candidate_lib_paths() -> Vec<(PathBuf, bool)> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("LIGHTER_SIGNER_LIB") {
         if !p.trim().is_empty() {
-            out.push(PathBuf::from(p));
+            out.push((PathBuf::from(p), true));
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            out.push(dir.join("liblighter_signer.so"));
+            out.push((dir.join("liblighter_signer.so"), false));
         }
     }
-    out.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native/lighter/liblighter_signer.so"));
+    out.push((
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native/lighter/liblighter_signer.so"),
+        false,
+    ));
     out
 }
 
 fn load_library() -> anyhow::Result<libloading::Library> {
     let candidates = candidate_lib_paths();
+    // Explicit override: verify against the caller-supplied digest and never
+    // fall back to sidecar/vendored on any failure.
+    if let Some((env_path, _)) = candidates.iter().find(|(_, is_override)| *is_override) {
+        let expected = std::env::var("LIGHTER_SIGNER_SHA256").map_err(|_| {
+            anyhow::anyhow!("LIGHTER_SIGNER_LIB override requires LIGHTER_SIGNER_SHA256 to be set")
+        })?;
+        let expected = expected.trim().to_string();
+        if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+            anyhow::bail!("LIGHTER_SIGNER_SHA256 must be exactly 64 hex chars");
+        }
+        verify_signer_digest(env_path, &expected)?;
+        // SAFETY: digest-verified explicit override; all calls go through
+        // narrow, validated wrappers below.
+        return unsafe { libloading::Library::new(env_path) }.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load LIGHTER_SIGNER_LIB override {}: {e}",
+                env_path.display()
+            )
+        });
+    }
     let mut tried = Vec::new();
-    for path in &candidates {
-        // SAFETY: loading a known-vendored signing library; all calls go
+    for (path, _) in candidates.iter().filter(|(_, is_override)| !is_override) {
+        if !path.exists() {
+            tried.push(format!("{} (missing)", path.display()));
+            continue;
+        }
+        // Hard integrity error on mismatch: never load, never fall through
+        // to the next candidate.
+        verify_signer_digest(path, APPROVED_LIGHTER_SIGNER_SHA256)?;
+        // SAFETY: digest matches the approved vendored library; all calls go
         // through narrow, validated wrappers below.
         match unsafe { libloading::Library::new(path) } {
             Ok(lib) => return Ok(lib),
@@ -339,12 +416,13 @@ mod tests {
         let lib = LoadedLib::load().expect("vendored liblighter_signer.so must load");
         // GenerateAPIKey exercises the library without any credentials.
         unsafe {
-            let gen: libloading::Symbol<unsafe extern "C" fn() -> ApiKeyResponse> =
-                lib._lib.get(b"GenerateAPIKey").expect("GenerateAPIKey symbol");
+            let gen: libloading::Symbol<unsafe extern "C" fn() -> ApiKeyResponse> = lib
+                ._lib
+                .get(b"GenerateAPIKey")
+                .expect("GenerateAPIKey symbol");
             let r = gen();
             assert!(
-                r.err.is_null()
-                    || CStr::from_ptr(r.err as *const c_char).to_bytes().is_empty(),
+                r.err.is_null() || CStr::from_ptr(r.err as *const c_char).to_bytes().is_empty(),
                 "GenerateAPIKey must succeed"
             );
             let privk = CStr::from_ptr(r.privateKey as *const c_char)
@@ -368,7 +446,8 @@ mod tests {
     #[test]
     fn sign_create_order_round_trip_local() {
         // Pure-local signing: fixed key, explicit nonce, no network.
-        let key = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key =
+            "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let params = CreateOrderParams {
             market_index: 1,
             client_order_index: 7,
@@ -393,8 +472,7 @@ mod tests {
         .expect("local signing must succeed");
         assert_eq!(tx.tx_type, 14, "create-order tx type");
         assert!(!tx.tx_hash.is_empty());
-        let v: serde_json::Value =
-            serde_json::from_str(&tx.tx_info).expect("tx_info is JSON");
+        let v: serde_json::Value = serde_json::from_str(&tx.tx_info).expect("tx_info is JSON");
         assert_eq!(v.get("MarketIndex").and_then(|m| m.as_i64()), Some(1));
         assert_eq!(v.get("BaseAmount").and_then(|m| m.as_i64()), Some(1000));
         assert_eq!(v.get("ApiKeyIndex").and_then(|m| m.as_u64()), Some(2));
@@ -409,16 +487,22 @@ mod tests {
         )
         .expect("repeat signing must succeed");
         assert_eq!(tx2.tx_type, tx.tx_type);
-        let v2: serde_json::Value =
-            serde_json::from_str(&tx2.tx_info).expect("tx_info is JSON");
-        for field in ["MarketIndex", "BaseAmount", "ApiKeyIndex", "AccountIndex", "Nonce"] {
+        let v2: serde_json::Value = serde_json::from_str(&tx2.tx_info).expect("tx_info is JSON");
+        for field in [
+            "MarketIndex",
+            "BaseAmount",
+            "ApiKeyIndex",
+            "AccountIndex",
+            "Nonce",
+        ] {
             assert_eq!(v2.get(field), v.get(field), "field {field} stable");
         }
     }
 
     #[test]
     fn sign_cancel_order_round_trip_local() {
-        let key = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let key =
+            "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let tx = sign_cancel_order(
             None,
             "https://mainnet.zklighter.elliot.ai",
@@ -441,5 +525,36 @@ mod tests {
         privateKey: *mut c_char,
         publicKey: *mut c_char,
         err: *mut c_char,
+    }
+
+    #[test]
+    fn vendored_signer_matches_approved_digest() {
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native/lighter/liblighter_signer.so");
+        let actual = sha256_hex(&path).expect("vendored .so must hash");
+        assert_eq!(actual, APPROVED_LIGHTER_SIGNER_SHA256);
+    }
+
+    #[test]
+    fn modified_signer_copy_is_rejected() {
+        let src =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native/lighter/liblighter_signer.so");
+        let bytes = std::fs::read(&src).expect("read vendored .so");
+        let mut tmp = std::env::temp_dir();
+        tmp.push(format!(
+            "lighter_signer_modified_{}_{}.so",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let mut mutated = bytes;
+        let last = mutated.len() - 1;
+        mutated[last] ^= 0x01;
+        std::fs::write(&tmp, &mutated).expect("write temp copy");
+        let r = verify_signer_digest(&tmp, APPROVED_LIGHTER_SIGNER_SHA256);
+        let _ = std::fs::remove_file(&tmp);
+        assert!(r.is_err(), "flipped-byte copy must be rejected");
     }
 }

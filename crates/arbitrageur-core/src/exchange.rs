@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use std::collections::HashMap;
-use rust_decimal::Decimal;
-use tokio::sync::broadcast;
 use crate::market::MarketMetadata;
 use crate::order::{CancelRequest, OrderRequest, OrderResponse};
-use crate::position::AccountSnapshot;
+use crate::position::{AccountSnapshot, Position};
 use crate::quote::{FundingRate, OrderBook, Ticker};
 use crate::types::VenueId;
+use async_trait::async_trait;
+use rust_decimal::Decimal;
+use std::collections::HashMap;
+use tokio::sync::broadcast;
 
 /// Unified async exchange connector interface.
 #[async_trait]
@@ -58,6 +58,47 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Fetch consolidated account balance, equity and positions.
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot>;
 
+    /// Normalize one venue-native account row into the engine/canonical
+    /// symbol and quantity units that `OrderRequest` uses. `Ok(None)` means
+    /// the row belongs to a market class this adapter intentionally does not
+    /// manage (for example inverse futures). Mapping failures error instead
+    /// of pretending the instrument is flat or guessing a default market.
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        Ok(Some(position.clone()))
+    }
+
+    /// Return `account`'s position for an engine/canonical symbol. Multiple
+    /// rows resolving to the same instrument are ambiguous and fail closed.
+    fn account_position_for(
+        &self,
+        account: &AccountSnapshot,
+        symbol: &str,
+    ) -> anyhow::Result<Option<Position>> {
+        let requested = symbol.trim();
+        let mut matched: Option<Position> = None;
+        for raw in &account.positions {
+            let Some(position) = self.normalize_account_position(raw)? else {
+                continue;
+            };
+            if position.quantity <= Decimal::ZERO
+                || !position.symbol.eq_ignore_ascii_case(requested)
+            {
+                continue;
+            }
+            if matched.is_some() {
+                anyhow::bail!(
+                    "{} account has multiple positions resolving to {}; refusing to guess exposure",
+                    self.venue_id(),
+                    requested
+                );
+            }
+            let mut position = position;
+            position.symbol = requested.to_string();
+            matched = Some(position);
+        }
+        Ok(matched)
+    }
+
     /// Fetch 24h notional trading volume (quote currency, ~USD) per venue
     /// asset name. Venues that do not expose bulk volume statistics return an
     /// empty map and simply contribute nothing to cross-venue aggregates.
@@ -72,19 +113,34 @@ pub trait ExchangeAdapter: Send + Sync {
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()>;
 
     /// Subscribe to live L2 orderbook updates via WebSocket.
-    async fn subscribe_orderbook(&self, _symbols: &[String]) -> anyhow::Result<broadcast::Receiver<OrderBook>> {
-        anyhow::bail!("WebSocket orderbook streaming not implemented for venue {}", self.name());
+    async fn subscribe_orderbook(
+        &self,
+        _symbols: &[String],
+    ) -> anyhow::Result<broadcast::Receiver<OrderBook>> {
+        anyhow::bail!(
+            "WebSocket orderbook streaming not implemented for venue {}",
+            self.name()
+        );
     }
 
     /// Subscribe to live funding rate updates via WebSocket.
-    async fn subscribe_funding(&self, _symbols: &[String]) -> anyhow::Result<broadcast::Receiver<FundingRate>> {
-        anyhow::bail!("WebSocket funding streaming not implemented for venue {}", self.name());
+    async fn subscribe_funding(
+        &self,
+        _symbols: &[String],
+    ) -> anyhow::Result<broadcast::Receiver<FundingRate>> {
+        anyhow::bail!(
+            "WebSocket funding streaming not implemented for venue {}",
+            self.name()
+        );
     }
 
     /// Set or update leverage for a given symbol/perp contract.
     /// Default implementation fails closed: venues without a leverage API must not silently pretend to apply it.
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Leverage updates are not implemented for venue {}", self.name());
+        anyhow::bail!(
+            "Leverage updates are not implemented for venue {}",
+            self.name()
+        );
     }
 
     /// Whether this adapter has implemented live order placement and cancellation.
@@ -97,6 +153,14 @@ pub trait ExchangeAdapter: Send + Sync {
     /// is still a fail-closed stub, so live preflights must consult THIS,
     /// not that flag, before promising anything submittable.
     fn live_order_submission_implemented(&self) -> bool {
+        false
+    }
+
+    /// Whether live strategy entries are safe end to end: terminal fill
+    /// reconciliation for both legs, cancellation recovery, and restart
+    /// reconciliation. Submission alone is not sufficient, so no adapter
+    /// overrides this yet and all live strategy entries stay blocked.
+    fn live_order_reconciliation_implemented(&self) -> bool {
         false
     }
 

@@ -7,18 +7,20 @@
 > Session 40 (2026-09-20): Safety settings are now operator-controllable (System Setting → Safety tab: circuit-breaker halt limits, DeltaGuard exposure cap, margin thresholds; live-applied + kv-persisted). Breaker baseline re-anchors on paper↔live switches / paper resets instead of false-tripping (fixes recurring -$196k flat-book halt). Portfolio Monitor is the single reset control; Header/sidebar resets removed; CB-tripped vs halted wording unified to Halted / circuit breaker tripped. One spec, five parts — newest decisions win on conflict. Per-part status reflects the live tree; the session handoff log (`docs/HANDOFF_MASTER_SESSION_HISTORY.md`) is the day-to-day record.
 >
 > Session 73 (2026-09-20): the ticker universe is now discovered from live venue-reported perpetual markets; `PERP_TICKERS` is metadata/benchmark fallback only, not an allowlist. Exact `BASE-QUOTE` markets need ≥2 admitted reporting venues. Bulk venue mark prices seed dynamic sizing and auto-filter evaluation. USDC and USDT listings remain distinct instruments.
+>
+> Session 74 (2026-09-20 remediation): capability vocabulary is now separated into market/account reads, signing/submission, cancellation, terminal fill reconciliation, paper strategy support, and live strategy-entry readiness. Several adapters can submit orders, but no adapter is live-entry ready because durable terminal/restart reconciliation is not implemented. Live flatten position reads resolve venue-native account symbols through adapter-owned normalization and fail closed on unknown/ambiguous mappings. `docs/CAPABILITIES.md` is the authoritative current-state matrix; older absolute claims in this file are historical requirements/intent.
 ## Parts & status
-1. **Core engine (V2)** — ✅ Implemented — paper-only; native execution disabled backend-wide, fail-closed.
+1. **Core engine (V2)** — ✅ Implemented for authenticated reads, market data, and paper strategy paths — live submission exists at adapter transport level, but **new live strategy entries remain disabled** pending terminal fill and restart reconciliation.
 2. **Session-aware seasonality layer** — 🟡 Partially implemented — session profiles + `get_session_profile` IPC exist; full phased rollout pending.
 3. **Spread Range Monitor (Opportunity Radar)** — ✅ Implemented as OpportunityRadar — note the display-vs-engine split: the Min Exp table floor lives on the gadget strip, not the Configurator.
 4. **Terminal navigation safeguards** — ✅ Implemented — layout grid, portfolio monitor, settings nav, pause/continue, 5X leverage default.
-5. **WebSocket feeds & retention** — ✅ Implemented — per-venue WS clients + feed supervisor, always-on recorder, retention settings + enforcement.
+5. **WebSocket feeds & retention** — ✅ Implemented at the desktop feed-supervisor layer for Hyperliquid, Lighter, Robinhood-Lighter, and Vanta — always-on recorder, retention settings + enforcement. `ExchangeAdapter::subscribe_orderbook` remains a trait-level stub; venues outside the supervised four use REST polling.
 
 ---
 
 ## Part 1 — Core engine (V2)
 
-> Status: ✅ Implemented — paper-only; native execution disabled backend-wide, fail-closed.
+> Status: ✅ Implemented for research and paper strategy paths — adapter transport can submit on some venues, but new live strategy entries are disabled fail-closed until durable fill/cancel/restart reconciliation is implemented and evidenced.
 
 ## System Specification: Next-Generation Cross-Market Arbitrage Engine & Terminal (V2)
 
@@ -71,6 +73,7 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 17. As an institutional trader, I want to set a 5-minute or 15-minute window on major assets (BTC, ETH), so that temporary orderbook flickers do not generate false triggers.
 18. As a quantitative analyst, I want the sliding window setting to persist in the backend database per ticker, so that my choices remain intact between application restarts.
 19. As a trader, I want presets (Conservative, Balanced, Aggressive) in the configurator that set target profit, percentile, window, grid, and leverage in one click, so that I can rapidly deploy standard parameters.
+    - **2026-09-20 status:** still open. Named risk presets are intentionally gated until the project has a versioned outcome corpus; fabricating tiers would violate the fail-closed/data-first mandate. `docs/PARAMETER_GUIDE.md` now provides the manual cold-start rules and current software defaults.
 20. As a risk analyst, I want the configurator to calculate the exact nominal hurdle breakdown (fees + closing friction + target profit), so that I know the minimum gross spread required for positive expectancy.
 
 #### Security, Vault Lockout & Auto-Lock
@@ -95,7 +98,9 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
 35. As an institutional trader, I want a strict fail-closed guarantee where no synthetic orderbooks or prices are fabricated, so that paper trading executes solely against authentic exchange depth.
 36. As an API user, I want unconfigured exchanges to cleanly report disconnected status, so that the strategy engine does not calculate phantom arbitrage opportunities.
 37. As a multi-exchange arbitrageur, I want support for Hyperliquid, Lighter, Vanta (Orderly), Robinhood Arbitrum, Arcus, PopDEX, Polymarket, and Kalshi, so that I can execute across all major venues.
+    - **2026-09-20 status:** superseded by `docs/CAPABILITIES.md`. Venue support is path-specific (reads, submission, cancellation, paper execution, research scaffold); it does not imply universal execution or live strategy readiness.
 38. As an operator, I want local untracked credentials (kept at `~/.config/arbitrageur/keychain.toml`, mode 0600 on a native filesystem — never on the shared NTFS mount where chmod is a no-op) to load seamlessly without ever being tracked in version control, so that private keys remain private.
+    - **2026-09-20 status:** superseded by the encrypted vault design. Credentials now live in `~/.arbitrageur/vault.enc` (AES-256-GCM + Argon2id); reveal is field-scoped only and no whole-account credential-read IPC is registered.
 
 #### Multi-Ticker Funding Rate Arbitrage Monitor
 39. As a quantitative carry trader, I want the Funding Rate tab to continuously monitor and rank delta-neutral carry opportunities across all shared, non-hidden tickers simultaneously, rather than being locked to the single spread strategy's active ticker.
@@ -241,11 +246,12 @@ pub struct TickerStrategyConfigDto {
 4. **Lighter 8-Hour Funding Prints (2026-09-20 fix)**:
    - Lighter `/api/v1/funding-rates` `rate` is an **8-hour aggregated print** (tracks the venue UI "8hr" figure; hourly ~= rate / 8 — verified: LINK venue print -0.0336% vs UI 1hr -0.0039%). Adapters record `interval_hours = 8`; mislabeling it as hourly inflated every Lighter-legged carry quote ~8x (LINK showed 277% APR / 1499% APY instead of ~45-60%) and faked identical +0.067%/8h rows across all majors (both venues' placeholder floors netting to dust). Same fix covers the Robinhood deployment (shares the Lighter parser).
    - One-time backfill: schema v20 rescales pre-fix `lighter`/`robinhood` rows (`rate_8h / 8`, `interval_hours = 8`); Hyperliquid hourly semantics confirmed against its UI (0.0013%/h) and left unchanged.
-9. **Live Submission Rollout (2026-09-20, in progress)**:
-   - Binance USDT-M: place/cancel/leverage over signed `/fapi` (HMAC-SHA256, 1000-contract scaling, 5 BPS taker accounting) + HMAC/sign/parse unit tests. OKX swaps: place/cancel/leverage over signed `/api/v5` (base64 HMAC preimage, contract-size conversion via `ctVal`, fill polling) + sign/contracts/parse tests. Vault credential plumbing for both already existed. 2026-09-20 update: Lighter live submission is IMPLEMENTED (vendored `liblighter_signer.so` Go signer, nextNonce → Sign → sendTx, `live_order_submission_implemented()=true` incl. Robinhood deployment; vault `api_key_index` plumbed through `state.rs`). Remaining: Arcus (no public API exists — stays fail-closed by design); then the reconciled two-leg live dispatcher. Decibel live submission IMPLEMENTED 2026-09-20 (aptos-sdk entry-function tx, mainnet vectors verified); Decibel reads (balances/positions/funding) rebuilt same day on official /api/v1 paths (book WS-only upstream). Later 2026-09-20: execution failures recorded to a persisted (v21) Log Monitor feed on all six execute commands; funding scanner gained a Venue/Min-Exp/Min-Win strip (defaults mirror bot thresholds) + decay-aware Expected $ replacing flat Daily; Win% hold-aligned with Expected; US100==TECH100 merged to NAS100; Risk Control tab (subcategories, equal tabs, global max leverage 10x ceiling).
+9. **Live Submission Rollout (2026-09-20, bounded)**:
+   - Binance USDT-M: place/cancel/leverage over signed `/fapi` (HMAC-SHA256, venue-native contract units incl. scaled `1000PEPE` symbols, 5 BPS taker accounting) + HMAC/sign/parse unit tests. OKX swaps: place/cancel/leverage over signed `/api/v5` (base64 HMAC preimage, contract-size conversion via `ctVal`, fill polling) + sign/contracts/parse tests. Vault credential plumbing for both already existed. 2026-09-20 update: Lighter live submission is IMPLEMENTED (vendored `liblighter_signer.so` Go signer, nextNonce → Sign → sendTx, `live_order_submission_implemented()=true` incl. Robinhood deployment; vault `api_key_index` plumbed through `state.rs`). Remaining: Arcus (no public API exists — stays fail-closed by design); then the reconciled two-leg live dispatcher. Decibel live submission IMPLEMENTED 2026-09-20 (aptos-sdk entry-function tx, mainnet vectors verified); Decibel reads (balances/positions/funding) rebuilt same day on official /api/v1 paths (book WS-only upstream). Later 2026-09-20: execution failures recorded to a persisted (v21) Log Monitor feed on all six execute commands; funding scanner gained a Venue/Min-Exp/Min-Win strip (defaults mirror bot thresholds) + decay-aware Expected $ replacing flat Daily; Win% hold-aligned with Expected; US100==TECH100 merged to NAS100; Risk Control tab (subcategories, equal tabs, global max leverage 10x ceiling).
+   - Current boundary: adapter submission exists, but no adapter implements terminal two-leg fill/cancel/restart reconciliation. Live mode is therefore limited to authenticated account reads and explicit risk-reducing close submissions; strategy entries remain disabled. `docs/CAPABILITIES.md` is the authoritative venue/strategy matrix.
 8. **Live-Mode Honesty (2026-09-20)**:
-   - New `ExchangeAdapter::live_order_submission_implemented` (default false; true only for Hyperliquid/Aster/PopDEX where `place_order` genuinely submits). The old `supports_live_execution` flag is aspirational (nearly every adapter returns true, including stubs) and must not gate promises.
-   - Live-mode funding dispatch refuses with per-leg reasons (unimplemented submission vs missing credentials) plus the two-leg reconciliation caveat, pointing at Paper Trading. Paper Starting Balance input is disabled/greyed in Live Trading mode.
+   - `ExchangeAdapter::live_order_submission_implemented` (default false) is true for adapters whose `place_order` genuinely submits: Hyperliquid, Lighter, Robinhood-Lighter, Vanta, Aster, PopDEX, Binance, OKX, Coinbase, Kraken, and Decibel. The old `supports_live_execution` flag is aspirational and must not gate promises.
+   - `ExchangeAdapter::live_order_reconciliation_implemented` (default false) remains unimplemented across admitted venues, so `live_ready` / `strategy_entry_ready` are false even when `submission_ready` is true. Live-mode strategy dispatch refuses with the reconciliation caveat; Paper Starting Balance input is disabled/greyed in Live Trading mode.
 7. **Paper Funding Carry Execution (2026-09-20)**:
    - `execute_funding_carry_impl` is no longer a stub: paper-only dispatch (live mode refused) mirroring the triangle executor — rescan + match the pair, min-APR hurdle, execution lock, dispatch-time books for both legs, blocking-signal + existing-position guards, per-venue margin checks, full-fill-or-bust paper legs, equity accounting, and ONE two-legged `funding` signal so the Funding dock aggregates a single open carry position. Below-hurdle and stale pairs refuse with reasons instead of executing.
 6. **Triangle Scanner Integrity (2026-09-20)**:
@@ -314,11 +320,11 @@ pub struct TickerStrategyConfigDto {
 
 ## Part 2 — Session-aware seasonality layer
 
-> Status: 🟡 Partially implemented — session profiles + `get_session_profile` IPC exist; full phased rollout pending.
+> Status: ✅ Implemented for profiles, monitor/Radar coupling, HAR anchors, AutoTune coupling, and scheduled promotion review; advanced models remain out of scope.
 
 ## System Specification: Session-Aware Seasonality Layer
 
-Status: **Phase 1 IMPLEMENTED 2026-09-16 — profiles display-only; nothing goes live-aggressive before promotion review**
+Status: **IMPLEMENTED 2026-09-20 — session multipliers remain review-gated; nothing goes live-aggressive without promotion evidence**
 
 ### Decisions Locked (proposed — confirm before build)
 
@@ -334,9 +340,9 @@ Status: **Phase 1 IMPLEMENTED 2026-09-16 — profiles display-only; nothing goes
 4. **Fail-closed**: funding masks (±2 min around 00/08/16 UTC, +04/12/20
    for 4h venues) block entries; stale/dead sessions degrade to neutral
    ×1.0; Ondo equity legs gate on US cash hours; unknown = no adjustment.
-5. **Scope**: Phase 1 = profiles + vol features + monitor/Radar integration
-   + display. Phase 2 (later) = HAR anchor automation, autotune coupling,
-   promotion jobs.
+5. **Scope**: implemented = profiles + vol features + monitor/Radar
+   integration + HAR anchors + AutoTune coupling + promotion jobs.
+   GARCH/ML remain research only.
 
 ### Problem Statement
 
@@ -389,9 +395,9 @@ Pure, tested, no I/O.
 - `get_session_profile(symbol)` → per-session rows + current session +
   active multipliers (snapshot pattern, registered in `main.rs`).
 - Radar: session badge/multiplier column; SignalTrend: session overlay
-  band; configurator: session-profile picker beside window-mode (display
-  only in Phase 1 — no auto-apply of tuned values; autotune consumes the
-  API when Phase 2 lands).
+  band; configurator: session-profile picker beside window-mode. AutoTune
+  consumes the session API; promotion gates still decide whether a tuned
+  value is READY or HELD.
 
 ### Failure & Honesty Constraints
 
@@ -411,11 +417,11 @@ Pure, tested, no I/O.
 - Frontend: badge/column rendering incl. provisional states; disabled
   states when no profile.
 
-### Out of Scope (Phase 2+)
+### Out of Scope
 
-HAR-anchor nightly job automation, autotune coupling, walk-forward
-promotion scheduler, per-hour τ sets (sessions only), GARCH, ML models,
-quote-activity volume proxy refinement, holiday-calendar sync.
+Per-hour τ sets (sessions only), GARCH, ML models, quote-activity volume
+proxy refinement, holiday-calendar sync, and unreviewed automatic
+threshold changes.
 
 ### Rollout
 
@@ -432,7 +438,7 @@ review before any threshold goes live-aggressive.
 
 ## System Specification: Spread Range Monitor (Opportunity Radar)
 
-Status: **APPROVED — implementation in progress**
+Status: **IMPLEMENTED — OpportunityRadar/Spread Radar with manual and opt-in autonomous paper lifecycle; live strategy entries remain disabled**
 
 ### Decisions Locked (user sign-off)
 
@@ -501,12 +507,15 @@ The trader needs a radar that continuously answers, for every directional
 7. A clean seam for a future autonomous strategy that consumes qualified
    signals (the "overall opportunities bot") without reworking the monitor.
 
-**Non-Goals (v1)**
+**Non-Goals / current boundary**
 
-- Live/real-money execution — the whole system remains paper-only.
-- Auto-execution — the bot is Phase 2; v1 ships the monitor + manual Execute.
+- Live/real-money strategy entries — adapter submission transport exists on
+  some venues, but no strategy is live-entry ready until terminal and restart
+  reconciliation exist.
+- The Phase-2 autonomous bot exists as an opt-in **paper** path; it is not a
+  live-trading bot.
 - New persistence schema — v1 reuses `spread_samples`; a dedicated
-  `monitor_signals` table is deferred to Phase 2.
+  `monitor_signals` table is deferred.
 
 ---
 
@@ -968,7 +977,7 @@ Tests must verify external behavioral contracts, state transitions, and safety b
 
 ### Out of Scope
 
-- Implementing direct hardware key signing integrations (Ledger/Trezor) beyond the existing Remote HSM token interface.
+- Implementing direct hardware key signing integrations (Ledger/Trezor) or a production Remote HSM signer. The current `hsm_url`/`hmac_token` settings are configuration fields only, not an integrated signing backend.
 - Automatic capital deposits or fiat on-ramping into exchange accounts.
 - Automated liquidation of unhedged positions when the user manually closes a single leg via external third-party web interfaces (covered by manual tripwire and DeltaGuard alerts).
 - Support for options volatility surface arbitrage (dedicated to future development cycles).
@@ -983,18 +992,20 @@ Tests must verify external behavioral contracts, state transitions, and safety b
 
 ## Part 5 — WebSocket feeds & retention
 
-> Status: ✅ Implemented — per-venue WS clients + feed supervisor, always-on recorder, retention settings + enforcement.
+> Status: ✅ Implemented at the desktop feed-supervisor layer for the four supervised lanes below — always-on recorder, retention settings + enforcement. `ExchangeAdapter::subscribe_orderbook` remains a trait-level stub; supervised WS ingestion lives in `frontend/src-tauri/src/feed.rs`, not in each venue adapter.
 
 ## System Specification: WebSocket Price Feeds & Historical Retention Control
 
-Status: **APPROVED — implementation in progress**
+Status: **IMPLEMENTED — supervised WS clients, feed supervisor, always-on recorder, and retention enforcement; venue coverage is limited to Hyperliquid, Lighter, Robinhood-Lighter, and Vanta**
 
 ### Decisions Locked (user sign-off)
 
-1. **Transport**: WebSocket-first, REST fallback. Every admitted venue streams
-   orderbooks over WS into `MarketDataHub`; REST polling remains as the
-   cold-start and stale-feed fallback. A dead WS lane marks its pairs `stale`
-   — never fabricated.
+1. **Transport**: WebSocket-first only where a supervised lane exists.
+   Hyperliquid, Lighter, Robinhood-Lighter, and Vanta stream orderbooks into
+   `MarketDataHub`; all other admitted venues use validated REST polling. A
+   dead or absent WS lane marks its pairs `stale` — never fabricated. This is
+   app-level ingestion; the core `ExchangeAdapter::subscribe_orderbook`
+   default still fails closed.
 2. **Rate-limit truth (verified against live venue docs, 2026-09-16)**:
    WS does **not** bypass rate limits — it **relieves** them. Lighter's docs
    state REST standard = 60 req/min/IP while WS has a separate envelope
@@ -1018,12 +1029,13 @@ Status: **APPROVED — implementation in progress**
    and load at boot. Session-only settings were the prior gap — this closes
    it for retention without migrating the whole settings DTO.
 
-### Problem Statement
+### Problem Statement (pre-implementation baseline)
 
-All ingestion today is REST polling (`SpreadMonitorEngine` lanes +
-`fetch_orderbooks_impl` 350 ms cache-first fallback, hub TTL 400 ms).
-`ExchangeAdapter::subscribe_orderbook` is a stub on every venue and
-`tokio-tungstenite` is a declared but unused dependency. Consequences:
+Before this feature, all ingestion was REST polling (`SpreadMonitorEngine`
+lanes + `fetch_orderbooks_impl` 350 ms cache-first fallback, hub TTL
+400 ms). `ExchangeAdapter::subscribe_orderbook` was — and still is — a
+trait-level stub; implementation now lives in the desktop feed supervisor.
+Consequences of the old baseline:
 
 - Lighter-family books burn 2 REST slots each against a 60/min standard IP
   budget (45 usable after the 25% tx reserve) — the watchlist cadence
@@ -1037,14 +1049,16 @@ All ingestion today is REST polling (`SpreadMonitorEngine` lanes +
 
 #### Transport — per-venue WS clients + feed supervisor
 
-A supervisor task per admitted venue owns **one** WS connection and
-multiplexes all watchlist symbols on it:
+A supervisor task per **supported WS venue** owns **one** WS connection and
+multiplexes all watchlist symbols on it. Supported lanes are enumerated in
+`frontend/src-tauri/src/feed.rs`; adding an admitted venue does not
+automatically create a WS lane:
 
 | Venue | URL | Subscribe | Messages |
 |---|---|---|---|
 | Hyperliquid | `wss://api.hyperliquid.xyz/ws` | `{"method":"subscribe","subscription":{"type":"l2Book","coin":"BTC"}}` | `{"channel":"l2Book","data":{"coin","levels":[bids,asks],"time"}}` push-on-change; server ping ~30 s (tungstenite auto-pong); max one info connection per IP |
 | Lighter (+ Robinhood-Lighter) | `wss://<host>/stream` (derive from adapter `base_url` by scheme swap; RH host `api.rh.lighter.xyz`) | `{"type":"subscribe","channel":"order_book/{market_id}"}` (market_id via existing `orderBookDetails` resolution) | snapshot on subscribe, then `type:"update/order_book"` deltas ~50 ms with `begin_nonce`/`nonce` continuity; gap (`begin_nonce != last nonce`) → resubscribe; client frame at least every 2 min keepalive |
-| Vanta (Orderly) | `wss://ws-evm.orderly.org/ws/stream/{account_id}` | `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}` | depth-100 snapshot push ~1 s: `{topic,ts,data:{symbol,asks:[[px,qty]],bids}}`; requires account_id — none configured → WS skipped, REST only |
+| Vanta (Orderly) | authenticated URL `wss://ws-evm.orderly.org/ws/stream/{account_id}` when configured, otherwise the public WS URL helper | `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}` | depth-100 snapshot push ~1 s: `{topic,ts,data:{symbol,asks:[[px,qty]],bids}}`; malformed/identity-mismatched frames are dropped |
 
 Message handling (shared): parse → reuse each adapter's existing REST
 level parsers where shapes match → `validate_adapter_book` identity check →

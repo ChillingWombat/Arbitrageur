@@ -189,19 +189,14 @@ impl AutoExecConfig {
                 self.pair_cooldown_secs
             ));
         }
-        if !self.hold_timeout_mult.is_finite()
-            || !(1.0..=24.0).contains(&self.hold_timeout_mult)
-        {
+        if !self.hold_timeout_mult.is_finite() || !(1.0..=24.0).contains(&self.hold_timeout_mult) {
             return Err(format!(
                 "hold_timeout_mult {} out of range 1..=24",
                 self.hold_timeout_mult
             ));
         }
         if !self.stop_mult.is_finite() || !(1.0..=10.0).contains(&self.stop_mult) {
-            return Err(format!(
-                "stop_mult {} out of range 1..=10",
-                self.stop_mult
-            ));
+            return Err(format!("stop_mult {} out of range 1..=10", self.stop_mult));
         }
         if !(60..=86_400).contains(&self.stale_unwind_secs) {
             return Err(format!(
@@ -501,9 +496,8 @@ pub fn plan_entry(
     entry_ts_ms: i64,
 ) -> Result<EntryPlan, String> {
     let size_usd = size_position(signal, cfg).ok_or_else(|| "no usable capacity".to_string())?;
-    let friction_band_bps =
-        friction_band_bps(signal.deviation_bps, signal.net_capture_bps)
-            .ok_or_else(|| "cannot derive friction band".to_string())?;
+    let friction_band_bps = friction_band_bps(signal.deviation_bps, signal.net_capture_bps)
+        .ok_or_else(|| "cannot derive friction band".to_string())?;
     let deadline_ms = hold_deadline_ms(entry_ts_ms, signal.expected_converge_secs, cfg)
         .ok_or_else(|| "cannot derive hold deadline".to_string())?;
     Ok(EntryPlan {
@@ -530,7 +524,10 @@ pub enum ExitEval {
     /// the grace window the executor unwinds reduce-only instead.
     Unwatched { reason: String },
     /// Unwind now through the existing flatten path.
-    Exit { trigger: ExitTrigger, reason: String },
+    Exit {
+        trigger: ExitTrigger,
+        reason: String,
+    },
 }
 
 /// Why a position is being unwound.
@@ -604,9 +601,7 @@ pub fn evaluate_exit(
     if dev.abs() >= stop_at {
         return ExitEval::Exit {
             trigger: ExitTrigger::Stopped,
-            reason: format!(
-                "deviation crossed stop band (|dev| {dev:.1} >= {stop_at:.1} bps)"
-            ),
+            reason: format!("deviation crossed stop band (|dev| {dev:.1} >= {stop_at:.1} bps)"),
         };
     }
     if now_ms >= deadline_ms {
@@ -951,15 +946,37 @@ mod tests {
         let cfg = exit_cfg();
         // Entry dev 10, friction 4: |dev| 3.9 converges; exactly 4.0 converges (inclusive).
         for dev in [0.0, 3.9, 4.0, -4.0] {
-            let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(dev))), 0, &cfg);
+            let e = evaluate_exit(
+                10.0,
+                4.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(dev))),
+                0,
+                &cfg,
+            );
             assert!(
-                matches!(e, ExitEval::Exit { trigger: ExitTrigger::Converged, .. }),
+                matches!(
+                    e,
+                    ExitEval::Exit {
+                        trigger: ExitTrigger::Converged,
+                        ..
+                    }
+                ),
                 "dev {dev} must converge, got {e:?}"
             );
         }
         // Just outside the band holds.
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(4.1))), 0, &cfg),
+            evaluate_exit(
+                10.0,
+                4.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(4.1))),
+                0,
+                &cfg
+            ),
             ExitEval::Hold
         );
     }
@@ -967,12 +984,34 @@ mod tests {
     #[test]
     fn exit_on_stop_band_breach() {
         let cfg = exit_cfg(); // stop 1.5 x |10| = 15
-        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(15.0))), 0, &cfg);
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(15.0))),
+            0,
+            &cfg,
+        );
         assert!(
-            matches!(e, ExitEval::Exit { trigger: ExitTrigger::Stopped, .. }),
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Stopped,
+                    ..
+                }
+            ),
             "got {e:?}"
         );
-        let e = evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(-20.0))), 0, &cfg);
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(-20.0))),
+            0,
+            &cfg,
+        );
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -982,7 +1021,15 @@ mod tests {
         ));
         // 14.9 holds (deadline far away).
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 999_999, None, Some(&live("ready", Some(14.9))), 0, &cfg),
+            evaluate_exit(
+                10.0,
+                4.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(14.9))),
+                0,
+                &cfg
+            ),
             ExitEval::Hold
         );
     }
@@ -992,7 +1039,15 @@ mod tests {
         let cfg = exit_cfg();
         // Tiny entry dev: stop floors at the friction band, so the converged
         // region always wins ties.
-        let e = evaluate_exit(1.0, 4.0, 999_999, None, Some(&live("ready", Some(4.0))), 0, &cfg);
+        let e = evaluate_exit(
+            1.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(4.0))),
+            0,
+            &cfg,
+        );
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -1006,7 +1061,15 @@ mod tests {
     fn exit_on_max_hold_timeout() {
         let cfg = exit_cfg();
         // Mid-band dev, deadline reached -> timeout.
-        let e = evaluate_exit(10.0, 4.0, 1000, None, Some(&live("ready", Some(8.0))), 1000, &cfg);
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            1000,
+            None,
+            Some(&live("ready", Some(8.0))),
+            1000,
+            &cfg,
+        );
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -1016,7 +1079,15 @@ mod tests {
         ));
         // One ms early holds.
         assert_eq!(
-            evaluate_exit(10.0, 4.0, 1000, None, Some(&live("ready", Some(8.0))), 999, &cfg),
+            evaluate_exit(
+                10.0,
+                4.0,
+                1000,
+                None,
+                Some(&live("ready", Some(8.0))),
+                999,
+                &cfg
+            ),
             ExitEval::Hold
         );
     }
@@ -1024,7 +1095,7 @@ mod tests {
     #[test]
     fn missing_or_stale_rows_hold_then_unwind() {
         let cfg = exit_cfg(); // stale grace 600s
-        // Gone entirely: unwatched inside grace…
+                              // Gone entirely: unwatched inside grace…
         let e = evaluate_exit(10.0, 4.0, 9_999_999, Some(60.0), None, 0, &cfg);
         assert!(matches!(e, ExitEval::Unwatched { .. }), "got {e:?}");
         // …reduce-only unwind past it.
@@ -1102,7 +1173,10 @@ mod tests {
         assert!(BotMode::Paused.exits_allowed());
         assert!(BotMode::ReduceOnly.exits_allowed());
         assert!(!BotMode::Off.exits_allowed());
-        assert_eq!(BotMode::parse_mode("reduce_only"), Some(BotMode::ReduceOnly));
+        assert_eq!(
+            BotMode::parse_mode("reduce_only"),
+            Some(BotMode::ReduceOnly)
+        );
         assert_eq!(BotMode::parse_mode("bogus"), None);
         assert_eq!(BotMode::Off.as_str(), "off");
     }
@@ -1119,19 +1193,55 @@ mod tests {
         // Live spread is now 25.5 bps -> live_dev = 25.5 - 25.0 = 0.5 bps.
         // Live dev is well within the friction band (0.5 <= 4.0).
         let live_row = live("ready", Some(0.5));
-        let e = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_row), 10_000, &cfg);
+        let e = evaluate_exit(
+            entry_dev,
+            friction_band,
+            deadline,
+            None,
+            Some(&live_row),
+            10_000,
+            &cfg,
+        );
         assert!(
-            matches!(e, ExitEval::Exit { trigger: ExitTrigger::Converged, .. }),
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
             "expected converged, got {e:?}"
         );
 
         // Conversely, if spread never converges (e.g. stays at 32 bps on a 25 bps baseline -> live_dev = 7.0 bps),
         // it holds until deadline expires, then exits on timeout:
         let live_unconverged = live("ready", Some(7.0));
-        let e_hold = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_unconverged), 50_000, &cfg);
+        let e_hold = evaluate_exit(
+            entry_dev,
+            friction_band,
+            deadline,
+            None,
+            Some(&live_unconverged),
+            50_000,
+            &cfg,
+        );
         assert_eq!(e_hold, ExitEval::Hold);
 
-        let e_timeout = evaluate_exit(entry_dev, friction_band, deadline, None, Some(&live_unconverged), 100_000, &cfg);
-        assert!(matches!(e_timeout, ExitEval::Exit { trigger: ExitTrigger::TimedOut, .. }));
+        let e_timeout = evaluate_exit(
+            entry_dev,
+            friction_band,
+            deadline,
+            None,
+            Some(&live_unconverged),
+            100_000,
+            &cfg,
+        );
+        assert!(matches!(
+            e_timeout,
+            ExitEval::Exit {
+                trigger: ExitTrigger::TimedOut,
+                ..
+            }
+        ));
     }
 }

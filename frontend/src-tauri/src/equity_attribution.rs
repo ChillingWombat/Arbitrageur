@@ -35,7 +35,11 @@ pub struct EquityCheckOutcome {
 /// changed position signature means the move rode alongside position
 /// changes (transfer/funding); otherwise the sign decides deposit vs
 /// withdrawal, with dust-scale moves on open positions read as funding.
-pub fn classify_equity_delta(delta: f64, positions_changed: bool, positions_open: bool) -> &'static str {
+pub fn classify_equity_delta(
+    delta: f64,
+    positions_changed: bool,
+    positions_open: bool,
+) -> &'static str {
     if positions_changed {
         return "transfer";
     }
@@ -73,7 +77,9 @@ pub fn check_equity_delta(
             delta: 0.0,
             event_kind: None,
             rebased: true,
-            note: Some("expected-equity baseline initialized; no prior window to compare".to_string()),
+            note: Some(
+                "expected-equity baseline initialized; no prior window to compare".to_string(),
+            ),
         };
     };
     if gap_ms.is_some_and(|g| g > EQUITY_POLL_GAP_MAX_MS) {
@@ -81,7 +87,9 @@ pub fn check_equity_delta(
             delta: actual - exp,
             event_kind: None,
             rebased: true,
-            note: Some("comparison gap exceeded poll window; rebased without attribution".to_string()),
+            note: Some(
+                "comparison gap exceeded poll window; rebased without attribution".to_string(),
+            ),
         };
     }
     let delta = actual - exp;
@@ -95,7 +103,9 @@ pub fn check_equity_delta(
     }
     EquityCheckOutcome {
         delta,
-        event_kind: Some(classify_equity_delta(delta, positions_changed, positions_open).to_string()),
+        event_kind: Some(
+            classify_equity_delta(delta, positions_changed, positions_open).to_string(),
+        ),
         rebased: true,
         note: None,
     }

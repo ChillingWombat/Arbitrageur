@@ -1,6 +1,6 @@
+use crate::types::{dec, Decimal, VenueId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::types::{dec, Decimal, VenueId};
 
 /// Single price level in the orderbook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,7 +297,10 @@ mod tests {
     fn validate_rejects_empty_symbol() {
         let mut book = valid_book();
         book.symbol = "  ".to_string();
-        assert!(book.validate_for_execution().unwrap_err().contains("symbol"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("symbol"));
     }
 
     #[test]
@@ -314,29 +317,47 @@ mod tests {
     fn validate_rejects_nonpositive_price_and_size() {
         let mut book = valid_book();
         book.asks[0].price = dec!(0);
-        assert!(book.validate_for_execution().unwrap_err().contains("nonpositive ask price"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("nonpositive ask price"));
         let mut book = valid_book();
         book.bids[1].size = dec!(-1);
-        assert!(book.validate_for_execution().unwrap_err().contains("nonpositive bid size"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("nonpositive bid size"));
     }
 
     #[test]
     fn validate_rejects_unsorted_levels() {
         let mut book = valid_book();
         book.bids.swap(0, 1);
-        assert!(book.validate_for_execution().unwrap_err().contains("descending"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("descending"));
         let mut book = valid_book();
         book.asks.swap(0, 1);
-        assert!(book.validate_for_execution().unwrap_err().contains("ascending"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("ascending"));
     }
 
     #[test]
     fn validate_rejects_crossed_and_locked_book() {
         let mut book = valid_book();
         book.bids[0].price = dec!(101.0);
-        assert!(book.validate_for_execution().unwrap_err().contains("crossed"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("crossed"));
         let mut book = valid_book();
         book.asks[0].price = dec!(100.0);
-        assert!(book.validate_for_execution().unwrap_err().contains("crossed"));
+        assert!(book
+            .validate_for_execution()
+            .unwrap_err()
+            .contains("crossed"));
     }
 }

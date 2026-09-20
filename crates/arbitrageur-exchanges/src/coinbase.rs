@@ -1,14 +1,14 @@
-use async_trait::async_trait;
-use chrono::Utc;
-use parking_lot::RwLock;
-use reqwest::Client;
+use crate::rate_limiter::AccountRequestCoordinator;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
+use async_trait::async_trait;
+use chrono::Utc;
+use parking_lot::RwLock;
+use reqwest::Client;
 use zeroize::Zeroizing;
 
 /// Coinbase Exchange connector (https://api.exchange.coinbase.com).
@@ -66,7 +66,8 @@ impl CoinbaseAdapter {
                     reqwest::header::ACCEPT,
                     "application/json, text/plain, */*".parse().unwrap(),
                 );
-                Client::builder().timeout(std::time::Duration::from_secs(15))
+                Client::builder()
+                    .timeout(std::time::Duration::from_secs(15))
                     .default_headers(headers)
                     .build()
                     .unwrap_or_default()
@@ -110,7 +111,13 @@ impl CoinbaseAdapter {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let headers = resp.headers().clone();
             let status = resp.status().as_u16();
-            let snippet: String = resp.text().await.unwrap_or_default().chars().take(512).collect();
+            let snippet: String = resp
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(512)
+                .collect();
             if crate::rate_limiter::is_waf_challenge(status, &headers, &snippet) {
                 self.rate_limiter.record_challenge();
                 anyhow::bail!("Coinbase edge challenge on {} — cooling down", path);
@@ -130,11 +137,7 @@ impl CoinbaseAdapter {
 
     fn credentials(
         &self,
-    ) -> anyhow::Result<(
-        Zeroizing<String>,
-        Zeroizing<String>,
-        Zeroizing<String>,
-    )> {
+    ) -> anyhow::Result<(Zeroizing<String>, Zeroizing<String>, Zeroizing<String>)> {
         let api_key = self
             .api_key
             .read()
@@ -226,8 +229,9 @@ impl CoinbaseAdapter {
         if text.trim().is_empty() {
             return Ok(serde_json::Value::Null);
         }
-        serde_json::from_str::<serde_json::Value>(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Coinbase {path} response: {e}; body: {text}"))
+        serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Coinbase {path} response: {e}; body: {text}")
+        })
     }
 
     /// Pure parse of a `GET /accounts` array into a snapshot. `marks_usd`
@@ -245,7 +249,10 @@ impl CoinbaseAdapter {
         let mut balances = Vec::new();
         let mut equity = dec!(0);
         for a in arr {
-            let ccy = a.get("currency").and_then(|c| c.as_str()).unwrap_or_default();
+            let ccy = a
+                .get("currency")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default();
             if ccy.is_empty() {
                 continue;
             }
@@ -286,16 +293,17 @@ impl CoinbaseAdapter {
         let sym = symbol.trim().to_uppercase();
         if sym.contains('-') {
             let parts: Vec<&str> = sym.split('-').collect();
-            if parts.len() >= 2 && parts[1] != "USD" && parts[1] != "USDC" && parts[1] != "USDT" {
-                anyhow::bail!("Coinbase USD markets only support USD/USDC quote; '{symbol}' is not supported");
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("Coinbase symbol '{symbol}' is not BASE-QUOTE");
+            };
+            if !matches!(*quote, "USD" | "USDC" | "USDT") {
+                anyhow::bail!(
+                    "Coinbase markets only support USD/USDC/USDT quotes; '{symbol}' is not supported"
+                );
             }
+            return Ok(format!("{base}-{quote}"));
         }
-        let base = if sym.contains('-') {
-            sym.split('-').next().unwrap_or(&sym)
-        } else {
-            &sym
-        };
-        Ok(format!("{}-USD", base))
+        Ok(format!("{sym}-USD"))
     }
 }
 
@@ -327,7 +335,10 @@ impl ExchangeAdapter for CoinbaseAdapter {
         let mut out = Vec::new();
         for item in items {
             let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("");
-            let trading_disabled = item.get("trading_disabled").and_then(|b| b.as_bool()).unwrap_or(false);
+            let trading_disabled = item
+                .get("trading_disabled")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
             if status != "online" || trading_disabled {
                 continue;
             }
@@ -337,18 +348,38 @@ impl ExchangeAdapter for CoinbaseAdapter {
                 _ => continue,
             };
 
-            let base_currency = item.get("base_currency").and_then(|s| s.as_str()).unwrap_or("");
-            let quote_currency = item.get("quote_currency").and_then(|s| s.as_str()).unwrap_or("");
+            let base_currency = item
+                .get("base_currency")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
+            let quote_currency = item
+                .get("quote_currency")
+                .and_then(|s| s.as_str())
+                .unwrap_or("");
             if base_currency.is_empty() || quote_currency.is_empty() {
                 continue;
             }
 
             let min_order_size = dec_from_json(item.get("base_min_size")).unwrap_or(dec!(0.0001));
-            let quote_inc = item.get("quote_increment").and_then(|s| s.as_str()).unwrap_or("0.01");
-            let base_inc = item.get("base_increment").and_then(|s| s.as_str()).unwrap_or("0.0001");
+            let quote_inc = item
+                .get("quote_increment")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0.01");
+            let base_inc = item
+                .get("base_increment")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0.0001");
 
-            let price_decimals = quote_inc.split('.').nth(1).map(|d| d.len() as u32).unwrap_or(2);
-            let size_decimals = base_inc.split('.').nth(1).map(|d| d.len() as u32).unwrap_or(4);
+            let price_decimals = quote_inc
+                .split('.')
+                .nth(1)
+                .map(|d| d.len() as u32)
+                .unwrap_or(2);
+            let size_decimals = base_inc
+                .split('.')
+                .nth(1)
+                .map(|d| d.len() as u32)
+                .unwrap_or(4);
 
             out.push(MarketMetadata {
                 symbol: Symbol::spot(base_currency, quote_currency),
@@ -420,7 +451,10 @@ impl ExchangeAdapter for CoinbaseAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        anyhow::bail!("Coinbase is a spot exchange with no perpetual funding rate for {}", symbol)
+        anyhow::bail!(
+            "Coinbase is a spot exchange with no perpetual funding rate for {}",
+            symbol
+        )
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
@@ -483,7 +517,9 @@ impl ExchangeAdapter for CoinbaseAdapter {
                 arbitrageur_core::types::Side::Buy => {
                     // Market buys are quote-funded: size the spend from the
                     // live ask so the full base quantity fills.
-                    let t = self.get_json(&format!("/products/{product_id}/ticker")).await?;
+                    let t = self
+                        .get_json(&format!("/products/{product_id}/ticker"))
+                        .await?;
                     let ask = dec_from_json(t.get("ask"))
                         .or_else(|| dec_from_json(t.get("price")))
                         .filter(|x| *x > dec!(0))
@@ -522,34 +558,110 @@ impl ExchangeAdapter for CoinbaseAdapter {
             anyhow::bail!("Coinbase spot does not support reduce-only orders");
         }
         let body = serde_json::to_string(&req)?;
-        let v = self
-            .authed("POST", "/orders", Some(body))
-            .await?;
+        let v = self.authed("POST", "/orders", Some(body)).await?;
         let order_id = v
             .get("id")
             .and_then(|o| o.as_str())
-            .unwrap_or("")
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order returned no id: {v}"))?
             .to_string();
-        if order_id.is_empty() {
-            anyhow::bail!("Coinbase order returned no id: {v}");
+        let returned_product = v
+            .get("product_id")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing product_id: {v}"))?;
+        if returned_product != product_id {
+            anyhow::bail!(
+                "Coinbase order response product_id '{returned_product}' does not match expected '{product_id}': {v}"
+            );
         }
-        let status = match v.get("status").and_then(|s| s.as_str()).unwrap_or("pending") {
-            "done" | "settled" => OrderStatus::Filled,
-            "rejected" => OrderStatus::Rejected,
-            "open" | "active" => OrderStatus::New,
-            _ => OrderStatus::New,
+        let returned_client = v
+            .get("client_oid")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing client_oid: {v}"))?;
+        if returned_client != order.client_order_id {
+            anyhow::bail!(
+                "Coinbase order response client_oid '{returned_client}' does not match request '{}': {v}",
+                order.client_order_id
+            );
+        }
+        if let Some(returned_side) = v.get("side").and_then(|s| s.as_str()) {
+            if returned_side != side_str {
+                anyhow::bail!(
+                    "Coinbase order response side '{returned_side}' does not match expected '{side_str}': {v}"
+                );
+            }
+        }
+        let filled_qty = dec_from_json(v.get("filled_size"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Coinbase order response missing valid filled_size: {v}")
+            })?;
+        if filled_qty > order.quantity {
+            anyhow::bail!(
+                "Coinbase order response filled_size {filled_qty} exceeds requested {}: {v}",
+                order.quantity
+            );
+        }
+        let remaining_qty = order.quantity.saturating_sub(filled_qty);
+        let raw_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing status: {v}"))?;
+        let status = match raw_status {
+            "done" | "settled" if filled_qty == order.quantity => OrderStatus::Filled,
+            "done" | "settled" => anyhow::bail!(
+                "Coinbase order response '{raw_status}' has inconsistent filled_size {filled_qty}/{}: {v}",
+                order.quantity
+            ),
+            "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
+            "rejected" => anyhow::bail!(
+                "Coinbase rejected order has nonzero filled_size {filled_qty}: {v}"
+            ),
+            "open" | "active" | "pending" if filled_qty == dec!(0) => OrderStatus::New,
+            "open" | "active" | "pending" => OrderStatus::PartiallyFilled,
+            "cancelled" | "canceled" if filled_qty == dec!(0) => OrderStatus::Cancelled,
+            "cancelled" | "canceled" if filled_qty < order.quantity => {
+                OrderStatus::PartiallyFilled
+            }
+            "cancelled" | "canceled" => OrderStatus::Filled,
+            other => anyhow::bail!("Coinbase order response has unknown status '{other}': {v}"),
+        };
+        let avg_fill_price = if filled_qty > dec!(0) {
+            let executed_value = dec_from_json(v.get("executed_value"))
+                .filter(|x| *x > dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Coinbase order response has fill quantity but no valid executed_value: {v}"
+                    )
+                })?;
+            Some(executed_value / filled_qty)
+        } else {
+            None
+        };
+        let fee = if filled_qty > dec!(0) {
+            dec_from_json(v.get("fill_fees"))
+                .filter(|f| *f >= dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Coinbase order response has fill quantity but no valid fill_fees: {v}"
+                    )
+                })?
+        } else {
+            dec!(0)
         };
         Ok(OrderResponse {
             order_id,
-            client_order_id: order.client_order_id.clone(),
+            client_order_id: returned_client.to_string(),
             venue: VenueId::new("coinbase"),
             symbol: order.symbol.clone(),
             status,
             original_qty: order.quantity,
-            filled_qty: dec!(0),
-            remaining_qty: order.quantity,
-            avg_fill_price: None,
-            fee: dec!(0),
+            filled_qty,
+            remaining_qty,
+            avg_fill_price,
+            fee,
             fee_currency: "USD".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -601,27 +713,16 @@ mod tests {
     #[test]
     fn sign_exchange_matches_independent_vectors() {
         // Cross-checked with Python hmac/hashlib/base64.
-        let secret = Zeroizing::new(
-            "c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string(),
-        );
-        let get_sig = CoinbaseAdapter::sign_exchange(
-            &secret,
-            "1700000000.000",
-            "GET",
-            "/accounts",
-            "",
-        )
-        .unwrap();
+        let secret =
+            Zeroizing::new("c2VjcmV0LWtleS1mb3ItdGVzdGluZy0xMjM0NTY3ODkwMTIzNDU2Nzg=".to_string());
+        let get_sig =
+            CoinbaseAdapter::sign_exchange(&secret, "1700000000.000", "GET", "/accounts", "")
+                .unwrap();
         assert_eq!(get_sig, "vF6wthHYf+8Vv2p0sA95y4IpxGmVU/QBbIM4DuvKsBs=");
         let body = r#"{"client_oid":"abc-123","side":"buy","product_id":"BTC-USD","type":"limit","price":"60000.00","size":"0.001"}"#;
-        let post_sig = CoinbaseAdapter::sign_exchange(
-            &secret,
-            "1700000000.000",
-            "POST",
-            "/orders",
-            body,
-        )
-        .unwrap();
+        let post_sig =
+            CoinbaseAdapter::sign_exchange(&secret, "1700000000.000", "POST", "/orders", body)
+                .unwrap();
         assert_eq!(post_sig, "bVeJS8x7MOeCJlcRdZFTx8XrL7ERjEcuq+N88Hb7blk=");
     }
 
@@ -650,9 +751,14 @@ mod tests {
             "BTC-USD"
         );
         assert_eq!(
-            CoinbaseAdapter::to_venue_symbol("ETH").unwrap(),
-            "ETH-USD"
+            CoinbaseAdapter::to_venue_symbol("BTC-USDC").unwrap(),
+            "BTC-USDC"
         );
+        assert_eq!(
+            CoinbaseAdapter::to_venue_symbol("BTC-USDT").unwrap(),
+            "BTC-USDT"
+        );
+        assert_eq!(CoinbaseAdapter::to_venue_symbol("ETH").unwrap(), "ETH-USD");
         assert!(CoinbaseAdapter::to_venue_symbol("BTC-SOL").is_err());
         assert!(CoinbaseAdapter::to_venue_symbol("BTC-ETH").is_err());
     }

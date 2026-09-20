@@ -1,5 +1,10 @@
-use std::collections::HashMap;
-use std::str::FromStr;
+use crate::rate_limiter::AccountRequestCoordinator;
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::market::{MarketMetadata, Symbol};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
+use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
+use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -7,13 +12,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha3::{Digest, Keccak256};
-use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::market::{MarketMetadata, Symbol};
-use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
-use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
+use std::collections::HashMap;
+use std::str::FromStr;
 use zeroize::Zeroizing;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -87,7 +87,9 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
 
     // EIP-712 Domain Separator:
     // EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)
-    let domain_typehash = keccak256(b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    let domain_typehash = keccak256(
+        b"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
+    );
     let name_hash = keccak256(b"Exchange");
     let version_hash = keccak256(b"1");
     let mut chain_id_bytes = [0u8; 32];
@@ -106,7 +108,11 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
     // Agent Struct Hash:
     // Agent(string source,bytes32 connectionId)
     let agent_typehash = keccak256(b"Agent(string source,bytes32 connectionId)");
-    let source_hash = if is_mainnet { keccak256(b"a") } else { keccak256(b"b") };
+    let source_hash = if is_mainnet {
+        keccak256(b"a")
+    } else {
+        keccak256(b"b")
+    };
 
     let mut struct_buf = Vec::with_capacity(32 * 3);
     struct_buf.extend_from_slice(&agent_typehash);
@@ -121,16 +127,25 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
     digest_buf.extend_from_slice(&struct_hash);
     let digest = keccak256(&digest_buf);
 
-    let key_clean = private_key_hex.trim().strip_prefix("0x").unwrap_or(private_key_hex.trim());
-    let key_bytes = hex::decode(key_clean)
-        .map_err(|e| anyhow::anyhow!("Invalid private key hex: {e}"))?;
+    let key_clean = private_key_hex
+        .trim()
+        .strip_prefix("0x")
+        .unwrap_or(private_key_hex.trim());
+    let key_bytes =
+        hex::decode(key_clean).map_err(|e| anyhow::anyhow!("Invalid private key hex: {e}"))?;
     if key_bytes.len() != 32 {
-        anyhow::bail!("Invalid private key length: expected 32 bytes, got {}", key_bytes.len());
+        anyhow::bail!(
+            "Invalid private key length: expected 32 bytes, got {}",
+            key_bytes.len()
+        );
     }
-    let key_arr: [u8; 32] = key_bytes.try_into().map_err(|_| anyhow::anyhow!("Failed to convert key bytes"))?;
+    let key_arr: [u8; 32] = key_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Failed to convert key bytes"))?;
     let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_arr).into())
         .map_err(|e| anyhow::anyhow!("Failed to instantiate secp256k1 signing key: {e}"))?;
-    let (sig, recid) = signing_key.sign_prehash_recoverable(&digest)
+    let (sig, recid) = signing_key
+        .sign_prehash_recoverable(&digest)
         .map_err(|e| anyhow::anyhow!("ECDSA signing failed: {e}"))?;
 
     let r_hex = format!("0x{}", hex::encode(sig.r().to_bytes()));
@@ -160,7 +175,10 @@ impl HyperliquidAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.hyperliquid.xyz".to_string());
         Self {
             venue_id: VenueId::new("hyperliquid"),
-            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: base,
             wallet_address: RwLock::new(wallet_address),
             private_key: RwLock::new(private_key.map(Zeroizing::new)),
@@ -200,17 +218,21 @@ impl HyperliquidAdapter {
         if !status.is_success() {
             anyhow::bail!("Hyperliquid /exchange error HTTP {status}: {text}");
         }
-        let json_val: serde_json::Value = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("Failed to parse Hyperliquid exchange response: {e}; body: {text}"))?;
+        let json_val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Hyperliquid exchange response: {e}; body: {text}")
+        })?;
         Ok(json_val)
     }
 
     /// Resolve coin name to integer asset index in Hyperliquid perpetual universe.
     pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
         let res = self.post_info(json!({"type": "meta"})).await?;
-        let universe = res.get("universe").and_then(|u| u.as_array()).ok_or_else(|| {
-            anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
-        })?;
+        let universe = res
+            .get("universe")
+            .and_then(|u| u.as_array())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
+            })?;
         for (idx, item) in universe.iter().enumerate() {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                 if name.eq_ignore_ascii_case(coin) {
@@ -269,12 +291,9 @@ fn perp_coin(symbol: &str) -> anyhow::Result<String> {
     let parts: Vec<&str> = clean.split(['-', '_']).collect();
     if parts.len() >= 2 {
         let quote = parts[1];
-        if !quote.eq_ignore_ascii_case("USDC")
-            && !quote.eq_ignore_ascii_case("USD")
-            && !quote.eq_ignore_ascii_case("PERP")
-        {
+        if !quote.eq_ignore_ascii_case("USDC") && !quote.eq_ignore_ascii_case("PERP") {
             anyhow::bail!(
-                "Hyperliquid perpetual markets are quoted in USDC/USD; '{symbol}' is not supported"
+                "Hyperliquid perpetual markets are quoted in USDC; '{symbol}' is not supported"
             );
         }
     }
@@ -283,6 +302,131 @@ fn perp_coin(symbol: &str) -> anyhow::Result<String> {
         anyhow::bail!("Hyperliquid symbol '{symbol}' has empty coin");
     }
     Ok(base.to_string())
+}
+
+/// Strict pure parser for the Hyperliquid `/exchange` order response.
+///
+/// Never synthesizes venue data: every field of the returned
+/// `OrderResponse` comes from the venue payload or the original request.
+/// Any missing/malformed `oid`, `totalSz`, `avgPx`, or unknown status shape
+/// is a hard `Err` (fail closed).
+fn parse_hl_order_response(
+    resp_json: &serde_json::Value,
+    order: &arbitrageur_core::order::OrderRequest,
+    venue: &arbitrageur_core::types::VenueId,
+    _selected_price: Decimal,
+) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+    if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
+        anyhow::bail!(
+            "Hyperliquid order error: {}",
+            resp_json.get("response").unwrap_or(resp_json)
+        );
+    }
+
+    let status_obj = resp_json
+        .get("response")
+        .and_then(|r| r.get("data"))
+        .and_then(|d| d.get("statuses"))
+        .and_then(|s| s.as_array())
+        .and_then(|a| a.first())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid order response has unknown shape: {resp_json}")
+        })?;
+
+    if let Some(err_msg) = status_obj.get("error").and_then(|e| e.as_str()) {
+        anyhow::bail!("Hyperliquid order rejected: {err_msg}");
+    }
+
+    if let Some(filled) = status_obj.get("filled") {
+        let oid = filled
+            .get("oid")
+            .and_then(|o| o.as_u64())
+            .filter(|o| *o > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Hyperliquid filled response missing positive integer oid: {resp_json}"
+                )
+            })?;
+        let total_sz_str = filled
+            .get("totalSz")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Hyperliquid filled response missing totalSz: {resp_json}")
+            })?;
+        let total_sz = Decimal::from_str(total_sz_str).map_err(|e| {
+            anyhow::anyhow!("Hyperliquid filled totalSz '{total_sz_str}' is not a Decimal: {e}")
+        })?;
+        if total_sz <= dec!(0) {
+            anyhow::bail!("Hyperliquid filled totalSz must be > 0: {resp_json}");
+        }
+        let avg_px_str = filled
+            .get("avgPx")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Hyperliquid filled response missing avgPx: {resp_json}")
+            })?;
+        let avg_px = Decimal::from_str(avg_px_str).map_err(|e| {
+            anyhow::anyhow!("Hyperliquid filled avgPx '{avg_px_str}' is not a Decimal: {e}")
+        })?;
+        if avg_px <= dec!(0) {
+            anyhow::bail!("Hyperliquid filled avgPx must be > 0: {resp_json}");
+        }
+        if total_sz > order.quantity {
+            anyhow::bail!(
+                "Hyperliquid filled totalSz {total_sz} exceeds order quantity {}: {resp_json}",
+                order.quantity
+            );
+        }
+        let (status, remaining_qty) = if total_sz == order.quantity {
+            (OrderStatus::Filled, dec!(0))
+        } else {
+            (OrderStatus::PartiallyFilled, order.quantity - total_sz)
+        };
+        return Ok(OrderResponse {
+            order_id: oid.to_string(),
+            client_order_id: order.client_order_id.clone(),
+            venue: venue.clone(),
+            symbol: order.symbol.clone(),
+            status,
+            original_qty: order.quantity,
+            filled_qty: total_sz,
+            remaining_qty,
+            avg_fill_price: Some(avg_px),
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(resp_json.to_string()),
+            timestamp: Utc::now(),
+        });
+    }
+
+    if let Some(resting) = status_obj.get("resting") {
+        let oid = resting
+            .get("oid")
+            .and_then(|o| o.as_u64())
+            .filter(|o| *o > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Hyperliquid resting response missing positive integer oid: {resp_json}"
+                )
+            })?;
+        return Ok(OrderResponse {
+            order_id: oid.to_string(),
+            client_order_id: order.client_order_id.clone(),
+            venue: venue.clone(),
+            symbol: order.symbol.clone(),
+            status: OrderStatus::New,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(resp_json.to_string()),
+            timestamp: Utc::now(),
+        });
+    }
+
+    anyhow::bail!("Hyperliquid order response has unknown shape: {resp_json}")
 }
 
 #[async_trait]
@@ -297,14 +441,18 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let res = self.post_info(json!({"type": "meta"})).await?;
-        let universe = res.get("universe").and_then(|u| u.as_array()).ok_or_else(|| {
-            anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
-        })?;
+        let universe = res
+            .get("universe")
+            .and_then(|u| u.as_array())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
+            })?;
 
         let mut markets = Vec::new();
         for item in universe {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                let sz_decimals = item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
+                let sz_decimals =
+                    item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
                 let symbol = Symbol::perp(name, "USDC");
                 markets.push(MarketMetadata {
                     symbol,
@@ -326,9 +474,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     async fn fetch_market_prices(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let res = self.post_info(json!({"type": "metaAndAssetCtxs"})).await?;
-        let arr = res
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs response is not an array"))?;
+        let arr = res.as_array().ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid metaAndAssetCtxs response is not an array")
+        })?;
         if arr.len() < 2 {
             anyhow::bail!("Hyperliquid metaAndAssetCtxs response is incomplete");
         }
@@ -336,9 +484,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
             .get("universe")
             .and_then(|u| u.as_array())
             .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs missing universe"))?;
-        let contexts = arr[1]
-            .as_array()
-            .ok_or_else(|| anyhow::anyhow!("Hyperliquid metaAndAssetCtxs missing asset contexts"))?;
+        let contexts = arr[1].as_array().ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid metaAndAssetCtxs missing asset contexts")
+        })?;
 
         let mut out = HashMap::new();
         for (index, item) in universe.iter().enumerate() {
@@ -366,7 +514,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
         let coin = perp_coin(symbol)?;
-        let res = self.post_info(json!({"type": "l2Book", "coin": coin})).await?;
+        let res = self
+            .post_info(json!({"type": "l2Book", "coin": coin}))
+            .await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
         if let Some(levels) = res.get("levels") {
@@ -448,13 +598,18 @@ impl ExchangeAdapter for HyperliquidAdapter {
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let res = self.post_info(json!({"type": "metaAndAssetCtxs"})).await?;
 
-        let arr = res.as_array().ok_or_else(|| anyhow::anyhow!("Unexpected metaAndAssetCtxs response"))?;
+        let arr = res
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("Unexpected metaAndAssetCtxs response"))?;
         if arr.len() < 2 {
             anyhow::bail!("metaAndAssetCtxs response missing universe/contexts");
         }
-        let universe = arr[0].get("universe").and_then(|u| u.as_array())
+        let universe = arr[0]
+            .get("universe")
+            .and_then(|u| u.as_array())
             .ok_or_else(|| anyhow::anyhow!("metaAndAssetCtxs missing universe"))?;
-        let contexts = arr[1].as_array()
+        let contexts = arr[1]
+            .as_array()
             .ok_or_else(|| anyhow::anyhow!("metaAndAssetCtxs missing asset contexts"))?;
 
         let mut volumes = HashMap::new();
@@ -466,7 +621,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
             if let Some(ctx) = contexts.get(i) {
                 if let Some(vol_str) = ctx.get("dayNtlVlm").and_then(|v| v.as_str()) {
                     if let Ok(vol) = Decimal::from_str(vol_str) {
-                        volumes.insert(name.to_string(), vol);
+                        // Canonical BASE-QUOTE keys match what hub consumers
+                        // look up (perp names such as kPEPE stay verbatim).
+                        volumes.insert(format!("{}-USDC", name.to_uppercase()), vol);
                     }
                 }
             }
@@ -483,9 +640,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 .filter(|v| !v.is_empty())
                 .map(ToString::to_string)
         }
-        .ok_or_else(|| {
-            anyhow::anyhow!("Hyperliquid account fetch requires a wallet address")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("Hyperliquid account fetch requires a wallet address"))?;
         let res = self
             .post_info(json!({"type": "clearinghouseState", "user": user}))
             .await?;
@@ -553,7 +708,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 if let Some(pos_obj) = p.get("position") {
                     let coin = pos_obj.get("coin").and_then(|c| c.as_str()).unwrap_or("");
                     let szi_str = pos_obj.get("szi").and_then(|s| s.as_str()).unwrap_or("0");
-                    let entry_str = pos_obj.get("entryPx").and_then(|e| e.as_str()).unwrap_or("0");
+                    let entry_str = pos_obj
+                        .get("entryPx")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("0");
 
                     let szi = Decimal::from_str(szi_str).unwrap_or(dec!(0));
                     let entry_px = Decimal::from_str(entry_str).unwrap_or(dec!(0));
@@ -616,7 +774,11 @@ impl ExchangeAdapter for HyperliquidAdapter {
             equity: account_value,
             free_margin,
             maintenance_margin: total_margin_used,
-            margin_usage_pct: if account_value > dec!(0) { (total_margin_used / account_value) * dec!(100) } else { dec!(0) },
+            margin_usage_pct: if account_value > dec!(0) {
+                (total_margin_used / account_value) * dec!(100)
+            } else {
+                dec!(0)
+            },
             balances: vec![Balance {
                 venue: self.venue_id.clone(),
                 currency: "USDC".to_string(),
@@ -629,6 +791,13 @@ impl ExchangeAdapter for HyperliquidAdapter {
         })
     }
 
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        let coin = perp_coin(&position.symbol)?;
+        position.symbol = format!("{}-USDC", coin.to_uppercase());
+        Ok(Some(position))
+    }
+
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         let private_key = {
             let guard = self.private_key.read();
@@ -638,7 +807,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 .filter(|k| !k.is_empty())
                 .map(ToString::to_string)
         }
-        .ok_or_else(|| anyhow::anyhow!("Hyperliquid live order placement requires a private key"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid live order placement requires a private key")
+        })?;
 
         let coin = perp_coin(&order.symbol)?;
         let asset_index = self.resolve_asset_index(&coin).await?;
@@ -700,95 +871,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
         let resp_json = self.post_exchange(body).await?;
 
-        if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
-            anyhow::bail!(
-                "Hyperliquid order error: {}",
-                resp_json.get("response").unwrap_or(&resp_json)
-            );
-        }
-
-        let data = resp_json.get("response").and_then(|r| r.get("data"));
-        let status_item = data
-            .and_then(|d| d.get("statuses"))
-            .and_then(|s| s.as_array())
-            .and_then(|a| a.first());
-
-        if let Some(status_obj) = status_item {
-            if let Some(err_msg) = status_obj.get("error").and_then(|e| e.as_str()) {
-                anyhow::bail!("Hyperliquid order rejected: {err_msg}");
-            }
-            if let Some(filled) = status_obj.get("filled") {
-                let oid = filled
-                    .get("oid")
-                    .and_then(|o| o.as_u64())
-                    .map(|o| o.to_string())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                let filled_sz = filled
-                    .get("totalSz")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| Decimal::from_str(s).ok())
-                    .unwrap_or(order.quantity);
-                let avg_px = filled
-                    .get("avgPx")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| Decimal::from_str(s).ok())
-                    .or(Some(price));
-
-                return Ok(OrderResponse {
-                    order_id: oid,
-                    client_order_id: order.client_order_id.clone(),
-                    venue: self.venue_id.clone(),
-                    symbol: order.symbol.clone(),
-                    status: OrderStatus::Filled,
-                    original_qty: order.quantity,
-                    filled_qty: filled_sz,
-                    remaining_qty: (order.quantity - filled_sz).max(dec!(0)),
-                    avg_fill_price: avg_px,
-                    fee: dec!(0),
-                    fee_currency: "USDC".to_string(),
-                    raw_response: Some(resp_json.to_string()),
-                    timestamp: Utc::now(),
-                });
-            }
-            if let Some(resting) = status_obj.get("resting") {
-                let oid = resting
-                    .get("oid")
-                    .and_then(|o| o.as_u64())
-                    .map(|o| o.to_string())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                return Ok(OrderResponse {
-                    order_id: oid,
-                    client_order_id: order.client_order_id.clone(),
-                    venue: self.venue_id.clone(),
-                    symbol: order.symbol.clone(),
-                    status: OrderStatus::New,
-                    original_qty: order.quantity,
-                    filled_qty: dec!(0),
-                    remaining_qty: order.quantity,
-                    avg_fill_price: None,
-                    fee: dec!(0),
-                    fee_currency: "USDC".to_string(),
-                    raw_response: Some(resp_json.to_string()),
-                    timestamp: Utc::now(),
-                });
-            }
-        }
-
-        Ok(OrderResponse {
-            order_id: uuid::Uuid::new_v4().to_string(),
-            client_order_id: order.client_order_id.clone(),
-            venue: self.venue_id.clone(),
-            symbol: order.symbol.clone(),
-            status: OrderStatus::New,
-            original_qty: order.quantity,
-            filled_qty: dec!(0),
-            remaining_qty: order.quantity,
-            avg_fill_price: None,
-            fee: dec!(0),
-            fee_currency: "USDC".to_string(),
-            raw_response: Some(resp_json.to_string()),
-            timestamp: Utc::now(),
-        })
+        parse_hl_order_response(&resp_json, &order, &self.venue_id, price)
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
@@ -800,7 +883,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 .filter(|k| !k.is_empty())
                 .map(ToString::to_string)
         }
-        .ok_or_else(|| anyhow::anyhow!("Hyperliquid live order cancellation requires a private key"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Hyperliquid live order cancellation requires a private key")
+        })?;
 
         let coin = perp_coin(&req.symbol)?;
         let asset_index = self.resolve_asset_index(&coin).await?;
@@ -842,7 +927,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        anyhow::bail!("Leverage updates are not implemented for venue {}", self.name())
+        anyhow::bail!(
+            "Leverage updates are not implemented for venue {}",
+            self.name()
+        )
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -870,6 +958,8 @@ mod tests {
         assert!(perp_coin("eth/spot").is_err());
         // A perp actually named SPOT must still resolve as a perp.
         assert_eq!(perp_coin("SPOT-USDC").unwrap(), "SPOT");
+        assert!(perp_coin("BTC-USD").is_err());
+        assert!(perp_coin("BTC-USDT").is_err());
         assert!(perp_coin("BTC-SOL").is_err());
         assert!(perp_coin("BTC-ETH").is_err());
     }
@@ -922,7 +1012,8 @@ mod tests {
             grouping: "na".to_string(),
         };
         let dummy_pk = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        let (r, s, v) = sign_hyperliquid_l1_action(&action, 1234567890, None, true, dummy_pk).unwrap();
+        let (r, s, v) =
+            sign_hyperliquid_l1_action(&action, 1234567890, None, true, dummy_pk).unwrap();
         assert!(r.starts_with("0x") && r.len() == 66);
         assert!(s.starts_with("0x") && s.len() == 66);
         assert!(v == 27 || v == 28);
@@ -942,5 +1033,102 @@ mod tests {
 
         adapter.update_credentials(None, None);
         assert!(!adapter.has_live_credentials());
+    }
+
+    fn test_order_fixture() -> OrderRequest {
+        OrderRequest::new_ioc(
+            VenueId::new("hyperliquid"),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(50000),
+            dec!(1),
+        )
+    }
+
+    fn test_venue_fixture() -> VenueId {
+        VenueId::new("hyperliquid")
+    }
+
+    fn hl_resp(statuses: serde_json::Value) -> serde_json::Value {
+        json!({
+            "status": "ok",
+            "response": { "type": "order", "data": { "statuses": statuses } }
+        })
+    }
+
+    #[test]
+    fn parse_complete_fill() {
+        let order = test_order_fixture();
+        let resp =
+            hl_resp(json!([{"filled": {"oid": 12345, "avgPx": "50001.5", "totalSz": "1.0"}}]));
+        let out =
+            parse_hl_order_response(&resp, &order, &test_venue_fixture(), dec!(50000)).unwrap();
+        assert_eq!(out.status, OrderStatus::Filled);
+        assert_eq!(out.order_id, "12345");
+        assert_eq!(out.filled_qty, dec!(1));
+        assert_eq!(out.remaining_qty, dec!(0));
+        assert_eq!(out.avg_fill_price, Some(dec!(50001.5)));
+    }
+
+    #[test]
+    fn parse_partial_fill() {
+        let order = test_order_fixture();
+        let resp = hl_resp(json!([{"filled": {"oid": 99, "avgPx": "49999.0", "totalSz": "0.4"}}]));
+        let out =
+            parse_hl_order_response(&resp, &order, &test_venue_fixture(), dec!(50000)).unwrap();
+        assert_eq!(out.status, OrderStatus::PartiallyFilled);
+        assert_eq!(out.order_id, "99");
+        assert_eq!(out.filled_qty, dec!(0.4));
+        assert_eq!(out.remaining_qty, dec!(0.6));
+        assert_eq!(out.avg_fill_price, Some(dec!(49999.0)));
+    }
+
+    #[test]
+    fn parse_resting() {
+        let order = test_order_fixture();
+        let resp = hl_resp(json!([{"resting": {"oid": 777}}]));
+        let out =
+            parse_hl_order_response(&resp, &order, &test_venue_fixture(), dec!(50000)).unwrap();
+        assert_eq!(out.status, OrderStatus::New);
+        assert_eq!(out.order_id, "777");
+        assert_eq!(out.filled_qty, dec!(0));
+        assert_eq!(out.remaining_qty, order.quantity);
+        assert_eq!(out.avg_fill_price, None);
+    }
+
+    #[test]
+    fn parse_missing_mandatory_fields_err() {
+        let order = test_order_fixture();
+        let venue = test_venue_fixture();
+        let cases = vec![
+            hl_resp(json!([{"filled": {"avgPx": "1.0", "totalSz": "0.5"}}])),
+            hl_resp(json!([{"filled": {"oid": 1, "avgPx": "1.0"}}])),
+            hl_resp(json!([{"filled": {"oid": 1, "totalSz": "0.5"}}])),
+            hl_resp(json!([{"resting": {}}])),
+        ];
+        for resp in cases {
+            let r = parse_hl_order_response(&resp, &order, &venue, dec!(50000));
+            assert!(
+                r.is_err(),
+                "missing mandatory field must Err, never fabricate"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_unknown_shape_err() {
+        let order = test_order_fixture();
+        let venue = test_venue_fixture();
+        let cases = vec![
+            json!({"status": "ok", "response": {"type": "order", "data": {"statuses": []}}}),
+            json!({"status": "ok", "response": {"type": "order"}}),
+            json!({"status": "ok"}),
+            hl_resp(json!([{"other": {}}])),
+            json!({"status": "err", "response": "insufficient margin"}),
+            hl_resp(json!([{"error": "rejected"}])),
+        ];
+        for resp in cases {
+            assert!(parse_hl_order_response(&resp, &order, &venue, dec!(50000)).is_err());
+        }
     }
 }

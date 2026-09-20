@@ -91,10 +91,7 @@ impl HedgeRatioKalmanFilter {
         let new_p11 = i_minus_kh10 * self.p[0][1] + i_minus_kh11 * self.p[1][1];
 
         let sym_p01 = (new_p01 + new_p10) * 0.5;
-        self.p = [
-            [new_p00.max(1e-12), sym_p01],
-            [sym_p01, new_p11.max(1e-12)],
-        ];
+        self.p = [[new_p00.max(1e-12), sym_p01], [sym_p01, new_p11.max(1e-12)]];
 
         (self.state[1], residual)
     }

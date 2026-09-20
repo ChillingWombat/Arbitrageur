@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use arbitrageur_core::types::{dec, Decimal};
+use std::collections::VecDeque;
 
 /// Numerically stable online running mean and variance using Welford's algorithm.
 /// Time complexity per update: O(1). Space complexity: O(1).

@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use tracing::info;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrageur_math::funding_carry::{evaluate_funding_carry, FundingCarryOpportunity};
+use std::sync::Arc;
+use tracing::info;
 
 pub struct FundingRateArbStrategy {
     pub symbol: String,
@@ -43,8 +43,15 @@ impl FundingRateArbStrategy {
             self.exchange_b.fetch_funding_rate(&self.symbol)
         )?;
 
-        if let Some(opp) = evaluate_funding_carry(&rate_a, &rate_b, self.round_trip_fee_bps, self.trade_size_usd) {
-            if opp.net_rate_8h >= self.min_funding_diff_8h && opp.break_even_hours <= self.max_breakeven_hours {
+        if let Some(opp) = evaluate_funding_carry(
+            &rate_a,
+            &rate_b,
+            self.round_trip_fee_bps,
+            self.trade_size_usd,
+        ) {
+            if opp.net_rate_8h >= self.min_funding_diff_8h
+                && opp.break_even_hours <= self.max_breakeven_hours
+            {
                 return Ok(Some(opp));
             }
         }
@@ -58,7 +65,11 @@ impl FundingRateArbStrategy {
         opp: &FundingCarryOpportunity,
         coordinator: &AtomicArbitrageCoordinator,
     ) -> anyhow::Result<ArbitrageExecutionResult> {
-        let is_a_long = self.exchange_a.venue_id().as_str().eq_ignore_ascii_case(&opp.long_venue)
+        let is_a_long = self
+            .exchange_a
+            .venue_id()
+            .as_str()
+            .eq_ignore_ascii_case(&opp.long_venue)
             || self.exchange_a.name().eq_ignore_ascii_case(&opp.long_venue);
         let (long_ex, short_ex) = if is_a_long {
             (&self.exchange_a, &self.exchange_b)
@@ -96,7 +107,9 @@ impl FundingRateArbStrategy {
             self.symbol, opp.long_venue, opp.short_venue, opp.net_rate_8h * dec!(100), opp.net_apr * dec!(100)
         );
 
-        let res = coordinator.execute_two_leg(long_ex, order_long, short_ex, order_short).await;
+        let res = coordinator
+            .execute_two_leg(long_ex, order_long, short_ex, order_short)
+            .await;
         Ok(res)
     }
 }

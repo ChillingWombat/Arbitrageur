@@ -251,9 +251,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     if (allowed > 0 && fails >= allowed - 1 && fails > 0)
       items.push({ severity: "warn", title: `Error budget nearly exhausted (${fails}/${allowed})`, detail: "One more consecutive failure trips the breaker." });
     for (const b of venueBalances ?? []) {
-      // EMPTY (unfunded, flat) is informational — shown neutrally on its own
-      // card, never as a critical Needs Attention item.
-      if (b.status === "EMPTY") continue;
+      // EMPTY (unfunded, flat) and STALE (transient read failure serving
+      // last-known figures) are informational — never Needs Attention items.
+      // STALE escalates to ERROR backend-side past the grace period, and
+      // ERROR does surface on its venue card.
+      if (b.status === "EMPTY" || b.status === "STALE") continue;
       if (b.status === "DEPLETED")
         items.push({ severity: "critical", title: `${formatVenueName(b.venue)} balance depleted`, detail: b.recommended_action ?? "Top up or disable this venue." });
       else if (b.status === "LOW_MARGIN")
@@ -430,10 +432,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                     <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
                       <div className={`h-full ${barCls} transition-all duration-300`} style={{ width: `${barWidth}%` }} />
                     </div>
-                    {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.recommended_action && (
+                    {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.status !== "STALE" && b.status !== "LOCKED" && b.recommended_action && (
                       <div className="text-[11px] font-mono text-warn">{b.recommended_action}</div>
                     )}
-                    {b.status === "EMPTY" && b.recommended_action && (
+                    {(b.status === "EMPTY" || b.status === "STALE" || b.status === "LOCKED") && b.recommended_action && (
                       <div className="text-[11px] font-mono text-slate-400">{b.recommended_action}</div>
                     )}
                   </div>

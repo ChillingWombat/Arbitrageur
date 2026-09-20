@@ -587,7 +587,6 @@ pub struct EngineSettingsDto {
     #[serde(default = "default_arcus_url")]
     pub arcus_url: String,
 
-
     // Vault-derived credential configuration state (venue IDs only, no secrets)
     #[serde(default)]
     pub configured_venues: Vec<String>,
@@ -845,7 +844,6 @@ impl EngineSettingsDto {
             });
         }
 
-
         if has_secret_value(&self.kraken_spot_api_key) || has_secret_value(&self.kraken_spot_secret)
         {
             out.push(ExchangeCredentials {
@@ -1076,7 +1074,9 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "vanta" | "vnt" | "vanta.exchange" | "vanta (orderly)" | "vanta (orderly, read-only)" => {
             Some("vanta")
         }
-        "aster" | "ast" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => Some("aster"),
+        "aster" | "ast" | "asterdex" | "aster (perp dex)" | "aster (perp dex, read-only)" => {
+            Some("aster")
+        }
         "popdex" | "pop" => Some("popdex"),
         "arcus" | "arc" | "arcus dex" | "arcus (fast clob)" | "arcus (perp dex)" => Some("arcus"),
         "binance" | "bnb" | "bin" | "binance futures" | "binance (perp)" => Some("binance"),
@@ -1277,8 +1277,20 @@ impl AppEngineState {
         // Overall circuit-breaker + safety-net limits persist in kv so a
         // restart keeps the operator's Safety tab values.
         {
-            let get_f = |k: &str| state_store.kv_get(k).ok().flatten().and_then(|v| v.parse::<f64>().ok());
-            let get_u = |k: &str| state_store.kv_get(k).ok().flatten().and_then(|v| v.parse::<u32>().ok());
+            let get_f = |k: &str| {
+                state_store
+                    .kv_get(k)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<f64>().ok())
+            };
+            let get_u = |k: &str| {
+                state_store
+                    .kv_get(k)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| v.parse::<u32>().ok())
+            };
             if let Some(v) = get_f("risk.cb_max_dd_usd") {
                 if v.is_finite() && v > 0.0 && v <= 1_000_000_000_000.0 {
                     initial_settings.cb_max_daily_drawdown_usd = v;
@@ -1320,7 +1332,7 @@ impl AppEngineState {
                 }
             }
             if let Some(v) = get_u("risk.stale_warn_secs") {
-                if v >= 30 && v <= 3600 {
+                if (30..=3600).contains(&v) {
                     initial_settings.balance_stale_warn_secs = v as u64;
                 }
             }
@@ -1329,20 +1341,32 @@ impl AppEngineState {
                     initial_settings.max_leverage = v;
                 }
             }
-            if initial_settings.margin_warning_usage_pct >= initial_settings.margin_critical_usage_pct {
+            if initial_settings.margin_warning_usage_pct
+                >= initial_settings.margin_critical_usage_pct
+            {
                 initial_settings.margin_warning_usage_pct = 70.0;
                 initial_settings.margin_critical_usage_pct = 85.0;
             }
         }
         let cb_config = CircuitBreakerConfig {
-            max_daily_drawdown_usd: Decimal::from_f64_retain(initial_settings.cb_max_daily_drawdown_usd).unwrap_or(dec!(25000.0)),
-            max_daily_drawdown_pct: Decimal::from_f64_retain(initial_settings.cb_max_daily_drawdown_pct).unwrap_or(dec!(5.0)),
+            max_daily_drawdown_usd: Decimal::from_f64_retain(
+                initial_settings.cb_max_daily_drawdown_usd,
+            )
+            .unwrap_or(dec!(25000.0)),
+            max_daily_drawdown_pct: Decimal::from_f64_retain(
+                initial_settings.cb_max_daily_drawdown_pct,
+            )
+            .unwrap_or(dec!(5.0)),
             max_consecutive_errors: initial_settings.cb_max_consecutive_errors,
-            max_spread_divergence_bps: Decimal::from_f64_retain(initial_settings.cb_max_spread_divergence_bps).unwrap_or(dec!(250.0)),
+            max_spread_divergence_bps: Decimal::from_f64_retain(
+                initial_settings.cb_max_spread_divergence_bps,
+            )
+            .unwrap_or(dec!(250.0)),
         };
         let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(200000.0)));
         let delta_guard = RwLock::new(DeltaGuard::new(
-            Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset).unwrap_or(dec!(2500.0)),
+            Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset)
+                .unwrap_or(dec!(2500.0)),
         ));
         let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
@@ -1352,9 +1376,8 @@ impl AppEngineState {
         // Reload the persisted execution log so the Log Monitor keeps history
         // across restarts (failures included since v21). A store failure
         // starts empty rather than bricking startup.
-        let initial_logs: Vec<ExecutionLogEntry> = state_store
-            .load_execution_logs(500)
-            .unwrap_or_default();
+        let initial_logs: Vec<ExecutionLogEntry> =
+            state_store.load_execution_logs(500).unwrap_or_default();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let virtual_ledger =
             RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());
@@ -1450,9 +1473,11 @@ impl AppEngineState {
             let get_active_cred = |venues: &[&str]| -> Option<&crate::vault::ExchangeCredentials> {
                 for &v in venues {
                     if let Ok(Some(acc)) = self.state_store.default_account(v) {
-                        if let Some(cred) = data.credentials.iter().find(|c| {
-                            c.enabled && c.profile_id.as_deref() == Some(&acc.id)
-                        }) {
+                        if let Some(cred) = data
+                            .credentials
+                            .iter()
+                            .find(|c| c.enabled && c.profile_id.as_deref() == Some(&acc.id))
+                        {
                             return Some(cred);
                         }
                     }
@@ -1465,9 +1490,9 @@ impl AppEngineState {
                         return None;
                     }
                 }
-                data.credentials.iter().find(|c| {
-                    c.enabled && venues.iter().any(|v| c.venue.eq_ignore_ascii_case(v))
-                })
+                data.credentials
+                    .iter()
+                    .find(|c| c.enabled && venues.iter().any(|v| c.venue.eq_ignore_ascii_case(v)))
             };
 
             let mut aster_key = None;
@@ -1544,7 +1569,10 @@ impl AppEngineState {
                 if !cred.api_secret.trim().is_empty() {
                     vanta_sec = Some(cred.api_secret.clone());
                 }
-                vanta_acc = cred.account_id.clone().filter(|a| !a.trim().is_empty())
+                vanta_acc = cred
+                    .account_id
+                    .clone()
+                    .filter(|a| !a.trim().is_empty())
                     .or_else(|| cred.wallet_address.clone().filter(|a| !a.trim().is_empty()));
             }
 
@@ -1581,7 +1609,8 @@ impl AppEngineState {
 
             let mut kraken_key = None;
             let mut kraken_sec = None;
-            if let Some(cred) = get_active_cred(&["kraken", "krk", "kraken_futures", "kraken_spot"]) {
+            if let Some(cred) = get_active_cred(&["kraken", "krk", "kraken_futures", "kraken_spot"])
+            {
                 if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
                     kraken_key = Some(cred.api_key.clone());
                     kraken_sec = Some(cred.api_secret.clone());
@@ -1596,8 +1625,17 @@ impl AppEngineState {
                 if !cred.api_key.trim().is_empty() {
                     decibel_key = Some(cred.api_key.clone());
                 }
-                decibel_node_key = cred.passphrase.clone().filter(|p| !p.trim().is_empty())
-                    .or_else(|| if !cred.api_secret.trim().is_empty() { Some(cred.api_secret.clone()) } else { None });
+                decibel_node_key = cred
+                    .passphrase
+                    .clone()
+                    .filter(|p| !p.trim().is_empty())
+                    .or_else(|| {
+                        if !cred.api_secret.trim().is_empty() {
+                            Some(cred.api_secret.clone())
+                        } else {
+                            None
+                        }
+                    });
                 decibel_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
                 decibel_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
             }
@@ -1610,7 +1648,11 @@ impl AppEngineState {
             let popdex_network = {
                 let guards = self.settings.read();
                 let n = guards.popdex_network.trim().to_string();
-                if n.is_empty() { None } else { Some(n) }
+                if n.is_empty() {
+                    None
+                } else {
+                    Some(n)
+                }
             };
             let mut popdex_wallet = None;
             let mut popdex_agent = None;
@@ -1618,22 +1660,25 @@ impl AppEngineState {
                 popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
                 popdex_agent = cred.private_key.clone().filter(|k| !k.trim().is_empty());
             }
-            if let Err(e) = self.live_popdex.update_credentials(
-                popdex_network,
-                popdex_wallet,
-                popdex_agent,
-            ) {
+            if let Err(e) =
+                self.live_popdex
+                    .update_credentials(popdex_network, popdex_wallet, popdex_agent)
+            {
                 tracing::warn!("PopDEX credential sync refused: {e}");
             }
             self.live_hl.update_credentials(hl_wallet, hl_pk);
-            self.live_lighter.update_credentials(lighter_idx, lighter_key);
+            self.live_lighter
+                .update_credentials(lighter_idx, lighter_key);
             self.live_lighter.set_api_key_index(lighter_key_idx);
             self.live_robinhood.update_credentials(rh_idx, rh_key);
             self.live_robinhood.set_api_key_index(rh_key_idx);
-            self.live_vanta.update_credentials(vanta_acc, vanta_key, vanta_sec);
-            self.live_binance.update_credentials(binance_key, binance_sec);
+            self.live_vanta
+                .update_credentials(vanta_acc, vanta_key, vanta_sec);
+            self.live_binance
+                .update_credentials(binance_key, binance_sec);
             self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
-            self.live_coinbase.update_credentials(cb_key, cb_sec, cb_pass);
+            self.live_coinbase
+                .update_credentials(cb_key, cb_sec, cb_pass);
             self.live_kraken.update_credentials(kraken_key, kraken_sec);
             self.live_decibel.update_credentials(
                 decibel_key,
@@ -1641,9 +1686,6 @@ impl AppEngineState {
                 decibel_wallet,
                 decibel_pk,
             );
-
-
-
         } else {
             self.live_aster.update_credentials(None, None);
             let _ = self.live_popdex.update_credentials(None, None, None);
@@ -1662,11 +1704,10 @@ impl AppEngineState {
     }
 
     /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
-    /// Lighter, Vanta (Orderly), Aster, Ondo Perps, GRVT, edgeX, and
-    /// Variational are exposed as native market-data adapters. Public
-    /// read-only feeds require enablement, not secrets. PopDEX stays out
-    /// until its closed-beta REST shape is published (its adapter is
-    /// credential-ready but its market-data paths fail closed).
+    /// Lighter, Vanta (Orderly), Aster, PopDEX, Binance, OKX, Coinbase,
+    /// Kraken, and Decibel can be enabled for their implemented market/account
+    /// paths. Admission is a read/submit boundary only — it never implies
+    /// live strategy-entry readiness.
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -1685,18 +1726,10 @@ impl AppEngineState {
         let account_enabled =
             |venue: &str| self.state_store.has_enabled_account(venue).unwrap_or(false);
         if s.hyperliquid_enabled || account_enabled("hyperliquid") {
-            list.push((
-                "hyperliquid",
-                "Hyperliquid",
-                self.live_hl.clone(),
-            ));
+            list.push(("hyperliquid", "Hyperliquid", self.live_hl.clone()));
         }
         if s.lighter_enabled || account_enabled("lighter") {
-            list.push((
-                "lighter",
-                "Lighter",
-                self.live_lighter.clone(),
-            ));
+            list.push(("lighter", "Lighter", self.live_lighter.clone()));
         }
         if s.robinhood_enabled || account_enabled("robinhood") {
             list.push((
@@ -1706,60 +1739,32 @@ impl AppEngineState {
             ));
         }
         if s.vanta_enabled || account_enabled("vanta") {
-            list.push((
-                "vanta",
-                "Vanta",
-                self.live_vanta.clone(),
-            ));
+            list.push(("vanta", "Vanta", self.live_vanta.clone()));
         }
         if s.aster_enabled || account_enabled("aster") {
-            list.push((
-                "aster",
-                "Aster",
-                self.live_aster.clone(),
-            ));
+            list.push(("aster", "Aster", self.live_aster.clone()));
         }
         if s.popdex_enabled || account_enabled("popdex") {
-            list.push((
-                "popdex",
-                "PopDEX",
-                self.live_popdex.clone(),
-            ));
+            list.push(("popdex", "PopDEX", self.live_popdex.clone()));
         }
         if s.binance_enabled || account_enabled("binance") {
-            list.push((
-                "binance",
-                "Binance",
-                self.live_binance.clone(),
-            ));
+            list.push(("binance", "Binance", self.live_binance.clone()));
         }
         if s.okx_enabled || account_enabled("okx") {
-            list.push((
-                "okx",
-                "OKX",
-                self.live_okx.clone(),
-            ));
+            list.push(("okx", "OKX", self.live_okx.clone()));
         }
         if s.coinbase_enabled || account_enabled("coinbase") {
-            list.push((
-                "coinbase",
-                "Coinbase",
-                self.live_coinbase.clone(),
-            ));
+            list.push(("coinbase", "Coinbase", self.live_coinbase.clone()));
         }
-        if s.kraken_enabled || s.kraken_futures_enabled || s.kraken_spot_enabled || account_enabled("kraken") {
-            list.push((
-                "kraken",
-                "Kraken",
-                self.live_kraken.clone(),
-            ));
+        if s.kraken_enabled
+            || s.kraken_futures_enabled
+            || s.kraken_spot_enabled
+            || account_enabled("kraken")
+        {
+            list.push(("kraken", "Kraken", self.live_kraken.clone()));
         }
         if s.decibel_enabled || account_enabled("decibel") {
-            list.push((
-                "decibel",
-                "Decibel",
-                self.live_decibel.clone(),
-            ));
+            list.push(("decibel", "Decibel", self.live_decibel.clone()));
         }
         list
     }
@@ -1854,8 +1859,7 @@ mod tests {
             "spotMaxSlippageBps": 5.0,
             "spotMinNetSpreadBps": 15.0
         });
-        let p: StrategyParamsDto =
-            serde_json::from_value(old).expect("old rows must still load");
+        let p: StrategyParamsDto = serde_json::from_value(old).expect("old rows must still load");
         assert_eq!(p.step_size_mult, 10.0);
         assert_eq!(p.max_step_usd, 2500.0);
         assert_eq!(p.max_ticker_equity_pct, 20.0);
@@ -1985,10 +1989,22 @@ mod tests {
         // In live mode, enabled venues remain admitted for market data streaming,
         // while order execution is selectively gated by adapter capability & credentials.
         assert!(!state.get_venues().is_empty());
-        assert!(state.get_adapter("hyperliquid").unwrap().supports_live_execution());
-        assert!(state.get_adapter("aster").unwrap().supports_live_execution());
-        assert!(state.get_adapter("vanta").unwrap().supports_live_execution());
-        assert!(!state.get_adapter("hyperliquid").unwrap().has_live_credentials());
+        assert!(state
+            .get_adapter("hyperliquid")
+            .unwrap()
+            .supports_live_execution());
+        assert!(state
+            .get_adapter("aster")
+            .unwrap()
+            .supports_live_execution());
+        assert!(state
+            .get_adapter("vanta")
+            .unwrap()
+            .supports_live_execution());
+        assert!(!state
+            .get_adapter("hyperliquid")
+            .unwrap()
+            .has_live_credentials());
     }
 
     #[tokio::test]

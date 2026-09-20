@@ -1,0 +1,24 @@
+# Log rotation for Arbitrageur file logging (OPTIONAL).
+#
+# Default deployments log to the systemd journal (StandardOutput=journal in
+# arbitrageur@.service) — prefer journald quotas over this file:
+#
+#   /etc/systemd/journald.conf: SystemMaxUse=500M RuntimeMaxUse=200M
+#
+# Only install this logrotate snippet when you additionally tee daemon
+# output to /var/log/arbitrageur/*.log (e.g. behind a process supervisor
+# that cannot use the journal). No secrets ever appear in logs: the engine
+# never prints credential values (presence flags only).
+/var/log/arbitrageur/*.log {
+  daily
+  rotate 14
+  compress
+  delaycompress
+  missingok
+  notifempty
+  create 0600 arbitrageur arbitrageur
+  sharedscripts
+  postrotate
+    systemctl kill -s SIGUSR1 arbitrageur@*.service >/dev/null 2>&1 || true
+  endscript
+}

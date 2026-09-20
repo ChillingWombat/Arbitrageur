@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_NET_RETRY: "5"
+
+jobs:
+  rust:
+    name: Rust format, lint, and tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt clippy
+          rustup default 1.96.0
+
+      - name: Check patch whitespace
+        run: git diff --check
+
+      - name: Verify vendored Lighter signer digest
+        run: |
+          echo "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753  crates/arbitrageur-exchanges/native/lighter/liblighter_signer.so" | sha256sum --check --status
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test workspace
+        run: cargo test --workspace --locked
+
+  frontend:
+    name: Frontend tests, build, and audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build production bundle
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  supply-chain:
+    name: Rust advisories and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked --version 0.22.2
+
+      - name: Check Rust advisories
+        run: cargo audit
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@v2.3.9
+
+  deployment:
+    name: Headless deployment template validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal
+
+      - name: Build headless binary
+        run: cargo build --release --locked --bin arbitrageur
+
+      - name: Install binary for unit verification
+        run: sudo install -m 0755 target/release/arbitrageur /usr/local/bin/arbitrageur
+
+      - name: Verify systemd unit templates
+        run: |
+          systemd-analyze verify ops/deploy/arbitrageur@.service ops/deploy/arbitrager@.service
+          ! grep -R '\${' ops/deploy/*.service

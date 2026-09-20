@@ -1,13 +1,13 @@
-use async_trait::async_trait;
-use chrono::Utc;
-use reqwest::Client;
+use crate::rate_limiter::AccountRequestCoordinator;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
-use crate::rate_limiter::AccountRequestCoordinator;
+use async_trait::async_trait;
+use chrono::Utc;
+use reqwest::Client;
 use zeroize::Zeroizing;
 
 /// Arcus High-Speed CLOB Perpetual DEX connector.
@@ -32,7 +32,10 @@ impl ArcusAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.arcus.xyz".to_string());
         Self {
             venue_id: VenueId::new("arcus"),
-            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: base,
             api_key: api_key.map(Zeroizing::new),
             api_secret: api_secret.map(Zeroizing::new),
@@ -82,7 +85,9 @@ impl ExchangeAdapter for ArcusAdapter {
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let mut markets = Vec::new();
-        let common_pairs = ["BTC", "ETH", "SOL", "AVAX", "BNB", "ARB", "OP", "SUI", "NEAR", "APT", "LINK", "DOGE"];
+        let common_pairs = [
+            "BTC", "ETH", "SOL", "AVAX", "BNB", "ARB", "OP", "SUI", "NEAR", "APT", "LINK", "DOGE",
+        ];
         for base in common_pairs {
             markets.push(MarketMetadata {
                 symbol: Symbol::perp(base, "USDC"),
@@ -102,7 +107,12 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let key = self.api_key.as_deref().map(String::as_str).unwrap_or("").trim();
+        let key = self
+            .api_key
+            .as_deref()
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
         if key.is_empty() {
             anyhow::bail!("Arcus API key not configured");
         }
@@ -119,7 +129,10 @@ impl ExchangeAdapter for ArcusAdapter {
                 if let (Some(p_val), Some(s_val)) = (b.get(0), b.get(1)) {
                     let p_str = p_val.as_str().unwrap_or("");
                     let s_str = s_val.as_str().unwrap_or("");
-                    if let (Ok(p), Ok(s)) = (Decimal::from_str_exact(p_str), Decimal::from_str_exact(s_str)) {
+                    if let (Ok(p), Ok(s)) = (
+                        Decimal::from_str_exact(p_str),
+                        Decimal::from_str_exact(s_str),
+                    ) {
                         if p > dec!(0) && s > dec!(0) {
                             book.bids.push(BookLevel::new(p, s));
                         }
@@ -132,7 +145,10 @@ impl ExchangeAdapter for ArcusAdapter {
                 if let (Some(p_val), Some(s_val)) = (a.get(0), a.get(1)) {
                     let p_str = p_val.as_str().unwrap_or("");
                     let s_str = s_val.as_str().unwrap_or("");
-                    if let (Ok(p), Ok(s)) = (Decimal::from_str_exact(p_str), Decimal::from_str_exact(s_str)) {
+                    if let (Ok(p), Ok(s)) = (
+                        Decimal::from_str_exact(p_str),
+                        Decimal::from_str_exact(s_str),
+                    ) {
                         if p > dec!(0) && s > dec!(0) {
                             book.asks.push(BookLevel::new(p, s));
                         }
@@ -142,7 +158,10 @@ impl ExchangeAdapter for ArcusAdapter {
         }
 
         if book.bids.is_empty() && book.asks.is_empty() {
-            anyhow::bail!("No live orderbook data returned from Arcus API for {}", symbol);
+            anyhow::bail!(
+                "No live orderbook data returned from Arcus API for {}",
+                symbol
+            );
         }
 
         Ok(book)
@@ -163,7 +182,12 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let key = self.api_key.as_deref().map(String::as_str).unwrap_or("").trim();
+        let key = self
+            .api_key
+            .as_deref()
+            .map(String::as_str)
+            .unwrap_or("")
+            .trim();
         if key.is_empty() {
             anyhow::bail!("Arcus API key not configured");
         }
@@ -172,9 +196,12 @@ impl ExchangeAdapter for ArcusAdapter {
         let res = self.get_json(&path).await?;
         // Fail-closed: a missing print is an outage, not a 0% print — a
         // silent zero would mint phantom carry against any nonzero leg.
-        let rate_f = res.get("funding_rate").and_then(|r| r.as_f64()).ok_or_else(|| {
-            anyhow::anyhow!("Arcus funding response missing funding_rate for {symbol}")
-        })?;
+        let rate_f = res
+            .get("funding_rate")
+            .and_then(|r| r.as_f64())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Arcus funding response missing funding_rate for {symbol}")
+            })?;
         let rate_dec = Decimal::from_f64_retain(rate_f).unwrap_or(dec!(0));
         Ok(FundingRate {
             venue: self.venue_id.clone(),
@@ -192,10 +219,16 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+        anyhow::bail!(
+            "Live order execution is not implemented for {}; refusing to fabricate a fill",
+            self.name()
+        )
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+        anyhow::bail!(
+            "Live order cancellation is not implemented for {}",
+            self.name()
+        )
     }
 }

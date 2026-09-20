@@ -1,8 +1,8 @@
-use std::sync::Arc;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrageur_math::rolling_stats::RollingWindowStats;
+use std::sync::Arc;
 
 pub struct StatArbPairsStrategy {
     pub symbol_y: String,

@@ -3,7 +3,9 @@
 > Operational — failure modes, fixes, pre-flight checklist, incident response. Still the playbook for deploys and incidents.
 
 
-This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, our engineered solutions, and an operational runbook for live deployments.
+This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, the controls designed for them, and an operational runbook.
+
+> **Current capability boundary:** the controls below describe the engineered/paper path and the safety architecture. New live strategy entries are disabled until terminal fill/cancel/expiry and restart reconciliation exist. Do not interpret this runbook as proof that live trading, automatic unwinds, or remote signing are currently enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
 
 ---
 
@@ -12,9 +14,9 @@ This document captures the failure modes, production bugs identified during the 
 ### 1.1 Bug 1: Legging Risk / Asymmetric Execution Failure
 - **Symptom:** The bot buys on Exchange A, but the order on Exchange B is rejected or times out due to network jitter. The bot is left holding a naked directional position, suffering catastrophic drawdowns if the market dumps.
 - **Root Cause:** Sequential order dispatch (`await place_a(); await place_b();`) without atomic failure rollback.
-- **Our Solution:**
-  1. **Concurrent Dispatch:** Dispatches both legs simultaneously using `tokio::join!`.
-  2. **Automated Emergency Unwind:** If Leg B rejects while Leg A fills, `EmergencyUnwindHandler::unwind_leg` instantly places a market order to close Leg A, restoring flat delta within milliseconds.
+- **Engineered control:**
+  1. **Concurrent Dispatch:** Dispatches both legs simultaneously using `tokio::join!` where the strategy path is enabled.
+  2. **Emergency compensation design:** If Leg B rejects while Leg A fills, `EmergencyUnwindHandler::unwind_leg` is designed to submit a reduce-only compensation order. Its terminal result must still be verified at the venue; unresolved residual exposure is preserved and surfaced rather than treated as success.
   3. **Circuit Breaker Trip:** Consecutive execution discrepancies trip the `CircuitBreaker`, halting new order entries until operator review.
 
 ---

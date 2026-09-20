@@ -27,13 +27,13 @@ use arbitrageur_core::types::{dec, Decimal};
 use arbitrageur_math::ou_process::OuModelParams;
 use arbitrageur_math::pair_monitor::{
     above_threshold_ratio, build_pair_series, build_pwin_curve, capacity_ladder,
-    effective_coverage, funding_carry_bps, p_win_at_deviation, reversion_stats,
-    PairObservation, PAIR_BUCKET_MS,
+    effective_coverage, funding_carry_bps, p_win_at_deviation, reversion_stats, PairObservation,
+    PAIR_BUCKET_MS,
 };
 use arbitrageur_math::session::{
     apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_ondo_venue,
-    is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma,
-    SessionId, FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
+    is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma, SessionId,
+    FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -437,9 +437,7 @@ fn session_context(
         .filter(|m| m.is_finite() && *m > 0.0)
         .collect();
     let global = winsorized_median(&meds).filter(|g| g.is_finite() && *g > 0.0);
-    let row = profiles
-        .iter()
-        .find(|r| r.session_id == session.as_str());
+    let row = profiles.iter().find(|r| r.session_id == session.as_str());
     let (row, global) = match (row, global) {
         (Some(r), Some(g)) => (r, g),
         _ => return neutral,
@@ -706,7 +704,10 @@ pub(crate) fn trade_win_probability(
     if funding_unknown || exit_uncostable {
         return Some(0.0);
     }
-    if optimal_size_usd.map(|s| !(s.is_finite() && s > 0.0)).unwrap_or(true) {
+    if optimal_size_usd
+        .map(|s| !(s.is_finite() && s > 0.0))
+        .unwrap_or(true)
+    {
         return Some(0.0);
     }
     if !variation_ok || !ratio_ok || !coverage_ok || !session_conf_ok || session_blocked {
@@ -733,10 +734,7 @@ fn dec_opt_f64(v: Decimal) -> Option<f64> {
 /// walk prices the minimum executable close, so a thin reverse side fails
 /// closed instead of hiding behind a top-of-book floor. `None` when no tier
 /// or reference price is usable.
-pub(crate) fn monitor_exit_qty(
-    tiers_usd: &[f64],
-    ref_price: Option<Decimal>,
-) -> Option<Decimal> {
+pub(crate) fn monitor_exit_qty(tiers_usd: &[f64], ref_price: Option<Decimal>) -> Option<Decimal> {
     let tier = tiers_usd
         .iter()
         .copied()
@@ -752,7 +750,9 @@ pub(crate) fn monitor_exit_qty(
     if qty <= dec!(0) {
         return None;
     }
-    dec_opt_f64(qty).filter(|f| f.is_finite() && *f > 0.0).map(|_| qty)
+    dec_opt_f64(qty)
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .map(|_| qty)
 }
 
 /// Expected two-way exit friction in bps: exit VWAP slippage on BOTH reverse
@@ -789,9 +789,8 @@ pub(crate) fn two_way_exit_estimate(
     }
     let buy_exit_vwap = dec_opt_f64(buy_exit)?;
     let sell_exit_vwap = dec_opt_f64(sell_exit)?;
-    let exit_slippage_bps =
-        ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
-            + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
+    let exit_slippage_bps = ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
+        + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
     let buy_spread_bps =
         (buy_best_ask - buy_best_bid) / ((buy_best_ask + buy_best_bid) / 2.0) * 10_000.0;
     let sell_spread_bps =
@@ -969,8 +968,7 @@ impl VenueLane {
     /// The fair-share interval carries ±20% jitter so lanes sharing an IP
     /// do not poll in lockstep; `symbol_interval` itself stays pure.
     fn due_symbols(&mut self, cfg: &MonitorConfigDto) -> Vec<String> {
-        let interval =
-            arbitrageur_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
+        let interval = arbitrageur_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
         let now = Instant::now();
         let n = self.symbols.len();
         let mut due = Vec::new();
@@ -1459,10 +1457,9 @@ impl SpreadMonitorEngine {
             }
         };
         for symbol in symbols.iter().take(500) {
-            if let Err(e) =
-                state
-                    .state_store
-                    .rollup_session_profiles(symbol, from_ms, now_ms, now_ms)
+            if let Err(e) = state
+                .state_store
+                .rollup_session_profiles(symbol, from_ms, now_ms, now_ms)
             {
                 tracing::warn!("session rollup failed for {symbol}: {e}");
             }
@@ -1529,8 +1526,9 @@ impl SpreadMonitorEngine {
                         lane.cursor = (pos + 1) % lane.symbols.len().max(1);
                     }
                     let venue_id = lane.adapter.venue_id();
-                    if let Some(book) =
-                        state.market_data_hub.get_valid_ws_book(&venue_id, &sym, None)
+                    if let Some(book) = state
+                        .market_data_hub
+                        .get_valid_ws_book(&venue_id, &sym, None)
                     {
                         if validate_monitor_book(&book, &venue_id, &sym).is_ok() {
                             // Mark the symbol fetched: without this stamp
@@ -1683,7 +1681,10 @@ impl SpreadMonitorEngine {
         let fee_map: HashMap<String, f64> = lane_meta
             .iter()
             .map(|(v, _, _, _, _, _)| {
-                (v.clone(), crate::commands::effective_venue_fee_bps(state, v))
+                (
+                    v.clone(),
+                    crate::commands::effective_venue_fee_bps(state, v),
+                )
             })
             .collect();
         let lanes_used: Vec<usize> = {
@@ -1759,9 +1760,7 @@ impl SpreadMonitorEngine {
                         .venue_volume_series(symbol, venue, depth_from_ms, now_ms)
                 {
                     let vols: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
-                    if let (Some((_, cur)), Some(med)) =
-                        (series.last(), winsorized_median(&vols))
-                    {
+                    if let (Some((_, cur)), Some(med)) = (series.last(), winsorized_median(&vols)) {
                         if cur.is_finite() && *cur > 0.0 && med.is_finite() && med > 0.0 {
                             depth_snapshot.insert(venue.clone(), (*cur, med));
                         }
@@ -1913,8 +1912,7 @@ impl SpreadMonitorEngine {
         // Session regime for this pair at this timestamp. Provisional or
         // missing aggregates degrade every multiplier below to neutral.
         let sess = session_context(state, symbol, buy_v, sell_v, now_ms);
-        let ondo_closed = (is_ondo_venue(buy_v) || is_ondo_venue(sell_v))
-            && !us_cash_open(now_ms);
+        let ondo_closed = (is_ondo_venue(buy_v) || is_ondo_venue(sell_v)) && !us_cash_open(now_ms);
 
         // --- live books ------------------------------------------------
         let buy_book = state.market_data_hub.get_valid_orderbook(
@@ -1995,8 +1993,13 @@ impl SpreadMonitorEngine {
         // closing spread, the exit half of `compute_route_economics` with no
         // second model. Either reverse side thin at that qty => route
         // uncostable (fail closed below). One-way mode is untouched.
-        let exit_est_opt =
-            exit_estimate_for_mode(&cfg.execution_mode, &buy_book, &sell_book, &cfg.capacity_tiers_usd, fee_bps);
+        let exit_est_opt = exit_estimate_for_mode(
+            &cfg.execution_mode,
+            &buy_book,
+            &sell_book,
+            &cfg.capacity_tiers_usd,
+            fee_bps,
+        );
         let exit_uncostable = exit_est_opt.is_none();
         let friction_bps = fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est_opt.unwrap_or(0.0);
 
@@ -2036,9 +2039,8 @@ impl SpreadMonitorEngine {
         // Single statistical standard shared with the scan path: empirical
         // hit-rate behind the min-episodes gate, OU first-passage fallback
         // behind the R² gate, else fail-closed None.
-        let p_win = edge_bps.and_then(|e| {
-            pair_win_probability(&series, e, friction_bps, cfg.min_episodes)
-        });
+        let p_win =
+            edge_bps.and_then(|e| pair_win_probability(&series, e, friction_bps, cfg.min_episodes));
 
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
@@ -2114,11 +2116,7 @@ impl SpreadMonitorEngine {
         };
 
         let dev_abs_bps = dev_bps.map(|d| d.abs());
-        let mut ewma = self
-            .fast_vol
-            .lock()
-            .remove(&key)
-            .unwrap_or_default();
+        let mut ewma = self.fast_vol.lock().remove(&key).unwrap_or_default();
         if let Some(dev) = dev_abs_bps {
             ewma.update(dev);
         }
@@ -2174,8 +2172,7 @@ impl SpreadMonitorEngine {
         // B) is the profitable side; a negative dev belongs to the reverse
         // pair row, so it must not trigger here. The session aggregate
         // shifts the hurdle additively (capped at 2x); provisional reads 0.
-        let entry_thresh =
-            apply_entry_adjust_bps(friction_bps.max(1.0), sess.entry_delta_bps);
+        let entry_thresh = apply_entry_adjust_bps(friction_bps.max(1.0), sess.entry_delta_bps);
         let signal_active = dev_bps.map(|d| d >= entry_thresh).unwrap_or(false);
         let variation_ok = window_met
             && variation_covers_friction(
@@ -2220,12 +2217,10 @@ impl SpreadMonitorEngine {
         let mut gate_reasons: Vec<String> = Vec::new();
         if !ratio_ok {
             match threshold_ratio {
-                Some(r) => gate_reasons.push(format!(
-                    "persistence {r:.2} < floor {ratio_floor:.2}"
-                )),
-                None => gate_reasons.push(format!(
-                    "persistence unknown < floor {ratio_floor:.2}"
-                )),
+                Some(r) => {
+                    gate_reasons.push(format!("persistence {r:.2} < floor {ratio_floor:.2}"))
+                }
+                None => gate_reasons.push(format!("persistence unknown < floor {ratio_floor:.2}")),
             }
         }
         if !coverage_ok {
@@ -2392,11 +2387,8 @@ impl SpreadMonitorEngine {
             p_win,
             reversion_probability: p_win,
             win_probability,
-            expected_profit_bps: exp_bps.or_else(|| {
-                dev_bps
-                    .zip(p_win)
-                    .map(|(d, p)| (d - friction_bps) * p)
-            }),
+            expected_profit_bps: exp_bps
+                .or_else(|| dev_bps.zip(p_win).map(|(d, p)| (d - friction_bps) * p)),
             expected_profit_usd: exp_usd,
             optimal_size_usd: optimal,
             breakeven_size_usd: breakeven,
@@ -2741,9 +2733,12 @@ mod tests {
         state
             .market_data_hub
             .update_orderbook_from_ws(book("test", "B", 99.0, 101.0, 2));
-        tokio::time::timeout(std::time::Duration::from_secs(10), engine.poll_due_books(&state))
-            .await
-            .expect("poll_due_books must terminate when every due symbol is WS-fresh");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            engine.poll_due_books(&state),
+        )
+        .await
+        .expect("poll_due_books must terminate when every due symbol is WS-fresh");
         let lanes = engine.lanes.lock();
         let lane = lanes.iter().find(|l| l.venue == "test").expect("lane");
         assert!(lane.last_fetch.contains_key("A"));
@@ -2935,8 +2930,14 @@ mod tests {
             session_standdown(false, false, Some(5.9), Some(2.0), false),
             None
         );
-        assert_eq!(session_standdown(false, false, None, Some(2.0), false), None);
-        assert_eq!(session_standdown(false, false, Some(5.0), None, false), None);
+        assert_eq!(
+            session_standdown(false, false, None, Some(2.0), false),
+            None
+        );
+        assert_eq!(
+            session_standdown(false, false, Some(5.0), None, false),
+            None
+        );
     }
 
     #[test]
@@ -3171,7 +3172,9 @@ mod tests {
     fn pair_win_probability_ou_fallback_when_episodes_thin() {
         // Smooth sine around mu=10, amplitude far below the 8.5 band: zero
         // episodes, but a near-perfect AR(1) fit -> fallback yields Some.
-        let spreads: Vec<f64> = (0..60).map(|k| 10.0 + 1.5 * ((k as f64) * 0.25).sin()).collect();
+        let spreads: Vec<f64> = (0..60)
+            .map(|k| 10.0 + 1.5 * ((k as f64) * 0.25).sin())
+            .collect();
         let series = win_series(&spreads, 1_000);
         let p = pair_win_probability(&series, 18.0, 8.5, 5).expect("OU fallback must qualify");
         assert!(p > 0.5 && p <= 1.0, "fallback P_win in range, got {p}");
@@ -3202,10 +3205,7 @@ mod tests {
         let series = win_series(&spreads, 1_000);
         assert_eq!(pair_win_probability(&series, f64::NAN, 5.0, 5), None);
         assert_eq!(pair_win_probability(&series, 12.0, f64::NAN, 5), None);
-        assert_eq!(
-            pair_win_probability(&series, f64::INFINITY, 5.0, 5),
-            None
-        );
+        assert_eq!(pair_win_probability(&series, f64::INFINITY, 5.0, 5), None);
     }
 
     #[test]
@@ -3616,8 +3616,14 @@ mod tests {
         let mut mids: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
         mids.insert("a".into(), mids_a);
         mids.insert("b".into(), mids_b);
-        engine.funding_ema.lock().insert(("a".into(), "BTC".into()), 0.0);
-        engine.funding_ema.lock().insert(("b".into(), "BTC".into()), 0.0);
+        engine
+            .funding_ema
+            .lock()
+            .insert(("a".into(), "BTC".into()), 0.0);
+        engine
+            .funding_ema
+            .lock()
+            .insert(("b".into(), "BTC".into()), 0.0);
         state
             .market_data_hub
             .update_orderbook(book("a", "BTC", 99.8, 100.0, 5));
@@ -3647,7 +3653,12 @@ mod tests {
         row
     }
 
-    fn window_spreads(now_ms: i64, n: usize, step_ms: i64, f: impl Fn(usize) -> f64) -> Vec<(i64, f64)> {
+    fn window_spreads(
+        now_ms: i64,
+        n: usize,
+        step_ms: i64,
+        f: impl Fn(usize) -> f64,
+    ) -> Vec<(i64, f64)> {
         (0..n)
             .map(|i| (now_ms - ((n - 1 - i) as i64) * step_ms, f(i)))
             .collect()
@@ -3660,24 +3671,35 @@ mod tests {
         // Full 60-bucket window (1800s/30s), same 12bps peak.
         // Persistent holds 48/60 above; flicker holds 3/60 above with one
         // spike per 900s chunk so variation still passes for both.
-        let persistent = window_spreads(now, 60, 30_000, |i| {
-            if i % 5 == 4 { 0.0 } else { 12.0 }
-        });
+        let persistent = window_spreads(now, 60, 30_000, |i| if i % 5 == 4 { 0.0 } else { 12.0 });
         let flicker = window_spreads(now, 60, 30_000, |i| {
-            if i == 10 || i == 35 || i == 55 { 12.0 } else { 0.0 }
+            if i == 10 || i == 35 || i == 55 {
+                12.0
+            } else {
+                0.0
+            }
         });
         let cfg = gate_cfg(0.2, 0.0);
         let engine_p = SpreadMonitorEngine::new(&state);
         let row_p = gate_eval(&engine_p, &state, &cfg, &persistent, now);
-        assert_eq!(row_p.status, "ready", "persistent must qualify: {:?}", row_p.block_reason);
+        assert_eq!(
+            row_p.status, "ready",
+            "persistent must qualify: {:?}",
+            row_p.block_reason
+        );
         assert!(row_p.threshold_ratio.unwrap() >= 0.2);
         let engine_f = SpreadMonitorEngine::new(&state);
         let row_f = gate_eval(&engine_f, &state, &cfg, &flicker, now);
         assert_eq!(row_f.status, "triggered", "flicker must stay triggered");
         assert!(row_f.threshold_ratio.unwrap() < 0.2);
         assert!(
-            row_f.block_reason.as_deref().unwrap_or("").contains("persistence"),
-            "explicit persistence reason, got {:?}", row_f.block_reason
+            row_f
+                .block_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("persistence"),
+            "explicit persistence reason, got {:?}",
+            row_f.block_reason
         );
     }
 
@@ -3698,15 +3720,27 @@ mod tests {
         let cfg = gate_cfg(0.0, 0.5);
         let engine_full = SpreadMonitorEngine::new(&state);
         let row_full = gate_eval(&engine_full, &state, &cfg, &full, now);
-        assert_eq!(row_full.status, "ready", "full coverage must be ready: {:?}", row_full.block_reason);
+        assert_eq!(
+            row_full.status, "ready",
+            "full coverage must be ready: {:?}",
+            row_full.block_reason
+        );
         assert!(row_full.coverage.unwrap() >= 0.5);
         let engine_thin = SpreadMonitorEngine::new(&state);
         let row_thin = gate_eval(&engine_thin, &state, &cfg, &thin, now);
-        assert_eq!(row_thin.status, "triggered", "thin coverage must not be ready");
+        assert_eq!(
+            row_thin.status, "triggered",
+            "thin coverage must not be ready"
+        );
         assert!(row_thin.coverage.unwrap() < 0.5);
         assert!(
-            row_thin.block_reason.as_deref().unwrap_or("").contains("coverage"),
-            "explicit coverage reason, got {:?}", row_thin.block_reason
+            row_thin
+                .block_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("coverage"),
+            "explicit coverage reason, got {:?}",
+            row_thin.block_reason
         );
     }
 
@@ -3715,9 +3749,7 @@ mod tests {
         let state = AppEngineState::new();
         let now = gate_now_ms();
         let cfg = gate_cfg(0.2, 0.5);
-        let spreads = window_spreads(now, 60, 30_000, |i| {
-            if i % 5 == 4 { 0.0 } else { 12.0 }
-        });
+        let spreads = window_spreads(now, 60, 30_000, |i| if i % 5 == 4 { 0.0 } else { 12.0 });
         let engine = SpreadMonitorEngine::new(&state);
         let a = gate_eval(&engine, &state, &cfg, &spreads, now);
         let engine2 = SpreadMonitorEngine::new(&state);
@@ -3742,9 +3774,7 @@ mod tests {
         let now = gate_now_ms();
         // Flicker + thin would fail active floors; with both at 0.0 the
         // gates disable and the same series qualifies on other merits.
-        let flicker_thin = window_spreads(now, 12, 150_000, |i| {
-            if i == 5 { 12.0 } else { 0.0 }
-        });
+        let flicker_thin = window_spreads(now, 12, 150_000, |i| if i == 5 { 12.0 } else { 0.0 });
         let active = gate_cfg(0.2, 0.5);
         let engine_a = SpreadMonitorEngine::new(&state);
         let blocked = gate_eval(&engine_a, &state, &active, &flicker_thin, now);
@@ -3752,7 +3782,11 @@ mod tests {
         let disabled = gate_cfg(0.0, 0.0);
         let engine_b = SpreadMonitorEngine::new(&state);
         let row = gate_eval(&engine_b, &state, &disabled, &flicker_thin, now);
-        assert_eq!(row.status, "ready", "zero floors disable gates: {:?}", row.block_reason);
+        assert_eq!(
+            row.status, "ready",
+            "zero floors disable gates: {:?}",
+            row.block_reason
+        );
         // Old persisted JSON without the new keys falls back to sane defaults.
         let old_json = serde_json::json!({"enabled": true, "qualificationMode": "auto"});
         let cfg: MonitorConfigDto = serde_json::from_value(old_json).unwrap();

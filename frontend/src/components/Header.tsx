@@ -121,7 +121,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             </div>
             <p className="text-sm text-slate-600 leading-relaxed">
-              This will immediately stop all trading coordination, trip the risk circuit breaker, and cancel pending orders across all venues.
+              This trips the risk circuit breaker and halts new trading coordination. It does not flatten positions or cancel resting venue orders; use explicit position close actions and verify state on the venue.
             </p>
             <div className="flex justify-end space-x-2.5 pt-3 border-t border-surface-border">
               <button

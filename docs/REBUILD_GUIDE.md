@@ -20,8 +20,10 @@ Tauri desktop app (Rust backend + React frontend in `frontend/`)
 
 Data flows one way: venue adapters → `market_data_hub` snapshot → strategy
 evaluators (spread / funding / triangle) → paper executor + SQLite → React
-polls Tauri commands every ~3s. Nothing touches real funds: native execution
-is disabled backend-wide and every adapter fails closed when unconfigured.
+polls Tauri commands every ~3s. New strategy live entries are fail-closed
+backend-wide; a small set of authenticated adapters retains submission
+transport for separately gated risk-reducing recovery, but is not live-entry
+ready until terminal fill/restart reconciliation exists.
 
 ## 1. Rust backend — open in this order
 

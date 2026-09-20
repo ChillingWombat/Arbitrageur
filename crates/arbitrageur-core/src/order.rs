@@ -1,7 +1,7 @@
+use crate::types::{Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use crate::types::{Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 
 /// Request to place a new order.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
-use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
 use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
 
 /// Cross-market spatial spread calculation result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,7 +40,9 @@ pub fn evaluate_spatial_spread(
     // Determine mutually executable depth across both books
     let available_buy_depth: Decimal = buy_book.asks.iter().map(|l| l.size).sum();
     let available_sell_depth: Decimal = sell_book.bids.iter().map(|l| l.size).sum();
-    let executable_qty = target_qty.min(available_buy_depth).min(available_sell_depth);
+    let executable_qty = target_qty
+        .min(available_buy_depth)
+        .min(available_sell_depth);
 
     if executable_qty <= dec!(0) {
         return None;

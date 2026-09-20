@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CycleStatus {
@@ -118,7 +118,8 @@ impl VirtualStrategyLedger {
         let total_fees = lot.fees_paid_usd + exit_fees_usd;
         let net_pnl_usd = long_pnl + short_pnl - total_fees;
 
-        let total_notional = (lot.long_entry_price * lot.long_qty + lot.short_entry_price * lot.short_qty) / 2.0;
+        let total_notional =
+            (lot.long_entry_price * lot.long_qty + lot.short_entry_price * lot.short_qty) / 2.0;
         let net_pnl_bps = if total_notional > 0.0 {
             (net_pnl_usd / total_notional) * 10000.0
         } else {
@@ -249,10 +250,7 @@ impl VirtualStrategyLedger {
         // Sharpe ratio: mean / std_dev of trade PnL
         let mean = avg_usd;
         let variance: f64 = if completed_count > 1 {
-            pnl_series
-                .iter()
-                .map(|&p| (p - mean).powi(2))
-                .sum::<f64>()
+            pnl_series.iter().map(|&p| (p - mean).powi(2)).sum::<f64>()
                 / (completed_count - 1) as f64
         } else {
             0.0
@@ -266,7 +264,11 @@ impl VirtualStrategyLedger {
             0.0
         };
 
-        let base_capital = if peak_equity > 1000.0 { peak_equity } else { 10000.0 };
+        let base_capital = if peak_equity > 1000.0 {
+            peak_equity
+        } else {
+            10000.0
+        };
         let max_dd_pct = (max_dd_usd / base_capital) * 100.0;
 
         let raw_return_rate = total_usd / base_capital;

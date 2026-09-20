@@ -8,8 +8,16 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 8] =
-    ["futures", "radar", "funding", "spot", "prediction", "stat_arb", "triangle", "external"];
+pub const ALLOWED_STRATEGY_IDS: [&str; 8] = [
+    "futures",
+    "radar",
+    "funding",
+    "spot",
+    "prediction",
+    "stat_arb",
+    "triangle",
+    "external",
+];
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct ExecutionLogEntry {
@@ -113,7 +121,8 @@ struct EquityEventDraft {
     note: String,
 }
 
-fn equity_event_from_row(row: &Row<'_>) -> rusqlite::Result<AccountEquityEvent> {    Ok(AccountEquityEvent {
+fn equity_event_from_row(row: &Row<'_>) -> rusqlite::Result<AccountEquityEvent> {
+    Ok(AccountEquityEvent {
         id: row.get(0)?,
         account_id: row.get(1)?,
         ts_ms: row.get(2)?,
@@ -222,6 +231,10 @@ pub struct SignalLeg {
     pub account_id: Option<String>,
     pub venue: String,
     pub side: LegSide,
+    /// Exact execution symbol for this leg. Funding legs diverge from the
+    /// parent root (long `BTC-SPOT` vs root `BTC-USDC`); backfilled from the
+    /// parent root for pre-v22 rows.
+    pub symbol: String,
     pub intended_qty: f64,
     pub filled_qty: f64,
     pub fill_price: Option<f64>,
@@ -255,6 +268,9 @@ pub struct NewSignalLeg {
     pub account_id: Option<String>,
     pub venue: String,
     pub side: LegSide,
+    /// Exact per-leg symbol. `None` resolves to the parent root symbol at
+    /// record time; funding entry/flatten legs pass `Some(exact)`.
+    pub symbol: Option<String>,
     pub intended_qty: f64,
 }
 
@@ -381,6 +397,8 @@ pub struct AutotuneApplyEventRow {
 #[serde(rename_all = "camelCase")]
 pub struct PositionVenueDto {
     pub venue: String,
+    /// Exact leg symbol behind this row's net quantity.
+    pub symbol: String,
     /// Positive = net long (buy side), negative = net short (sell side).
     pub net_qty: f64,
 }
@@ -428,11 +446,16 @@ pub fn aggregate_open_positions(
         if !s.status.counts_as_open() {
             continue;
         }
-        let mut venues: Vec<String> =
-            s.legs.iter().map(|l| l.venue.to_lowercase()).collect();
-        venues.sort();
-        venues.dedup();
-        let venue_key = venues.join("+");
+        // Leg-symbol venue set: one segment per distinct (venue, leg symbol)
+        // so a same-venue spot+perp pair groups as two rows, not one.
+        let mut segs: Vec<String> = s
+            .legs
+            .iter()
+            .map(|l| format!("{}:{}", l.venue.to_lowercase(), l.symbol))
+            .collect();
+        segs.sort();
+        segs.dedup();
+        let venue_key = segs.join("+");
         groups
             .entry((s.strategy_id.to_lowercase(), s.symbol.clone(), venue_key))
             .or_default()
@@ -441,7 +464,7 @@ pub fn aggregate_open_positions(
 
     let mut out = Vec::with_capacity(groups.len());
     for ((strategy_id, symbol, venue_key), members) in groups {
-        let mut nets: BTreeMap<String, f64> = BTreeMap::new();
+        let mut nets: BTreeMap<(String, String), f64> = BTreeMap::new();
         let mut fees = 0.0f64;
         let mut expected_sum = 0.0f64;
         let mut expected_any = false;
@@ -466,9 +489,11 @@ pub fn aggregate_open_positions(
                     LegSide::Long => leg.filled_qty,
                     LegSide::Short => -leg.filled_qty,
                 };
-                *nets.entry(leg.venue.clone()).or_insert(0.0) += signed;
+                *nets
+                    .entry((leg.venue.clone(), leg.symbol.clone()))
+                    .or_insert(0.0) += signed;
 
-                match (leg.fill_price, mark(&leg.venue, &s.symbol)) {
+                match (leg.fill_price, mark(&leg.venue, &leg.symbol)) {
                     (Some(entry), Some(mid)) => {
                         if let Some(p) = pnl.as_mut() {
                             *p += (mid - entry) * signed;
@@ -493,16 +518,19 @@ pub fn aggregate_open_positions(
         let mut venue_rows: Vec<PositionVenueDto> = nets
             .iter()
             .filter(|(_, q)| q.abs() > EPS)
-            .map(|(v, q)| PositionVenueDto {
+            .map(|((v, sym), q)| PositionVenueDto {
                 venue: v.clone(),
+                symbol: sym.clone(),
                 net_qty: *q,
             })
             .collect();
         if venue_rows.is_empty() {
             venue_rows = venue_key
                 .split('+')
-                .map(|v| PositionVenueDto {
+                .filter_map(|seg| seg.split_once(':'))
+                .map(|(v, s)| PositionVenueDto {
                     venue: v.to_string(),
+                    symbol: s.to_string(),
                     net_qty: 0.0,
                 })
                 .collect();
@@ -1134,6 +1162,12 @@ const MIGRATION_V20_SQL: &str = "BEGIN IMMEDIATE; UPDATE funding_rate_samples SE
 /// record helper); reads take the newest N.
 const MIGRATION_V21_SQL: &str = "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS execution_log (id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '', trade_type TEXT NOT NULL DEFAULT '', strategy_id TEXT NOT NULL DEFAULT '', symbol TEXT NOT NULL DEFAULT '', venue_a TEXT NOT NULL DEFAULT '', venue_b TEXT NOT NULL DEFAULT '', leg_a_status TEXT NOT NULL DEFAULT '', leg_b_status TEXT NOT NULL DEFAULT '', success INTEGER NOT NULL DEFAULT 0, gross_profit REAL NOT NULL DEFAULT 0, fees REAL NOT NULL DEFAULT 0, net_profit REAL NOT NULL DEFAULT 0, latency_us INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', direction TEXT, trigger_spread_bps REAL, baseline_mean_spread_bps REAL, position_step INTEGER, max_units INTEGER, nominal_hurdle_bps REAL, is_live INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS idx_execution_log_ts ON execution_log(ts); PRAGMA user_version = 21; COMMIT;";
 
+/// v22 adds the per-leg exact execution symbol. Pre-v22 rows carry the
+/// parent root on every leg (funding entries then shared the root), so the
+/// backfill copies each leg's symbol from its parent `signal_executions`
+/// row — v21 data reads back identically, with symbols populated.
+const MIGRATION_V22_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN symbol TEXT NOT NULL DEFAULT ''; UPDATE signal_legs SET symbol = (SELECT symbol FROM signal_executions WHERE signal_executions.id = signal_legs.signal_id) WHERE symbol = ''; PRAGMA user_version = 22; COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1338,12 +1372,23 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
 /// appearing as two unrelated tickers.
 pub fn canonical_base(raw: &str) -> String {
     let up = raw.trim().to_uppercase();
+    // Strip instrument-class and quote suffixes until stable so compound
+    // venue spellings (`BTC-USDT-SWAP`, `BTC-USD-PERP`) fully reduce.
     let mut stripped = up.as_str();
     let mut cut = false;
-    for suf in ["-USDC", "-USDT", "-USD", "/USDC", "/USDT", "/USD", "-PERP"] {
-        if up.len() > suf.len() && up.ends_with(suf) {
-            stripped = &up[..up.len() - suf.len()];
-            cut = true;
+    loop {
+        let mut again = false;
+        for suf in [
+            "-USDC", "-USDT", "-USD1", "-USD", "-PERP", "-SWAP", "-U", "/USDC", "/USDT", "/USD",
+        ] {
+            if stripped.len() > suf.len() && stripped.ends_with(suf) {
+                stripped = &stripped[..stripped.len() - suf.len()];
+                cut = true;
+                again = true;
+                break;
+            }
+        }
+        if !again {
             break;
         }
     }
@@ -1371,9 +1416,7 @@ pub fn canonical_base(raw: &str) -> String {
 /// - Dow Jones → `US30` (`DJ30`, `WS30`, `DJI`, …)
 pub fn canonical_index_alias(base: &str) -> Option<&'static str> {
     match base {
-        "US100" | "TECH100" | "NAS100" | "USTEC" | "USTEC100" | "NQ100" | "NQ" => {
-            Some("NAS100")
-        }
+        "US100" | "TECH100" | "NAS100" | "USTEC" | "USTEC100" | "NQ100" | "NQ" => Some("NAS100"),
         "US500" | "SPX500" | "SP500" | "SPX" => Some("SPX500"),
         "US30" | "DJ30" | "WS30" | "DJI" | "DJIA" => Some("US30"),
         _ => None,
@@ -1414,7 +1457,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<AccountProfile> {
         enabled: row.get(3)?,
         is_default: row.get(4)?,
         account_tier: row.get(5)?,
-        max_leverage: row.get::<_, Option<i64>>(6)?.and_then(|v| u32::try_from(v).ok()),
+        max_leverage: row
+            .get::<_, Option<i64>>(6)?
+            .and_then(|v| u32::try_from(v).ok()),
         created_at: row.get(7)?,
         updated_at: row.get(8)?,
     })
@@ -1486,6 +1531,7 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
         side: LegSide::from_side(&side_raw).ok_or_else(|| {
             rusqlite::Error::InvalidColumnType(4, "side".into(), rusqlite::types::Type::Text)
         })?,
+        symbol: row.get(12).unwrap_or_default(),
         intended_qty: row.get(5)?,
         filled_qty: row.get(6)?,
         fill_price: row.get(7)?,
@@ -1563,7 +1609,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 21 {
+        if version > 22 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1692,6 +1738,12 @@ impl StateStore {
                 return Err(err.into());
             }
         }
+        if version <= 21 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V22_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
         Ok(())
     }
 
@@ -1713,7 +1765,9 @@ impl StateStore {
         let max_leverage_i64 = match max_leverage {
             None => None,
             Some(v) if (1..=5).contains(&v) => Some(i64::from(v)),
-            Some(v) => anyhow::bail!("max_leverage {v} out of range; must be 1..=5 or unset (unlimited)"),
+            Some(v) => {
+                anyhow::bail!("max_leverage {v} out of range; must be 1..=5 or unset (unlimited)")
+            }
         };
         let now = Utc::now().to_rfc3339();
 
@@ -1739,7 +1793,15 @@ impl StateStore {
 
         tx.execute(
             ACCOUNT_UPSERT_SQL,
-            params![id, venue, label, enabled, account_tier, now, max_leverage_i64],
+            params![
+                id,
+                venue,
+                label,
+                enabled,
+                account_tier,
+                now,
+                max_leverage_i64
+            ],
         )?;
 
         let chosen: Option<String> = if make_default && enabled {
@@ -2091,6 +2153,9 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             if let Some(aid) = &leg.account_id {
                 normalize_id(aid)?;
             }
+            if let Some(sym) = &leg.symbol {
+                normalize_symbol(sym)?;
+            }
             match leg.side {
                 LegSide::Long => account_long = leg.account_id.clone(),
                 LegSide::Short => account_short = leg.account_id.clone(),
@@ -2122,11 +2187,15 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         )?;
         for leg in &signal.legs {
             let leg_id = normalize_id(&format!("{id}-{}", leg.side.as_str()))?;
+            let leg_symbol = match &leg.symbol {
+                Some(sym) => normalize_symbol(sym)?,
+                None => symbol.clone(),
+            };
             tx.execute(
                 "INSERT INTO signal_legs
                     (id, signal_id, account_id, venue, side, intended_qty,
-                     filled_qty, fill_price, fee_usd, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7)",
+                     filled_qty, fill_price, fee_usd, created_at, updated_at, symbol)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7, ?8)",
                 params![
                     leg_id,
                     id,
@@ -2134,7 +2203,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                     leg.venue,
                     leg.side.as_str(),
                     leg.intended_qty,
-                    now
+                    now,
+                    leg_symbol
                 ],
             )?;
         }
@@ -2222,6 +2292,38 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
              SET fees_usd = (SELECT COALESCE(SUM(fee_usd), 0) FROM signal_legs WHERE signal_id = ?1),
                  updated_at = ?2
              WHERE id = ?1",
+            params![signal_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Attach the venue's order identity to a submitted leg before any fill is
+    /// known. Accepted-but-working live closes need this durable handle for
+    /// operator reconciliation and future restart recovery.
+    pub fn record_leg_order_id(
+        &self,
+        signal_id: &str,
+        side: LegSide,
+        venue_order_id: &str,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        let oid = venue_order_id.trim();
+        if oid.is_empty() || oid.len() > 256 || oid.chars().any(|c| c.is_control()) {
+            anyhow::bail!("invalid venue order id");
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE signal_legs
+             SET venue_order_id = ?3, updated_at = ?4
+             WHERE signal_id = ?1 AND side = ?2",
+            params![signal_id, side.as_str(), oid, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("signal {signal_id} has no {side:?} leg");
+        }
+        conn.execute(
+            "UPDATE signal_executions SET updated_at = ?2 WHERE id = ?1",
             params![signal_id, now],
         )?;
         Ok(())
@@ -2337,8 +2439,10 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         )?)
     }
 
-    /// Per-account net position on a symbol — the attribution exchanges lose
-    /// when they only report aggregate positions.
+    /// Per-account net position on an exact execution symbol — the
+    /// attribution exchanges lose when they only report aggregate positions.
+    /// Pre-v22 legs backfilled their parent symbol, so carry rows keep their
+    /// original behavior while funding spot/perp legs remain distinct.
     pub fn account_symbol_net(&self, account_id: &str, symbol: &str) -> anyhow::Result<f64> {
         let account_id = normalize_id(account_id)?;
         let symbol = normalize_symbol(symbol)?;
@@ -2347,14 +2451,15 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
-             WHERE l.account_id = ?1 AND s.symbol = ?2
+             WHERE l.account_id = ?1 AND l.symbol = ?2
                AND s.status NOT IN ('closed', 'failed')",
             params![account_id, symbol],
             |r| r.get(0),
         )?)
     }
 
-    /// Per-venue net position on a symbol across all accounts/signals.
+    /// Per-venue net position on an exact execution symbol across all
+    /// accounts/signals (see [`Self::account_symbol_net`]).
     pub fn venue_symbol_net(&self, venue: &str, symbol: &str) -> anyhow::Result<f64> {
         let venue = normalize_venue(venue)?;
         let symbol = normalize_symbol(symbol)?;
@@ -2363,7 +2468,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
-             WHERE l.venue = ?1 AND s.symbol = ?2
+             WHERE l.venue = ?1 AND l.symbol = ?2
                AND s.status NOT IN ('closed', 'failed')",
             params![venue, symbol],
             |r| r.get(0),
@@ -2404,9 +2509,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let mut stmt = conn.prepare(
             "SELECT strategy_id, params_json FROM strategy_params ORDER BY strategy_id ASC",
         )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -2468,10 +2571,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> = keys
-            .iter()
-            .map(|k| k as &dyn rusqlite::ToSql)
-            .collect();
+        let mut params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
         params.push(&from_ts_ms);
         params.push(&to_ts_ms);
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
@@ -2496,10 +2597,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let sql = format!("SELECT MIN(ts_ms) FROM spread_samples WHERE symbol IN ({placeholders})");
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> = keys
-            .iter()
-            .map(|k| k as &dyn rusqlite::ToSql)
-            .collect();
+        let params: Vec<&dyn rusqlite::ToSql> =
+            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
         Ok(stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
@@ -2710,9 +2809,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         to_ts_ms: i64,
         now_ms: i64,
     ) -> anyhow::Result<usize> {
-        use arbitrageur_math::pair_monitor::{
-            build_pair_series, reversion_stats, PairObservation,
-        };
+        use arbitrageur_math::pair_monitor::{build_pair_series, reversion_stats, PairObservation};
         use arbitrageur_math::session::{
             hour_modulator, hour_of_day_utc, percentile_sorted, session_of, session_stats,
             winsorized_median, SessionId, SESSION_MIN_EPISODES,
@@ -2771,7 +2868,10 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let spreads: Vec<f64> = abs_vals.clone();
         let n_all = spreads.len();
         let sigma_abs = if n_all >= 2 {
-            let v = spreads.iter().map(|x| (x - global_med).powi(2)).sum::<f64>()
+            let v = spreads
+                .iter()
+                .map(|x| (x - global_med).powi(2))
+                .sum::<f64>()
                 / (n_all - 1) as f64;
             if v.is_finite() && v >= 0.0 {
                 v.sqrt()
@@ -2822,20 +2922,14 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                 }
                 let (n_episodes, win_rate, mean_hold_s) = if have_moments {
                     let rs = reversion_stats(&sub, global_med, sigma_abs, 2.0, 2.0, 3.0, 1);
-                    (
-                        rs.episodes as i64,
-                        rs.p_win,
-                        rs.median_converge_secs,
-                    )
+                    (rs.episodes as i64, rs.p_win, rs.median_converge_secs)
                 } else {
                     (0i64, None, None)
                 };
                 let p90 = percentile_sorted(
                     &{
                         let mut v = abs_vals.clone();
-                        v.sort_by(|a, b| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         v
                     },
                     0.90,
@@ -3220,13 +3314,21 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                 gross_profit: r.get(10)?,
                 fees: r.get(11)?,
                 net_profit: r.get(12)?,
-                latency_us: r.get::<_, i64>(13).ok().and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
+                latency_us: r
+                    .get::<_, i64>(13)
+                    .ok()
+                    .and_then(|v| u64::try_from(v).ok())
+                    .unwrap_or(0),
                 note: r.get(14)?,
                 direction: r.get(15)?,
                 trigger_spread_bps: r.get(16)?,
                 baseline_mean_spread_bps: r.get(17)?,
-                position_step: r.get::<_, Option<i64>>(18)?.and_then(|v| u32::try_from(v).ok()),
-                max_units: r.get::<_, Option<i64>>(19)?.and_then(|v| u32::try_from(v).ok()),
+                position_step: r
+                    .get::<_, Option<i64>>(18)?
+                    .and_then(|v| u32::try_from(v).ok()),
+                max_units: r
+                    .get::<_, Option<i64>>(19)?
+                    .and_then(|v| u32::try_from(v).ok()),
                 nominal_hurdle_bps: r.get(20)?,
                 is_live: r.get::<_, i64>(21)? != 0,
             })
@@ -3236,10 +3338,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
 
     pub fn db_size_bytes(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
-        let page_count: i64 =
-            conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let page_size: i64 =
-            conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         Ok((page_count.max(0) as u64) * (page_size.max(0) as u64))
     }
 
@@ -3313,17 +3413,20 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         )?;
         let rows = stmt.query_map(
             rusqlite::params![venue, symbol, from_ts_ms, to_ts_ms],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?, r.get::<_, i64>(2)?)),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Bound the funding-rate log with the same day cutoff the retention
     /// pass computes for spread/volume samples.
-    pub fn prune_funding_rate_samples(
-        &self,
-        retain_after_ts_ms: i64,
-    ) -> anyhow::Result<usize> {
+    pub fn prune_funding_rate_samples(&self, retain_after_ts_ms: i64) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
         Ok(conn.execute(
             "DELETE FROM funding_rate_samples WHERE ts_ms < ?1",
@@ -3409,7 +3512,11 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         if ts_ms < 0 {
             anyhow::bail!("margin snapshot timestamp must be non-negative");
         }
-        for (name, v) in [("equity", equity), ("used margin", used_margin), ("rate", rate_pct)] {
+        for (name, v) in [
+            ("equity", equity),
+            ("used margin", used_margin),
+            ("rate", rate_pct),
+        ] {
             if !v.is_finite() || v < 0.0 {
                 anyhow::bail!("margin snapshot {name} must be finite and non-negative");
             }
@@ -3568,8 +3675,13 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             .as_ref()
             .is_some_and(|(_, sig, _)| sig.as_str() != pos_sig);
         let positions_open = !pos_sig.is_empty();
-        let outcome =
-            crate::equity_attribution::check_equity_delta(expected, actual, positions_changed, positions_open, gap_ms);
+        let outcome = crate::equity_attribution::check_equity_delta(
+            expected,
+            actual,
+            positions_changed,
+            positions_open,
+            gap_ms,
+        );
         if outcome.rebased && actual.is_finite() {
             self.set_equity_expectation(&account_id, actual, pos_sig, now_ms)?;
         } else if prev.is_some() {
@@ -3703,7 +3815,10 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
-    pub fn count_bot_decisions_since(&self, since_ts_ms: i64) -> anyhow::Result<Vec<(String, i64)>> {
+    pub fn count_bot_decisions_since(
+        &self,
+        since_ts_ms: i64,
+    ) -> anyhow::Result<Vec<(String, i64)>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT new_status, COUNT(*) FROM monitor_signal_events
@@ -3810,9 +3925,9 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                 friction_band_bps: r.get(6)?,
                 size_usd: r.get(7)?,
                 deadline_ms: r.get(8)?,
-                    unwatched_since_ms: r.get(9)?,
-                    last_seen_ms: r.get(10)?,
-                })
+                unwatched_since_ms: r.get(9)?,
+                last_seen_ms: r.get(10)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -4095,8 +4210,10 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         sql.push_str(" ORDER BY ts_ms DESC, id DESC LIMIT ?");
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let refs: Vec<&dyn rusqlite::types::ToSql> =
-            binds.iter().map(|b| b as &dyn rusqlite::types::ToSql).collect();
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds
+            .iter()
+            .map(|b| b as &dyn rusqlite::types::ToSql)
+            .collect();
         let mut all_refs: Vec<&dyn rusqlite::types::ToSql> = refs;
         all_refs.push(&limit);
         let rows = stmt.query_map(rusqlite::params_from_iter(all_refs), |r| {
@@ -4153,7 +4270,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
                     filled_qty, fill_price, fee_usd, venue_order_id,
-                    created_at, updated_at
+                    created_at, updated_at, symbol
              FROM signal_legs WHERE signal_id = ?1
              ORDER BY CASE side WHEN 'long' THEN 0 ELSE 1 END",
         )?;
@@ -4211,7 +4328,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 21);
+            assert_eq!(version, 22);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4273,23 +4390,14 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         // Two writes inside the same minute collapse to one row (REPLACE).
         store
-            .record_funding_rate_samples(
-                1_700_000_000_012,
-                &[("lighter", "BTC-USDC", 0.0008, 8)],
-            )
+            .record_funding_rate_samples(1_700_000_000_012, &[("lighter", "BTC-USDC", 0.0008, 8)])
             .unwrap();
         store
-            .record_funding_rate_samples(
-                1_700_000_000_045,
-                &[("lighter", "BTC-USDC", 0.0009, 8)],
-            )
+            .record_funding_rate_samples(1_700_000_000_045, &[("lighter", "BTC-USDC", 0.0009, 8)])
             .unwrap();
         // A later minute appends.
         store
-            .record_funding_rate_samples(
-                1_700_000_060_000,
-                &[("lighter", "BTC-USDC", 0.001, 8)],
-            )
+            .record_funding_rate_samples(1_700_000_060_000, &[("lighter", "BTC-USDC", 0.001, 8)])
             .unwrap();
         let series = store
             .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
@@ -4302,7 +4410,10 @@ mod tests {
         store
             .record_funding_rate_samples(
                 1_700_000_120_000,
-                &[("!!", "BTC-USDC", 0.001, 8), ("lighter", "BTC-USDC", f64::NAN, 8)],
+                &[
+                    ("!!", "BTC-USDC", 0.001, 8),
+                    ("lighter", "BTC-USDC", f64::NAN, 8),
+                ],
             )
             .unwrap();
         let after = store
@@ -4310,9 +4421,7 @@ mod tests {
             .unwrap();
         assert_eq!(after.len(), 2);
         // Retention prune keeps only the fresh minute bucket (1_700_000_040_000).
-        let removed = store
-            .prune_funding_rate_samples(1_700_000_040_000)
-            .unwrap();
+        let removed = store.prune_funding_rate_samples(1_700_000_040_000).unwrap();
         assert_eq!(removed, 1);
         let kept = store
             .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
@@ -4324,14 +4433,30 @@ mod tests {
     fn test_default_account_lifecycle() {
         let store = StateStore::open_in_memory().unwrap();
         let first = store
-            .upsert_account("hl_main", "HyperLiquid", "Main", true, false, "standard", None)
+            .upsert_account(
+                "hl_main",
+                "HyperLiquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(first.is_default);
         assert!(store.has_enabled_account("hyperliquid").unwrap());
         assert!(!store.has_enabled_account("lighter").unwrap());
 
         let second = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard", None)
+            .upsert_account(
+                "hl_alt",
+                "hyperliquid",
+                "Alt",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(!second.is_default);
         assert_eq!(
@@ -4340,29 +4465,69 @@ mod tests {
         );
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", true, false, "standard", None)
+            .upsert_account(
+                "hl_zulu",
+                "hyperliquid",
+                "Zulu",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         store.set_default_account("hyperliquid", "hl_zulu").unwrap();
         assert!(store.get_account("hl_zulu").unwrap().unwrap().is_default);
         assert!(!store.get_account("hl_main").unwrap().unwrap().is_default);
 
         store
-            .upsert_account("hl_zulu", "hyperliquid", "Zulu", false, false, "standard", None)
+            .upsert_account(
+                "hl_zulu",
+                "hyperliquid",
+                "Zulu",
+                false,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
         assert_eq!(promoted.id, "hl_alt");
 
         store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", false, false, "standard", None)
+            .upsert_account(
+                "hl_alt",
+                "hyperliquid",
+                "Alt",
+                false,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         store
-            .upsert_account("hl_main", "hyperliquid", "Main", false, false, "standard", None)
+            .upsert_account(
+                "hl_main",
+                "hyperliquid",
+                "Main",
+                false,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(store.default_account("hyperliquid").unwrap().is_none());
         assert!(!store.has_enabled_account("hyperliquid").unwrap());
 
         let reenabled = store
-            .upsert_account("hl_alt", "hyperliquid", "Alt", true, false, "standard", None)
+            .upsert_account(
+                "hl_alt",
+                "hyperliquid",
+                "Alt",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(reenabled.is_default);
     }
@@ -4371,13 +4536,37 @@ mod tests {
     fn test_delete_default_promotes_alphabetically_first_enabled() {
         let store = StateStore::open_in_memory().unwrap();
         store
-            .upsert_account("a_main", "hyperliquid", "Main", true, true, "standard", None)
+            .upsert_account(
+                "a_main",
+                "hyperliquid",
+                "Main",
+                true,
+                true,
+                "standard",
+                None,
+            )
             .unwrap();
         store
-            .upsert_account("a_zulu", "hyperliquid", "Zulu", true, false, "standard", None)
+            .upsert_account(
+                "a_zulu",
+                "hyperliquid",
+                "Zulu",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         store
-            .upsert_account("a_beta", "hyperliquid", "Beta", true, false, "standard", None)
+            .upsert_account(
+                "a_beta",
+                "hyperliquid",
+                "Beta",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(store.delete_account("a_main").unwrap());
         let promoted = store.default_account("hyperliquid").unwrap().unwrap();
@@ -4391,7 +4580,15 @@ mod tests {
             .upsert_account("", "hyperliquid", "Main", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("bad id", "hyperliquid", "Main", true, false, "standard", None)
+            .upsert_account(
+                "bad id",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                None
+            )
             .is_err());
         assert!(store
             .upsert_account(
@@ -4414,7 +4611,15 @@ mod tests {
             .upsert_account("a", "hyperliquid", "", true, false, "standard", None)
             .is_err());
         assert!(store
-            .upsert_account("a", "hyperliquid", &"y".repeat(81), true, false, "standard", None)
+            .upsert_account(
+                "a",
+                "hyperliquid",
+                &"y".repeat(81),
+                true,
+                false,
+                "standard",
+                None
+            )
             .is_err());
         assert!(store
             .upsert_account(
@@ -4429,13 +4634,29 @@ mod tests {
             .is_err());
 
         store
-            .upsert_account("acct1", "hyperliquid", "Main", true, false, "standard", None)
+            .upsert_account(
+                "acct1",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert!(store
             .upsert_account("acct1", "lighter", "Moved", true, false, "standard", None)
             .is_err());
         let renamed = store
-            .upsert_account("acct1", "HyperLiquid", "Renamed", true, false, "standard", None)
+            .upsert_account(
+                "acct1",
+                "HyperLiquid",
+                "Renamed",
+                true,
+                false,
+                "standard",
+                None,
+            )
             .unwrap();
         assert_eq!(renamed.venue, "hyperliquid");
         assert_eq!(renamed.label, "Renamed");
@@ -4469,7 +4690,9 @@ mod tests {
             .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
             .unwrap();
         store
-            .upsert_account("lt_off", "lighter", "LT Off", false, false, "standard", None)
+            .upsert_account(
+                "lt_off", "lighter", "LT Off", false, false, "standard", None,
+            )
             .unwrap();
 
         assert!(store
@@ -4631,16 +4854,104 @@ mod tests {
                     account_id: acct_a.map(|s| s.to_string()),
                     venue: "hyperliquid".into(),
                     side: LegSide::Long,
+                    symbol: None,
                     intended_qty: 1.0,
                 },
                 NewSignalLeg {
                     account_id: acct_b.map(|s| s.to_string()),
                     venue: "lighter".into(),
                     side: LegSide::Short,
+                    symbol: None,
                     intended_qty: 1.0,
                 },
             ],
         }
+    }
+
+    #[test]
+    fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
+        let store = StateStore::open_in_memory().unwrap();
+        let version: i64 = store
+            .conn
+            .lock()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 22);
+        store
+            .record_signal_execution(&NewSignalExecution {
+                id: "fund-1".to_string(),
+                strategy_id: "funding".into(),
+                symbol: "BTC-USDC".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-SPOT".to_string()),
+                        intended_qty: 0.5,
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Short,
+                        symbol: None,
+                        intended_qty: 0.5,
+                    },
+                ],
+            })
+            .unwrap();
+        let sig = store.get_signal("fund-1").unwrap().expect("signal");
+        let long = sig
+            .legs
+            .iter()
+            .find(|l| l.side == LegSide::Long)
+            .expect("long");
+        let short = sig
+            .legs
+            .iter()
+            .find(|l| l.side == LegSide::Short)
+            .expect("short");
+        assert_eq!(long.symbol, "BTC-SPOT");
+        assert_eq!(short.symbol, "BTC-USDC");
+        store
+            .apply_leg_fill("fund-1", LegSide::Long, 0.5, 64990.0, 0.1, None)
+            .unwrap();
+        store
+            .apply_leg_fill("fund-1", LegSide::Short, 0.5, 65000.0, 0.1, None)
+            .unwrap();
+        assert!((store.venue_symbol_net("lighter", "BTC-SPOT").unwrap() - 0.5).abs() < 1e-9);
+        assert!((store.venue_symbol_net("lighter", "BTC-USDC").unwrap() + 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_v22_backfill_copies_parent_root_symbol() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_signal_execution(&two_leg_signal("s-v21", "ETH-USDC", None, None))
+            .unwrap();
+        // Simulate a pre-v22 row, then replay the v22 backfill verbatim.
+        store
+            .conn
+            .lock()
+            .execute(
+                "UPDATE signal_legs SET symbol = '' WHERE signal_id = 's-v21'",
+                [],
+            )
+            .unwrap();
+        store
+            .conn
+            .lock()
+            .execute(
+                "UPDATE signal_legs SET symbol = (SELECT symbol FROM signal_executions WHERE signal_executions.id = signal_legs.signal_id) WHERE symbol = ''",
+                [],
+            )
+            .unwrap();
+        let sig = store.get_signal("s-v21").unwrap().expect("signal");
+        assert!(sig.legs.iter().all(|l| l.symbol == "ETH-USDC"));
+        assert_eq!(store.ticker_net_position("ETH-USDC").unwrap(), 0.0);
     }
 
     #[test]
@@ -4690,6 +5001,28 @@ mod tests {
         let recorded = store.get_signal("s1").unwrap().unwrap();
         assert_eq!(recorded.status, SignalStatus::Balanced);
         assert!((recorded.fees_usd - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_leg_order_id_before_fill() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_signal_execution(&two_leg_signal("s-ack", "BTC-USDC", None, None))
+            .unwrap();
+        store
+            .record_leg_order_id("s-ack", LegSide::Short, "venue-order-42")
+            .unwrap();
+        let sig = store.get_signal("s-ack").unwrap().unwrap();
+        let short = sig
+            .legs
+            .iter()
+            .find(|l| l.side == LegSide::Short)
+            .expect("short leg");
+        assert_eq!(short.venue_order_id.as_deref(), Some("venue-order-42"));
+        assert_eq!(short.filled_qty, 0.0);
+        assert!(store
+            .record_leg_order_id("s-ack", LegSide::Short, "")
+            .is_err());
     }
 
     #[test]
@@ -4924,13 +5257,15 @@ mod tests {
             .unwrap();
 
         let via_ui = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
-        assert_eq!(via_ui.len(), 2, "UI key must see background base-keyed rows");
+        assert_eq!(
+            via_ui.len(),
+            2,
+            "UI key must see background base-keyed rows"
+        );
         let via_base = store.spread_samples("BTC", 0, i64::MAX).unwrap();
         assert_eq!(via_base.len(), 2, "base key must see UI full-symbol rows");
         // Trailing-window slice sees the fresh background row.
-        let windowed = store
-            .spread_samples("BTC-USDC", now - 5_000, now)
-            .unwrap();
+        let windowed = store.spread_samples("BTC-USDC", now - 5_000, now).unwrap();
         assert_eq!(windowed.len(), 1);
         assert_eq!(windowed[0].venue_id, "hyperliquid");
         assert_eq!(
@@ -5012,7 +5347,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 21);
+            assert_eq!(version, 22);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5191,44 +5526,107 @@ mod tests {
         // Every invalid append is rejected and stores nothing new.
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", -1, None, "triggered",
-                None, None, None, None, "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                -1,
+                None,
+                "triggered",
+                None,
+                None,
+                None,
+                None,
+                "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "bogus",
-                None, None, None, None, "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                None,
+                "bogus",
+                None,
+                None,
+                None,
+                None,
+                "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, Some("bogus"), "triggered",
-                None, None, None, None, "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                Some("bogus"),
+                "triggered",
+                None,
+                None,
+                None,
+                None,
+                "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
-                None, None, None, None, "pulse",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                None,
+                "triggered",
+                None,
+                None,
+                None,
+                None,
+                "pulse",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
-                Some(f64::NAN), None, None, None, "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                None,
+                "triggered",
+                Some(f64::NAN),
+                None,
+                None,
+                None,
+                "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
-                None, None, Some(1.5), None, "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                None,
+                "triggered",
+                None,
+                None,
+                Some(1.5),
+                None,
+                "transition",
             )
             .is_err());
         assert!(store
             .record_monitor_signal_event(
-                "BTC", "hyperliquid", "lighter", 1, None, "triggered",
-                None, None, None, Some("{nope"), "transition",
+                "BTC",
+                "hyperliquid",
+                "lighter",
+                1,
+                None,
+                "triggered",
+                None,
+                None,
+                None,
+                Some("{nope"),
+                "transition",
             )
             .is_err());
         assert_eq!(store.monitor_signal_event_count().unwrap(), 3);
@@ -5320,13 +5718,15 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 21);
+        assert_eq!(v, 22);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
             .unwrap();
         let rows: Vec<(String, f64, i64)> = stmt
-            .query_map([], |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap())))
+            .query_map([], |r| {
+                Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap()))
+            })
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -5359,14 +5759,26 @@ mod tests {
             symbol: "NEAR-USDC".to_string(),
             venue_a: "vanta".to_string(),
             venue_b: "lighter".to_string(),
-            leg_a_status: if ok { "filled".into() } else { "blocked".into() },
-            leg_b_status: if ok { "filled".into() } else { "blocked".into() },
+            leg_a_status: if ok {
+                "filled".into()
+            } else {
+                "blocked".into()
+            },
+            leg_b_status: if ok {
+                "filled".into()
+            } else {
+                "blocked".into()
+            },
             success: ok,
             gross_profit: 0.0,
             fees: 1.0,
             net_profit: -1.0,
             latency_us: 7,
-            note: if ok { "ok".into() } else { "Execution blocked: test reason".into() },
+            note: if ok {
+                "ok".into()
+            } else {
+                "Execution blocked: test reason".into()
+            },
             direction: None,
             trigger_spread_bps: Some(61.1),
             baseline_mean_spread_bps: None,
@@ -5426,7 +5838,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 21);
+        assert_eq!(v10, 22);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -5495,7 +5907,9 @@ mod tests {
         let all: i64 = store
             .conn
             .lock()
-            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(all, 2);
         // Retention bounds the raw log.
@@ -5503,14 +5917,18 @@ mod tests {
         let kept: i64 = store
             .conn
             .lock()
-            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kept, 2);
         store.prune_venue_volume_samples(60_001, 1_000_000).unwrap();
         let kept: i64 = store
             .conn
             .lock()
-            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM venue_volume_samples", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(kept, 0);
     }
@@ -5536,11 +5954,7 @@ mod tests {
         };
         for i in 0..(days * 24) {
             let ts = base + i * 3_600_000 + 60_000;
-            let spread_bps = if i % 2 == 0 {
-                peak_for_hour(i)
-            } else {
-                7.0
-            };
+            let spread_bps = if i % 2 == 0 { peak_for_hour(i) } else { 7.0 };
             store
                 .record_spread_samples(
                     "BTC",
@@ -5571,7 +5985,11 @@ mod tests {
             .collect();
         // Overlap carries 32 episodes: calibrated, not provisional.
         let overlap = by_session["overlap"];
-        assert!(overlap.n_episodes >= 30, "overlap episodes: {}", overlap.n_episodes);
+        assert!(
+            overlap.n_episodes >= 30,
+            "overlap episodes: {}",
+            overlap.n_episodes
+        );
         assert!(!overlap.provisional);
         assert!(overlap.med_abs_spread_bps.unwrap() > 0.0);
         assert!(
@@ -5644,12 +6062,7 @@ mod tests {
         // Nuke the entire raw log: time cutoff plus zero-row cap.
         store.prune_spread_samples(i64::MAX, 0).unwrap();
         assert_eq!(store.spread_sample_count().unwrap(), 0);
-        assert_eq!(
-            store
-                .delete_spread_samples_before(i64::MAX)
-                .unwrap_or(0),
-            0
-        );
+        assert_eq!(store.delete_spread_samples_before(i64::MAX).unwrap_or(0), 0);
         // Derived state survives every raw-sample prune path.
         assert_eq!(store.session_profiles("BTC").unwrap().len(), 5);
         assert_eq!(store.session_hour_bins("BTC").unwrap().len(), 24);
@@ -5710,9 +6123,39 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         // BTC traded twice on hyperliquid-vs-lighter, once on
         // hyperliquid-vs-arcus: two cards, first aggregates both signals.
-        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 60000.0, 60100.0);
-        filled_two_leg(&store, "s2", "BTC-USDC", "futures", "hyperliquid", "lighter", 0.5, 60000.0, 60100.0);
-        filled_two_leg(&store, "s3", "BTC-USDC", "futures", "hyperliquid", "arcus", 1.0, 60000.0, 60100.0);
+        filled_two_leg(
+            &store,
+            "s1",
+            "BTC-USDC",
+            "futures",
+            "hyperliquid",
+            "lighter",
+            1.0,
+            60000.0,
+            60100.0,
+        );
+        filled_two_leg(
+            &store,
+            "s2",
+            "BTC-USDC",
+            "futures",
+            "hyperliquid",
+            "lighter",
+            0.5,
+            60000.0,
+            60100.0,
+        );
+        filled_two_leg(
+            &store,
+            "s3",
+            "BTC-USDC",
+            "futures",
+            "hyperliquid",
+            "arcus",
+            1.0,
+            60000.0,
+            60100.0,
+        );
 
         let signals = store.list_signals(None, None).unwrap();
         let positions = aggregate_open_positions(&signals, &|_, _| None);
@@ -5738,10 +6181,40 @@ mod tests {
     #[test]
     fn test_aggregate_open_positions_marks_to_market_and_filters() {
         let store = StateStore::open_in_memory().unwrap();
-        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 100.0, 105.0);
-        filled_two_leg(&store, "s2", "ETH-USDC", "funding", "hyperliquid", "lighter", 2.0, 10.0, 10.0);
+        filled_two_leg(
+            &store,
+            "s1",
+            "BTC-USDC",
+            "futures",
+            "hyperliquid",
+            "lighter",
+            1.0,
+            100.0,
+            105.0,
+        );
+        filled_two_leg(
+            &store,
+            "s2",
+            "ETH-USDC",
+            "funding",
+            "hyperliquid",
+            "lighter",
+            2.0,
+            10.0,
+            10.0,
+        );
         // A closed signal must not contribute.
-        filled_two_leg(&store, "s3", "SOL-USDC", "futures", "hyperliquid", "lighter", 5.0, 1.0, 1.0);
+        filled_two_leg(
+            &store,
+            "s3",
+            "SOL-USDC",
+            "futures",
+            "hyperliquid",
+            "lighter",
+            5.0,
+            1.0,
+            1.0,
+        );
         store
             .update_signal_status("s3", SignalStatus::Closed, None)
             .unwrap();
@@ -5768,7 +6241,17 @@ mod tests {
     #[test]
     fn test_aggregate_open_positions_partial_flatten_nets_residual() {
         let store = StateStore::open_in_memory().unwrap();
-        filled_two_leg(&store, "s1", "BTC-USDC", "futures", "hyperliquid", "lighter", 1.0, 100.0, 100.0);
+        filled_two_leg(
+            &store,
+            "s1",
+            "BTC-USDC",
+            "futures",
+            "hyperliquid",
+            "lighter",
+            1.0,
+            100.0,
+            100.0,
+        );
         // Partial flatten child: opposite-side legs on the same venues,
         // still open (unresolved) -> nets the group to residual 0.4.
         let mut child = two_leg_signal("flat-s1-0001", "BTC-USDC", None, None);
@@ -5845,7 +6328,10 @@ mod tests {
                 updated_ts: 9_000,
             })
             .unwrap();
-        let got = store.phase2_promotion_state("ETH").unwrap().expect("alias read");
+        let got = store
+            .phase2_promotion_state("ETH")
+            .unwrap()
+            .expect("alias read");
         assert_eq!(got.status, "promoted");
         assert!(store
             .phase2_upsert_promotion_state(&PromotionStateRow {
@@ -5862,7 +6348,10 @@ mod tests {
     #[test]
     fn test_autotune_apply_events_audit_roundtrip() {
         let store = StateStore::open_in_memory().unwrap();
-        assert!(store.recent_autotune_apply_events("BTC-USDC", 10).unwrap().is_empty());
+        assert!(store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .unwrap()
+            .is_empty());
         let id = store
             .record_autotune_apply_event(
                 "BTC-USDC",
@@ -5885,13 +6374,37 @@ mod tests {
     fn test_max_leverage_validation_bounds() {
         let store = StateStore::open_in_memory().unwrap();
         assert!(store
-            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(0))
+            .upsert_account(
+                "a1",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                Some(0)
+            )
             .is_err());
         assert!(store
-            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(6))
+            .upsert_account(
+                "a1",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                Some(6)
+            )
             .is_err());
         assert!(store
-            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", Some(99))
+            .upsert_account(
+                "a1",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                Some(99)
+            )
             .is_err());
         for ok in [None, Some(1), Some(3), Some(5)] {
             store
@@ -5942,7 +6455,10 @@ mod tests {
             .unwrap();
         assert_eq!(quiet.event, None);
         assert_eq!(quiet.note, None);
-        assert!(store.list_equity_events(Some("hyperliquid"), 10).unwrap().is_empty());
+        assert!(store
+            .list_equity_events(Some("hyperliquid"), 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -5963,7 +6479,10 @@ mod tests {
             .get_equity_expectation("lighter")
             .unwrap()
             .expect("rebased");
-        assert_eq!(expected, 55_000.0, "baseline must rebase so PnL never absorbs the flow");
+        assert_eq!(
+            expected, 55_000.0,
+            "baseline must rebase so PnL never absorbs the flow"
+        );
         let rows = store.list_equity_events(Some("lighter"), 10).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, event.id);
@@ -5972,11 +6491,16 @@ mod tests {
     #[test]
     fn test_equity_withdrawal_and_transfer_guess() {
         let store = StateStore::open_in_memory().unwrap();
-        store.check_account_equity("vanta", 20_000.0, "", 1_000).unwrap();
+        store
+            .check_account_equity("vanta", 20_000.0, "", 1_000)
+            .unwrap();
         let out = store
             .check_account_equity("vanta", 19_000.0, "", 2_000)
             .unwrap();
-        assert_eq!(out.event.as_ref().map(|e| e.kind.as_str()), Some("withdrawal"));
+        assert_eq!(
+            out.event.as_ref().map(|e| e.kind.as_str()),
+            Some("withdrawal")
+        );
         let moved = store
             .check_account_equity("vanta", 19_050.0, "BTC-USDC:Buy:1", 3_000)
             .unwrap();
@@ -5990,23 +6514,31 @@ mod tests {
     #[test]
     fn test_equity_missed_poll_gap_produces_no_event() {
         let store = StateStore::open_in_memory().unwrap();
-        store.check_account_equity("grvt", 10_000.0, "", 1_000).unwrap();
+        store
+            .check_account_equity("grvt", 10_000.0, "", 1_000)
+            .unwrap();
         let gap = crate::equity_attribution::EQUITY_POLL_GAP_MAX_MS + 1;
         let report = store
             .check_account_equity("grvt", 99_000.0, "", 1_000 + gap)
             .unwrap();
         assert_eq!(report.event, None);
         assert!(report.note.unwrap_or_default().contains("gap"));
-        let (expected, _, _) = store.get_equity_expectation("grvt").unwrap().expect("rebased");
+        let (expected, _, _) = store
+            .get_equity_expectation("grvt")
+            .unwrap()
+            .expect("rebased");
         assert_eq!(expected, 99_000.0);
         assert!(store.list_equity_events(None, 100).unwrap().is_empty());
     }
 
     #[test]
-    fn test_equity_events_ipc_listing_filters_and_limits() {        let store = StateStore::open_in_memory().unwrap();
+    fn test_equity_events_ipc_listing_filters_and_limits() {
+        let store = StateStore::open_in_memory().unwrap();
         for (acct, base) in [("hyperliquid", 10_000.0), ("lighter", 20_000.0)] {
             store.check_account_equity(acct, base, "", 1_000).unwrap();
-            store.check_account_equity(acct, base + 100.0, "", 2_000).unwrap();
+            store
+                .check_account_equity(acct, base + 100.0, "", 2_000)
+                .unwrap();
         }
         let all = store.list_equity_events(None, 100).unwrap();
         assert_eq!(all.len(), 2);
@@ -6016,7 +6548,10 @@ mod tests {
         assert_eq!(one[0].account_id, "lighter");
         let capped = store.list_equity_events(None, 1).unwrap();
         assert_eq!(capped.len(), 1);
-        assert!(store.list_equity_events(Some("nope"), 10).unwrap().is_empty());
+        assert!(store
+            .list_equity_events(Some("nope"), 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -6040,11 +6575,17 @@ mod tests {
         assert_eq!(windowed.len(), 1);
         let removed = store.prune_margin_snapshots(2_000).unwrap();
         assert_eq!(removed, 1);
-        assert_eq!(store.list_margin_snapshots("hyperliquid", 0).unwrap().len(), 1);
+        assert_eq!(
+            store.list_margin_snapshots("hyperliquid", 0).unwrap().len(),
+            1
+        );
         assert_eq!(store.list_margin_snapshots("lighter", 0).unwrap().len(), 1);
         let removed_all = store.prune_margin_snapshots(3_000).unwrap();
         assert_eq!(removed_all, 2);
-        assert!(store.list_margin_snapshots("lighter", 0).unwrap().is_empty());
+        assert!(store
+            .list_margin_snapshots("lighter", 0)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

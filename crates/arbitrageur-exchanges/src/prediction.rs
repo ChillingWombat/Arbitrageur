@@ -1,12 +1,12 @@
-use async_trait::async_trait;
-use chrono::Utc;
-use reqwest::Client;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, VenueId};
+use async_trait::async_trait;
+use chrono::Utc;
+use reqwest::Client;
 
 /// Polymarket CTF CLOB adapter for binary prediction markets.
 #[allow(dead_code)]
@@ -21,7 +21,10 @@ impl PolymarketAdapter {
     pub fn new(base_url: Option<String>, api_key: Option<String>) -> Self {
         Self {
             venue_id: VenueId::new("polymarket"),
-            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.unwrap_or_else(|| "https://clob.polymarket.com".to_string()),
             api_key,
         }
@@ -92,11 +95,17 @@ impl ExchangeAdapter for PolymarketAdapter {
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+        anyhow::bail!(
+            "Live order execution is not implemented for {}; refusing to fabricate a fill",
+            self.name()
+        )
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+        anyhow::bail!(
+            "Live order cancellation is not implemented for {}",
+            self.name()
+        )
     }
 }
 
@@ -113,7 +122,10 @@ impl KalshiAdapter {
     pub fn new(base_url: Option<String>, api_key: Option<String>) -> Self {
         Self {
             venue_id: VenueId::new("kalshi"),
-            client: Client::builder().timeout(std::time::Duration::from_secs(15)).build().unwrap_or_default(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_default(),
             base_url: base_url.unwrap_or_else(|| "https://trading-api.kalshi.com".to_string()),
             api_key,
         }
@@ -184,10 +196,16 @@ impl ExchangeAdapter for KalshiAdapter {
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live order execution is not implemented for {}; refusing to fabricate a fill", self.name())
+        anyhow::bail!(
+            "Live order execution is not implemented for {}; refusing to fabricate a fill",
+            self.name()
+        )
     }
 
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live order cancellation is not implemented for {}", self.name())
+        anyhow::bail!(
+            "Live order cancellation is not implemented for {}",
+            self.name()
+        )
     }
 }

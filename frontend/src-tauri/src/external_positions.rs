@@ -14,16 +14,14 @@
 //!   `get_venue_balances`). Per-venue failures become `unreadable` notes —
 //!   never fabricated or zero-filled positions.
 //! - Closes need Live Trading mode + unlocked vault + a venue whose adapter
-//!   reports `supports_live_execution`. Reduce-only orders only, full residual
-//!   quantity, fresh re-read right before submit (no stale-qty closes).
+//!   reports `live_order_submission_implemented`. Reduce-only orders only, full
+//!   residual quantity, fresh re-read right before submit (no stale-qty closes).
 //! - Every close is recorded as a strategy-"external" signal execution so it
 //!   shows up in attribution and audit like any other managed trade.
 
 use crate::state::AppEngineState;
-use crate::state_store::{
-    canonical_base, LegSide, NewSignalExecution, NewSignalLeg, SignalStatus,
-};
-use arbitrageur_core::order::OrderRequest;
+use crate::state_store::{canonical_base, LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+use arbitrageur_core::order::{OrderRequest, OrderResponse};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -196,26 +194,26 @@ fn f64_dec(v: f64) -> Option<Decimal> {
     Decimal::from_str(&v.to_string()).ok()
 }
 
-/// Sum of open system leg qtys on (venue, base, side-sign). Only legs of
-/// non-terminal signals count; closed/failed history never shields a live
-/// position from being shown as external.
+/// Sum of open system leg qtys on (venue, exact symbol, side-sign). Only
+/// legs of non-terminal signals count; closed/failed history never shields a
+/// live position from being shown as external. Attribution keys on each
+/// leg's own exact symbol — same-base instruments must not net against one
+/// another.
 fn system_qty_for(
     signals: &[crate::state_store::SignalExecution],
     venue_lc: &str,
-    base: &str,
+    exact_symbol: &str,
     side_sign: f64,
 ) -> f64 {
     signals
         .iter()
-        .filter(|s| {
-            !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed)
-                && canonical_base(&s.symbol) == base
-        })
+        .filter(|s| !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
         .flat_map(|s| s.legs.iter())
         .filter(|l| {
             l.venue.trim().to_lowercase() == venue_lc
                 && l.filled_qty.is_finite()
                 && l.filled_qty > 0.0
+                && l.symbol.eq_ignore_ascii_case(exact_symbol)
         })
         .filter(|l| match l.side {
             LegSide::Long => side_sign > 0.0,
@@ -260,10 +258,18 @@ pub async fn get_external_positions_impl(
         };
         let venue_lc = vid.to_string().to_lowercase();
         let close_supported =
-            adapter.supports_live_execution() && adapter.has_live_credentials();
-        let (mut raw, mut shown, mut sys_n, mut dust_n, mut bad_n) = (0usize, 0usize, 0usize, 0usize, 0usize);
-        for p in &account.positions {
+            adapter.live_order_submission_implemented() && adapter.has_live_credentials();
+        let (mut raw, mut shown, mut sys_n, mut dust_n, mut bad_n) =
+            (0usize, 0usize, 0usize, 0usize, 0usize);
+        for raw_position in &account.positions {
             raw += 1;
+            let p = match adapter.normalize_account_position(raw_position) {
+                Ok(Some(p)) => p,
+                Ok(None) | Err(_) => {
+                    bad_n += 1;
+                    continue;
+                }
+            };
             let qty = dec_f64(p.quantity);
             if !qty.is_finite() || qty <= 0.0 {
                 bad_n += 1;
@@ -276,7 +282,7 @@ pub async fn get_external_positions_impl(
                 bad_n += 1;
                 continue;
             }
-            let sys = system_qty_for(&signals, &venue_lc, &base, side_sign);
+            let sys = system_qty_for(&signals, &venue_lc, &p.symbol, side_sign);
             let ext = residual_qty(qty, sys);
             if ext <= 0.0 {
                 sys_n += 1;
@@ -291,11 +297,20 @@ pub async fn get_external_positions_impl(
             let entry = dec_f64(p.entry_price);
             let upnl = dec_f64(p.unrealized_pnl);
             positions.push(ExternalPositionDto {
-                key: format!("external|{}|{}|{}", venue_lc, base, if side_sign > 0.0 { "long" } else { "short" }),
+                key: format!(
+                    "external|{}|{}|{}",
+                    venue_lc,
+                    p.symbol,
+                    if side_sign > 0.0 { "long" } else { "short" }
+                ),
                 venue: venue_lc.clone(),
                 symbol: p.symbol.clone(),
                 base: base.clone(),
-                side: if side_sign > 0.0 { "long".into() } else { "short".into() },
+                side: if side_sign > 0.0 {
+                    "long".into()
+                } else {
+                    "short".into()
+                },
                 quantity: qty,
                 entry_price: entry,
                 mark_price: mark,
@@ -344,7 +359,9 @@ fn hub_book_levels(
     let book = state
         .market_data_hub
         .get_valid_orderbook(&VenueId::from(venue), symbol, None)
-        .ok_or_else(|| format!("No live orderbook for {symbol} on {venue} — refresh the venue feed first"))?;
+        .ok_or_else(|| {
+            format!("No live orderbook for {symbol} on {venue} — refresh the venue feed first")
+        })?;
     let bids: Vec<(f64, f64)> = book
         .bids
         .iter()
@@ -358,7 +375,9 @@ fn hub_book_levels(
         .filter(|(p, s)| p.is_finite() && s.is_finite() && *p > 0.0 && *s > 0.0)
         .collect();
     if bids.is_empty() || asks.is_empty() {
-        return Err(format!("Orderbook for {symbol} on {venue} has an empty side — cannot price a close"));
+        return Err(format!(
+            "Orderbook for {symbol} on {venue} has an empty side — cannot price a close"
+        ));
     }
     let age_ms = Utc::now()
         .signed_duration_since(book.timestamp)
@@ -382,31 +401,28 @@ pub async fn recommend_external_close_impl(
         .get_adapter(&venue_lc)
         .ok_or_else(|| format!("Unknown venue '{venue}'"))?;
     if !adapter.has_live_credentials() {
-        return Err(format!("No live credentials for {venue} — unlock the vault and configure the account first"));
+        return Err(format!(
+            "No live credentials for {venue} — unlock the vault and configure the account first"
+        ));
     }
     let account = adapter
         .fetch_account()
         .await
         .map_err(|e| format!("Account read failed for {venue}: {e}"))?;
-    let base = canonical_base(symbol);
-    let pos = account
-        .positions
-        .iter()
-        .find(|p| {
-            canonical_base(&p.symbol) == base
-                && dec_f64(p.quantity) > 0.0
-        })
-        .ok_or_else(|| format!("No live position in {base} on {venue}"))?;
+    let pos = adapter
+        .account_position_for(&account, symbol)
+        .map_err(|e| format!("Could not resolve {symbol} on {venue}: {e}"))?
+        .ok_or_else(|| format!("No live position in {symbol} on {venue}"))?;
+    let base = canonical_base(&pos.symbol);
     let qty = dec_f64(pos.quantity);
     let long = pos.signed_quantity() > dec!(0);
     let close_side = if long { "Sell" } else { "Buy" };
 
-    // Hub symbols may differ in quote suffix; try the live spelling first,
-    // then fall back to any hub book for the same base on this venue.
+    // Hub books key on the engine/canonical spelling; try the normalized
+    // account symbol first, then the caller's spelling.
     let (bids, asks, age_ms) = match hub_book_levels(state, &venue_lc, &pos.symbol) {
         Ok(v) => v,
-        Err(_) => hub_book_levels(state, &venue_lc, symbol)
-            .map_err(|e| e.to_string())?,
+        Err(_) => hub_book_levels(state, &venue_lc, symbol).map_err(|e| e.to_string())?,
     };
     // Closing levels: a long sells into bids, a short buys from asks.
     let levels: Vec<(f64, f64)> = if long { bids.clone() } else { asks.clone() };
@@ -414,15 +430,22 @@ pub async fn recommend_external_close_impl(
     let best_bid = bids[0].0;
     let best_ask = asks[0].0;
     let mid = (best_bid + best_ask) / 2.0;
-    let touch_spread_bps = if mid > 0.0 { (best_ask - best_bid) / mid * 10_000.0 } else { 0.0 };
+    let touch_spread_bps = if mid > 0.0 {
+        (best_ask - best_bid) / mid * 10_000.0
+    } else {
+        0.0
+    };
 
-    let (vwap, filled) = vwap_for_size(&levels, qty).ok_or_else(|| {
-        format!("Book too thin to price closing {qty} {base} on {venue}")
-    })?;
+    let (vwap, filled) = vwap_for_size(&levels, qty)
+        .ok_or_else(|| format!("Book too thin to price closing {qty} {base} on {venue}"))?;
     let full_fill = filled + 1e-9 >= qty;
     let slip_bps = if touch > 0.0 {
         // Signed so that paying through the touch reads positive.
-        let raw = if long { (touch - vwap) / touch } else { (vwap - touch) / touch };
+        let raw = if long {
+            (touch - vwap) / touch
+        } else {
+            (vwap - touch) / touch
+        };
         raw * 10_000.0
     } else {
         0.0
@@ -441,7 +464,9 @@ pub async fn recommend_external_close_impl(
 
     let mut warnings = Vec::new();
     if age_ms > STALE_BOOK_MS {
-        warnings.push(format!("Book snapshot is {age_ms}ms old — re-check before submitting"));
+        warnings.push(format!(
+            "Book snapshot is {age_ms}ms old — re-check before submitting"
+        ));
     }
     if !full_fill {
         warnings.push(format!(
@@ -449,7 +474,9 @@ pub async fn recommend_external_close_impl(
         ));
     }
     if slip_bps > 25.0 {
-        warnings.push(format!("Depth slip is {slip_bps:.1} bps — prefer a pegged limit and work the order"));
+        warnings.push(format!(
+            "Depth slip is {slip_bps:.1} bps — prefer a pegged limit and work the order"
+        ));
     }
     if let Some(d) = drift {
         if d.abs() > 50.0 {
@@ -458,7 +485,11 @@ pub async fn recommend_external_close_impl(
             ));
         }
     }
-    let recommended_mode = if full_fill && slip_bps <= 25.0 { "limit" } else { "market" };
+    let recommended_mode = if full_fill && slip_bps <= 25.0 {
+        "limit"
+    } else {
+        "market"
+    };
     Ok(CloseRecommendationDto {
         venue: venue_lc,
         symbol: pos.symbol.clone(),
@@ -471,13 +502,73 @@ pub async fn recommend_external_close_impl(
         depth_fillable_qty: filled,
         full_size_fillable: full_fill,
         recommended_mode: recommended_mode.into(),
-        recommended_limit_price: if recommended_mode == "limit" { Some(touch) } else { None },
+        recommended_limit_price: if recommended_mode == "limit" {
+            Some(touch)
+        } else {
+            None
+        },
         taker_fee_bps: fee_bps,
         est_friction_bps: est_friction,
         mid_vs_mark_bps: drift,
         book_age_ms: age_ms,
         warnings,
     })
+}
+
+fn validate_close_response(
+    adapter_venue: &VenueId,
+    expected_symbol: &str,
+    expected_client_order_id: &str,
+    expected_qty: Decimal,
+    resp: &OrderResponse,
+) -> Result<(), String> {
+    let attributable = resp.venue == *adapter_venue
+        && resp.symbol == expected_symbol
+        && resp.client_order_id == expected_client_order_id
+        && !resp.order_id.trim().is_empty()
+        && resp.order_id != "0";
+    let bounded_qty = resp.original_qty == expected_qty
+        && resp.filled_qty >= dec!(0)
+        && resp.filled_qty <= expected_qty
+        && resp.remaining_qty >= dec!(0)
+        && resp.remaining_qty <= expected_qty;
+    let valid_status = match resp.status {
+        arbitrageur_core::types::OrderStatus::New => {
+            resp.filled_qty == dec!(0) && resp.remaining_qty == expected_qty
+        }
+        arbitrageur_core::types::OrderStatus::PartiallyFilled => {
+            resp.filled_qty > dec!(0)
+                && resp.filled_qty < expected_qty
+                && resp.remaining_qty == expected_qty - resp.filled_qty
+        }
+        arbitrageur_core::types::OrderStatus::Filled => {
+            resp.filled_qty == expected_qty && resp.remaining_qty == dec!(0)
+        }
+        arbitrageur_core::types::OrderStatus::Cancelled
+        | arbitrageur_core::types::OrderStatus::Rejected
+        | arbitrageur_core::types::OrderStatus::Expired => {
+            resp.filled_qty == dec!(0) && resp.remaining_qty == expected_qty
+        }
+    };
+    if !(valid_status && attributable && bounded_qty && resp.fee >= dec!(0)) {
+        return Err(format!(
+            "Close response on {adapter_venue} {expected_symbol} is not attributable/consistent: status={:?} qty={}/{} remaining={} venue={} client_order_id={} order_id={} fee={}",
+            resp.status,
+            resp.filled_qty,
+            expected_qty,
+            resp.remaining_qty,
+            resp.venue,
+            resp.client_order_id,
+            resp.order_id,
+            resp.fee
+        ));
+    }
+    if resp.filled_qty > dec!(0) && resp.avg_fill_price.filter(|p| *p > dec!(0)).is_none() {
+        return Err(format!(
+            "Close response on {adapter_venue} {expected_symbol} reports filled quantity without a positive fill price"
+        ));
+    }
+    Ok(())
 }
 
 /// Close the external residual with a live reduce-only order.
@@ -498,8 +589,10 @@ pub async fn close_external_position_impl(
     let adapter = state
         .get_adapter(&venue_lc)
         .ok_or_else(|| format!("Unknown venue '{}'", input.venue))?;
-    if !adapter.supports_live_execution() {
-        return Err(format!("{venue_lc} does not support live close orders through the bot yet"));
+    if !adapter.live_order_submission_implemented() {
+        return Err(format!(
+            "{venue_lc} does not support live close orders through the bot yet"
+        ));
     }
     if !adapter.has_live_credentials() {
         return Err(format!("No live credentials for {venue_lc}"));
@@ -513,32 +606,40 @@ pub async fn close_external_position_impl(
         .fetch_account()
         .await
         .map_err(|e| format!("Account re-read failed for {venue_lc}: {e}"))?;
-    let base = canonical_base(&input.symbol);
     let signals = state
         .state_store
         .list_signals(None, None)
         .map_err(|e| e.to_string())?;
-    let live = account
-        .positions
-        .iter()
-        .find(|p| canonical_base(&p.symbol) == base && dec_f64(p.quantity) > 0.0)
-        .ok_or_else(|| format!("No live position in {base} on {venue_lc} (already flat?)"))?;
+    let live = adapter
+        .account_position_for(&account, &input.symbol)
+        .map_err(|e| format!("Could not resolve {} on {venue_lc}: {e}", input.symbol))?
+        .ok_or_else(|| {
+            format!(
+                "No live position in {} on {venue_lc} (already flat?)",
+                input.symbol
+            )
+        })?;
+    let base = canonical_base(&live.symbol);
     let qty = dec_f64(live.quantity);
     let long = live.signed_quantity() > dec!(0);
     let sign = if long { 1.0 } else { -1.0 };
-    let ext = residual_qty(qty, system_qty_for(&signals, &venue_lc, &base, sign));
+    let ext = residual_qty(qty, system_qty_for(&signals, &venue_lc, &live.symbol, sign));
     if ext * dec_f64(live.mark_price) < DUST_NOTIONAL_USD {
-        return Err(format!("Nothing external left to close in {base} on {venue_lc}"));
+        return Err(format!(
+            "Nothing external left to close in {base} on {venue_lc}"
+        ));
     }
-    let qty_dec = f64_dec(ext)
-        .ok_or_else(|| "External quantity is not finite — refusing".to_string())?;
+    let qty_dec =
+        f64_dec(ext).ok_or_else(|| "External quantity is not finite — refusing".to_string())?;
     let close_side = if long { Side::Sell } else { Side::Buy };
     let mut order = if mode == "limit" {
         let px = input
             .limit_price
             .filter(|p| p.is_finite() && *p > 0.0)
             .and_then(f64_dec)
-            .ok_or_else(|| "Limit close needs a positive limit_price (use the recommendation)".to_string())?;
+            .ok_or_else(|| {
+                "Limit close needs a positive limit_price (use the recommendation)".to_string()
+            })?;
         let mut o = OrderRequest::new_limit(
             VenueId::from(venue_lc.clone()),
             live.symbol.clone(),
@@ -559,22 +660,25 @@ pub async fn close_external_position_impl(
         o
     };
     // Tag the client order so venue-side fills reconcile to this flow.
-    order.client_order_id = format!("extclose-{}-{}", venue_lc, Utc::now().timestamp_millis());
-
-    let _guard = state.execution_lock.lock().await;
-    let resp = adapter
-        .place_order(order)
-        .await
-        .map_err(|e| format!("Close order rejected on {venue_lc}: {e}"))?;
-
-    // Record under strategy "external" so attribution + audit treat the close
-    // like any other managed trade (1-leg reduce, filled from the response).
-    let sid = format!("extclose-{}", Utc::now().timestamp_millis());
+    order.client_order_id = format!(
+        "extclose-{}-{}-{:08x}",
+        venue_lc,
+        Utc::now().timestamp_millis(),
+        rand::random::<u32>()
+    );
+    let expected_client_order_id = order.client_order_id.clone();
+    let expected_symbol = order.symbol.clone();
+    let expected_qty = order.quantity;
+    let sid = expected_client_order_id.clone();
     let leg_side = if long { LegSide::Short } else { LegSide::Long };
-    let exec = state
+
+    // Persist the close intent before dispatch. If the process dies after the
+    // venue accepts the order, the in-flight row keeps the symbol blocked and
+    // preserves the exact leg identity for reconciliation.
+    state
         .state_store
         .record_signal_execution(&NewSignalExecution {
-            id: sid,
+            id: sid.clone(),
             strategy_id: "external".into(),
             symbol: live.symbol.clone(),
             route_id: None,
@@ -584,29 +688,163 @@ pub async fn close_external_position_impl(
                 account_id: None,
                 venue: venue_lc.clone(),
                 side: leg_side,
+                symbol: Some(live.symbol.clone()),
                 intended_qty: ext,
             }],
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Failed to persist external close intent: {e}"))?;
+
+    let mark_unresolved = |note: &str| {
+        let _ = state
+            .state_store
+            .update_signal_status(&sid, SignalStatus::Unresolved, Some(note));
+    };
+
+    let _guard = state.execution_lock.lock().await;
+    let resp = match adapter.place_order(order).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            let note = format!(
+                "External close submission returned an error after dispatch; verify venue state before retrying: {e}"
+            );
+            mark_unresolved(&note);
+            return Err(format!("Close order failed on {venue_lc}: {e}"));
+        }
+    };
+
+    if let Err(e) = validate_close_response(
+        &adapter.venue_id(),
+        &expected_symbol,
+        &expected_client_order_id,
+        expected_qty,
+        &resp,
+    ) {
+        let note = format!(
+            "External close response failed attribution/consistency checks; verify venue order {} before retrying: {e}",
+            resp.order_id
+        );
+        mark_unresolved(&note);
+        return Err(e);
+    }
+
+    if let Err(e) = state
+        .state_store
+        .record_leg_order_id(&sid, leg_side, &resp.order_id)
+    {
+        let note = format!(
+            "External close order {} was accepted but its order id could not be persisted: {e}",
+            resp.order_id
+        );
+        mark_unresolved(&note);
+        return Err(note);
+    }
+
     let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
     let avg = resp
         .avg_fill_price
         .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
     if filled > 0.0 {
-        let _ = state.state_store.apply_leg_fill(
-            &exec.id,
+        let fill_price = avg.unwrap_or(0.0).max(0.000_001);
+        if let Err(e) = state.state_store.apply_leg_fill(
+            &sid,
             leg_side,
             filled,
-            avg.unwrap_or(0.0).max(0.000_001),
+            fill_price,
             resp.fee.to_string().parse::<f64>().unwrap_or(0.0),
             Some(resp.order_id.as_str()),
-        );
-        let _ = state.state_store.update_signal_status(
-            &exec.id,
-            SignalStatus::Closed,
-            Some(format!("External close filled {filled} @ {:?}", avg).as_str()),
-        );
+        ) {
+            let note = format!(
+                "External close order {} filled but its fill could not be persisted: {e}",
+                resp.order_id
+            );
+            mark_unresolved(&note);
+            return Err(note);
+        }
     }
+
+    let fully_reported = resp.status == arbitrageur_core::types::OrderStatus::Filled
+        && resp.filled_qty == expected_qty
+        && resp.remaining_qty == dec!(0);
+    let mut status = if fully_reported {
+        "filled"
+    } else if filled > 0.0 {
+        "partial"
+    } else if resp.status == arbitrageur_core::types::OrderStatus::New {
+        "submitted"
+    } else {
+        "not_filled"
+    };
+    let mut note = format!(
+        "Reduce-only {close_side:?} {ext} {base}: {}",
+        match status {
+            "filled" => "reported filled; confirming account state",
+            "partial" => "partially filled — residual exposure remains",
+            "submitted" => "accepted/working — confirm terminal state at the venue",
+            "unverified" => "reported filled, but account confirmation is incomplete",
+            _ => "terminated without a fill — residual exposure remains",
+        }
+    );
+
+    if fully_reported {
+        match adapter.fetch_account().await {
+            Ok(acc) => {
+                let residual = match adapter.account_position_for(&acc, &live.symbol) {
+                    Ok(Some(p)) => residual_qty(
+                        dec_f64(p.quantity),
+                        system_qty_for(&signals, &venue_lc, &live.symbol, sign),
+                    ),
+                    Ok(None) => 0.0,
+                    Err(e) => {
+                        status = "unverified";
+                        note = format!(
+                            "External close reported filled, but account position resolution failed: {e} — verify venue state"
+                        );
+                        mark_unresolved(&note);
+                        return Ok(CloseResultDto {
+                            venue: venue_lc,
+                            symbol: live.symbol.clone(),
+                            mode,
+                            order_id: Some(resp.order_id),
+                            filled_qty: Some(filled),
+                            avg_fill_price: avg,
+                            status: status.into(),
+                            note,
+                        });
+                    }
+                };
+                if residual * dec_f64(live.mark_price) <= DUST_NOTIONAL_USD {
+                    let done =
+                        format!("External close filled {filled} and account re-read is flat");
+                    let _ = state.state_store.update_signal_status(
+                        &sid,
+                        SignalStatus::Closed,
+                        Some(&done),
+                    );
+                    note = done;
+                } else {
+                    status = "unverified";
+                    note = format!(
+                        "External close reported filled, but account re-read still shows {residual} {base} residual — verify venue state"
+                    );
+                    mark_unresolved(&note);
+                }
+            }
+            Err(e) => {
+                status = "unverified";
+                note = format!(
+                    "External close reported filled, but account re-read failed: {e} — verify venue state"
+                );
+                mark_unresolved(&note);
+            }
+        }
+    } else if status == "not_filled" {
+        let _ = state
+            .state_store
+            .update_signal_status(&sid, SignalStatus::Failed, Some(&note));
+    } else {
+        mark_unresolved(&note);
+    }
+
     Ok(CloseResultDto {
         venue: venue_lc,
         symbol: live.symbol.clone(),
@@ -614,11 +852,8 @@ pub async fn close_external_position_impl(
         order_id: Some(resp.order_id),
         filled_qty: Some(filled),
         avg_fill_price: avg,
-        status: if filled > 0.0 { "filled".into() } else { "submitted".into() },
-        note: format!(
-            "Reduce-only {close_side:?} {ext} {base}: {}",
-            if filled > 0.0 { "filled" } else { "working — re-check the venue" }
-        ),
+        status: status.into(),
+        note,
     })
 }
 
@@ -686,5 +921,101 @@ mod tests {
         assert!(vwap_for_size(&[], 1.0).is_none());
         assert!(vwap_for_size(&levels, 0.0).is_none());
         assert!(vwap_for_size(&[(100.0, 0.0)], 1.0).is_none());
+    }
+
+    #[test]
+    fn close_response_validation_requires_attributable_consistent_ack() {
+        use arbitrageur_core::types::OrderStatus;
+
+        let venue = VenueId::new("hyperliquid");
+        let mut resp = OrderResponse {
+            order_id: "oid-1".into(),
+            client_order_id: "client-1".into(),
+            venue: venue.clone(),
+            symbol: "BTC-USDC".into(),
+            status: OrderStatus::New,
+            original_qty: dec!(1.0),
+            filled_qty: dec!(0),
+            remaining_qty: dec!(1.0),
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDC".into(),
+            raw_response: None,
+            timestamp: Utc::now(),
+        };
+        validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &resp)
+            .expect("working ack");
+
+        resp.status = OrderStatus::Filled;
+        resp.filled_qty = dec!(1.0);
+        resp.remaining_qty = dec!(0);
+        resp.avg_fill_price = Some(dec!(65000.0));
+        validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &resp)
+            .expect("terminal fill");
+
+        let mut wrong_client = resp.clone();
+        wrong_client.client_order_id = "other".into();
+        assert!(
+            validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &wrong_client)
+                .is_err()
+        );
+
+        let mut wrong_symbol = resp.clone();
+        wrong_symbol.symbol = "ETH-USDC".into();
+        assert!(
+            validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &wrong_symbol)
+                .is_err()
+        );
+
+        let mut inconsistent = resp.clone();
+        inconsistent.remaining_qty = dec!(0.5);
+        assert!(
+            validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &inconsistent)
+                .is_err()
+        );
+
+        let mut no_price = resp.clone();
+        no_price.avg_fill_price = None;
+        assert!(
+            validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &no_price).is_err()
+        );
+
+        let mut impossible_working_fill = resp.clone();
+        impossible_working_fill.status = OrderStatus::New;
+        assert!(validate_close_response(
+            &venue,
+            "BTC-USDC",
+            "client-1",
+            dec!(1.0),
+            &impossible_working_fill
+        )
+        .is_err());
+
+        let mut partial = resp.clone();
+        partial.status = OrderStatus::PartiallyFilled;
+        partial.filled_qty = dec!(0.4);
+        partial.remaining_qty = dec!(0.6);
+        validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &partial)
+            .expect("partial close remains attributable");
+
+        for status in [
+            OrderStatus::Cancelled,
+            OrderStatus::Rejected,
+            OrderStatus::Expired,
+        ] {
+            let mut terminal = resp.clone();
+            terminal.status = status;
+            terminal.filled_qty = dec!(0);
+            terminal.remaining_qty = dec!(1.0);
+            terminal.avg_fill_price = None;
+            validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &terminal)
+                .expect("terminal zero-fill close remains attributable");
+
+            terminal.remaining_qty = dec!(0);
+            assert!(
+                validate_close_response(&venue, "BTC-USDC", "client-1", dec!(1.0), &terminal)
+                    .is_err()
+            );
+        }
     }
 }
