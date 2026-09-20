@@ -1451,5 +1451,13 @@ overhaul pass committed as `23d4aed`).
   - Clippy nit fixed (`collapsible_str_replace`).
 - **Venue sweep:** every venue with a documented trading API is now submittable — Hyperliquid, Lighter (+Robinhood deployment), Vanta/Orderly, PopDEX, Aster, Binance, OKX, Kraken, Coinbase, Decibel. Fail-closed BY DESIGN (no public trading API exists): Arcus account+orders (web search confirms no perps DEX API docs), prediction markets, Decibel funding (no endpoint). Arcus research documented in-session.
 - **Docs:** `EXCHANGES.md` §12 (Decibel, IMPLEMENTED), `SPEC.md` rollout paragraph updated.
-- **Verification:** exchanges 131/0, clippy 0 warnings, `cargo check -p arbitrageur-desktop` clean; release rebuild + relaunch pending.
+- **Verification:** exchanges 131/0, clippy 0 warnings, `cargo check -p arbitrageur-desktop` clean; release rebuilt (REL_EXIT 0), sidecar hash-matched, app relaunched and smoke-tested ALIVE with only pre-existing keyless-endpoint warnings.
 - **Tree note:** stages only the two `Cargo.toml`s + `decibel.rs` + the two doc files; second worker's UI hunks (`EngineSettings/ExchangeAccounts/PortfolioMonitor`, `types`, `commands.rs`, `state.rs`) untouched.
+
+## 56. Session Handoff — 2026-09-20 (PopDEX tickers shape fix, live-verified)
+
+- **Found live in the relaunched app log:** `fetch_markets failed for popdex: ... invalid type: map, expected a sequence at line 1 column 38` repeating every few seconds — all 66 PopDEX listings were blind.
+- **Root cause (reproduced in a scratch Rust test before fixing):** `fetch_all_tickers` parsed the envelope as paged-map `TickerPage {data, cursor}`, but the live API (mainnet AND testnet, confirmed via direct probes) returns `data` as a bare ARRAY. Single-symbol paths (`fetch_ticker`/`fetch_funding_rate` → `Vec<…>`) already assumed the array form, so only the market scan was broken.
+- **Fix (`crates/arbitrageur-exchanges/src/popdex.rs`):** untagged `TickerData::{List, Paged}` accepted by `fetch_all_tickers` (array → single page, map → paged loop); `+tickers_shapes_both_parse` unit test pins both fixtures. Scratch repro test removed.
+- **Verification:** exchanges 132/0, clippy 0 warnings, committed `816c69a`, pushed; release rebuilt, app relaunched — `fetch_markets failed for popdex` count is 0 over the full new run, no popdex/decibel errors, process ALIVE (remaining WARNs are pre-existing keyless aster/vanta backoffs).
+- **Tree note:** staged/committed only `popdex.rs`; second worker UI hunks untouched throughout.
