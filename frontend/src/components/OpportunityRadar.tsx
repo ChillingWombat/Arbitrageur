@@ -38,6 +38,7 @@ import {
 import { computeBotCycleStats } from "../services/botCycleStats";
 import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers — missing data always renders as "—", never 0    */
@@ -94,6 +95,25 @@ const STATUS_STYLE: Record<string, string> = {
   tracking: "bg-sky-50 text-sky-700 border-sky-300",
   preparing: "bg-surface-raised text-slate-600 border-surface-border",
   "no-data": "bg-loss-dim text-loss border-loss-border",
+};
+
+const VENUE_NAME: Record<string, string> = {
+  hyperliquid: "Hyperliquid",
+  lighter: "Lighter",
+  robinhood: "Robinhood",
+  vanta: "Vanta",
+  aster: "Aster",
+  arcus: "Arcus",
+  popdex: "PopDEX",
+  kraken_spot: "Kraken Spot",
+  kraken_futures: "Kraken Futures",
+  polymarket: "Polymarket",
+  kalshi: "Kalshi",
+  binance: "Binance",
+  coinbase: "Coinbase",
+  decibel: "Decibel",
+  ibkr: "IBKR",
+  ig: "IG",
 };
 
 const VENUE_LABEL: Record<string, string> = {
@@ -1329,6 +1349,13 @@ const OpportunityRadarInner: React.FC = () => {
               title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
             >
               <span className="text-slate-400 font-medium">Venue</span>
+              {venueFilters.length > 0 && (
+                <span className="flex items-center -space-x-1">
+                  {venueFilters.slice(0, 4).map((v) => (
+                    <VenueLogo key={v} venueId={v} name={VENUE_NAME[v] ?? v} size={16} />
+                  ))}
+                </span>
+              )}
               <span className="font-bold text-slate-900 font-mono text-xs">
                 {venueFilters.length === 0
                   ? "ALL"
@@ -1370,7 +1397,10 @@ const OpportunityRadarInner: React.FC = () => {
                           : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                       }`}
                     >
-                      <span className="font-mono text-xs">{VENUE_LABEL[v] ?? v}</span>
+                      <span className="flex items-center gap-2">
+                        <VenueLogo venueId={v} name={VENUE_NAME[v] ?? v} size={18} />
+                        <span className="font-mono text-xs">{VENUE_LABEL[v] ?? v}</span>
+                      </span>
                       {on && <Check className="w-3.5 h-3.5" />}
                     </button>
                   );
