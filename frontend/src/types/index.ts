@@ -1328,6 +1328,17 @@ export interface AgentCheckDto {
   approved: boolean;
   agentCount: number;
 }
+/** One reconciliation-supervisor pass over persisted working orders. */
+export interface ReconcileSummaryDto {
+  pendingLegs: number;
+  polled: number;
+  advanced: number;
+  resolved: number;
+  escalated: number;
+  pollErrors: number;
+  skipped: number;
+}
+
 export interface SignApproveDto {
   txHash: string;
   explorerUrl: string;

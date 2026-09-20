@@ -130,6 +130,7 @@ fn main() {
             commands::get_venue_execution_capabilities,
             commands::set_live_mode,
             commands::set_engine_paused,
+            commands::reconcile_orders_now,
             commands::get_engine_settings,
             commands::save_engine_settings,
             commands::get_ticker_strategy_config,

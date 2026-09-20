@@ -60,6 +60,7 @@ import type {
   SignApproveDto,
   SessionProfileDto,
   VenueCapabilityDto,
+  ReconcileSummaryDto,
 } from "../types/index.ts";
 import { DEFAULT_PASSIVE_UNWIND } from "../types/index.ts";
 
@@ -151,6 +152,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_venue_execution_capabilities",
   "set_live_mode",
   "set_engine_paused",
+  "reconcile_orders_now",
   "get_engine_settings",
   "save_engine_settings",
   "get_ticker_strategy_config",
@@ -698,6 +700,10 @@ export const api = {
 
   async setEnginePaused(paused: boolean): Promise<boolean> {
     return invokeDesktop<boolean>("set_engine_paused", { paused });
+  },
+
+  async reconcileOrdersNow(): Promise<ReconcileSummaryDto> {
+    return invokeDesktop<ReconcileSummaryDto>("reconcile_orders_now");
   },
 
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {

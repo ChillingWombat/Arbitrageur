@@ -633,6 +633,37 @@ impl DecibelAdapter {
         Ok(committed.data)
     }
 
+    /// Recent transactions touching our primary subaccount, ascending by
+    /// ledger version and strictly AFTER `after_version` — the post-commit
+    /// window where a resting order's fills/cancels actually land.
+    async fn recent_subaccount_txs(
+        &self,
+        subaccount: &str,
+        after_version: u64,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let url = format!(
+            "{}/accounts/{subaccount}/transactions?limit=50",
+            self.fullnode_url()
+        );
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "Decibel fullnode account-transactions status {} for {subaccount}",
+                resp.status()
+            );
+        }
+        let mut txs: Vec<serde_json::Value> = resp.json().await?;
+        let ver = |t: &serde_json::Value| {
+            t.get("version")
+                .and_then(|v| v.as_str())
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        txs.retain(|t| ver(t) > after_version);
+        txs.sort_by_key(ver);
+        Ok(txs)
+    }
+
     fn fullnode_url(&self) -> &'static str {
         if self.is_testnet() {
             "https://fullnode.testnet.aptoslabs.com/v1"
@@ -705,23 +736,66 @@ fn event_addr(v: Option<&serde_json::Value>) -> String {
     .to_lowercase()
 }
 
-/// Scan `tx.events` for our subaccount's `OrderEvent` (last one wins — the
-/// final lifecycle state) plus every `TradeEvent` booked to our account
-/// (each fill emits one maker + one taker row; ours is `account == sub`).
-fn parse_commit_order_state(
+/// Raw event accumulator — latest OrderEvent lifecycle fields plus summed
+/// TradeEvent fill/fee units across ANY number of transactions. Scanning
+/// the placement tx alone is blind to resting-order fills that land in
+/// later transactions; the accumulator lets a scan span them.
+#[derive(Default)]
+struct OrderScan {
+    venue_order_id: Option<String>,
+    client_order_id: Option<String>,
+    status_variant: Option<String>,
+    order_price: Option<Decimal>,
+    orig_qty: Decimal,
+    remaining_qty: Decimal,
+    fill_sz: Decimal,
+    fill_notional_units: Decimal,
+    fee_units: Decimal,
+}
+
+/// Does this event row belong to the order we're scanning? `cid`/`oid` are
+/// the persisted identity; `None, None` (the commit tx) accepts every row
+/// for the subaccount — our own placement tx emits only our order's rows.
+fn order_event_matches(data: &serde_json::Value, cid: Option<&str>, oid: Option<&str>) -> bool {
+    if cid.is_none() && oid.is_none() {
+        return true;
+    }
+    let ev_cid = option_str(data.get("client_order_id"));
+    let ev_oid = data.get("order_id").and_then(|id| {
+        id.as_str()
+            .map(str::to_string)
+            .or_else(|| id.as_u64().map(|n| n.to_string()))
+            .or_else(|| option_str(id.get("order_id")))
+    });
+    if let (Some(w), Some(g)) = (cid, ev_cid.as_deref()) {
+        if g == w {
+            return true;
+        }
+    }
+    if let (Some(w), Some(g)) = (oid, ev_oid.as_deref()) {
+        if g == w {
+            return true;
+        }
+    }
+    false
+}
+
+/// Fold one transaction's events into `acc`. OrderEvent rows update the
+/// lifecycle fields (later txs overwrite earlier ones — scan in ascending
+/// version order); TradeEvent rows add to the cumulative fill/fee sums.
+fn scan_tx_events(
+    acc: &mut OrderScan,
     tx: &serde_json::Value,
     subaccount: &str,
+    cid: Option<&str>,
+    oid: Option<&str>,
     sz_decimals: u32,
     px_decimals: u32,
-) -> DecibelCommitState {
-    let mut st = DecibelCommitState::default();
+) {
     let Some(events) = tx.get("events").and_then(|e| e.as_array()) else {
-        return st;
+        return;
     };
     let sub = subaccount.trim().to_lowercase();
-    let mut fill_sz = dec!(0);
-    let mut fill_notional_units = dec!(0);
-    let mut fee_units = dec!(0);
     for ev in events {
         let Some(ty) = ev.get("type").and_then(|t| t.as_str()) else {
             continue;
@@ -731,20 +805,21 @@ fn parse_commit_order_state(
         };
         if ty.contains("OrderEvent") {
             let user = event_addr(data.get("user"));
-            if user != sub {
+            if user != sub || !order_event_matches(data, cid, oid) {
                 continue;
             }
-            st.venue_order_id = data
-                .get("order_id")
-                .and_then(|id| {
-                    id.as_str()
-                        .map(str::to_string)
-                        .or_else(|| id.as_u64().map(|n| n.to_string()))
-                        .or_else(|| option_str(id.get("order_id")))
-                })
-                .or(st.venue_order_id);
-            st.client_order_id = option_str(data.get("client_order_id")).or(st.client_order_id);
-            st.status_variant = data
+            if let Some(v) = data.get("order_id").and_then(|id| {
+                id.as_str()
+                    .map(str::to_string)
+                    .or_else(|| id.as_u64().map(|n| n.to_string()))
+                    .or_else(|| option_str(id.get("order_id")))
+            }) {
+                acc.venue_order_id = Some(v);
+            }
+            if let Some(v) = option_str(data.get("client_order_id")) {
+                acc.client_order_id = Some(v);
+            }
+            if let Some(v) = data
                 .get("status")
                 .and_then(|s| {
                     s.get("__variant__")
@@ -752,19 +827,21 @@ fn parse_commit_order_state(
                         .or_else(|| s.as_str())
                 })
                 .map(str::to_string)
-                .or(st.status_variant);
-            st.order_price = dec_unit(data, "price", px_decimals)
-                .filter(|p| *p > dec!(0))
-                .or(st.order_price);
+            {
+                acc.status_variant = Some(v);
+            }
+            if let Some(v) = dec_unit(data, "price", px_decimals).filter(|p| *p > dec!(0)) {
+                acc.order_price = Some(v);
+            }
             if let Some(o) = dec_unit(data, "orig_size", sz_decimals) {
-                st.orig_qty = o;
+                acc.orig_qty = o;
             }
             if let Some(r) = dec_unit(data, "remaining_size", sz_decimals) {
-                st.remaining_qty = r;
+                acc.remaining_qty = r;
             }
         } else if ty.contains("TradeEvent") {
             let acct = event_addr(data.get("account"));
-            if acct != sub {
+            if acct != sub || !order_event_matches(data, cid, oid) {
                 continue;
             }
             let sz = data
@@ -777,20 +854,33 @@ fn parse_commit_order_state(
                 .and_then(|s| s.as_str())
                 .and_then(|s| Decimal::from_str_exact(s).ok())
                 .unwrap_or(dec!(0));
-            fill_sz += sz;
-            fill_notional_units += sz * px;
-            fee_units += data
+            acc.fill_sz += sz;
+            acc.fill_notional_units += sz * px;
+            acc.fee_units += data
                 .get("fee")
                 .and_then(|s| s.as_str())
                 .and_then(|s| Decimal::from_str_exact(s).ok())
                 .unwrap_or(dec!(0));
         }
     }
+}
+
+/// Scale raw accumulators into ledger units and apply the sanity gates.
+fn finalize_order_scan(acc: &OrderScan, sz_decimals: u32, px_decimals: u32) -> DecibelCommitState {
+    let mut st = DecibelCommitState {
+        venue_order_id: acc.venue_order_id.clone(),
+        client_order_id: acc.client_order_id.clone(),
+        status_variant: acc.status_variant.clone(),
+        order_price: acc.order_price,
+        orig_qty: acc.orig_qty,
+        remaining_qty: acc.remaining_qty,
+        ..Default::default()
+    };
     let sz_factor = Decimal::from(10u64.pow(sz_decimals.min(18)));
     let px_factor = Decimal::from(10u64.pow(px_decimals.min(18)));
-    if fill_sz > dec!(0) {
-        st.filled_qty = fill_sz / sz_factor;
-        let vwap_units = fill_notional_units / fill_sz;
+    if acc.fill_sz > dec!(0) {
+        st.filled_qty = acc.fill_sz / sz_factor;
+        let vwap_units = acc.fill_notional_units / acc.fill_sz;
         let vwap = vwap_units / px_factor;
         // Scale sanity: the documented px unit is the collateral balance
         // sheet's; a fill VWAP that deviates wildly from the order's own
@@ -816,7 +906,7 @@ fn parse_commit_order_state(
     // Negative fee = rebate; expose cost only and never a negative credit
     // that would inflate computed PnL. Sanity-gate against the fill
     // notional so a wrong-scale assumption cannot corrupt accounting.
-    let fee = fee_units / Decimal::from(10u64.pow(6));
+    let fee = acc.fee_units / Decimal::from(10u64.pow(6));
     let notional = st
         .avg_fill_price
         .or(st.order_price)
@@ -826,6 +916,28 @@ fn parse_commit_order_state(
         st.fee_usd = fee;
     }
     st
+}
+
+/// Scan `tx.events` for our subaccount's `OrderEvent` (last one wins — the
+/// final lifecycle state) plus every `TradeEvent` booked to our account
+/// (each fill emits one maker + one taker row; ours is `account == sub`).
+fn parse_commit_order_state(
+    tx: &serde_json::Value,
+    subaccount: &str,
+    sz_decimals: u32,
+    px_decimals: u32,
+) -> DecibelCommitState {
+    let mut acc = OrderScan::default();
+    scan_tx_events(
+        &mut acc,
+        tx,
+        subaccount,
+        None,
+        None,
+        sz_decimals,
+        px_decimals,
+    );
+    finalize_order_scan(&acc, sz_decimals, px_decimals)
 }
 
 /// Map a Decibel `OrderEvent` status variant onto `OrderStatus` using the
@@ -1389,7 +1501,7 @@ impl ExchangeAdapter for DecibelAdapter {
             });
         }
         let row = self.fetch_market_row(symbol).await?;
-        let st = parse_commit_order_state(&tx, &subaccount, row.sz_decimals, row.px_decimals);
+        let mut st = parse_commit_order_state(&tx, &subaccount, row.sz_decimals, row.px_decimals);
         if st.status_variant.is_none() && st.venue_order_id.is_none() {
             anyhow::bail!(
                 "Decibel transaction {hash} carries no OrderEvent for subaccount {subaccount}"
@@ -1405,6 +1517,88 @@ impl ExchangeAdapter for DecibelAdapter {
                 anyhow::bail!(
                     "Decibel transaction {hash} client_order_id '{got}' != persisted '{want}'"
                 );
+            }
+        }
+        let status = decibel_order_status(
+            st.status_variant.as_deref(),
+            st.filled_qty,
+            st.remaining_qty,
+        );
+        // Stage 2 — resting-order fills land in LATER transactions the
+        // placement tx cannot see. While the order is still working, scan
+        // post-commit subaccount transactions for events keyed to our order
+        // identity. Venue lifecycle fields (status/orig/remaining) from the
+        // latest OrderEvent are authoritative for cumulative state and
+        // outrank the additive TradeEvent sum, which covers windows where no
+        // lifecycle row was emitted.
+        if matches!(status, OrderStatus::New | OrderStatus::PartiallyFilled) {
+            let cid_key = st
+                .client_order_id
+                .clone()
+                .or_else(|| client_order_id.map(str::to_string))
+                .filter(|v| !v.is_empty());
+            let oid_key = st.venue_order_id.clone();
+            if cid_key.is_some() || oid_key.is_some() {
+                let commit_ver = tx
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+                match self.recent_subaccount_txs(&subaccount, commit_ver).await {
+                    Ok(recent) => {
+                        let mut acc = OrderScan::default();
+                        for rtx in &recent {
+                            scan_tx_events(
+                                &mut acc,
+                                rtx,
+                                &subaccount,
+                                cid_key.as_deref(),
+                                oid_key.as_deref(),
+                                row.sz_decimals,
+                                row.px_decimals,
+                            );
+                        }
+                        let later = finalize_order_scan(&acc, row.sz_decimals, row.px_decimals);
+                        let has_lifecycle =
+                            later.status_variant.is_some() || later.orig_qty > dec!(0);
+                        if let Some(v) = later.status_variant {
+                            st.status_variant = Some(v);
+                        }
+                        if later.orig_qty > dec!(0) {
+                            st.orig_qty = later.orig_qty;
+                        }
+                        let commit_filled = st.filled_qty;
+                        let later_filled_portion;
+                        if has_lifecycle {
+                            st.remaining_qty = later.remaining_qty;
+                            if st.orig_qty > st.remaining_qty {
+                                st.filled_qty = st.orig_qty - st.remaining_qty;
+                            }
+                            later_filled_portion = (st.filled_qty - commit_filled).max(dec!(0));
+                        } else {
+                            st.filled_qty += later.filled_qty;
+                            later_filled_portion = later.filled_qty;
+                        }
+                        st.fee_usd += later.fee_usd;
+                        // Blend the two fill windows' VWAPs by quantity —
+                        // overwriting with the later VWAP alone would
+                        // misstate the blended entry in accounting.
+                        if let Some(p2) = later.avg_fill_price {
+                            st.avg_fill_price = Some(match st.avg_fill_price {
+                                Some(p1) if commit_filled + later_filled_portion > dec!(0) => {
+                                    (p1 * commit_filled + p2 * later_filled_portion)
+                                        / (commit_filled + later_filled_portion)
+                                }
+                                _ => p2,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        // Scan failure must not downgrade commit-time truth —
+                        // the order simply stays at commit state.
+                        tracing::debug!("Decibel post-commit scan for {hash} unavailable: {e}");
+                    }
+                }
             }
         }
         let status = decibel_order_status(
@@ -1720,6 +1914,87 @@ mod tests {
             decibel_order_status(st.status_variant.as_deref(), st.filled_qty, dec!(0)),
             OrderStatus::Filled
         );
+    }
+
+    #[test]
+    fn post_commit_scan_matches_only_our_order() {
+        let sub = "0xabc";
+        // Later engine tx: our resting order's fill + another order's fill
+        // for the same subaccount — only ours must count.
+        let later_tx = serde_json::json!({
+            "version": "101",
+            "events": [
+                {
+                    "type": "0xpkg::perp_positions::OrderEvent",
+                    "data": {
+                        "user": "0xABC",
+                        "order_id": "42",
+                        "client_order_id": {"vec": ["cid-1"]},
+                        "orig_size": "2000000",
+                        "remaining_size": "0",
+                        "status": {"__variant__": "FILLED"},
+                    }
+                },
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xabc",
+                        "order_id": "42",
+                        "size": "2000000",
+                        "price": "50050000000",
+                        "fee": "1001000",
+                    }
+                },
+                // Someone else's order filling in the same engine tx.
+                {
+                    "type": "0xpkg::perp_positions::OrderEvent",
+                    "data": {
+                        "user": "0xabc",
+                        "order_id": "77",
+                        "status": {"__variant__": "FILLED"},
+                        "orig_size": "9000000",
+                        "remaining_size": "0",
+                    }
+                },
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xabc",
+                        "order_id": "77",
+                        "size": "9000000",
+                        "price": "50000000000",
+                        "fee": "9000000",
+                    }
+                },
+                // Anonymous fill (no order identity) — cannot be safely
+                // attributed in a batch tx, must be skipped.
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xabc",
+                        "size": "5000000",
+                        "price": "1",
+                        "fee": "1",
+                    }
+                }
+            ]
+        });
+        let mut acc = OrderScan::default();
+        scan_tx_events(&mut acc, &later_tx, sub, Some("cid-1"), Some("42"), 6, 6);
+        let st = finalize_order_scan(&acc, 6, 6);
+        assert_eq!(st.status_variant.as_deref(), Some("FILLED"));
+        assert_eq!(st.venue_order_id.as_deref(), Some("42"));
+        // Only our 2.0-unit fill — the other order's 9.0 and the anonymous
+        // 5.0 are excluded.
+        assert_eq!(st.filled_qty, dec!(2));
+        assert_eq!(st.avg_fill_price, Some(dec!(50050)));
+        assert_eq!(st.fee_usd, dec!(1.001));
+        // Wrong keys → nothing matches.
+        let mut acc2 = OrderScan::default();
+        scan_tx_events(&mut acc2, &later_tx, sub, Some("cid-zzz"), None, 6, 6);
+        let st2 = finalize_order_scan(&acc2, 6, 6);
+        assert!(st2.status_variant.is_none());
+        assert_eq!(st2.filled_qty, dec!(0));
     }
 
     #[test]

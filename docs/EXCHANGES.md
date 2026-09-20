@@ -527,6 +527,13 @@ the whole flow, so no sidecar was needed.
   fills. The venue order id is parsed best-effort from commit `OrderEvent`s
   (subaccount-matched), falling back to the tx hash. Status is `New` with
   full remaining qty — fills are never invented.
+- **Order-status reconciliation:** `fetch_order` polls the committed tx via
+  `transactions/by_hash`, then — while the order is still working — scans
+  post-commit `accounts/{subaccount}/transactions` (last 50, ascending
+  version) for `OrderEvent`/`TradeEvent` rows identity-matched on
+  `client_order_id`/`order_id`. Venue lifecycle rows are authoritative for
+  cumulative fills; anonymous batch-tx fills without order identity are
+  never attributed. Window truncation fails closed to `unresolved`.
 - **Credentials (vault):** Geomi client API key (reads) + Aptos wallet
   private key (signer) + optional wallet address (defaults to the key's own
   account). `has_live_credentials` keys on the private key; everything

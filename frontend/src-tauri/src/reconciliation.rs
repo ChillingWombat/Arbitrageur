@@ -47,7 +47,8 @@ const MAX_CANCEL_ATTEMPTS: u32 = 3;
 /// beyond this the residual is left for the operator.
 const MAX_RESIDUAL_ATTEMPTS: usize = 3;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ReconcileSummary {
     pub pending_legs: usize,
     pub polled: usize,

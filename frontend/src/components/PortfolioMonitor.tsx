@@ -101,6 +101,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   // Per-venue 24h utilisation histories keyed by lowercase venue id. Absent
   // until the first successful read — the gadget keeps the "—" fallback.
   const [utilHistories, setUtilHistories] = useState<Record<string, UtilisationHistory | null>>({});
+  // Last manual reconciliation-pass summary; null until the operator runs one.
+  const [reconcileNote, setReconcileNote] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState(false);
 
   const loadStrategyMetrics = async () => {
     try {
@@ -646,6 +649,29 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 <Ban className="w-3.5 h-3.5 mr-1.5" />
                 <span>Halt Trading</span>
               </button>
+            )}
+            <button
+              onClick={async () => {
+                setReconciling(true);
+                try {
+                  const r = await api.reconcileOrdersNow();
+                  setReconcileNote(
+                    `${r.polled} polled · ${r.resolved} resolved · ${r.escalated} escalated`,
+                  );
+                } catch {
+                  setReconcileNote("reconciliation pass failed");
+                } finally {
+                  setReconciling(false);
+                }
+              }}
+              disabled={reconciling}
+              className="w-full px-2 py-2 bg-surface-alt hover:bg-surface-dim text-slate-600 border border-surface-border rounded-lg text-xs font-mono font-bold flex items-center justify-center transition shadow-xs cursor-pointer disabled:opacity-50"
+              title="Poll every open venue order now and update fill state — runs automatically every 5s"
+            >
+              <span>{reconciling ? "Reconciling…" : "Reconcile Orders Now"}</span>
+            </button>
+            {reconcileNote && (
+              <div className="text-[10px] font-mono text-slate-500 text-center">{reconcileNote}</div>
             )}
           </div>
         </div>

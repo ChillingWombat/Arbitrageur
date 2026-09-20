@@ -35,7 +35,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
-const LIVE_EXECUTION_DISABLED: &str = "Live strategy entry is disabled until terminal fill reconciliation, cancellation recovery, and restart reconciliation are implemented; switch to Paper Trading for strategy entries";
+const LIVE_EXECUTION_DISABLED: &str = "Live strategy entry is disabled pending venue sandbox/canary evidence for the reconciliation supervisor (order polling, residual auto-resolution, cancel retry all implemented but unproven against real venues); switch to Paper Trading for strategy entries";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemStatusDto {
@@ -3870,7 +3870,7 @@ async fn execute_spatial_arbitrage_inner(
     }
     let is_live = *state.is_live_mode.read();
     if is_live {
-        return Err("Live strategy entry is disabled until terminal two-leg fill reconciliation, cancellation recovery, and restart reconciliation are implemented; switch to Paper Trading for strategy entries".into());
+        return Err("Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries".into());
     }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
 
@@ -8412,6 +8412,13 @@ pub async fn set_engine_paused(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<bool, String> {
     set_engine_paused_impl(paused, &state)
+}
+
+#[tauri::command]
+pub async fn reconcile_orders_now(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::reconciliation::ReconcileSummary, String> {
+    Ok(crate::reconciliation::reconcile_pending_orders(&state).await)
 }
 
 #[tauri::command]
@@ -15297,7 +15304,7 @@ mod tests {
         .await;
         assert_eq!(
             sim_err.unwrap_err(),
-            "Live strategy entry is disabled until terminal two-leg fill reconciliation, cancellation recovery, and restart reconciliation are implemented; switch to Paper Trading for strategy entries"
+            "Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries"
         );
         assert!(state
             .state_store
@@ -15314,7 +15321,7 @@ mod tests {
         .await;
         assert_eq!(
             decibel_err.unwrap_err(),
-            "Live strategy entry is disabled until terminal two-leg fill reconciliation, cancellation recovery, and restart reconciliation are implemented; switch to Paper Trading for strategy entries"
+            "Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries"
         );
 
         // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
