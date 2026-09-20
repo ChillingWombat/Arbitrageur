@@ -1478,3 +1478,14 @@ overhaul pass committed as `23d4aed`).
 - **Also fixed (same screenshot):** "Save failed — parameters were not written." The backend save validator returns field-level reasons as strings, but Tauri rejections arrive as plain strings (not `Error`), so the modal's `instanceof Error` check always fell through to the generic dead-end message. `TickerConfigModal.tsx` (clean, not worker-touched) now renders string errors verbatim — next save failure names the offending field (note: with the toggle OFF and 50/10/3/15/10 shown, passive validation passes, so the current failure is a different tab's field — the surfaced message will say which).
 - **Verification:** `tsc --noEmit` 0, `vite build` 0, forced release rebuild (cargo called dist-only change "fresh", so `touch main.rs` + full link 31.7s), app relaunched (PID 525629) ALIVE with only routine equity-rebase WARNs. Committed `22fb58d`, pushed.
 - **Tree note:** only `TickerConfigModal.tsx` staged/committed; second worker UI hunks untouched.
+
+## 59. Session Handoff — 2026-09-20 (Risk Control tab + global max leverage 10x)
+
+- **Ask (screenshot):** sub-categorize Safety settings; max leverage lives only in the single-spread (futures) configurator → move to Safety, default 10x; rename Safety → Risk Control; equal-width System Settings tabs.
+- **Shipped:**
+  - `EngineSettings.tsx` (surgical, worker hunks preserved): tab label Safety → **Risk Control**; all 5 tabs `flex-1` equal width; sub-category pills (Circuit Breaker / DeltaGuard / Margin Monitor / Leverage) scrolling to card anchors via refs; new **Leverage — Global Max** card (default 10x, 1–100, wired load/save).
+  - Backend: `EngineSettingsDto.max_leverage` (default 10, save-validated 1–100, kv-persisted `risk.max_leverage` + startup load); `resolve_effective_leverage` now takes min(strategy target, account max, venue max, **global max**); `HARD_LEVERAGE_CEILING` 5 → 100 (was silently pinning everything to 5x — the old ceiling would have nulled the new 10x default); strategy `user_target_leverage` validation 1..=5 → 1..=10 in all 3 gates (aligns with the autotune path that already wrote up to 10).
+  - Deliberately kept: per-strategy Target Leverage input in the futures configurator (it's the sizing *request*, default 5x, now clampable to 10x with copy pointing at the global cap) — the *ceiling* is what moved. Account-level 1..=5 caps + DB CHECK untouched (conservative min() participant, ExchangeAccounts UI is worker territory).
+  - `types/index.ts` gains `max_leverage?`.
+- **Verification:** tsc 0, desktop 315/0 (updated 2 tests that pinned the 5x ceiling), committed `1000ff7` + `6c91209`, pushed; vite build 0, forced release rebuild (touch + 29.8s link), app relaunched (PID 531249) ALIVE, routine WARNs only.
+- **Tree note:** only the 7 listed paths staged; worker UI hunks (stale-balance field etc.) preserved in place, second worker should rebase.
