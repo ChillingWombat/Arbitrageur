@@ -1083,13 +1083,7 @@ COMMIT;";
 /// `rate` is an 8-hour print but was persisted with `interval_hours = 1`,
 /// inflating stored `rate_8h` 8x. Rescale those rows and mark interval 8.
 /// New samples are correct at write time; this is a one-time backfill.
-const MIGRATION_V20_SQL: &str = "\
-BEGIN IMMEDIATE;\
-UPDATE funding_rate_samples\
-SET rate_8h = rate_8h / 8.0, interval_hours = 8\
-WHERE LOWER(venue_id) IN ('lighter', 'robinhood') AND interval_hours = 1;\
-PRAGMA user_version = 20;\
-COMMIT;";
+const MIGRATION_V20_SQL: &str = "BEGIN IMMEDIATE; UPDATE funding_rate_samples SET rate_8h = rate_8h / 8.0, interval_hours = 8 WHERE LOWER(venue_id) IN ('lighter', 'robinhood') AND interval_hours = 1; PRAGMA user_version = 20; COMMIT;";
 
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
@@ -1486,7 +1480,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 19 {
+        if version > 20 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -4044,7 +4038,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 19);
+            assert_eq!(version, 20);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4845,7 +4839,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 19);
+            assert_eq!(version, 20);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5112,6 +5106,74 @@ mod tests {
     /* ------------------ session seasonality (V8) ------------------ */
 
     #[test]
+    fn test_migration_v20_rescales_lighter_funding_history() {
+        // Pre-fix rows: Lighter-family 8h prints persisted with interval 1
+        // (8x inflated rate_8h). v20 rescales exactly those rows; other
+        // venues and already-correct rows pass through untouched.
+        let conn = Connection::open_in_memory().unwrap();
+        for batch in [
+            MIGRATION_V1_SQL,
+            MIGRATION_V2_SQL,
+            MIGRATION_V3_SQL,
+            MIGRATION_V4_SQL,
+            MIGRATION_V5_SQL,
+            MIGRATION_V6_SQL,
+            MIGRATION_V7_SQL,
+            MIGRATION_V8_SQL,
+            MIGRATION_V9_SQL,
+            MIGRATION_V10_SQL,
+            MIGRATION_V11_SQL,
+            MIGRATION_V12_SQL,
+            MIGRATION_V13_SQL,
+            MIGRATION_V14_SQL,
+            MIGRATION_V15_SQL,
+            MIGRATION_V16_SQL,
+            MIGRATION_V17_SQL,
+            MIGRATION_V18_SQL,
+            MIGRATION_V19_SQL,
+        ] {
+            conn.execute_batch(batch).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO funding_rate_samples (venue_id, symbol, ts_ms, rate_8h, interval_hours) VALUES
+             ('lighter', 'LINK-USDC', 1, -0.002688, 1),
+             ('robinhood', 'LINK-USDC', 1, 0.000768, 1),
+             ('hyperliquid', 'LINK-USDC', 1, 0.0001, 1),
+             ('lighter', 'LINK-USDC', 2, -0.000336, 8)",
+            [],
+        )
+        .unwrap();
+        StateStore::migrate(&conn).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 20);
+        let mut stmt = conn
+            .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
+            .unwrap();
+        let rows: Vec<(String, f64, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap())))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 4);
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        // Untouched venue keeps its print and interval.
+        assert_eq!(rows[0].0, "hyperliquid");
+        assert!(approx(rows[0].1, 0.0001));
+        assert_eq!(rows[0].2, 1);
+        // Buggy-era Lighter rows rescale exactly 8x to the true 8h print.
+        for row in rows.iter().filter(|r| r.0 == "lighter") {
+            assert!(approx(row.1, -0.000336), "lighter row: {row:?}");
+            assert_eq!(row.2, 8);
+        }
+        // Robinhood shares the Lighter parser, same repair.
+        let rh = rows.iter().find(|r| r.0 == "robinhood").unwrap();
+        assert!(approx(rh.1, 0.000096), "robinhood row: {rh:?}");
+        assert_eq!(rh.2, 8);
+    }
+
+    #[test]
     fn test_migration_v7_to_v8_preserves_data() {
         let conn = Connection::open_in_memory().unwrap();
         for batch in [
@@ -5146,7 +5208,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 19);
+        assert_eq!(v10, 20);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(

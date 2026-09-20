@@ -215,6 +215,12 @@ pub struct TickerStrategyConfigDto {
    - Setting `Auto Min Mid Price = 0.5` reliably filters sub-$0.50 meme coins (PEPE, BONK, SHIB, DOGE) while keeping major assets (BTC, ETH, SOL) visible.
 3. **Safe Decimal Arithmetic**:
    - `evaluate_funding_carry` in `arbitrageur-math` utilizes `checked_mul` and `checked_div` for funding APR, APY, and daily income calculations, eliminating panic risks on extreme inputs or stress test values.
+4. **Lighter 8-Hour Funding Prints (2026-09-20 fix)**:
+   - Lighter `/api/v1/funding-rates` `rate` is an **8-hour aggregated print** (tracks the venue UI "8hr" figure; hourly ~= rate / 8 — verified: LINK venue print -0.0336% vs UI 1hr -0.0039%). Adapters record `interval_hours = 8`; mislabeling it as hourly inflated every Lighter-legged carry quote ~8x (LINK showed 277% APR / 1499% APY instead of ~45-60%) and faked identical +0.067%/8h rows across all majors (both venues' placeholder floors netting to dust). Same fix covers the Robinhood deployment (shares the Lighter parser).
+   - One-time backfill: schema v20 rescales pre-fix `lighter`/`robinhood` rows (`rate_8h / 8`, `interval_hours = 8`); Hyperliquid hourly semantics confirmed against its UI (0.0013%/h) and left unchanged.
+5. **Carry Detail Popup — Leg Prints + Trend (2026-09-20)**:
+   - Every carry/basis opp carries `long_rate_8h_pct` / `short_rate_8h_pct` (8h-normalized current prints; basis long leg is spot = 0). Rendered as "Long/Short funding" fields in the popup.
+   - New `get_funding_trend` IPC serves per-leg 8h funding history + venue-neutral ticker mid history (minute buckets, ≤240 pts, 72h default) for the popup SVG: teal long / orange short (%/8h, left axis), blue ticker mid (right axis), dashed gray net gap on shared timestamps, dashed green model-expected decay from the current net to the min-APR exit threshold over `expected_hold_hours`, dotted red exit threshold. Empty history renders the current prints only — never interpolated. Popup overlay keeps `backdrop-blur-sm` so the scanner grid stays out of focus behind it.
 
 ---
 

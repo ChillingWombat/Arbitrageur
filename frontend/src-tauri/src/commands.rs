@@ -3164,10 +3164,16 @@ fn downsample_series(series: &[(i64, f64)], max: usize) -> Vec<FundingTrendPoint
         .collect();
     if pts.len() > max && max >= 2 {
         let stride = pts.len().div_ceil(max);
-        let mut thin: Vec<FundingTrendPoint> =
-            pts.into_iter().step_by(stride).collect();
-        if thin.len() > max {
-            thin.truncate(max);
+        let last = pts.last().cloned();
+        let mut thin: Vec<FundingTrendPoint> = pts.into_iter().step_by(stride).collect();
+        // Pin the true last sample so the line always reaches "now".
+        if let Some(l) = last {
+            if thin.last().map(|p| p.t) != Some(l.t) {
+                if thin.len() >= max {
+                    thin.pop();
+                }
+                thin.push(l);
+            }
         }
         pts = thin;
     }

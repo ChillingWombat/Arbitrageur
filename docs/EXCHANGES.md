@@ -86,6 +86,15 @@ Lighter operates a high-throughput orderbook DEX secured by zero-knowledge rollu
    ```bash
    GET /api/v1/account?by=index&value=<ACCOUNT_INDEX>
    ```
+4. **Funding Rates:**
+   ```bash
+   GET /api/v1/funding-rates
+   ```
+   Only rows with `exchange: "lighter"` are the venue's own print (same on the
+   Robinhood Chain deployment); sibling rows (binance/bybit/hyperliquid) are
+   reference context. The venue `rate` is an **8-hour aggregated print** (tracks
+   the venue UI's "8hr" figure; hourly ~= rate / 8) — adapters must record it
+   with `interval_hours = 8` or carry quotes inflate ~8x.
 
 ### 2.3 Signing Architecture
 Order submissions require native Starknet / Poseidon curve signatures generated via Lighter's native C-ABI dynamic library (`lighter-signer-linux-amd64.so`) or Taoli remote signer.
