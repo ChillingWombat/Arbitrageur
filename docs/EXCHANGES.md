@@ -466,6 +466,58 @@ public REST. Guide: <https://popdex.xyz/docs/product-docs/onboarding/how-to-trad
   — fund testnet first, then mainnet size.
 
 ---
+## 12. Decibel (Aptos CLOB Perp DEX) — live submission IMPLEMENTED 2026-09-20
+
+Native-API adapter (`DecibelAdapter`, venue `decibel`). Reads go through the
+Geomi trading API (`{base}/api/v1/...`, `Authorization: Bearer <client key>`);
+writes are genuine on-chain Aptos transactions signed with the vault-held
+wallet key via the `aptos-sdk` Rust crate (v0.7.1, `ed25519` feature) plus the
+`bcs` crate — non-Rust crypto was considered but the audited Rust SDK covers
+the whole flow, so no sidecar was needed.
+
+- **Deployment (official `decibeltrade/sdk` `PACKAGE`):**
+  mainnet `0x50ead22afd6ffd9769e3b3d6e0e64a2a350d68e8b102c4e72e33d0b8cfdfdb06`
+  (chain id 1), testnet
+  `0xe7da2794b1d8af76532ed95f38bfdf1136abfd8ea3a240189971988a83101b7f`
+  (chain id 2). Network is resolved from the adapter base URL (`testnet`
+  substring → testnet package + testnet fullnode).
+- **Entry functions** (`<package>::dex_accounts_entry::…`, sender = owner
+  wallet, no agent keys):
+  `place_order_to_subaccount(subaccount, market, price:u64, size:u64,
+  isBuy:bool, tif:u8, reduceOnly:bool, Option<String> clientId,
+  Option<u64>×5 stops/TP/SL, Option<address> builder, Option<u64> fee)`,
+  `cancel_order_to_subaccount(subaccount, orderId:u128, market)`,
+  `cancel_client_order_to_subaccount(subaccount, clientId:String, market)`.
+  Arg shapes verified against the SDK `mainnet.json` ABI.
+- **Address derivation** (`object::create_object_address` =
+  `sha3_256(creator || seed || 0xFE)`):
+  `GlobalPerpEngine` named object under the package (mainnet
+  `0x4d8cc47e…928098370` — verified live on the fullnode, owned by the
+  package), market = named object under the engine keyed by BCS(MoveString)
+  of the market name (mirrors SDK `getMarketAddr`), primary subaccount via
+  the `GlobalSubaccountManager` deriver with seed
+  `owner_bytes ++ BCS("primary_subaccount")` (mirrors
+  `getPrimarySubaccountAddr`). Pure-Rust unit tests pin the mainnet vectors.
+- **Scaling:** price/size chain units come from the LIVE `/api/v1/markets`
+  row (`px_decimals`/`sz_decimals`); unresolvable markets fail closed.
+  Prices side-safe tick-aligned (buy floor / sell ceil), sizes floored to the
+  lot multiple, minima enforced. TIF mapping GTC→0 / PostOnly→1 / IOC·FOK→2.
+  Limit orders fully supported; market orders become a bounded
+  marketable-limit (live touch ±0.5% collar, IOC) — a blind cross is refused.
+- **Submission:** per-adapter async order lock (one sequence number per
+  account), live sequence/chain-id/gas-price from the fullnode, 120s expiry,
+  50k-unit gas cap, `submit_and_wait` ≤30s; vm failures are errors, never
+  fills. The venue order id is parsed best-effort from commit `OrderEvent`s
+  (subaccount-matched), falling back to the tx hash. Status is `New` with
+  full remaining qty — fills are never invented.
+- **Credentials (vault):** Geomi client API key (reads) + Aptos wallet
+  private key (signer) + optional wallet address (defaults to the key's own
+  account). `has_live_credentials` keys on the private key; everything
+  without it fails closed with an actionable message.
+- **Still fail-closed by design:** funding (no public endpoint — was a
+  hardcoded `0.0001` phantom, removed), matching is async on-venue.
+
+---
 
 ## 6. Transfer Rails & Rebalance Friction (researched 2026-09-19)
 

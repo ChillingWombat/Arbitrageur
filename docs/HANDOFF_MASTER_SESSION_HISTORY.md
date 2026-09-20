@@ -1438,3 +1438,18 @@ overhaul pass committed as `23d4aed`).
 - **Verification:** exchanges 128/0, `cargo clippy -p arbitrageur-exchanges` 0 warnings (2 pre-existing okx lints fixed), `cargo check -p arbitrageur-desktop` clean, release rebuilt + sidecar hash-matched + app relaunched and smoke-tested (process alive, normal fail-closed market-data warnings only).
 - **Still fail-closed:** Decibel orders (Aptos `dex_accounts::place_order_to_subaccount` entry fn researched — package + market addresses need live verification, needs `bcs` crate), Arcus account+orders (private API undocumented).
 - **Tree note:** second worker's risk/stale-balance hunks (commands.rs, EngineSettings/ExchangeAccounts/PortfolioMonitor, types) left uncommitted; this commit stages only the Lighter + apiKeyIndex + docs paths.
+
+## 55. Session Handoff — 2026-09-20 (Decibel live orders via aptos-sdk + full-venue sweep)
+
+- **Ask:** "add those librarys. we dont have to have every part to be rust. keep working dont stop. fill all gaps, fix all issues."
+- **Shipped (`crates/arbitrageur-exchanges/src/decibel.rs`, unit-tested, no network in tests):**
+  - New deps (workspace + exchanges): `aptos-sdk 0.7.1` (`ed25519` feature only — no secp/indexer/faucet weight) and `bcs 0.1`. A non-Rust sidecar was evaluated but unnecessary: the audited Rust SDK covers payload build, Ed25519 sign, BCS submit and commit-wait.
+  - Official `decibeltrade/sdk` research: `PACKAGE` mainnet `0x50ea…dfdb06` / testnet `0xe7da…01b7f`; writes are `dex_accounts_entry::{place_order_to_subaccount, cancel_order_to_subaccount, cancel_client_order_to_subaccount}` with sender = owner wallet; arg shapes verified against SDK `mainnet.json` ABI (incl. `u128` order ids, `Option<T>` stops/builder).
+  - Pure-Rust address derivation (`sha3_256(creator || seed || 0xFE)`): `GlobalPerpEngine`, market-by-BCS-name, primary subaccount via `GlobalSubaccountManager` + `owner ++ BCS("primary_subaccount")`. Mainnet engine `0x4d8cc47e…928098370` verified LIVE on the fullnode (object exists, owned by package); vectors pinned in unit tests.
+  - `place_order`: live `/api/v1/markets` row for chain-unit scaling (unresolvable market fails closed), side-safe tick alignment, lot flooring, minima enforced, TIF GTC→0/PostOnly→1/IOC·FOK→2, limit full support, market → bounded marketable-limit (touch ±0.5%, IOC). Per-adapter order lock, live sequence/chain-id/gas-price, 120s expiry, 50k gas cap, `submit_and_wait` ≤30s, order id from commit `OrderEvent`s (tx-hash fallback), status `New` — never a fabricated fill. `cancel_order` by numeric id (`u128`) or client id.
+  - `supports_live_execution() = live_order_submission_implemented() = true`; `has_live_credentials` keys on the vault private key.
+  - Clippy nit fixed (`collapsible_str_replace`).
+- **Venue sweep:** every venue with a documented trading API is now submittable — Hyperliquid, Lighter (+Robinhood deployment), Vanta/Orderly, PopDEX, Aster, Binance, OKX, Kraken, Coinbase, Decibel. Fail-closed BY DESIGN (no public trading API exists): Arcus account+orders (web search confirms no perps DEX API docs), prediction markets, Decibel funding (no endpoint). Arcus research documented in-session.
+- **Docs:** `EXCHANGES.md` §12 (Decibel, IMPLEMENTED), `SPEC.md` rollout paragraph updated.
+- **Verification:** exchanges 131/0, clippy 0 warnings, `cargo check -p arbitrageur-desktop` clean; release rebuild + relaunch pending.
+- **Tree note:** stages only the two `Cargo.toml`s + `decibel.rs` + the two doc files; second worker's UI hunks (`EngineSettings/ExchangeAccounts/PortfolioMonitor`, `types`, `commands.rs`, `state.rs`) untouched.
