@@ -175,6 +175,17 @@ struct TickerPage {
     cursor: String,
 }
 
+/// The tickers endpoint answers the paged scan with either a bare array
+/// (`data: [...]`, observed live on mainnet + testnet) or a paged map
+/// (`data: {data: [...], cursor: ...}`). Accept both — assuming one shape
+/// fails closed on the other and blinds all PopDEX markets.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TickerData {
+    List(Vec<TickerRow>),
+    Paged(TickerPage),
+}
+
 #[derive(Debug, Deserialize)]
 struct BookPayload {
     #[serde(default)]
@@ -569,25 +580,28 @@ impl PopDexAdapter {
         let mut out = Vec::new();
         let mut cursor = "0".to_string();
         for _ in 0..10 {
-            let page: TickerPage = self
+            let shaped: TickerData = self
                 .rest_get(&format!(
                     "/api/v1/public/market/tickers?category=Futures&limit=100&cursor={cursor}"
                 ))
                 .await?;
-            if page.data.is_empty() {
+            let (rows, next) = match shaped {
+                TickerData::List(v) => (v, String::new()),
+                TickerData::Paged(p) => (p.data, p.cursor),
+            };
+            if rows.is_empty() {
                 break;
             }
             // Refresh the symbol-id cache from every page.
             {
                 let mut ids = self.symbol_ids.write();
-                for t in &page.data {
+                for t in &rows {
                     if let Ok(id) = t.symbol_id.trim().parse::<u16>() {
                         ids.insert(t.symbol.trim().to_uppercase(), id);
                     }
                 }
             }
-            let next = page.cursor.clone();
-            out.extend(page.data);
+            out.extend(rows);
             if next.trim().is_empty() || next.trim() == "0" {
                 break;
             }
@@ -1613,6 +1627,30 @@ pub async fn check_agent_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tickers_shapes_both_parse() {
+        // Live array form (mainnet + testnet, limit=100&cursor=0).
+        let arr = r#"{"code":"200","msg":"success","data":[{"symbolId":"20017","symbol":"ENAUSDT","lastPrice":"0.1996","bid1Price":"0.1982","ask1Price":"0.1983","turnover24h":"1","status":"Trading"}]}"#;
+        let env: Envelope<TickerData> = serde_json::from_str(arr).unwrap();
+        match env.data.unwrap() {
+            TickerData::List(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].symbol, "ENAUSDT");
+            }
+            TickerData::Paged(_) => panic!("array form must parse as List"),
+        }
+        // Paged map form (cursor-bearing deployments).
+        let map = r#"{"code":"200","msg":"success","data":{"data":[{"symbolId":"1","symbol":"BTCUSDT"}],"cursor":"5"}}"#;
+        let env: Envelope<TickerData> = serde_json::from_str(map).unwrap();
+        match env.data.unwrap() {
+            TickerData::Paged(p) => {
+                assert_eq!(p.data.len(), 1);
+                assert_eq!(p.cursor, "5");
+            }
+            TickerData::List(_) => panic!("map form must parse as Paged"),
+        }
+    }
 
     #[test]
     fn network_parse() {
