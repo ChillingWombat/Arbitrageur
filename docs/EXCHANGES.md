@@ -514,8 +514,17 @@ the whole flow, so no sidecar was needed.
   private key (signer) + optional wallet address (defaults to the key's own
   account). `has_live_credentials` keys on the private key; everything
   without it fails closed with an actionable message.
-- **Still fail-closed by design:** funding (no public endpoint — was a
-  hardcoded `0.0001` phantom, removed), matching is async on-venue.
+- **Reads (rebuilt 2026-09-20 on official SDK paths after a guessed
+  `/v1/subaccounts` 404):** `GET /api/v1/subaccounts?owner=` → primary
+  subaccount (lowercase retry); `GET /api/v1/account_overviews?account=`
+  (`perp_equity_balance`, `usdc_cross_withdrawable_balance`,
+  `maintenance_margin`); `GET /api/v1/account_positions` (rows labelled via
+  the live markets map, marked via `/api/v1/prices` mids with entry
+  fallback); **funding via `/api/v1/prices?market=`** (`funding_rate_bps` +
+  `funding_period_s` → 8h print, Decibel legs join funding scans).
+- **Still fail-closed by design:** orderbook depth (REST removed upstream —
+  WebSocket-only, tried once then refused, never synthesized), ticker (no
+  REST bid/ask); matching is async on-venue.
 
 ---
 

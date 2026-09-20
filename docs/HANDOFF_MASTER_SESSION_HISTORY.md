@@ -1544,3 +1544,9 @@ overhaul pass committed as `23d4aed`).
 - **Root cause:** two horizons. Win% used a flat 24h fee-coverage heuristic (`24h carry / fee` at today's print); Expected uses the modelled hold with linear gap decay. A fast-decaying gap scores well on 24h-flat math while losing money on its actual ~breakeven-short hold.
 - **Fix:** `funding_win_probability` takes `WinHoldContext { hold_hours, min_apr_pct, entry_spread_bps }` — coverage becomes decay-averaged hold accrual over fee+spread costs (same inputs as `expected_carry_return_usd`), so p ≥ 0.5 agrees in sign with non-negative expectation by construction. `None` keeps legacy 24h-flat (tests pin it). Both scan paths pass the modelled hold; copy updated (DTO docs, card + modal tooltips).
 - **Verification:** math 97/0 (new sign-agreement test + legacy pin), desktop 317/0 (a triangle flatten test flaked twice under parallel load with a 2s book-TTL race — passes alone and in full suite; pre-existing, untouched paths, noted), tsc 0, vite 0, release rebuilt, app relaunched (PID 566833) clean. Committed `bb5a3e6`, pushed. Worker files untouched.
+
+## 67. Session Handoff — 2026-09-20 (docs wrap-up: Decibel reads + session rollup)
+
+- **Ask:** update handoff, spec, commit, push, launch the app.
+- **Done:** `EXCHANGES.md` §12 rewritten for the rebuilt reads (official `/api/v1` paths, funding feed live, book/ticker honestly unavailable); `SPEC.md` rollout paragraph extended with the day's full feature rollup (persisted failure logging, funding filter strip + bot-mirror defaults + 2dp, decay-aware Expected $, hold-aligned Win%, NAS100 merge, Risk Control + 10x ceiling). Committed + pushed (docs-only; code HEAD unchanged since last green build). App relaunched fresh and smoke-checked ALIVE.
+- **Tree note:** only docs staged; worker UI files untouched. Code HEAD: desktop 317/0, math 97/0, tsc/vite/release green (see §60–66).
