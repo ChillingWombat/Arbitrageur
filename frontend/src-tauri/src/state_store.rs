@@ -2321,6 +2321,18 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// Test-only: backdate a signal's created_at so reconciliation tests
+    /// can exercise the escalation deadline without waiting.
+    #[cfg(test)]
+    pub fn force_signal_age_for_test(&self, signal_id: &str, created_at: &str) {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE signal_executions SET created_at = ?1 WHERE id = ?2",
+            params![created_at, signal_id],
+        )
+        .expect("age signal for test");
+    }
+
     /// Record an actual fill on one leg of a signal (matched by side).
     pub fn apply_leg_fill(
         &self,

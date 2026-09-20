@@ -1037,6 +1037,13 @@ pub struct AppEngineState {
     /// Serializes reconciliation passes so the periodic supervisor and any
     /// manual trigger never run overlapping venue polls.
     pub reconcile_lock: tokio::sync::Mutex<()>,
+    /// Test-only adapter registry consulted before `get_venues` — lets
+    /// reconciliation tests inject scripted venue responses without
+    /// touching the live adapter fields.
+    #[cfg(test)]
+    pub test_adapters: std::sync::RwLock<
+        std::collections::HashMap<String, Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>>,
+    >,
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
@@ -1441,6 +1448,8 @@ impl AppEngineState {
             is_paused: RwLock::new(false),
             execution_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            test_adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
             sample_prune_at: Mutex::new(0),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
@@ -1789,6 +1798,15 @@ impl AppEngineState {
         venue_id: &str,
     ) -> Option<Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>> {
         let canonical = canonical_venue_id(venue_id)?;
+        #[cfg(test)]
+        if let Some(a) = self
+            .test_adapters
+            .read()
+            .ok()
+            .and_then(|m| m.get(canonical).cloned())
+        {
+            return Some(a);
+        }
         self.get_venues()
             .into_iter()
             .find(|(vid, _, _)| *vid == canonical)

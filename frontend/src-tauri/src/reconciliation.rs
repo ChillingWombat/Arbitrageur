@@ -310,6 +310,12 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     }
                 }
                 let poll = classify_response(&resp);
+                // Terminal legs can never retry — drop the cancel-attempt
+                // counter so resolved orders don't accumulate kv rows.
+                if poll != LegPoll::Working {
+                    let key = format!("recon_cancel:{}:{order_id}", leg.venue);
+                    let _ = state.state_store.kv_delete(&key);
+                }
                 // A still-working order past the deadline is anomalous —
                 // try a bounded cancel so the next poll sees a terminal
                 // state instead of hanging forever.
@@ -941,5 +947,328 @@ mod tests {
             Some(&notes),
         );
         assert!(note.unwrap().contains("attempt 1/3"));
+    }
+
+    // ---- end-to-end reconciler passes with a scripted venue adapter ----
+
+    struct MockVenue {
+        venue: &'static str,
+        responses: std::sync::Mutex<std::collections::VecDeque<Result<OrderResponse, String>>>,
+        cancels: std::sync::Mutex<Vec<String>>,
+        cancel_error: std::sync::Mutex<Option<String>>,
+    }
+
+    impl MockVenue {
+        fn new(venue: &'static str, responses: Vec<Result<OrderResponse, String>>) -> Self {
+            Self {
+                venue,
+                responses: std::sync::Mutex::new(responses.into()),
+                cancels: std::sync::Mutex::new(Vec::new()),
+                cancel_error: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for MockVenue {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.venue)
+        }
+        fn name(&self) -> &str {
+            self.venue
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            unimplemented!()
+        }
+        async fn fetch_orderbook(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+            unimplemented!()
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            unimplemented!()
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            unimplemented!()
+        }
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            unimplemented!()
+        }
+        async fn place_order(&self, _o: OrderRequest) -> anyhow::Result<OrderResponse> {
+            unimplemented!()
+        }
+        async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+            self.cancels
+                .lock()
+                .unwrap()
+                .push(req.order_id.clone().unwrap_or_default());
+            if let Some(e) = self.cancel_error.lock().unwrap().clone() {
+                anyhow::bail!(e);
+            }
+            Ok(())
+        }
+        async fn fetch_order(
+            &self,
+            symbol: &str,
+            order_id: &str,
+            _cid: Option<&str>,
+        ) -> anyhow::Result<OrderResponse> {
+            let mut q = self.responses.lock().unwrap();
+            let r = if q.len() > 1 {
+                q.pop_front().unwrap()
+            } else {
+                // Keep returning the last scripted response so repeated
+                // polls are deterministic.
+                match q.front() {
+                    Some(Ok(r)) => Ok(r.clone()),
+                    Some(Err(e)) => Err(e.clone()),
+                    None => Err("no scripted response".to_string()),
+                }
+            };
+            let mut r = r.map_err(|e| anyhow::anyhow!(e))?;
+            r.order_id = order_id.to_string();
+            r.symbol = symbol.to_string();
+            r.venue = VenueId::new(self.venue);
+            Ok(r)
+        }
+        fn has_live_credentials(&self) -> bool {
+            true
+        }
+    }
+
+    fn seeded_state(
+        strategy_id: &str,
+        legs: Vec<(&'static str, LegSide)>,
+    ) -> (AppEngineState, String) {
+        let state = AppEngineState::new();
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: sid.clone(),
+                strategy_id: strategy_id.into(),
+                symbol: "BTC-USD".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: legs
+                    .iter()
+                    .map(|(v, side)| crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: (*v).into(),
+                        side: *side,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                    })
+                    .collect(),
+            })
+            .unwrap();
+        for (v, side) in &legs {
+            state
+                .state_store
+                .record_leg_order_id(&sid, *side, &format!("oid-{v}"), Some(&format!("cid-{v}")))
+                .unwrap();
+        }
+        (state, sid)
+    }
+
+    fn mock_filled() -> OrderResponse {
+        let mut r = resp(OrderStatus::Filled, dec!(1), dec!(0));
+        r.avg_fill_price = Some(dec!(100));
+        r.fee = dec!(0.5);
+        r
+    }
+
+    #[tokio::test]
+    async fn e2e_filled_legs_resolve_balanced() {
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        for v in ["kraken", "aster"] {
+            state.test_adapters.write().unwrap().insert(
+                v.to_string(),
+                Arc::new(MockVenue::new(v, vec![Ok(mock_filled())])),
+            );
+        }
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.polled, 2);
+        assert_eq!(sum.resolved, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Balanced);
+        assert!(sig.legs.iter().all(|l| l.filled_qty == 1.0));
+    }
+
+    #[tokio::test]
+    async fn e2e_fill_plus_cancel_empty_is_imbalanced() {
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.resolved, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        // Residual one-sided exposure — never Failed (which would unblock
+        // the ticker), never Balanced (which would claim neutrality).
+        assert_eq!(sig.status, SignalStatus::Imbalanced);
+    }
+
+    #[tokio::test]
+    async fn e2e_poll_error_preserves_state_then_escalates() {
+        let (state, sid) = seeded_state("futures", vec![("kraken", LegSide::Long)]);
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new("kraken", vec![Err("timeout".to_string())])),
+        );
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.poll_errors, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::InFlight); // never assumed
+
+        // Past the deadline, an unreachable order escalates — still never
+        // assumed terminal.
+        let old =
+            (Utc::now() - chrono::Duration::seconds(NON_FINAL_DEADLINE_SECS + 60)).to_rfc3339();
+        state.state_store.force_signal_age_for_test(&sid, &old);
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.escalated, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Unresolved);
+    }
+
+    #[tokio::test]
+    async fn e2e_stale_working_order_attempts_bounded_cancel() {
+        let (state, sid) = seeded_state("futures", vec![("kraken", LegSide::Long)]);
+        let mock = Arc::new(MockVenue::new(
+            "kraken",
+            vec![Ok(resp(OrderStatus::New, dec!(0), dec!(1)))],
+        ));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), mock.clone());
+        let old =
+            (Utc::now() - chrono::Duration::seconds(NON_FINAL_DEADLINE_SECS + 60)).to_rfc3339();
+        state.state_store.force_signal_age_for_test(&sid, &old);
+
+        // Each pass while Working past the deadline tries a cancel, bounded
+        // by MAX_CANCEL_ATTEMPTS persisted in kv.
+        for _ in 0..MAX_CANCEL_ATTEMPTS + 2 {
+            reconcile_pending_orders(&state).await;
+        }
+        assert_eq!(
+            mock.cancels.lock().unwrap().len() as u32,
+            MAX_CANCEL_ATTEMPTS
+        );
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Unresolved);
+        assert!(sig.note.unwrap().contains("cancel"));
+    }
+
+    #[tokio::test]
+    async fn e2e_close_signal_filled_resolves_closed() {
+        let (state, sid) = seeded_state("external", vec![("kraken", LegSide::Short)]);
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
+        );
+        reconcile_pending_orders(&state).await;
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn e2e_identity_mismatch_never_applies() {
+        // A venue response echoing a different order id must not touch the
+        // ledger — the leg stays in_flight, nothing is written.
+        let (state, sid) = seeded_state("futures", vec![("kraken", LegSide::Long)]);
+        struct Mismatch;
+        #[async_trait::async_trait]
+        impl ExchangeAdapter for Mismatch {
+            fn venue_id(&self) -> VenueId {
+                VenueId::new("kraken")
+            }
+            fn name(&self) -> &str {
+                "kraken"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                unimplemented!()
+            }
+            async fn fetch_orderbook(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+                unimplemented!()
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                unimplemented!()
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                unimplemented!()
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                unimplemented!()
+            }
+            async fn place_order(&self, _o: OrderRequest) -> anyhow::Result<OrderResponse> {
+                unimplemented!()
+            }
+            async fn cancel_order(&self, _r: CancelRequest) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn fetch_order(
+                &self,
+                _s: &str,
+                _o: &str,
+                _c: Option<&str>,
+            ) -> anyhow::Result<OrderResponse> {
+                let mut r = mock_filled();
+                r.order_id = "attacker-order".into(); // wrong id
+                Ok(r)
+            }
+            fn has_live_credentials(&self) -> bool {
+                true
+            }
+        }
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), Arc::new(Mismatch));
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.polled, 1);
+        assert_eq!(sum.advanced, 0);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::InFlight);
+        assert_eq!(sig.legs[0].filled_qty, 0.0);
     }
 }
