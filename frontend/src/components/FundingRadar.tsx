@@ -397,7 +397,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <CarryDetailField
                 label="Win probability"
                 value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
-                title="Experimental fee-coverage heuristic over a 24h hold (informational only — never gates entries)"
+                title="Modelled-hold fee-coverage heuristic over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)"
               />
               <CarryDetailField
                 label="Depth slope"
@@ -1024,7 +1024,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                       )}
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Win:</span>
-                        <span className="font-semibold text-slate-900 tabular-nums" title="Experimental fee-coverage heuristic — informational only">{opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}</span>
+                        <span className="font-semibold text-slate-900 tabular-nums" title="Modelled-hold fee-coverage heuristic — informational only; sub-50% whenever Expected is negative">{opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}</span>
                       </div>
                     </div>
 

@@ -21,7 +21,7 @@ use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidS
 use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
     estimate_funding_hold_hours, evaluate_funding_carry, evaluate_spot_perp_basis,
-    expected_carry_return_usd, funding_entry_capacity, funding_win_probability,
+    expected_carry_return_usd, funding_entry_capacity, funding_win_probability, WinHoldContext,
 };
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
@@ -168,8 +168,10 @@ pub struct FundingOpportunityDto {
     /// Perp reference price for basis opps. `None` for carry.
     #[serde(default)]
     pub perp_price: Option<f64>,
-    /// Informational win probability (experimental fee-coverage heuristic,
-    /// 0..1). `None` when the edge is unusable. Never gates ordering or
+    /// Informational win probability (modelled-hold fee-coverage heuristic,
+    /// 0..1, same decay-averaged accrual and fee+spread costs as
+    /// `expected_return_usd`, so p >= 0.5 agrees in sign with a non-negative
+    /// expectation). `None` when the edge is unusable. Never gates ordering or
     /// executability — same contract as the spread monitor's field.
     #[serde(default)]
     pub win_probability: Option<f64>,
@@ -2845,6 +2847,11 @@ async fn scan_funding_opportunities_for_symbol(
                             opp.round_trip_fee_bps,
                             None,
                             agrees,
+                            hold_estimate.as_ref().map(|h| WinHoldContext {
+                                hold_hours: h.hours,
+                                min_apr_pct: Some(funding_min_apr(state)),
+                                entry_spread_bps: spread_cost_f,
+                            }),
                         )
                     },
                     expected_hold_hours: hold_estimate.as_ref().map(|h| h.hours),
@@ -3135,6 +3142,11 @@ async fn scan_funding_opportunities_for_symbol(
                                 None
                             },
                             funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
+                            basis_hold.as_ref().map(|h| WinHoldContext {
+                                hold_hours: h.hours,
+                                min_apr_pct: Some(funding_min_apr(state)),
+                                entry_spread_bps: spread_cost_f,
+                            }),
                         ),
                         expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
                         hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),

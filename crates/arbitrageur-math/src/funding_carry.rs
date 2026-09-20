@@ -471,13 +471,31 @@ pub fn expected_carry_return_usd(
     net.is_finite().then_some(net)
 }
 
+/// Modelled-hold context aligning win probability with
+/// [`expected_carry_return_usd`]. `None` keeps the legacy flat 24h horizon.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WinHoldContext {
+    /// Modelled hold in hours (from [`estimate_funding_hold_hours`]).
+    pub hold_hours: f64,
+    /// Exit-threshold source; defaults to 8.0 like the hold model.
+    pub min_apr_pct: Option<f64>,
+    /// Measured entry-spread cost in bps (joins fees in the coverage
+    /// denominator so the sign agrees with the expected-return figure).
+    pub entry_spread_bps: Option<f64>,
+}
+
 /// Informational win probability for a funding-carry / basis opportunity.
 ///
 /// Heuristic, NOT a calibrated forecast: under a memoryless assumption the
 /// edge survives each hour with equal odds, so the chance it persists past
-/// fee breakeven over a standard 24h hold is `coverage / (1 + coverage)`
-/// where `coverage = 24h carry / round-trip fee = 24 / break_even_hours`.
-/// A 4h breakeven scores ~0.86, 24h scores 0.50, 72h scores ~0.25.
+/// fee breakeven is `coverage / (1 + coverage)`.
+/// - With `hold = None` (legacy): `coverage = 24h flat carry / round-trip
+///   fee = 24 / break_even_hours`. A 4h breakeven scores ~0.86, 24h ~0.50.
+/// - With `hold = Some` (scanner default): coverage uses the SAME
+///   decay-averaged accrual and fee+spread costs as
+///   [`expected_carry_return_usd`], so `p >= 0.5` agrees in sign with a
+///   non-negative expected return — a 65% win next to a −$13 expectation
+///   (flat-24h vs modelled-hold horizons) cannot happen.
 ///
 /// Adjustments (small, documented):
 /// - `predicted_agrees = Some(true)` (venue predicted rates confirm the edge
@@ -494,6 +512,7 @@ pub fn funding_win_probability(
     round_trip_fee_bps: Decimal,
     basis_buffer_bps: Option<Decimal>,
     predicted_agrees: Option<bool>,
+    hold: Option<WinHoldContext>,
 ) -> Option<f64> {
     if net_rate_8h <= dec!(0) || round_trip_fee_bps < dec!(0) {
         return None;
@@ -503,17 +522,42 @@ pub fn funding_win_probability(
     if !rate_f.is_finite() || !fee_f.is_finite() || rate_f <= 0.0 || fee_f < 0.0 {
         return None;
     }
-    // 3 funding periods/day; fee_ratio is dimensionless.
-    let daily_carry = 3.0 * rate_f;
-    let fee_ratio = fee_f / 10_000.0;
-    if daily_carry <= 0.0 {
+    // Cost fraction covers fees plus measured entry spread when a hold
+    // context is present (sign-agreement with expected_carry_return_usd);
+    // legacy path keeps fees-only over a flat 24h horizon.
+    let spread_f: f64 = match hold {
+        Some(h) => h
+            .entry_spread_bps
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(0.0),
+        None => 0.0,
+    };
+    let cost_ratio = (fee_f + spread_f) / 10_000.0;
+    // Accrual fraction: flat 24h (legacy) or decay-averaged over the
+    // modelled hold (hold-aligned).
+    let accrual_frac = match hold {
+        Some(h) => {
+            if !(h.hold_hours.is_finite() && h.hold_hours > 0.0) {
+                return None;
+            }
+            let apr = h.min_apr_pct.filter(|v| v.is_finite() && *v >= 0.0).unwrap_or(8.0);
+            let threshold_8h = apr / 100.0 / 365.0 / 3.0;
+            let exit_8h = threshold_8h.min(rate_f);
+            ((rate_f + exit_8h) / 2.0) * (h.hold_hours / 8.0)
+        }
+        None => {
+            // 3 funding periods/day, flat at the current print.
+            3.0 * rate_f
+        }
+    };
+    if !(accrual_frac.is_finite()) || accrual_frac <= 0.0 {
         return None;
     }
-    // Zero-fee edge: carry is pure profit if it persists at all.
-    let mut p = if fee_ratio <= 0.0 {
+    // Zero-cost edge: carry is pure profit if it persists at all.
+    let mut p = if cost_ratio <= 0.0 {
         0.95
     } else {
-        let coverage = daily_carry / fee_ratio;
+        let coverage = accrual_frac / cost_ratio;
         if !coverage.is_finite() || coverage <= 0.0 {
             return None;
         }
@@ -744,20 +788,20 @@ mod funding_win_probability_tests {
     fn breakeven_anchors_match_documented_scale() {
         // fee 7.2bps, rate 0.00024/8h -> breakeven exactly 24h ->
         // coverage 1.0 -> P = 0.50.
-        let p = funding_win_probability(dec!(0.00024), dec!(7.2), None, None).expect("p");
+        let p = funding_win_probability(dec!(0.00024), dec!(7.2), None, None, None).expect("p");
         assert!((p - 0.50).abs() < 0.02, "unexpected {p}");
         // Faster breakeven -> higher P; slower -> lower P (monotonic).
-        let fast = funding_win_probability(dec!(0.001), dec!(7.2), None, None).expect("fast");
-        let slow = funding_win_probability(dec!(0.000024), dec!(7.2), None, None).expect("slow");
+        let fast = funding_win_probability(dec!(0.001), dec!(7.2), None, None, None).expect("fast");
+        let slow = funding_win_probability(dec!(0.000024), dec!(7.2), None, None, None).expect("slow");
         assert!(fast > p && p > slow, "fast={fast} p={p} slow={slow}");
     }
 
     #[test]
     fn adjustments_lift_or_trim() {
-        let base = funding_win_probability(dec!(0.0001), dec!(7.2), None, None).expect("base");
-        let agree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(true)).expect("agree");
-        let disagree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(false)).expect("disagree");
-        let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None).expect("buffered");
+        let base = funding_win_probability(dec!(0.0001), dec!(7.2), None, None, None).expect("base");
+        let agree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(true), None).expect("agree");
+        let disagree = funding_win_probability(dec!(0.0001), dec!(7.2), None, Some(false), None).expect("disagree");
+        let buffered = funding_win_probability(dec!(0.0001), dec!(7.2), Some(dec!(40)), None, None).expect("buffered");
         assert!(agree > base && base > disagree, "agree={agree} base={base} disagree={disagree}");
         assert!(buffered > base, "buffered={buffered} base={base}");
     }
@@ -789,12 +833,45 @@ mod funding_win_probability_tests {
 
     #[test]
     fn degenerate_inputs_are_none_and_bounds_hold() {
-        assert_eq!(funding_win_probability(dec!(0), dec!(7.2), None, None), None);
-        assert_eq!(funding_win_probability(dec!(-0.0001), dec!(7.2), None, None), None);
+        assert_eq!(funding_win_probability(dec!(0), dec!(7.2), None, None, None), None);
+        assert_eq!(funding_win_probability(dec!(-0.0001), dec!(7.2), None, None, None), None);
         // Extremes never reach 0/1.
-        let huge = funding_win_probability(dec!(0.01), dec!(0.1), Some(dec!(1000)), Some(true)).expect("huge");
-        let tiny = funding_win_probability(dec!(0.0000001), dec!(100.0), None, Some(false)).expect("tiny");
+        let huge = funding_win_probability(dec!(0.01), dec!(0.1), Some(dec!(1000)), Some(true), None).expect("huge");
+        let tiny = funding_win_probability(dec!(0.0000001), dec!(100.0), None, Some(false), None).expect("tiny");
         assert!(huge <= 0.98 && tiny >= 0.02, "huge={huge} tiny={tiny}");
+    }
+
+    #[test]
+    fn hold_aligned_win_agrees_in_sign_with_expected_return() {
+        // The reported contradiction: flat-24h Win 65% next to a -$13
+        // expectation. With the modelled hold, both must agree in sign.
+        let hold = |h: f64| {
+            Some(super::WinHoldContext {
+                hold_hours: h,
+                min_apr_pct: Some(8.0),
+                entry_spread_bps: None,
+            })
+        };
+        // Short decaying hold, costs dominate -> loss AND sub-50% win.
+        let exp = super::expected_carry_return_usd(0.00022, 10.0, None, Some(8.0), Some(8.0), 50_000.0)
+            .expect("expected");
+        assert!(exp < 0.0, "expected loss: {exp}");
+        let p = funding_win_probability(dec!(0.00022), dec!(10.0), None, None, hold(8.0))
+            .expect("p");
+        assert!(p < 0.5, "win must be sub-50% alongside a loss: {p}");
+        // Long stable hold -> profit AND super-50% win.
+        let exp2 = super::expected_carry_return_usd(0.0008, 10.0, None, Some(80.0), Some(8.0), 50_000.0)
+            .expect("expected2");
+        assert!(exp2 > 0.0, "expected profit: {exp2}");
+        let p2 = funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(80.0))
+            .expect("p2");
+        assert!(p2 > 0.5, "win must be super-50% alongside a profit: {p2}");
+        // Unknown hold keeps the legacy flat-24h answer.
+        let legacy = funding_win_probability(dec!(0.00024), dec!(7.2), None, None, None).expect("legacy");
+        assert!((legacy - 0.50).abs() < 0.02, "legacy 24h scale unchanged: {legacy}");
+        // Garbage hold refuses rather than inventing.
+        assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(f64::NAN)).is_none());
+        assert!(funding_win_probability(dec!(0.0008), dec!(10.0), None, None, hold(0.0)).is_none());
     }
 }
 
