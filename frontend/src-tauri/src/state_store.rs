@@ -1185,6 +1185,46 @@ const MIGRATION_V22_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD CO
 
 const MIGRATION_V23_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN client_order_id TEXT NOT NULL DEFAULT ''; PRAGMA user_version = 23; COMMIT;";
 
+/// v24 admits 'external' into the signal_executions strategy CHECK. The
+/// external-close flow has always persisted signals with strategy_id
+/// 'external' (ALLOWED_STRATEGY_IDS admits it) but every prior rebuild of
+/// the table omitted it from the CHECK — external closes failed to persist
+/// with a constraint error before ever dispatching. The rebuild mirrors
+/// v13 exactly, widened by one value.
+const MIGRATION_V24_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE signal_executions_v24 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb', 'triangle', 'external')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT
+);
+INSERT INTO signal_executions_v24
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v24 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+PRAGMA user_version = 24;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1631,7 +1671,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 23 {
+        if version > 24 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1768,6 +1808,12 @@ impl StateStore {
         }
         if version <= 22 {
             if let Err(err) = conn.execute_batch(MIGRATION_V23_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 23 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V24_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -4465,7 +4511,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 23);
+            assert_eq!(version, 24);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -5013,7 +5059,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 23);
+        assert_eq!(version, 24);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5528,7 +5574,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 23);
+            assert_eq!(version, 24);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5899,7 +5945,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 23);
+        assert_eq!(v, 24);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -6019,7 +6065,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 23);
+        assert_eq!(v10, 24);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -6818,5 +6864,124 @@ mod tests {
         let pending = store.list_pending_order_legs().unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1.side, LegSide::Long);
+    }
+    #[test]
+    fn test_migration_v24_admits_external_and_preserves_rows() {
+        // Replay up to v13 (the last signal_executions rebuild), seed a
+        // normal signal, then migrate fully — the row must survive the v24
+        // rebuild and 'external' must insert cleanly.
+        let conn = Connection::open_in_memory().unwrap();
+        for batch in [
+            MIGRATION_V1_SQL,
+            MIGRATION_V2_SQL,
+            MIGRATION_V3_SQL,
+            MIGRATION_V4_SQL,
+            MIGRATION_V5_SQL,
+            MIGRATION_V6_SQL,
+            MIGRATION_V7_SQL,
+            MIGRATION_V8_SQL,
+            MIGRATION_V9_SQL,
+            MIGRATION_V10_SQL,
+            MIGRATION_V11_SQL,
+            MIGRATION_V12_SQL,
+            MIGRATION_V13_SQL,
+        ] {
+            conn.execute_batch(batch).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO signal_executions
+                (id, strategy_id, symbol, status, created_at, updated_at)
+             VALUES ('sig-keep', 'futures', 'BTC-USD', 'closed', 't0', 't0')",
+            [],
+        )
+        .unwrap();
+        StateStore::migrate(&conn).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 24);
+        let kept: String = conn
+            .query_row(
+                "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "futures");
+        conn.execute(
+            "INSERT INTO signal_executions
+                (id, strategy_id, symbol, status, created_at, updated_at)
+             VALUES ('sig-ext', 'external', 'BTC-USD', 'in_flight', 't1', 't1')",
+            [],
+        )
+        .unwrap();
+        // The other allowed ids still insert — the widened CHECK is a
+        // superset, not a replacement.
+        conn.execute(
+            "INSERT INTO signal_executions
+                (id, strategy_id, symbol, status, created_at, updated_at)
+             VALUES ('sig-tri', 'triangle', 'BTC-USD', 'closed', 't2', 't2')",
+            [],
+        )
+        .unwrap();
+        // A bogus id still fails closed.
+        assert!(conn
+            .execute(
+                "INSERT INTO signal_executions
+                    (id, strategy_id, symbol, status, created_at, updated_at)
+                 VALUES ('sig-bad', 'bogus', 'BTC-USD', 'closed', 't3', 't3')",
+                [],
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn external_strategy_signal_persists() {
+        // The external-close flow records strategy_id "external" — the DB
+        // CHECK must accept it or the close intent can never persist.
+        let store = StateStore::open_in_memory().unwrap();
+        let sig = NewSignalExecution {
+            id: "extclose-test-1".into(),
+            strategy_id: "external".into(),
+            symbol: "BTC-USD".into(),
+            route_id: None,
+            expected_net_usd: None,
+            note: None,
+            legs: vec![NewSignalLeg {
+                account_id: None,
+                venue: "kraken".into(),
+                side: LegSide::Short,
+                symbol: Some("BTC-USD".into()),
+                intended_qty: 0.5,
+            }],
+        };
+        store.record_signal_execution(&sig).unwrap();
+    }
+
+    #[test]
+    fn every_allowed_strategy_id_persists() {
+        // Regression guard for the v24 class of bug: ALLOWED_STRATEGY_IDS
+        // and the signal_executions CHECK list must never diverge — every
+        // admitted strategy id must actually insert.
+        let store = StateStore::open_in_memory().unwrap();
+        for (i, sid) in ALLOWED_STRATEGY_IDS.iter().enumerate() {
+            store
+                .record_signal_execution(&NewSignalExecution {
+                    id: format!("allowed-{i}"),
+                    strategy_id: (*sid).into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                    }],
+                })
+                .unwrap_or_else(|e| panic!("strategy id {sid} failed CHECK: {e}"));
+        }
     }
 }

@@ -1639,3 +1639,35 @@ overhaul pass committed as `23d4aed`).
 - **Auto-compensation + cancel retry (final pass):** `auto_resolve_residual_exposure` (new opt-in `EngineSettingsDto` flag + Safety-tab toggle) — an entry signal landing `imbalanced` now auto-dispatches reduce-only residual flattens persisted as `flat-{id}-*` children (durable intent before submission; deduplicated while any child is open; bounded to `MAX_RESIDUAL_ATTEMPTS=3`, after which the signal escalates `unresolved`). Stale working orders past the 15-min deadline get up to `MAX_CANCEL_ATTEMPTS=3` `cancel_order` calls (kv-persisted counter survives restart; only confirmed `Working` polls consume budget — transport failures don't burn retries). `residual_leg_quantities` is a pure planner fn with unit tests for uncovered/partial/full coverage and venue+closing-side matching. `live_order_reconciliation_implemented` still returns `false` — these mechanisms need venue sandbox/canary evidence before entries can be enabled.
 - **Verification:** `cargo fmt` clean; `cargo clippy --workspace --all-targets -D warnings` clean; `cargo test --workspace --locked` **718 pass, 0 fail** (desktop 334 incl. `pending_order_legs_exclude_simulated_ids`, exchanges 154 incl. new Decibel commit-state + PopDEX row-parser tests); `npm test` all green; `tsc --noEmit` + `npm run build` green.
 - **Files:** `crates/arbitrageur-core/src/exchange.rs`, `crates/arbitrageur-exchanges/src/{decibel,popdex,binance,aster,okx,kraken,vanta,coinbase,hyperliquid,lighter,robinhood,lighter_signer}.rs`, `frontend/src-tauri/src/{reconciliation.rs,state_store.rs,main.rs,commands.rs}`, `frontend/src/types/index.ts`, `native/lighter/verify/*`, `.github/workflows/ci.yml`, `docs/{CAPABILITIES.md,EXCHANGES.md,PROJECT_REVIEW_CROSSCHECK_2026-09-20.md}`.
+
+## 79. Session Handoff — 2026-09-20 (post-commit Decibel scan, operator reconcile, external-close CHECK fix)
+
+- **Decibel stage-2 reconciliation:** `fetch_order` no longer stops at the
+  placement transaction. While an order stays working it scans
+  `accounts/{subaccount}/transactions` (ascending version > commit, last
+  50) for `OrderEvent`/`TradeEvent` rows identity-matched on
+  client_order_id/order_id. Venue lifecycle fields are authoritative for
+  cumulative state; anonymous batch-tx fills are never attributed; commit
+  and later fills blend by quantity-weighted VWAP; window truncation fails
+  closed to `unresolved`; scan failure preserves commit-time truth.
+- **Operator-triggered reconciliation:** `reconcile_orders_now` Tauri
+  command (registered + allowlisted) returns `ReconcileSummaryDto`; a
+  "Reconcile Orders Now" button on the Portfolio monitor invokes it. An
+  attention strip on the radar page lists every `unresolved`/`imbalanced`
+  signal with its escalation note — escalations were previously invisible
+  except via ticker-block tooltips.
+- **Reconciler test coverage:** `derive_signal_status` extracted as a pure
+  function; the full classification matrix (balanced/closed/failed/
+  imbalanced/partial-terminal/escalation/cancel-notes) is now unit-tested.
+- **External-close persistence bug (fixed):** `signal_executions.strategy_id`
+  CHECK never included `'external'` — every rebuild (v11, v13) omitted it
+  while `ALLOWED_STRATEGY_IDS` admitted it, so external closes failed to
+  persist with `constraint failed` before dispatch (fail-closed, but a
+  dead feature). Migration v24 rebuilds the table with the full allowed
+  set; a replay-migration test proves row preservation + a regression
+  guard asserts every `ALLOWED_STRATEGY_IDS` value inserts.
+- **Verification:** 345 desktop + 155 exchange tests, full workspace
+  clippy -D warnings, tsc, frontend tests (210) and build all green.
+- Commits: `75b76e5` (Decibel scan + reconcile command), `0a47f8c`
+  (derivation matrix tests), `3ec57aa` (attention strip), plus the v24
+  migration fix.
