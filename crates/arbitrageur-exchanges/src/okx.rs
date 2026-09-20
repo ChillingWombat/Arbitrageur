@@ -137,6 +137,157 @@ impl OkxAdapter {
         Ok(data)
     }
 
+    fn credentials(
+        &self,
+    ) -> anyhow::Result<(Zeroizing<String>, Zeroizing<String>, Zeroizing<String>)> {
+        let key = |v: &RwLock<Option<Zeroizing<String>>>, what: &str| {
+            v.read()
+                .clone()
+                .filter(|k| !k.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("OKX {what} not configured or empty"))
+        };
+        Ok((
+            key(&self.api_key, "API key")?,
+            key(&self.api_secret, "API secret")?,
+            key(&self.passphrase, "passphrase")?,
+        ))
+    }
+
+    fn has_credentials(&self) -> bool {
+        self.credentials().is_ok()
+    }
+
+    /// OKX signature preimage: `timestamp + METHOD + requestPath + body`,
+    /// HMAC-SHA256, base64. Pure for unit testing.
+    fn sign_request(secret: &Zeroizing<String>, preimage: &str) -> anyhow::Result<String> {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
+            .map_err(|e| anyhow::anyhow!("Invalid OKX HMAC key: {e}"))?;
+        mac.update(preimage.as_bytes());
+        Ok(base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes()))
+    }
+
+    fn okx_timestamp() -> String {
+        Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    }
+
+    async fn signed_request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let (api_key, api_secret, passphrase) = self.credentials()?;
+        let ts = Self::okx_timestamp();
+        let body_str = body.unwrap_or("");
+        let preimage = format!("{ts}{method}{path}{body_str}");
+        let sign = Self::sign_request(&api_secret, &preimage)?;
+        let url = format!("{}{}", self.base_url, path);
+        let mut req = match method {
+            "GET" => self.client.get(&url),
+            "POST" => self.client.post(&url),
+            _ => anyhow::bail!("OKX unsupported signed method {method}"),
+        };
+        req = req
+            .header("OK-ACCESS-KEY", api_key.to_string())
+            .header("OK-ACCESS-SIGN", sign)
+            .header("OK-ACCESS-TIMESTAMP", ts)
+            .header("OK-ACCESS-PASSPHRASE", passphrase.to_string())
+            .header("Content-Type", "application/json");
+        if !body_str.is_empty() {
+            req = req.body(body_str.to_string());
+        }
+        let resp = req.send().await.map_err(|e| {
+            self.rate_limiter.record_failure(false);
+            anyhow::anyhow!("OKX {method} {path} transport failure: {e}")
+        })?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
+            anyhow::bail!("OKX {method} {path} failed (HTTP {status}): {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("Failed to parse OKX {path} response: {e}; body: {text}"))?;
+        if v.get("code").and_then(|c| c.as_str()) != Some("0") {
+            anyhow::bail!("OKX {method} {path} error response: {text}");
+        }
+        Ok(v)
+    }
+
+    /// Contract face value (ctVal, base units per contract) with a tiny
+    /// in-memory cache. Public endpoint — safe before credentials exist.
+    async fn contract_face_value(&self, inst_id: &str) -> anyhow::Result<Decimal> {
+        let path = format!("/api/v5/public/instruments?instType=SWAP&instId={inst_id}");
+        let v = self.get_json(&path).await?;
+        let ct_val = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|d| dec_from_json(d.get("ctVal")))
+            .filter(|c| *c > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("OKX missing ctVal for {inst_id}"))?;
+        Ok(ct_val)
+    }
+
+    /// Engine base-unit quantity into whole OKX contracts (floor). Pure.
+    fn contracts_for_qty(qty: Decimal, ct_val: Decimal) -> Option<Decimal> {
+        if !(qty > dec!(0)) || !(ct_val > dec!(0)) {
+            return None;
+        }
+        let contracts = (qty / ct_val).trunc();
+        (contracts >= dec!(1)).then_some(contracts)
+    }
+
+    /// Pure parse of a `/trade/order` response envelope.
+    fn parse_order_response(
+        v: &serde_json::Value,
+        order: &OrderRequest,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow::anyhow!("OKX order response missing data"))?;
+        let code = data.get("sCode").and_then(|c| c.as_str()).unwrap_or("");
+        if code != "0" {
+            let msg = data.get("sMsg").and_then(|m| m.as_str()).unwrap_or("unknown");
+            anyhow::bail!("OKX order rejected (sCode {code}): {msg}");
+        }
+        let order_id = data
+            .get("ordId")
+            .and_then(|id| id.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let client_order_id = data
+            .get("clOrdId")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&order.client_order_id)
+            .to_string();
+        // Market fills report asynchronously; the ack carries no fill price.
+        Ok(OrderResponse {
+            order_id,
+            client_order_id,
+            venue: VenueId::new("okx"),
+            symbol: order.symbol.clone(),
+            status: OrderStatus::New,
+            original_qty: order.quantity,
+            filled_qty: dec!(0),
+            remaining_qty: order.quantity,
+            avg_fill_price: None,
+            fee: dec!(0),
+            fee_currency: "USDT".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
     fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
         let sym = symbol.trim().to_uppercase();
         if sym.ends_with("-SWAP") {
@@ -157,6 +308,55 @@ impl OkxAdapter {
             }
             Ok(format!("{}-USDT-SWAP", base))
         }
+    }
+
+    /// Poll a resting order for its true fill state (up to ~5s). Returns
+    /// (status, filled_base_qty, avg_px, fee).
+    async fn poll_order_fill(
+        &self,
+        inst_id: &str,
+        ord_id: &str,
+        ct_val: Decimal,
+    ) -> anyhow::Result<(
+        arbitrageur_core::types::OrderStatus,
+        Decimal,
+        Option<Decimal>,
+        Decimal,
+    )> {
+        use arbitrageur_core::types::OrderStatus;
+        for _ in 0..6 {
+            let path = format!("/api/v5/trade/order?instId={inst_id}&ordId={ord_id}");
+            let v = self.signed_request("GET", &path, None).await?;
+            let data = v
+                .get("data")
+                .and_then(|d| d.as_array())
+                .and_then(|a| a.first())
+                .ok_or_else(|| anyhow::anyhow!("OKX order query missing data"))?;
+            let state = data.get("state").and_then(|s| s.as_str()).unwrap_or("live");
+            let acc_contracts = dec_from_json(data.get("accFillSz")).unwrap_or(dec!(0));
+            let filled_base = acc_contracts * ct_val;
+            let avg_px = dec_from_json(data.get("avgPx")).filter(|p| *p > dec!(0));
+            let fee = dec_from_json(data.get("fee")).unwrap_or(dec!(0)).abs();
+            let terminal = matches!(
+                state,
+                "filled" | "partially_filled" | "canceled" | "cancelled" | "failed"
+            );
+            if terminal || filled_base > dec!(0) {
+                let status = match state {
+                    "filled" => OrderStatus::Filled,
+                    "partially_filled" => OrderStatus::PartiallyFilled,
+                    "canceled" | "cancelled" if filled_base > dec!(0) => {
+                        OrderStatus::PartiallyFilled
+                    }
+                    "canceled" | "cancelled" => OrderStatus::Cancelled,
+                    "failed" => OrderStatus::Rejected,
+                    _ => OrderStatus::New,
+                };
+                return Ok((status, filled_base, avg_px, fee));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        }
+        anyhow::bail!("OKX order {ord_id} fill state unknown after polling")
     }
 }
 
@@ -352,12 +552,136 @@ impl ExchangeAdapter for OkxAdapter {
         anyhow::bail!("Live account query not configured for OKX; refusing to fabricate")
     }
 
-    async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        anyhow::bail!("Live trading execution not configured for OKX")
+    async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot place live order on OKX: API credentials are not configured or vault is locked");
+        }
+        if order.quantity <= dec!(0) {
+            anyhow::bail!("OKX order quantity must be positive");
+        }
+        let inst_id = Self::to_venue_symbol(&order.symbol)?;
+        let ct_val = self.contract_face_value(&inst_id).await?;
+        // Engine quantities are base units; OKX `sz` is whole contracts.
+        let contracts = Self::contracts_for_qty(order.quantity, ct_val).ok_or_else(|| {
+            anyhow::anyhow!(
+                "OKX order quantity {} {} is below one contract ({inst_id} ctVal {ct_val})",
+                order.quantity, order.symbol
+            )
+        })?;
+        let side_str = match order.side {
+            arbitrageur_core::types::Side::Buy => "buy",
+            arbitrageur_core::types::Side::Sell => "sell",
+        };
+        let (ord_type, px) = match order.order_type {
+            arbitrageur_core::types::OrderType::Market
+            | arbitrageur_core::types::OrderType::ImmediateOrCancel => ("market", None),
+            arbitrageur_core::types::OrderType::Limit
+            | arbitrageur_core::types::OrderType::PostOnly => {
+                let p = order.price.filter(|p| *p > dec!(0)).ok_or_else(|| {
+                    anyhow::anyhow!("OKX limit order requires a positive price")
+                })?;
+                ("limit", Some(p.to_string()))
+            }
+        };
+        let mut body = serde_json::json!({
+            "instId": inst_id,
+            "tdMode": "isolated",
+            "side": side_str,
+            "ordType": ord_type,
+            "sz": contracts.to_string(),
+        });
+        if let Some(px) = px {
+            body["px"] = serde_json::Value::String(px);
+        }
+        if order.reduce_only {
+            body["reduceOnly"] = serde_json::Value::Bool(true);
+        }
+        if !order.client_order_id.is_empty() {
+            body["clOrdId"] = serde_json::Value::String(order.client_order_id.clone());
+        }
+        let body_str = serde_json::to_string(&body)?;
+        let v = self
+            .signed_request("POST", "/api/v5/trade/order", Some(&body_str))
+            .await?;
+        let mut resp = Self::parse_order_response(&v, &order)?;
+        // Market fills land asynchronously: poll the order a few times and
+        // report truthful fills. Never fabricate: unknown states stay New.
+        if order.order_type == arbitrageur_core::types::OrderType::Market
+            || order.order_type == arbitrageur_core::types::OrderType::ImmediateOrCancel
+        {
+            if let Ok(fill) = self.poll_order_fill(&inst_id, &resp.order_id, ct_val).await {
+                resp.status = fill.0;
+                resp.filled_qty = fill.1;
+                resp.remaining_qty = order.quantity.saturating_sub(fill.1);
+                resp.avg_fill_price = fill.2;
+                resp.fee = fill.3;
+            }
+        }
+        Ok(resp)
     }
 
-    async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
-        anyhow::bail!("Live trading cancellation not configured for OKX")
+
+    async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot cancel live order on OKX: API credentials are not configured or vault is locked");
+        }
+        let inst_id = Self::to_venue_symbol(&req.symbol)?;
+        let mut body = serde_json::json!({ "instId": inst_id });
+        if let Some(id) = req.order_id {
+            body["ordId"] = serde_json::Value::String(id);
+        }
+        if let Some(cid) = req.client_order_id {
+            body["clOrdId"] = serde_json::Value::String(cid);
+        }
+        let body_str = serde_json::to_string(&body)?;
+        let v = self
+            .signed_request("POST", "/api/v5/trade/cancel-order", Some(&body_str))
+            .await?;
+        let code = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|d| d.get("sCode"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        if code != "0" {
+            anyhow::bail!("OKX cancel rejected (sCode {code}): {}", v);
+        }
+        Ok(())
+    }
+
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot set leverage on OKX: API credentials are not configured or vault is locked");
+        }
+        if !(1..=125).contains(&leverage) {
+            anyhow::bail!("OKX leverage {leverage} out of range 1..=125");
+        }
+        let inst_id = Self::to_venue_symbol(symbol)?;
+        let body = serde_json::json!({
+            "instId": inst_id,
+            "lever": leverage.to_string(),
+            "mgnMode": "isolated",
+        });
+        let body_str = serde_json::to_string(&body)?;
+        let v = self
+            .signed_request("POST", "/api/v5/account/set-leverage", Some(&body_str))
+            .await?;
+        let got = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .and_then(|d| d.get("lever"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("");
+        if got != leverage.to_string() {
+            anyhow::bail!("OKX leverage ack mismatch: wanted {leverage}, venue reports {got}");
+        }
+        Ok(())
+    }
+
+    fn live_order_submission_implemented(&self) -> bool {
+        true
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -382,6 +706,55 @@ mod tests {
     use super::*;
 
     #[test]
+    #[test]
+    fn sign_request_matches_verified_vector() {
+        // Cross-checked with `openssl dgst -sha256 -hmac secret -binary | openssl base64`
+        // and Python hmac over the same preimage.
+        let secret = Zeroizing::new("secret".to_string());
+        let pre = "2020-12-08T09:08:57.715ZPOST/api/v5/trade/order{\"instId\":\"BTC-USDT-SWAP\",\"tdMode\":\"isolated\",\"side\":\"buy\",\"ordType\":\"market\",\"sz\":\"1\"}";
+        let sig = OkxAdapter::sign_request(&secret, pre).unwrap();
+        assert_eq!(sig, "1mGn7nuHsjf/9bT57H1rzqrdrjs0S9gIS4QTbfF3yM0=");
+    }
+
+    #[test]
+    fn contracts_for_qty_floors_to_whole_contracts() {
+        assert_eq!(
+            OkxAdapter::contracts_for_qty(dec!(0.05), dec!(0.01)),
+            Some(dec!(5))
+        );
+        assert_eq!(
+            OkxAdapter::contracts_for_qty(dec!(0.015), dec!(0.01)),
+            Some(dec!(1))
+        );
+        assert_eq!(OkxAdapter::contracts_for_qty(dec!(0.005), dec!(0.01)), None);
+        assert_eq!(OkxAdapter::contracts_for_qty(dec!(0), dec!(0.01)), None);
+    }
+
+    #[test]
+    fn parse_order_response_accepts_and_rejects() {
+        use arbitrageur_core::order::OrderRequest;
+        use arbitrageur_core::types::{OrderStatus, Side};
+        let order = OrderRequest::new_market(
+            VenueId::new("okx"),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.05),
+        );
+        let v: serde_json::Value = serde_json::json!({
+            "code": "0",
+            "data": [{ "ordId": "999", "clOrdId": "", "sCode": "0", "sMsg": "" }]
+        });
+        let resp = OkxAdapter::parse_order_response(&v, &order).unwrap();
+        assert_eq!(resp.order_id, "999");
+        assert_eq!(resp.status, OrderStatus::New);
+        let rej: serde_json::Value = serde_json::json!({
+            "code": "0",
+            "data": [{ "ordId": "", "sCode": "51000", "sMsg": "boom" }]
+        });
+        let err = OkxAdapter::parse_order_response(&rej, &order).expect_err("must reject");
+        assert!(err.to_string().contains("51000"), "unexpected: {err}");
+    }
+
     fn to_venue_symbol_normalizes_and_rejects_cross() {
         assert_eq!(
             OkxAdapter::to_venue_symbol("BTC-USDT").unwrap(),

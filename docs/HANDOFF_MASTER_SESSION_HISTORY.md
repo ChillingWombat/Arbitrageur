@@ -1400,3 +1400,10 @@ overhaul pass committed as `23d4aed`).
 - **Fix:** `live_order_submission_implemented` trait method (default false; true for HL/Aster/PopDEX); funding live refusal now names per-leg state (not implemented vs no credentials) + reconciliation caveat + paper pointer. Paper balance input disabled + greyed with tooltip in Live mode.
 - **Tree note:** stages only the trait/override/preflight/test/grey-out hunks; concurrent worker hunks untouched.
 - **Verification:** desktop 313/0, exchanges 100/0, tsc clean, release rebuilt + relaunched.
+
+## 52. Session Handoff — 2026-09-20 (Live submission: Binance + OKX)
+
+- **Ask:** live execution support for all included exchanges.
+- **Shipped:** Binance USDT-M place/cancel/set-leverage (signed fapi, 1000x memecoin scaling, VIP0 5 BPS fees) and OKX swap place/cancel/set-leverage (signed api/v5, ctVal contract conversion, fill polling, isolated margin) + `live_order_submission_implemented() == true` for both. HMAC vectors cross-checked with openssl/python; no network in tests. Vault key/secret/passphrase plumbing already covered both.
+- **Deliberately next:** Kraken (needs inverse-vs-linear margin care), Vanta/Orderly (EIP-712), Lighter (Starknet signer), Decibel (Aptos), Arcus scoping; then the atomic two-leg live dispatcher with reconciliation (refusing to strand naked legs).
+- **Verification:** exchanges 106/0, desktop 313/0, tsc clean, release rebuilt + relaunched.
