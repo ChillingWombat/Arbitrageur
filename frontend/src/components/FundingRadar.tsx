@@ -395,9 +395,9 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
               <CarryDetailField label="Compounded APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
               <CarryDetailField
-                label="Win probability"
+                label="Breakeven probability"
                 value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
-                title="Modelled-hold fee-coverage heuristic over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)"
+                title="Probability of covering costs over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)"
               />
               <CarryDetailField
                 label="Depth slope"
@@ -661,7 +661,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // Default mirrors the auto-carry bot's entry hurdle (Min APR %) converted
   // to 8h BPS: APR/100/365/3*10000 — the same 365d×3 convention the backend
   // uses both ways. Tracks the live minAprPct until the user overrides it.
-  // Min Win has no bot-side gate (win probability never gates execution),
+  // Min Breakeven has no bot-side gate (breakeven probability never gates execution),
   // so it defaults to off.
   // Filter inputs show at most 2 decimal places (bot-mirrored defaults are
   // normalized; user typing is never reformatted mid-edit).
@@ -924,9 +924,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-              title="Display filter — minimum win probability. The bot does not gate on win probability, so this defaults to off. Does not affect execution"
+              title="Display filter — minimum breakeven probability. The bot does not gate on breakeven probability, so this defaults to off. Does not affect execution"
             >
-              <span className="text-slate-400 font-medium">Min Win</span>
+              <span className="text-slate-400 font-medium">Min Breakeven</span>
               <input
                 value={minWinPct}
                 onChange={(e) => setMinWinPct(e.target.value)}
@@ -1007,10 +1007,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         </div>
                       )}
                       <div className="flex items-center justify-between gap-1">
-                        <span className="text-slate-500">Win:</span>
+                        <span className="text-slate-500">Breakeven:</span>
                         <span
                           className={`font-semibold tabular-nums ${opp.win_probability != null && opp.win_probability < 0.5 ? "text-loss" : "text-slate-900"}`}
-                          title="Odds the trade covers its costs over the modelled hold (informational only — never gates entries). Below 50% = more likely to lose than win, agreeing in sign with a negative Expected."
+                          title="Probability the trade covers its costs over the modelled hold (informational only — never gates entries). Below 50% = more likely to lose than win, agreeing in sign with a negative Expected."
                         >
                           {opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
                         </span>
