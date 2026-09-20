@@ -3719,10 +3719,13 @@ fn reconcile_signal_legs(
         // the reconciliation supervisor needs it to reach terminal state.
         if !leg.order_id.is_empty() {
             let cid = (!leg.client_order_id.is_empty()).then_some(leg.client_order_id.as_str());
-            let _ =
+            if let Err(e) =
                 state
                     .state_store
-                    .record_leg_order_id(signal_id, side, leg.order_id.as_str(), cid);
+                    .record_leg_order_id(signal_id, side, leg.order_id.as_str(), cid)
+            {
+                tracing::error!("persist venue order id failed for {signal_id} {side:?}: {e}");
+            }
         }
         if filled > 0.0 {
             let px = leg
@@ -4548,22 +4551,32 @@ async fn execute_spatial_arbitrage_inner(
                     if !f.order_id.is_empty() {
                         let cid =
                             (!f.client_order_id.is_empty()).then_some(f.client_order_id.as_str());
-                        let _ = state.state_store.record_leg_order_id(
+                        if let Err(e) = state.state_store.record_leg_order_id(
                             &signal_id,
                             side,
                             f.order_id.as_str(),
                             cid,
-                        );
+                        ) {
+                            // A lost order id orphans a live venue order —
+                            // louder than the surrounding `let _` style.
+                            tracing::error!(
+                                "persist venue order id failed for {signal_id} {side:?}: {e}"
+                            );
+                        }
                     }
                     if filled > 0.0 && px > 0.0 {
-                        let _ = state.state_store.apply_leg_fill(
+                        if let Err(e) = state.state_store.apply_leg_fill(
                             &signal_id,
                             side,
                             filled,
                             px,
                             fee,
                             Some(f.order_id.as_str()),
-                        );
+                        ) {
+                            tracing::error!(
+                                "persist leg fill failed for {signal_id} {side:?}: {e}"
+                            );
+                        }
                     }
                 }
             }
@@ -5613,22 +5626,32 @@ pub async fn execute_funding_carry_impl(
                     if !f.order_id.is_empty() {
                         let cid =
                             (!f.client_order_id.is_empty()).then_some(f.client_order_id.as_str());
-                        let _ = state.state_store.record_leg_order_id(
+                        if let Err(e) = state.state_store.record_leg_order_id(
                             &signal_id,
                             side,
                             f.order_id.as_str(),
                             cid,
-                        );
+                        ) {
+                            // A lost order id orphans a live venue order —
+                            // louder than the surrounding `let _` style.
+                            tracing::error!(
+                                "persist venue order id failed for {signal_id} {side:?}: {e}"
+                            );
+                        }
                     }
                     if filled > 0.0 && px > 0.0 {
-                        let _ = state.state_store.apply_leg_fill(
+                        if let Err(e) = state.state_store.apply_leg_fill(
                             &signal_id,
                             side,
                             filled,
                             px,
                             fee,
                             Some(f.order_id.as_str()),
-                        );
+                        ) {
+                            tracing::error!(
+                                "persist leg fill failed for {signal_id} {side:?}: {e}"
+                            );
+                        }
                     }
                 }
             }
