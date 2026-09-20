@@ -1337,11 +1337,18 @@ fn uninitialized_account_msg(main: &str, network: PopDexNetwork) -> String {
     )
 }
 
-/// Rewrite a raw `-32000 Core account not found` RPC failure into the
-/// actionable message above; every other error passes through unchanged.
-fn map_core_account_error(raw: &str, main: &str, network: PopDexNetwork) -> String {
+/// Map an estimate/send RPC failure. The REST preflight already proved the
+/// account exists and is funded, so a `-32000` here is a submission problem —
+/// report it raw with that context instead of misdiagnosing "not funded".
+fn map_send_error(raw: &str, main: &str, network: PopDexNetwork) -> String {
     if raw.contains("Core account not found") || raw.contains("-32000") {
-        return uninitialized_account_msg(main, network);
+        let net = match network {
+            PopDexNetwork::Mainnet => "mainnet",
+            PopDexNetwork::Testnet => "testnet",
+        };
+        return format!(
+            "PopDEX rejected the approval transaction for {main} on {net} ({raw}). The account exists and holds funds, so this is a submission problem: wrong network selected in the toolkit, a stuck pending transaction blocking the nonce, or a node hiccup — then retry. Guide: https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api (Step 4)."
+        );
     }
     format!("PopDEX sendTransaction failed: {raw}")
 }
@@ -1459,19 +1466,28 @@ pub async fn submit_approve_agent_with_main(
     let gas_limit = provider
         .estimate_gas(estimate_tx)
         .await
-        .map_err(|e| anyhow::anyhow!("{}", map_core_account_error(&e.to_string(), main.trim(), network)))?;
+        .map_err(|e| anyhow::anyhow!("{}", map_send_error(&e.to_string(), main.trim(), network)))?;
     let gas_limit = gas_limit.saturating_mul(125).saturating_div(100).max(100_000);
+    // The Ethereum transaction nonce is the sequential account nonce
+    // (NOT the millisecond timestamp — that lives only in the calldata
+    // `initialNonce` field). A timestamp-sized nonce is trillions ahead of
+    // the account and the node rejects it with `-32000 Core account not
+    // found for sender`.
+    let tx_nonce = provider
+        .get_transaction_count(main_addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("PopDEX nonce query failed: {e}"))?;
     let tx = TransactionRequest::default()
         .with_to(to_addr)
         .with_input(Bytes::from(calldata))
-        .with_nonce(now_ms)
+        .with_nonce(tx_nonce)
         .with_chain_id(chain_id)
         .with_gas_price(gas_price)
         .with_gas_limit(gas_limit);
     let pending = provider
         .send_transaction(tx)
         .await
-        .map_err(|e| anyhow::anyhow!("{}", map_core_account_error(&e.to_string(), main.trim(), network)))?;
+        .map_err(|e| anyhow::anyhow!("{}", map_send_error(&e.to_string(), main.trim(), network)))?;
     let tx_hash = format!("{:#x}", pending.tx_hash());
     let receipt = tokio::time::timeout(Duration::from_secs(30), pending.get_receipt())
         .await
@@ -1582,15 +1598,15 @@ mod tests {
     #[test]
     fn core_account_errors_point_at_funding() {
         let main = "0x1111111111111111111111111111111111111111";
-        let rewritten = map_core_account_error(
+        let rewritten = map_send_error(
             "server returned an error response: error code -32000: Core account not found for sender",
             main,
             PopDexNetwork::Testnet,
         );
-        assert!(rewritten.contains("not initialized"), "got: {rewritten}");
-        assert!(rewritten.contains("faucet"), "got: {rewritten}");
+        assert!(rewritten.contains("rejected the approval transaction"), "got: {rewritten}");
+        assert!(rewritten.contains("wrong network selected"), "got: {rewritten}");
         assert!(rewritten.contains("popdex.xyz/docs"), "got: {rewritten}");
-        let passthrough = map_core_account_error("insufficient funds", main, PopDexNetwork::Mainnet);
+        let passthrough = map_send_error("insufficient funds", main, PopDexNetwork::Mainnet);
         assert!(passthrough.contains("insufficient funds"), "got: {passthrough}");
         assert!(uninitialized_account_msg(main, PopDexNetwork::Mainnet).contains("mainnet"));
     }
