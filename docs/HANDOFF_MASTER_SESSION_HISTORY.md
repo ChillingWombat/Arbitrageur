@@ -1504,3 +1504,9 @@ overhaul pass committed as `23d4aed`).
 - **Surgery notes:** struct `ExecutionLogEntry` moved state.rs → state_store.rs (re-export keeps paths); repaired a bad paste (orphaned AccountProfile derives) + a dropped migrate block + the version guard during the session — all green now.
 - **Verification:** desktop 317/0 (new: v21 round-trip incl. REPLACE semantics + limit; record helper memory+sqlite), tsc 0, vite 0, forced release rebuild, app relaunched (PID 539340, prod DB migrated to v21 cleanly) ALIVE, routine WARNs only. Committed `d91ca7c`, pushed.
 - **Tree note:** only the 6 listed paths staged; worker UI files untouched.
+
+## 61. Session Handoff — 2026-09-20 (funding scanner filter strip)
+
+- **Ask:** funding rate monitor needs the spread monitor's filter set (Venue ALL / Min Exp BPS / Min Win %).
+- **Shipped (`FundingRadar.tsx`, committed `dc89bb8`, pushed):** scanner-header strip mirroring `OpportunityRadar` styling/behavior — venue multi-select dropdown (ALL default, either-leg match, logo chips), Min Exp (min net 8h edge in BPS over `net_rate_8h_pct * 100`), Min Win (% over `win_probability * 100`, absent prob fails an active filter like the spread side), live `N/M` count + Clear, filtered-empty state with clear affordance. Display-only by construction: detail modal, auto-carry loop, and execution all keep using the full list.
+- **Verification:** tsc 0, frontend suite pass, vite 0, release rebuilt, app relaunched (PID 541970) clean. Worker files untouched.
