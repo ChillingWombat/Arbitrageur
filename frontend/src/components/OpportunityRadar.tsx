@@ -1145,6 +1145,17 @@ const OpportunityRadarInner: React.FC = () => {
 
   const cycleStats = useMemo(() => computeBotCycleStats(signals, "radar", fillPnl), [signals, fillPnl]);
 
+  // Signals the reconciler escalated or could not prove flat — surfaced
+  // prominently because each one may hold residual venue exposure and
+  // blocks its ticker until an operator reviews it.
+  const attentionSignals = useMemo(
+    () =>
+      (signals ?? []).filter(
+        (s) => s.status === "unresolved" || s.status === "imbalanced",
+      ),
+    [signals],
+  );
+
   const heldSet = useMemo(
     () => buildHeldSet(botStatus?.openPositions),
     [botStatus],
@@ -1327,6 +1338,43 @@ const OpportunityRadarInner: React.FC = () => {
       </div>
 
       <BotStatCards stats={cycleStats} />
+
+      {attentionSignals.length > 0 && (
+        <div
+          className="bg-loss-dim border border-loss-border rounded-xl px-4 py-3 space-y-1.5 shrink-0"
+          role="alert"
+        >
+          <div className="text-xs font-mono font-bold text-loss">
+            {attentionSignals.length} signal{attentionSignals.length === 1 ? "" : "s"} need
+            operator review — exposure may be open
+          </div>
+          {attentionSignals.slice(0, 5).map((s) => (
+            <div key={s.id} className="flex items-center gap-2 text-[11px] font-mono">
+              <span
+                className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${
+                  s.status === "imbalanced"
+                    ? "bg-loss/15 text-loss border-loss-border"
+                    : "bg-warn-dim text-warn border-warn-border"
+                }`}
+              >
+                {s.status}
+              </span>
+              <span className="text-slate-700 font-bold">{s.symbol}</span>
+              <span className="text-slate-400">{s.id}</span>
+              {s.note && (
+                <span className="text-slate-500 truncate max-w-md" title={s.note}>
+                  {s.note}
+                </span>
+              )}
+            </div>
+          ))}
+          {attentionSignals.length > 5 && (
+            <div className="text-[10px] font-mono text-slate-500">
+              …and {attentionSignals.length - 5} more in the signal ledger
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Radar gadget — filter strip + table in a single card.
           Filters are display-only; none of these affect the monitor or strategy. */}
