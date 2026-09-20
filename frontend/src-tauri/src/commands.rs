@@ -2431,7 +2431,7 @@ pub async fn execute_triangle_arbitrage_impl(
     }
 
     if let Some(err) = leg_error {
-        state.execution_logs.write().push(ExecutionLogEntry {
+        record_execution_log(state, ExecutionLogEntry {
             id: format!("exec-triangle-{cycle}"),
             timestamp: Utc::now().to_rfc3339(),
             trade_type: "Triangle".into(),
@@ -2464,7 +2464,7 @@ pub async fn execute_triangle_arbitrage_impl(
         ));
     }
 
-    state.execution_logs.write().push(ExecutionLogEntry {
+    record_execution_log(state, ExecutionLogEntry {
         id: format!("exec-triangle-{cycle}"),
         timestamp: Utc::now().to_rfc3339(),
         trade_type: "Triangle".into(),
@@ -4342,7 +4342,7 @@ async fn execute_spatial_arbitrage_inner(
                 }
             }
 
-            state.execution_logs.write().push(ExecutionLogEntry {
+            record_execution_log(state, ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
@@ -4438,7 +4438,7 @@ async fn execute_spatial_arbitrage_inner(
                     .map(|r| format!("{:?} filled {}/{}", r.status, r.filled_qty, r.original_qty))
                     .unwrap_or_else(|| "no fill".to_string())
             };
-            state.execution_logs.write().push(ExecutionLogEntry {
+            record_execution_log(state, ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
@@ -4484,7 +4484,7 @@ async fn execute_spatial_arbitrage_inner(
                 crate::state_store::SignalStatus::Failed,
                 Some(&format!("{other:?}")),
             );
-            state.execution_logs.write().push(ExecutionLogEntry {
+            record_execution_log(state, ExecutionLogEntry {
                 id: format!("exec-spatial-{}", cycle),
                 timestamp: Utc::now().to_rfc3339(),
                 trade_type: "Spatial".into(),
@@ -5187,7 +5187,7 @@ pub async fn execute_funding_carry_impl(
 
     let net_bps = opp.net_rate_8h_pct * 100.0;
     if let Some(err) = leg_error {
-        state.execution_logs.write().push(ExecutionLogEntry {
+        record_execution_log(state, ExecutionLogEntry {
             id: format!("exec-funding-{cycle}"),
             timestamp: Utc::now().to_rfc3339(),
             trade_type: "Funding".into(),
@@ -5220,7 +5220,7 @@ pub async fn execute_funding_carry_impl(
         ));
     }
 
-    state.execution_logs.write().push(ExecutionLogEntry {
+    record_execution_log(state, ExecutionLogEntry {
         id: format!("exec-funding-{cycle}"),
         timestamp: Utc::now().to_rfc3339(),
         trade_type: "Funding".into(),
@@ -6416,7 +6416,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .map_err(|e| e.to_string())?;
         }
 
-        state.execution_logs.write().push(ExecutionLogEntry {
+        record_execution_log(state, ExecutionLogEntry {
             id: format!("exec-flatten-{}-{}", cycle, sig.id),
             timestamp: Utc::now().to_rfc3339(),
             trade_type: "Flatten".into(),
@@ -6511,6 +6511,71 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
             }
         })
         .collect()
+}
+
+/// Single choke point for execution-log writes: in-memory Log Monitor
+/// source (capped at 2000 rows) + best-effort SQLite persistence (survives
+/// restarts). Successes, partials, AND failures — a blocked click must leave
+/// the same trace as a fill.
+pub fn record_execution_log(state: &AppEngineState, entry: ExecutionLogEntry) {
+    {
+        let mut logs = state.execution_logs.write();
+        if logs.len() >= 2000 {
+            let drop = logs.len() - 1999;
+            logs.drain(..drop);
+        }
+        logs.push(entry.clone());
+    }
+    if let Err(e) = state.state_store.insert_execution_log(&entry) {
+        tracing::debug!("execution-log persist failed: {e}");
+    }
+}
+
+/// Record a blocked/failed execution attempt as a failed log entry (visible
+/// in the Log Monitor) plus an app-log warning. Every early gate return in
+/// the execute_*_impl family funnels through its command wrapper here, so no
+/// failure mode is silent anymore.
+fn record_execution_failure(
+    state: &AppEngineState,
+    trade_type: &str,
+    strategy_id: &str,
+    symbol: &str,
+    venue_a: &str,
+    venue_b: &str,
+    reason: &str,
+) {
+    tracing::warn!("{trade_type} execution blocked for {symbol} ({venue_a}/{venue_b}): {reason}");
+    record_execution_log(
+        state,
+        ExecutionLogEntry {
+            id: format!(
+                "exec-fail-{}-{:08x}",
+                chrono::Utc::now().timestamp_millis(),
+                rand::random::<u32>()
+            ),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            trade_type: trade_type.to_string(),
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            venue_a: venue_a.to_string(),
+            venue_b: venue_b.to_string(),
+            leg_a_status: "blocked".into(),
+            leg_b_status: "blocked".into(),
+            success: false,
+            gross_profit: 0.0,
+            fees: 0.0,
+            net_profit: 0.0,
+            latency_us: 0,
+            note: format!("Execution blocked: {reason}"),
+            direction: None,
+            trigger_spread_bps: None,
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: None,
+            is_live: *state.is_live_mode.read(),
+        },
+    );
 }
 
 pub fn get_execution_logs_by_mode_impl(
@@ -7399,7 +7464,13 @@ pub async fn execute_spot_arbitrage(
     params: SpotExecutionParams,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_spot_arbitrage_impl(params, &state).await
+    match execute_spot_arbitrage_impl(params.clone(), &state).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Spot", "spot", &params.symbol, &params.buy_venue, &params.sell_venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -7479,7 +7550,7 @@ pub async fn execute_spatial_arbitrage(
     nominal_hurdle_bps: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_spatial_arbitrage_impl(
+    match execute_spatial_arbitrage_impl(
         &symbol,
         &buy_venue,
         &sell_venue,
@@ -7493,6 +7564,13 @@ pub async fn execute_spatial_arbitrage(
         &state,
     )
     .await
+    {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Spatial", "futures", &symbol, &buy_venue, &sell_venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -7508,7 +7586,13 @@ pub async fn execute_triangle_arbitrage(
     params: TriangleExecutionParams,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_triangle_arbitrage_impl(params, &state).await
+    match execute_triangle_arbitrage_impl(params.clone(), &state).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Triangle", TRIANGLE_STRATEGY_ID, &params.path, &params.venue, &params.venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -7530,7 +7614,7 @@ pub async fn execute_cross_ticker_arbitrage(
     net_spread_bps: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_cross_ticker_arbitrage_impl(
+    match execute_cross_ticker_arbitrage_impl(
         &long_symbol,
         &short_symbol,
         &long_venue,
@@ -7540,6 +7624,13 @@ pub async fn execute_cross_ticker_arbitrage(
         &state,
     )
     .await
+    {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Spatial", "futures", &long_symbol, &long_venue, &short_venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -7558,7 +7649,13 @@ pub async fn execute_funding_carry(
     trade_size_usd: f64,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_funding_carry_impl(&symbol, &long_venue, &short_venue, trade_size_usd, &state).await
+    match execute_funding_carry_impl(&symbol, &long_venue, &short_venue, trade_size_usd, &state).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Funding", FUNDING_STRATEGY_ID, &symbol, &long_venue, &short_venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -7569,7 +7666,7 @@ pub async fn execute_prediction_arbitrage(
     quantity: f64,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    execute_prediction_arbitrage_impl(
+    match execute_prediction_arbitrage_impl(
         &market_title,
         &buy_yes_venue,
         &buy_no_venue,
@@ -7577,6 +7674,13 @@ pub async fn execute_prediction_arbitrage(
         &state,
     )
     .await
+    {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            record_execution_failure(&state, "Prediction", "prediction", &market_title, &buy_yes_venue, &buy_no_venue, &e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -16793,6 +16897,40 @@ mod tests {
         assert_eq!(pnl.unattributed_closed_families, 1);
         assert_eq!(pnl.net_profit_usd, 0.0);
         assert_eq!(pnl.net_profit_bps, None);
+    }
+
+    #[test]
+    fn record_execution_log_persists_and_caps_memory() {
+        let state = setup_test_state_with_venues();
+        let mk = |id: &str| ExecutionLogEntry {
+            id: id.to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            trade_type: "Funding".to_string(),
+            strategy_id: FUNDING_STRATEGY_ID.to_string(),
+            symbol: "NEAR-USDC".to_string(),
+            venue_a: "vanta".to_string(),
+            venue_b: "lighter".to_string(),
+            leg_a_status: "blocked".into(),
+            leg_b_status: "blocked".into(),
+            success: false,
+            gross_profit: 0.0,
+            fees: 0.0,
+            net_profit: 0.0,
+            latency_us: 0,
+            note: "Execution blocked: unit test".into(),
+            direction: None,
+            trigger_spread_bps: None,
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: None,
+            is_live: false,
+        };
+        record_execution_log(&state, mk("fail-1"));
+        // Visible in-memory (Log Monitor source) AND durable in SQLite.
+        assert!(state.execution_logs.read().iter().any(|e| e.id == "fail-1"));
+        let rows = state.state_store.load_execution_logs(500).expect("load");
+        assert!(rows.iter().any(|e| e.id == "fail-1" && !e.success));
     }
 
     #[test]

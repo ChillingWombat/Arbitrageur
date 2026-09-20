@@ -27,48 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use zeroize::Zeroize;
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct ExecutionLogEntry {
-    pub id: String,
-    pub timestamp: String,
-    pub trade_type: String, // "Spatial" or "Funding" or "Prediction"
-    /// Owning strategy for this fill event (`futures`, `radar`, `triangle`,
-    /// ...). Rows that predate attribution carry `"unattributed"`: they are
-    /// excluded from per-strategy sums and counted separately, never
-    /// absorbed. `serde(default)` keeps old serialized rows loadable.
-    #[serde(default = "default_unattributed_strategy")]
-    pub strategy_id: String,
-    pub symbol: String,
-    pub venue_a: String,
-    pub venue_b: String,
-    pub leg_a_status: String,
-    pub leg_b_status: String,
-    pub success: bool,
-    pub gross_profit: f64,
-    pub fees: f64,
-    pub net_profit: f64,
-    pub latency_us: u64,
-    pub note: String,
-    #[serde(default)]
-    pub direction: Option<String>,
-    #[serde(default)]
-    pub trigger_spread_bps: Option<f64>,
-    #[serde(default)]
-    pub baseline_mean_spread_bps: Option<f64>,
-    #[serde(default)]
-    pub position_step: Option<u32>,
-    #[serde(default)]
-    pub max_units: Option<u32>,
-    #[serde(default)]
-    pub nominal_hurdle_bps: Option<f64>,
-    #[serde(default)]
-    pub is_live: bool,
-}
-
-fn default_unattributed_strategy() -> String {
-    crate::attribution::UNATTRIBUTED_STRATEGY_ID.to_string()
-}
-
+pub use crate::state_store::ExecutionLogEntry;
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TickerStrategyConfigDto {
@@ -1390,7 +1349,12 @@ impl AppEngineState {
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
         let settings = RwLock::new(initial_settings);
 
-        let initial_logs: Vec<ExecutionLogEntry> = Vec::new();
+        // Reload the persisted execution log so the Log Monitor keeps history
+        // across restarts (failures included since v21). A store failure
+        // starts empty rather than bricking startup.
+        let initial_logs: Vec<ExecutionLogEntry> = state_store
+            .load_execution_logs(500)
+            .unwrap_or_default();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let virtual_ledger =
             RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());

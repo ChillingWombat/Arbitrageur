@@ -79,6 +79,18 @@ async function getTauriCore() {
 export const DESKTOP_REQUIRED_ERROR =
   "This feature requires the desktop application";
 
+/**
+ * Render a Tauri command rejection for UI display. Backend failures arrive
+ * as plain strings (never `Error` instances), so `instanceof Error` checks
+ * always fall through to a dead-end generic message. Verbatim strings keep
+ * the backend's field-level reason visible.
+ */
+export function describeCommandError(err: unknown, fallback: string): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string" && err.trim() !== "") return err;
+  return fallback;
+}
+
 export async function invokeDesktop<T>(
   command: string,
   args?: Record<string, unknown>,

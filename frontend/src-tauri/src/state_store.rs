@@ -11,6 +11,48 @@ use std::path::{Path, PathBuf};
 pub const ALLOWED_STRATEGY_IDS: [&str; 8] =
     ["futures", "radar", "funding", "spot", "prediction", "stat_arb", "triangle", "external"];
 
+#[derive(Clone, Serialize, Deserialize, Debug)]
+pub struct ExecutionLogEntry {
+    pub id: String,
+    pub timestamp: String,
+    pub trade_type: String, // "Spatial" or "Funding" or "Prediction"
+    /// Owning strategy for this fill event (`futures`, `radar`, `triangle`,
+    /// ...). Rows that predate attribution carry `"unattributed"`: they are
+    /// excluded from per-strategy sums and counted separately, never
+    /// absorbed. `serde(default)` keeps old serialized rows loadable.
+    #[serde(default = "default_unattributed_strategy")]
+    pub strategy_id: String,
+    pub symbol: String,
+    pub venue_a: String,
+    pub venue_b: String,
+    pub leg_a_status: String,
+    pub leg_b_status: String,
+    pub success: bool,
+    pub gross_profit: f64,
+    pub fees: f64,
+    pub net_profit: f64,
+    pub latency_us: u64,
+    pub note: String,
+    #[serde(default)]
+    pub direction: Option<String>,
+    #[serde(default)]
+    pub trigger_spread_bps: Option<f64>,
+    #[serde(default)]
+    pub baseline_mean_spread_bps: Option<f64>,
+    #[serde(default)]
+    pub position_step: Option<u32>,
+    #[serde(default)]
+    pub max_units: Option<u32>,
+    #[serde(default)]
+    pub nominal_hurdle_bps: Option<f64>,
+    #[serde(default)]
+    pub is_live: bool,
+}
+
+fn default_unattributed_strategy() -> String {
+    crate::attribution::UNATTRIBUTED_STRATEGY_ID.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountProfile {
@@ -1085,6 +1127,13 @@ COMMIT;";
 /// New samples are correct at write time; this is a one-time backfill.
 const MIGRATION_V20_SQL: &str = "BEGIN IMMEDIATE; UPDATE funding_rate_samples SET rate_8h = rate_8h / 8.0, interval_hours = 8 WHERE LOWER(venue_id) IN ('lighter', 'robinhood') AND interval_hours = 1; PRAGMA user_version = 20; COMMIT;";
 
+/// v21 persists the execution log (Log Monitor source). Previously the log
+/// lived only in memory: every restart wiped it, and — worse — execution
+/// *failures* were never recorded at all, so a blocked click left no trace
+/// anywhere. New rows land via `insert_execution_log` (called by the shared
+/// record helper); reads take the newest N.
+const MIGRATION_V21_SQL: &str = "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS execution_log (id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT '', trade_type TEXT NOT NULL DEFAULT '', strategy_id TEXT NOT NULL DEFAULT '', symbol TEXT NOT NULL DEFAULT '', venue_a TEXT NOT NULL DEFAULT '', venue_b TEXT NOT NULL DEFAULT '', leg_a_status TEXT NOT NULL DEFAULT '', leg_b_status TEXT NOT NULL DEFAULT '', success INTEGER NOT NULL DEFAULT 0, gross_profit REAL NOT NULL DEFAULT 0, fees REAL NOT NULL DEFAULT 0, net_profit REAL NOT NULL DEFAULT 0, latency_us INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '', direction TEXT, trigger_spread_bps REAL, baseline_mean_spread_bps REAL, position_step INTEGER, max_units INTEGER, nominal_hurdle_bps REAL, is_live INTEGER NOT NULL DEFAULT 0); CREATE INDEX IF NOT EXISTS idx_execution_log_ts ON execution_log(ts); PRAGMA user_version = 21; COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1514,7 +1563,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 20 {
+        if version > 21 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1633,6 +1682,12 @@ impl StateStore {
         }
         if version <= 19 {
             if let Err(err) = conn.execute_batch(MIGRATION_V20_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 20 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V21_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -3118,6 +3173,67 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// Persist one execution-log row (the Log Monitor source). Successes,
+    /// partials, and — since v21 — *failures* alike: a blocked click must
+    /// leave the same trace as a fill. Callers treat store errors as
+    /// best-effort (a logging failure never fails execution). The table is
+    /// capped at the newest 2000 rows.
+    pub fn insert_execution_log(&self, e: &ExecutionLogEntry) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR REPLACE INTO execution_log (id, ts, trade_type, strategy_id, symbol, venue_a, venue_b, leg_a_status, leg_b_status, success, gross_profit, fees, net_profit, latency_us, note, direction, trigger_spread_bps, baseline_mean_spread_bps, position_step, max_units, nominal_hurdle_bps, is_live) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+            params![
+                e.id, e.timestamp, e.trade_type, e.strategy_id, e.symbol, e.venue_a, e.venue_b,
+                e.leg_a_status, e.leg_b_status, e.success as i32, e.gross_profit, e.fees,
+                e.net_profit, e.latency_us as i64, e.note, e.direction, e.trigger_spread_bps,
+                e.baseline_mean_spread_bps,
+                e.position_step.map(|v| v as i64), e.max_units.map(|v| v as i64),
+                e.nominal_hurdle_bps, e.is_live as i32,
+            ],
+        )?;
+        conn.execute(
+            "DELETE FROM execution_log WHERE rowid NOT IN (SELECT rowid FROM execution_log ORDER BY rowid DESC LIMIT 2000)",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Newest-first execution-log rows (survives restarts — the monitor no
+    /// longer starts empty).
+    pub fn load_execution_logs(&self, limit: i64) -> anyhow::Result<Vec<ExecutionLogEntry>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, ts, trade_type, strategy_id, symbol, venue_a, venue_b, leg_a_status, leg_b_status, success, gross_profit, fees, net_profit, latency_us, note, direction, trigger_spread_bps, baseline_mean_spread_bps, position_step, max_units, nominal_hurdle_bps, is_live FROM execution_log ORDER BY rowid DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit.max(1)], |r| {
+            Ok(ExecutionLogEntry {
+                id: r.get(0)?,
+                timestamp: r.get(1)?,
+                trade_type: r.get(2)?,
+                strategy_id: r.get(3)?,
+                symbol: r.get(4)?,
+                venue_a: r.get(5)?,
+                venue_b: r.get(6)?,
+                leg_a_status: r.get(7)?,
+                leg_b_status: r.get(8)?,
+                success: r.get::<_, i64>(9)? != 0,
+                gross_profit: r.get(10)?,
+                fees: r.get(11)?,
+                net_profit: r.get(12)?,
+                latency_us: r.get::<_, i64>(13).ok().and_then(|v| u64::try_from(v).ok()).unwrap_or(0),
+                note: r.get(14)?,
+                direction: r.get(15)?,
+                trigger_spread_bps: r.get(16)?,
+                baseline_mean_spread_bps: r.get(17)?,
+                position_step: r.get::<_, Option<i64>>(18)?.and_then(|v| u32::try_from(v).ok()),
+                max_units: r.get::<_, Option<i64>>(19)?.and_then(|v| u32::try_from(v).ok()),
+                nominal_hurdle_bps: r.get(20)?,
+                is_live: r.get::<_, i64>(21)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn db_size_bytes(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
         let page_count: i64 =
@@ -4095,7 +4211,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 20);
+            assert_eq!(version, 21);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4896,7 +5012,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 20);
+            assert_eq!(version, 21);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5204,7 +5320,8 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 20);
+        assert_eq!(v, 21);
+
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
             .unwrap();
@@ -5228,6 +5345,50 @@ mod tests {
         let rh = rows.iter().find(|r| r.0 == "robinhood").unwrap();
         assert!(approx(rh.1, 0.000096), "robinhood row: {rh:?}");
         assert_eq!(rh.2, 8);
+    }
+
+    #[test]
+    fn execution_log_insert_load_round_trip() {
+        let (dir, file) = temp_store_path("execlog");
+        let store = StateStore::open(&file).unwrap();
+        let mk = |id: &str, ok: bool| ExecutionLogEntry {
+            id: id.to_string(),
+            timestamp: "2026-09-20T00:00:00Z".to_string(),
+            trade_type: "Funding".to_string(),
+            strategy_id: "funding".to_string(),
+            symbol: "NEAR-USDC".to_string(),
+            venue_a: "vanta".to_string(),
+            venue_b: "lighter".to_string(),
+            leg_a_status: if ok { "filled".into() } else { "blocked".into() },
+            leg_b_status: if ok { "filled".into() } else { "blocked".into() },
+            success: ok,
+            gross_profit: 0.0,
+            fees: 1.0,
+            net_profit: -1.0,
+            latency_us: 7,
+            note: if ok { "ok".into() } else { "Execution blocked: test reason".into() },
+            direction: None,
+            trigger_spread_bps: Some(61.1),
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: Some(8.0),
+            is_live: false,
+        };
+        store.insert_execution_log(&mk("a", true)).unwrap();
+        store.insert_execution_log(&mk("b", false)).unwrap();
+        // REPLACE semantics: same id overwrites, never duplicates.
+        store.insert_execution_log(&mk("b", true)).unwrap();
+        let rows = store.load_execution_logs(500).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, "b");
+        assert!(rows[0].success);
+        assert_eq!(rows[0].trigger_spread_bps, Some(61.1));
+        assert_eq!(rows[1].id, "a");
+        assert_eq!(rows[1].note, "ok");
+        // Limit respected (newest-first).
+        assert_eq!(store.load_execution_logs(1).unwrap().len(), 1);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5265,7 +5426,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 20);
+        assert_eq!(v10, 21);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(

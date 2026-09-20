@@ -4,6 +4,7 @@ import type { PredictionOpportunityDto } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
+import { describeCommandError } from "../services/api";
 
 interface PredictionHubProps {
   opportunities: PredictionOpportunityDto[];
@@ -53,7 +54,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
       setLastExecuted(opp.id);
       setTimeout(() => setLastExecuted(null), 3000);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Execution failed";
+      const message = describeCommandError(err, "Execution failed");
       console.error(`Prediction execution failed for ${opp.id}:`, message);
       if (!opts?.silent) showExecError(message);
     } finally {

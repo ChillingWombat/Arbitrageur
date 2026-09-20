@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SlidersHorizontal, X } from "lucide-react";
 import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto } from "../types";
-import { api } from "../services/api";
+import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
@@ -645,7 +645,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       setLastExecuted(opp.id);
       setTimeout(() => setLastExecuted(null), 3000);
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Execution failed";
+      const message = describeCommandError(err, "Execution failed");
       console.error(`Funding carry execution failed for ${opp.id}:`, message);
       if (!opts?.silent) showExecError(message);
     } finally {
