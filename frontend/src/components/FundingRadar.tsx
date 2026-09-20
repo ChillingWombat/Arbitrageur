@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { SlidersHorizontal, X } from "lucide-react";
+import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
 import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
@@ -7,6 +7,7 @@ import { BotLifecycleControls } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface FundingRadarProps {
@@ -605,6 +606,45 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   const [detailOppId, setDetailOppId] = useState<string | null>(null);
   const [dockTab, setDockTab] = useState<"position" | "history" | "logs">("history");
   const [detailPosKey, setDetailPosKey] = useState<string | null>(null);
+  // Display-only scanner filters (mirror the spread monitor strip): venue
+  // multi-select, min net 8h edge (BPS), min win probability (%). None of
+  // these reach the engine — execution and the auto loop use the full list.
+  const [venueFilters, setVenueFilters] = useState<string[]>([]);
+  const [minExpBps, setMinExpBps] = useState("");
+  const [minWinPct, setMinWinPct] = useState("");
+  const [showVenueMenu, setShowVenueMenu] = useState(false);
+  const venueMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (venueMenuRef.current && !venueMenuRef.current.contains(e.target as Node)) {
+        setShowVenueMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, []);
+  const filterVenues = useMemo(
+    () => Array.from(new Set(opportunities.flatMap((o) => [o.long_venue, o.short_venue]))).sort(),
+    [opportunities],
+  );
+  const filteredOpps = useMemo(() => {
+    let out = opportunities;
+    if (venueFilters.length)
+      out = out.filter((o) => venueFilters.includes(o.long_venue) || venueFilters.includes(o.short_venue));
+    const me = Number(minExpBps);
+    if (minExpBps !== "" && Number.isFinite(me))
+      out = out.filter((o) => (o.net_rate_8h_pct ?? -Infinity) * 100 >= me);
+    const mp = Number(minWinPct);
+    if (minWinPct !== "" && Number.isFinite(mp))
+      out = out.filter((o) => ((o.win_probability ?? -Infinity) * 100) >= mp);
+    return out;
+  }, [opportunities, venueFilters, minExpBps, minWinPct]);
+  const filtersActive = venueFilters.length > 0 || minExpBps !== "" || minWinPct !== "";
+  const clearFilters = () => {
+    setVenueFilters([]);
+    setMinExpBps("");
+    setMinWinPct("");
+  };
   const fundingPositions = useMemo(
     () => openPositions.filter((p) => (p.strategyId ?? "").toLowerCase() === "funding"),
     [openPositions]
@@ -737,16 +777,139 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
             Opportunity Scanner
           </h3>
+          <div className="flex items-center gap-2 text-xs font-sans">
+            {filtersActive && (
+              <span className="text-slate-400 font-mono tabular-nums">
+                {filteredOpps.length}/{opportunities.length}
+              </span>
+            )}
+            <div className="relative" ref={venueMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowVenueMenu((v) => !v)}
+                className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 transition-all cursor-pointer"
+                title="Display filter — shows only cards with a selected venue on either leg. Does not affect execution"
+              >
+                <span className="text-slate-400 font-medium">Venue</span>
+                {venueFilters.length > 0 && (
+                  <span className="flex items-center -space-x-1">
+                    {venueFilters.slice(0, 4).map((v) => (
+                      <VenueLogo key={v} venueId={v} name={v} size={16} />
+                    ))}
+                  </span>
+                )}
+                <span className="font-bold text-slate-900 font-mono text-xs">
+                  {venueFilters.length === 0 ? "ALL" : venueFilters.join("+").toUpperCase()}
+                </span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+                />
+              </button>
+              {showVenueMenu && (
+                <div className="absolute right-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
+                  <button
+                    type="button"
+                    onClick={() => setVenueFilters([])}
+                    className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
+                      venueFilters.length === 0
+                        ? "bg-accent/10 text-accent font-semibold"
+                        : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                    }`}
+                  >
+                    <span>All</span>
+                    {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                  <div className="border-t border-surface-border/60 my-1 -mx-1" />
+                  {filterVenues.map((v) => {
+                    const on = venueFilters.includes(v);
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() =>
+                          setVenueFilters((prev) =>
+                            prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
+                          )
+                        }
+                        className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
+                          on
+                            ? "bg-accent/10 text-accent font-semibold"
+                            : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <VenueLogo venueId={v} name={v} size={18} />
+                          <span className="font-mono text-xs uppercase">{v}</span>
+                        </span>
+                        {on && <Check className="w-3.5 h-3.5" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+              title="Display filter — minimum net 8h funding edge. Does not affect execution"
+            >
+              <span className="text-slate-400 font-medium">Min Exp</span>
+              <input
+                value={minExpBps}
+                onChange={(e) => setMinExpBps(e.target.value)}
+                placeholder="0"
+                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+              />
+              <span className="text-slate-400 text-[11px] font-medium">BPS</span>
+            </div>
+            <div
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+              title="Display filter — minimum win probability. Does not affect execution"
+            >
+              <span className="text-slate-400 font-medium">Min Win</span>
+              <input
+                value={minWinPct}
+                onChange={(e) => setMinWinPct(e.target.value)}
+                placeholder="0"
+                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+              />
+              <span className="text-slate-400 text-[11px] font-medium">%</span>
+            </div>
+            {filtersActive && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="text-slate-400 hover:text-slate-700 font-mono text-[11px] underline underline-offset-2 cursor-pointer"
+                title="Clear all scanner filters"
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
 
-        {opportunities.length === 0 ? (
+        {filteredOpps.length === 0 ? (
           <div className="border border-dashed border-surface-border rounded-xl">
-            <EmptyState plain title="No Opportunity Detected" />
+            {opportunities.length === 0 ? (
+              <EmptyState plain title="No Opportunity Detected" />
+            ) : (
+              <div className="flex flex-col items-center gap-2 py-8 text-xs font-sans text-slate-500">
+                <span>
+                  No opportunities match the current filters ({opportunities.length} scanned).
+                </span>
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="text-accent font-semibold underline underline-offset-2 cursor-pointer"
+                >
+                  Clear filters
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="flex-1 min-h-0 overflow-y-auto">
             <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3">
-              {opportunities.map((opp, idx) => (
+              {filteredOpps.map((opp, idx) => (
                 <div
                   key={opp.id}
                   onClick={() => setDetailOppId(opp.id)}
