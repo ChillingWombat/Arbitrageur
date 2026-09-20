@@ -6,7 +6,7 @@ use sha3::{Digest, Sha3_256};
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::{AccountSnapshot, Balance};
+use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
 use aptos_sdk::{
@@ -21,12 +21,36 @@ use std::str::FromStr;
 use std::time::Duration;
 use zeroize::Zeroizing;
 
-fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
+/// f64-or-string JSON number (Decibel REST mixes both across endpoints).
+fn num_f64(v: Option<&serde_json::Value>) -> Option<f64> {
     match v? {
-        serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
-        serde_json::Value::Number(n) => Decimal::from_str_exact(&n.to_string()).ok(),
+        serde_json::Value::Number(n) => n.as_f64(),
+        serde_json::Value::String(t) => t.trim().parse::<f64>().ok(),
         _ => None,
     }
+}
+
+fn dec_f64(v: Option<&serde_json::Value>) -> Option<Decimal> {
+    num_f64(v).and_then(Decimal::from_f64_retain)
+}
+
+/// Unwrap the trading-API envelope: either a bare value or `{data: …}`.
+fn envelope_data(v: &serde_json::Value) -> &serde_json::Value {
+    if let Some(inner) = v.get("data") {
+        if !inner.is_null() {
+            return inner;
+        }
+    }
+    v
+}
+
+fn as_array(v: &serde_json::Value) -> Option<&Vec<serde_json::Value>> {
+    let d = envelope_data(v);
+    d.as_array().or_else(|| {
+        d.get("result")
+            .and_then(|r| r.as_array())
+            .or_else(|| d.get("markets").and_then(|m| m.as_array()))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +461,105 @@ impl DecibelAdapter {
         )
     }
 
+    /// Resolve the owner's primary subaccount object address via the
+    /// official `GET {trading}/api/v1/subaccounts?owner=` listing (primary
+    /// first, else first active, else first row). Fails closed when the owner
+    /// has no subaccount — the fix is creating one in the Decibel app, not
+    /// guessing an address.
+    async fn primary_subaccount(&self, owner: &str) -> anyhow::Result<String> {
+        let val = self
+            .get_json(&format!("/api/v1/subaccounts?owner={}", owner.trim()))
+            .await?;
+        let rows = as_array(&val).ok_or_else(|| {
+            anyhow::anyhow!("Decibel subaccounts response has no list for owner {owner}")
+        })?;
+        if rows.is_empty() {
+            anyhow::bail!(
+                "Decibel owner {owner} has no subaccount yet — create one at https://app.decibel.trade, then re-read"
+            );
+        }
+        let pick = rows
+            .iter()
+            .find(|r| r.get("is_primary").and_then(|b| b.as_bool()).unwrap_or(false))
+            .or_else(|| {
+                rows.iter().find(|r| {
+                    r.get("is_active").and_then(|b| b.as_bool()).unwrap_or(true)
+                })
+            })
+            .or_else(|| rows.first())
+            .expect("non-empty");
+        pick.get("subaccount_address")
+            .and_then(|a| a.as_str())
+            .filter(|a| !a.trim().is_empty())
+            .map(|a| a.trim().to_string())
+            .ok_or_else(|| anyhow::anyhow!("Decibel subaccount row has no address"))
+    }
+
+    /// Live market map (object address lowercase → market name) from the
+    /// official `GET {trading}/api/v1/markets` listing. Used to label
+    /// positions and to address price lookups.
+    async fn market_name_map(&self) -> anyhow::Result<std::collections::HashMap<String, String>> {
+        let mut map = std::collections::HashMap::new();
+        let mut last_err = String::new();
+        for path in ["/api/v1/markets", "/v1/markets"] {
+            match self.get_json(path).await {
+                Ok(val) => {
+                    if let Some(rows) = as_array(&val) {
+                        for r in rows {
+                            let (Some(addr), Some(name)) = (
+                                r.get("market_addr")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| r.get("marketAddr").and_then(|v| v.as_str())),
+                                r.get("market_name")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| r.get("name").and_then(|v| v.as_str())),
+                            ) else {
+                                continue;
+                            };
+                            map.insert(addr.trim().to_lowercase(), name.trim().to_string());
+                        }
+                        if !map.is_empty() {
+                            return Ok(map);
+                        }
+                        last_err = format!("no usable rows at {path}");
+                    } else {
+                        last_err = format!("unexpected markets shape at {path}");
+                    }
+                }
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        anyhow::bail!("Decibel markets listing unavailable: {last_err}")
+    }
+
+    /// Live per-market mids (object address lowercase → mid price) from the
+    /// official `GET {trading}/api/v1/prices` listing. Best-effort: an empty
+    /// map just means marks fall back to entry prices, never fabricated ones.
+    async fn market_mid_map(&self) -> std::collections::HashMap<String, Decimal> {
+        let mut map = std::collections::HashMap::new();
+        let Ok(val) = self.get_json("/api/v1/prices").await else {
+            return map;
+        };
+        let d = envelope_data(&val);
+        let rows: Vec<&serde_json::Value> = match d {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            serde_json::Value::Object(_) => vec![d],
+            _ => vec![],
+        };
+        for r in rows {
+            let (Some(addr), Some(mid)) = (
+                r.get("market").and_then(|v| v.as_str()),
+                dec_f64(r.get("mid_px").or_else(|| r.get("mark_px"))),
+            ) else {
+                continue;
+            };
+            if mid > dec!(0) {
+                map.insert(addr.trim().to_lowercase(), mid);
+            }
+        }
+        map
+    }
+
     /// Submit a pre-built entry-function payload as the vault signer and wait
     /// for commit. Returns the committed transaction JSON.
     async fn submit_payload(
@@ -565,58 +688,106 @@ impl ExchangeAdapter for DecibelAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let path = format!("/v1/orderbook?market={}", symbol);
-        let val = self.get_json(&path).await?;
+        // Upstream removed the REST depth endpoint (WS-only now, see the
+        // official SDK's commented-out `/api/v1/depth` reader). Try the
+        // documented path once in case it was reintroduced; otherwise fail
+        // closed — a book must never be synthesized.
+        let market_name = resolve_market_name(symbol);
+        let engine = perp_engine_global_addr(self.deployment_package())?;
+        let market_addr = market_addr_for(&engine, &market_name)?;
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        if let Some(bids) = val.get("bids").and_then(|b| b.as_array()) {
-            for b in bids {
-                if let (Some(px), Some(sz)) = (
-                    b.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<Decimal>().ok()),
-                    b.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<Decimal>().ok()),
-                ) {
-                    book.bids.push(BookLevel::new(px, sz));
+        if let Ok(val) = self
+            .get_json(&format!("/api/v1/depth?market={market_addr}&limit=50"))
+            .await
+        {
+            let d = envelope_data(&val);
+            let parse_side = |key: &str, out: &mut Vec<BookLevel>| {
+                if let Some(levels) = d.get(key).and_then(|v| v.as_array()) {
+                    for lvl in levels {
+                        let (px, sz) = match lvl {
+                            serde_json::Value::Array(a) => {
+                                (dec_f64(a.first()), dec_f64(a.get(1)))
+                            }
+                            serde_json::Value::Object(o) => (
+                                dec_f64(o.get("price").or_else(|| o.get("px"))),
+                                dec_f64(o.get("size").or_else(|| o.get("sz")).or_else(|| o.get("quantity"))),
+                            ),
+                            _ => (None, None),
+                        };
+                        if let (Some(p), Some(q)) = (px, sz) {
+                            if p > dec!(0) && q > dec!(0) {
+                                out.push(BookLevel::new(p, q));
+                            }
+                        }
+                    }
                 }
-            }
+            };
+            parse_side("bids", &mut book.bids);
+            parse_side("asks", &mut book.asks);
         }
-        if let Some(asks) = val.get("asks").and_then(|a| a.as_array()) {
-            for a in asks {
-                if let (Some(px), Some(sz)) = (
-                    a.get(0).and_then(|v| v.as_str()).and_then(|s| s.parse::<Decimal>().ok()),
-                    a.get(1).and_then(|v| v.as_str()).and_then(|s| s.parse::<Decimal>().ok()),
-                ) {
-                    book.asks.push(BookLevel::new(px, sz));
-                }
-            }
-        }
-        if book.bids.is_empty() && book.asks.is_empty() {
-            anyhow::bail!("Decibel orderbook empty or offline for {}", symbol);
+        if book.bids.is_empty() || book.asks.is_empty() {
+            anyhow::bail!(
+                "Decibel has no REST orderbook for {symbol} (depth is WebSocket-only upstream); refusing to synthesize a book"
+            );
         }
         book.timestamp = Utc::now();
         Ok(book)
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
-        let book = self.fetch_orderbook(symbol).await?;
-        let bid = book.best_bid_price().unwrap_or(dec!(0));
-        let ask = book.best_ask_price().unwrap_or(dec!(0));
-        let last = (bid + ask) / dec!(2);
-        Ok(Ticker {
-            venue: self.venue_id.clone(),
-            symbol: symbol.to_string(),
-            bid,
-            ask,
-            last,
-            timestamp: Utc::now(),
-        })
+        // No REST bid/ask exists upstream (depth is WebSocket-only), and a
+        // mid!=last ticker with zeroed touch would poison execution pricing.
+        // Fail closed; live limit orders (user-priced) are unaffected.
+        let _ = symbol;
+        anyhow::bail!("Decibel exposes no REST bid/ask (depth is WebSocket-only upstream); refusing to fabricate a ticker")
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        // Fail-closed: the venue exposes no public funding endpoint and this
-        // adapter must not invent a print. A hardcoded 0.01% fabricated
-        // phantom carry on every Decibel leg, so Decibel contributes no legs
-        // to funding scans until a real funding feed is wired.
-        let _ = symbol;
-        anyhow::bail!("Decibel exposes no public funding-rate endpoint; refusing to fabricate a print")
+        // Real feed: `GET {trading}/api/v1/prices?market={addr}` returns
+        // `funding_rate_bps` per `funding_period_s` (official SDK
+        // `MarketPricesSchema`). Normalized to an 8h print; missing fields
+        // fail closed, never zero-filled (a silent zero would mint phantom
+        // carry against any nonzero leg).
+        let market_name = resolve_market_name(symbol);
+        let engine = perp_engine_global_addr(self.deployment_package())?;
+        let market_addr = market_addr_for(&engine, &market_name)?;
+        let val = self
+            .get_json(&format!("/api/v1/prices?market={market_addr}"))
+            .await?;
+        let d = envelope_data(&val);
+        let rows: Vec<&serde_json::Value> = match d {
+            serde_json::Value::Array(a) => a.iter().collect(),
+            serde_json::Value::Object(_) => vec![d],
+            _ => vec![],
+        };
+        let row = rows
+            .iter()
+            .find(|r| {
+                r.get("market")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.eq_ignore_ascii_case(&market_addr))
+            })
+            .or(rows.first())
+            .ok_or_else(|| anyhow::anyhow!("Decibel prices feed returned no rows for {symbol}"))?;
+        let bps = num_f64(row.get("funding_rate_bps")).ok_or_else(|| {
+            anyhow::anyhow!("Decibel prices row for {symbol} has no funding_rate_bps")
+        })?;
+        let period_s = num_f64(row.get("funding_period_s")).unwrap_or(3600.0);
+        if !(period_s.is_finite() && period_s > 0.0) {
+            anyhow::bail!("Decibel prices row for {symbol} has an unusable funding_period_s");
+        }
+        let period_h = period_s / 3600.0;
+        let rate_8h = Decimal::from_f64_retain(bps / 10_000.0 * (8.0 / period_h))
+            .unwrap_or(dec!(0));
+        Ok(FundingRate {
+            venue: self.venue_id.clone(),
+            symbol: symbol.to_string(),
+            rate: rate_8h,
+            predicted_rate: None,
+            interval_hours: period_h.max(1.0) as u32,
+            next_funding_time: Utc::now() + chrono::Duration::seconds(period_s as i64),
+            timestamp: Utc::now(),
+        })
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
@@ -624,17 +795,108 @@ impl ExchangeAdapter for DecibelAdapter {
         let Some(w) = wallet.filter(|s| !s.trim().is_empty()) else {
             anyhow::bail!("Decibel account query requires an Aptos wallet address. Please set the Login Wallet Address in Settings > Exchange Accounts.");
         };
+        let owner = w.trim().to_string();
 
-        let path = format!("/v1/subaccounts?owner={}", w.trim());
-        let val = self.get_json(&path).await?;
-        let total_equity = dec_from_json(val.get("totalEquity").or_else(|| val.get("equity"))).unwrap_or_default();
-        let free_margin = dec_from_json(val.get("freeMargin").or_else(|| val.get("availableBalance"))).unwrap_or(total_equity);
-        let locked = if total_equity > free_margin { total_equity - free_margin } else { dec!(0) };
+        // 1. Owner -> primary subaccount (official `/api/v1/subaccounts`).
+        let subaccount = self.primary_subaccount(&owner).await?;
+
+        // 2. Balances via the official `/api/v1/account_overviews`.
+        let overview = self
+            .get_json(&format!("/api/v1/account_overviews?account={subaccount}"))
+            .await
+            .map(|v| envelope_data(&v).clone())
+            .unwrap_or(serde_json::Value::Null);
+        let total_equity =
+            dec_f64(overview.get("perp_equity_balance")).unwrap_or(dec!(0));
+        let free_margin = dec_f64(overview.get("usdc_cross_withdrawable_balance"))
+            .or_else(|| dec_f64(overview.get("usdc_cross_balance")))
+            .unwrap_or(total_equity);
+        let locked = if total_equity > free_margin {
+            total_equity - free_margin
+        } else {
+            dec!(0)
+        };
+        let maintenance = dec_f64(overview.get("maintenance_margin")).unwrap_or(dec!(0));
+
+        // 3. Positions via the official `/api/v1/account_positions`, labelled
+        // through the live markets map, marked through the live prices feed.
+        // A position row without a resolvable market or size is skipped, not
+        // guessed; marks fall back to entry (never invented).
+        let names = self.market_name_map().await.unwrap_or_default();
+        let mids = self.market_mid_map().await;
+        let mut positions = Vec::new();
+        if let Ok(pval) = self
+            .get_json(&format!(
+                "/api/v1/account_positions?account={subaccount}&include_deleted=false&limit=100"
+            ))
+            .await
+        {
+            if let Some(rows) = as_array(&pval) {
+                for r in rows {
+                    let size = num_f64(r.get("size")).unwrap_or(0.0);
+                    if !size.is_finite() || size == 0.0 {
+                        continue;
+                    }
+                    let market_addr = r.get("market").and_then(|m| m.as_str()).unwrap_or("");
+                    let label = names
+                        .get(&market_addr.trim().to_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            let a = market_addr.trim();
+                            if a.len() > 12 {
+                                format!("{}…{}", &a[..6], &a[a.len() - 4..])
+                            } else {
+                                a.to_string()
+                            }
+                        });
+                    if label.trim().is_empty() {
+                        continue;
+                    }
+                    let qty = Decimal::from_f64_retain(size.abs()).unwrap_or(dec!(0));
+                    if qty <= dec!(0) {
+                        continue;
+                    }
+                    let entry = dec_f64(r.get("entry_price")).unwrap_or(dec!(0));
+                    let mark = mids
+                        .get(&market_addr.trim().to_lowercase())
+                        .cloned()
+                        .filter(|m| *m > dec!(0))
+                        .unwrap_or(entry);
+                    let upnl = if mark > dec!(0) && entry > dec!(0) {
+                        (mark - entry)
+                            * qty
+                            * if size > 0.0 { dec!(1) } else { dec!(-1) }
+                    } else {
+                        dec!(0)
+                    };
+                    let liq = dec_f64(r.get("estimated_liquidation_price"))
+                        .filter(|p| *p > dec!(0));
+                    positions.push(Position {
+                        venue: self.venue_id.clone(),
+                        symbol: label,
+                        side: if size > 0.0 { Side::Buy } else { Side::Sell },
+                        quantity: qty,
+                        entry_price: entry,
+                        mark_price: mark,
+                        unrealized_pnl: upnl,
+                        realized_pnl: dec!(0),
+                        liquidation_price: liq,
+                        leverage: num_f64(r.get("user_leverage"))
+                            .and_then(Decimal::from_f64_retain)
+                            .unwrap_or(dec!(0)),
+                        initial_margin: dec!(0),
+                        maintenance_margin: dec!(0),
+                        updated_at: Utc::now(),
+                    });
+                }
+            }
+        }
+
         Ok(AccountSnapshot {
             venue: self.venue_id.clone(),
             equity: total_equity,
             free_margin,
-            maintenance_margin: dec!(0),
+            maintenance_margin: maintenance,
             margin_usage_pct: dec!(0),
             balances: vec![Balance {
                 venue: self.venue_id.clone(),
@@ -643,7 +905,7 @@ impl ExchangeAdapter for DecibelAdapter {
                 free: free_margin,
                 locked,
             }],
-            positions: Vec::new(),
+            positions,
             timestamp: Utc::now(),
         })
     }
@@ -960,6 +1222,25 @@ mod tests {
         );
         assert!(price_to_chain_units(dec!(0), 2).is_err());
         assert!(size_to_chain_units(dec!(-1), 6).is_err());
+    }
+
+    #[test]
+    fn test_decibel_api_shapes() {
+        // f64-or-string numbers across endpoints.
+        assert_eq!(num_f64(Some(&serde_json::json!(1.5))), Some(1.5));
+        assert_eq!(num_f64(Some(&serde_json::json!("2.5"))), Some(2.5));
+        assert_eq!(num_f64(Some(&serde_json::json!(true))), None);
+        assert_eq!(num_f64(None), None);
+        // Envelope: bare value vs {data: …}.
+        let bare = serde_json::json!([{"a": 1}]);
+        assert!(as_array(&bare).is_some_and(|a| a.len() == 1));
+        let wrapped = serde_json::json!({"code": "200", "data": [{"a": 1}]});
+        assert!(as_array(&wrapped).is_some_and(|a| a.len() == 1));
+        assert!(as_array(&serde_json::json!({"code": "200"})).is_none());
+        // Overview equity fields parse from either numbers or strings.
+        let ov = serde_json::json!({"perp_equity_balance": 123.5, "usdc_cross_withdrawable_balance": "100.25"});
+        assert_eq!(dec_f64(ov.get("perp_equity_balance")), Decimal::from_str_exact("123.5").ok());
+        assert_eq!(dec_f64(ov.get("usdc_cross_withdrawable_balance")), Decimal::from_str_exact("100.25").ok());
     }
 
     #[test]
