@@ -9,12 +9,15 @@
 use std::collections::HashMap;
 
 /// Backend hard ceiling for leverage. All gates pin this value; per-account
-/// caps and strategy targets can only lower the effective leverage.
-pub const HARD_LEVERAGE_CEILING: u32 = 5;
+/// caps, strategy targets, venue caps, and the Risk Control global max can
+/// only lower the effective leverage. Raised 5 -> 100 alongside the Risk
+/// Control Max Leverage setting (default 10x); the ceiling is an absolute
+/// backstop, the global max is the operator's control.
+pub const HARD_LEVERAGE_CEILING: u32 = 100;
 
 /// Effective order-time leverage: the minimum of the strategy target, the
 /// account cap (`None` = unlimited), and the venue cap (`None` = unknown,
-/// treated as the hard ceiling). Result is always within 1..=5.
+/// treated as the hard ceiling). Result is always within 1..=100.
 pub fn effective_leverage(
     strategy_leverage: u32,
     account_cap: Option<u32>,
@@ -349,9 +352,10 @@ mod tests {
         assert_eq!(effective_leverage(3, Some(5), None), 3);
         assert_eq!(effective_leverage(5, None, Some(3)), 3);
         assert_eq!(effective_leverage(4, Some(3), Some(2)), 2);
-        assert_eq!(effective_leverage(9, None, None), 5);
+        assert_eq!(effective_leverage(9, None, None), 9);
         assert_eq!(effective_leverage(0, None, None), 1);
         assert_eq!(effective_leverage(5, Some(9), Some(99)), 5);
+        assert_eq!(effective_leverage(150, None, None), 100);
     }
 
     #[test]

@@ -1015,15 +1015,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Target Leverage"
-        description="Requested strategy leverage, default 5x (effective is min(strategy, account))"
-        tooltip="Requested leverage tier for opening perpetual positions. Effective leverage is min(strategy target, account max)."
+        description="Requested strategy leverage, default 5x (effective is min(strategy, Risk Control max, account, venue))"
+        tooltip="Requested leverage tier for opening perpetual positions, up to 10x. Effective leverage is min(strategy target, Risk Control global max, account max, venue max)."
       >
         <NumberInput
           value={userTargetLeverage}
-          onChange={(v) => setUserTargetLeverage(Math.max(1, parseInt(v, 10) || 5))}
+          onChange={(v) => setUserTargetLeverage(Math.min(10, Math.max(1, parseInt(v, 10) || 5)))}
           unit="x"
           step="1"
           min="1"
+          max="10"
         />
       </SettingRow>
 

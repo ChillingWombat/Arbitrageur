@@ -392,6 +392,9 @@ fn default_margin_min_liq_distance_pct() -> f64 {
 fn default_balance_stale_warn_secs() -> u64 {
     300
 }
+fn default_max_leverage() -> u32 {
+    10
+}
 fn default_referral_lighter() -> String {
     "https://app.lighter.xyz/?referral=SOLO&source=none".into()
 }
@@ -494,6 +497,10 @@ pub struct EngineSettingsDto {
     /// drawdown stable (a blip is not a loss).
     #[serde(default = "default_balance_stale_warn_secs")]
     pub balance_stale_warn_secs: u64,
+    /// Global leverage ceiling (Risk Control tab). Every execution path
+    /// takes min(strategy target, account max, venue max, this).
+    #[serde(default = "default_max_leverage")]
+    pub max_leverage: u32,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -666,6 +673,7 @@ impl Default for EngineSettingsDto {
             margin_critical_usage_pct: default_margin_critical_pct(),
             margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
+            max_leverage: default_max_leverage(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -1355,6 +1363,11 @@ impl AppEngineState {
             if let Some(v) = get_u("risk.stale_warn_secs") {
                 if v >= 30 && v <= 3600 {
                     initial_settings.balance_stale_warn_secs = v as u64;
+                }
+            }
+            if let Some(v) = get_u("risk.max_leverage") {
+                if (1..=100).contains(&v) {
+                    initial_settings.max_leverage = v;
                 }
             }
             if initial_settings.margin_warning_usage_pct >= initial_settings.margin_critical_usage_pct {

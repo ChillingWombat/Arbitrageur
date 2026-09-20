@@ -649,6 +649,8 @@ export interface EngineSettingsDto {
   margin_warning_usage_pct?: number;
   margin_critical_usage_pct?: number;
   margin_min_liquidation_distance_pct?: number;
+  max_leverage?: number;
+  balance_stale_warn_secs?: number;
 
   // Subaccount mappings
   hyperliquid_account_index?: number;

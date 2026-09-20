@@ -6698,6 +6698,9 @@ pub fn save_engine_settings_impl(
     if settings.balance_stale_warn_secs < 30 || settings.balance_stale_warn_secs > 3600 {
         return Err("Balance staleness warning must be within 30–3600 seconds".into());
     }
+    if settings.max_leverage < 1 || settings.max_leverage > 100 {
+        return Err("Max leverage must be within 1–100x".into());
+    }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
@@ -6887,6 +6890,7 @@ pub fn save_engine_settings_impl(
     let _ = state.state_store.kv_set("risk.margin_crit", &sanitized.margin_critical_usage_pct.to_string());
     let _ = state.state_store.kv_set("risk.margin_min_liq", &sanitized.margin_min_liquidation_distance_pct.to_string());
     let _ = state.state_store.kv_set("risk.stale_warn_secs", &sanitized.balance_stale_warn_secs.to_string());
+    let _ = state.state_store.kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
     // Live-apply: breaker limits update in place (no restart), delta guard
     // re-limits, margin thresholds feed the next snapshot automatically.
     {
@@ -7686,8 +7690,8 @@ pub fn save_ticker_strategy_config_impl(
     if config.max_accumulated_units < 1 {
         return Err("max_accumulated_units must be at least 1".into());
     }
-    if !(1..=5).contains(&config.user_target_leverage) {
-        return Err("user_target_leverage must be between 1 and 5".into());
+    if !(1..=10).contains(&config.user_target_leverage) {
+        return Err("user_target_leverage must be between 1 and 10".into());
     }
     if !config.unit_size.is_finite() || config.unit_size <= 0.0 {
         return Err("unit_size must be finite and positive".into());
@@ -7786,8 +7790,8 @@ pub fn save_strategy_params_impl(
     if params.window_percentile < 50 {
         return Err("window_percentile must be at least 50%".into());
     }
-    if !(1..=5).contains(&params.user_target_leverage) {
-        return Err("user_target_leverage must be between 1 and 5".into());
+    if !(1..=10).contains(&params.user_target_leverage) {
+        return Err("user_target_leverage must be between 1 and 10".into());
     }
     if !params.step_size_mult.is_finite() || params.step_size_mult < 1.0 {
         return Err("step_size_mult must be finite and >= 1".into());
@@ -8232,9 +8236,9 @@ pub(crate) fn resolve_effective_leverage(
                 .map(|c| c.user_target_leverage)
         })
         .unwrap_or(5);
-    if !(1..=5).contains(&strategy_target) {
+    if !(1..=10).contains(&strategy_target) {
         return Err(format!(
-            "Configured leverage {strategy_target} for {symbol} is out of range; must be 1..=5"
+            "Configured leverage {strategy_target} for {symbol} is out of range; must be 1..=10"
         ));
     }
     let accounts =
@@ -8249,8 +8253,16 @@ pub(crate) fn resolve_effective_leverage(
             };
         }
     }
+    // Risk Control global ceiling: min over strategy target, account max,
+    // venue max, and this. Defaults to 10x; 0/absurd stored values fall back
+    // to the default rather than unbinding leverage or bricking execution.
+    let global_max = {
+        let v = state.settings.read().max_leverage;
+        if (1..=100).contains(&v) { v } else { 10 }
+    };
     Ok((
-        crate::strategy_filters::effective_leverage(strategy_target, account_cap, None),
+        crate::strategy_filters::effective_leverage(strategy_target, account_cap, None)
+            .min(global_max),
         account_cap,
     ))
 }
@@ -9089,7 +9101,7 @@ pub struct AccountDto {
     /// venue's shared-IP rate budget and fee adjustments.
     pub account_tier: String,
     /// Per-account leverage ceiling 1..=5; `None` = unlimited (backend hard
-    /// ceiling of 5 still applies).
+    /// ceiling of 100 still applies; Risk Control global max also caps).
     pub max_leverage: Option<u32>,
 }
 
@@ -14384,12 +14396,17 @@ mod tests {
         };
         assert!(save_ticker_strategy_config_impl(invalid_percentile, &state).is_err());
 
-        // Leverage above the hard cap and nonpositive unit sizes are rejected
+        // Leverage above the 10x strategy band and nonpositive unit sizes are rejected
         let bad_leverage = TickerStrategyConfigDto {
-            user_target_leverage: 6,
+            user_target_leverage: 11,
             ..def.clone()
         };
         assert!(save_ticker_strategy_config_impl(bad_leverage, &state).is_err());
+        let ten_leverage = TickerStrategyConfigDto {
+            user_target_leverage: 10,
+            ..def.clone()
+        };
+        assert!(save_ticker_strategy_config_impl(ten_leverage, &state).is_ok());
         let zero_leverage = TickerStrategyConfigDto {
             user_target_leverage: 0,
             ..def.clone()

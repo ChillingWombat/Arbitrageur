@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -124,6 +124,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginWarnPct, setMarginWarnPct] = useState(70);
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
+  const [maxLeverage, setMaxLeverage] = useState(10);
+  const [staleWarnSecs, setStaleWarnSecs] = useState(300);
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
   const [engineWsPort, setEngineWsPort] = useState(8789);
@@ -210,6 +212,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
+  // Risk Control sub-category anchors (scroll-to-section pills).
+  const cbRef = useRef<HTMLDivElement>(null);
+  const dgRef = useRef<HTMLDivElement>(null);
+  const mmRef = useRef<HTMLDivElement>(null);
+  const levRef = useRef<HTMLDivElement>(null);
+  const scrollRiskTo = (r: { current: HTMLDivElement | null }) => {
+    r.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>("arcus");
   // Favorite exchanges: a pure UI preference (localStorage, per machine) —
   // starring never touches strategy state. The selector filter below narrows
@@ -413,6 +423,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginWarnPct(s.margin_warning_usage_pct ?? 70);
         setMarginCritPct(s.margin_critical_usage_pct ?? 85);
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
+        setMaxLeverage(s.max_leverage ?? 10);
+        setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
         setHyperliquidPrivateKey(s.hyperliquid_private_key || "");
@@ -561,6 +573,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         margin_warning_usage_pct: Number(marginWarnPct) || 0,
         margin_critical_usage_pct: Number(marginCritPct) || 0,
         margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
+        max_leverage: Math.trunc(Number(maxLeverage)) || 0,
+        balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
         spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
         spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
         configured_venues: configuredVenues,
@@ -789,11 +803,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       {/* Top Section Navigation Bar */}
       <div className="border-b border-surface-border bg-slate-50/80 shrink-0 flex items-stretch justify-between select-none">
         {/* Navigation Tabs with dividers: Execution, Exchanges, Network & VPS, About */}
-        <div className="flex items-stretch divide-x divide-surface-border border-r border-surface-border">
+        <div className="flex flex-1 items-stretch divide-x divide-surface-border border-r border-surface-border">
           <button
             type="button"
             onClick={() => setActiveTab("execution")}
-            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "execution"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -813,7 +827,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("safety")}
-            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "safety"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -824,7 +838,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 activeTab === "safety" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
               }`}
             />
-            <span>Safety</span>
+            <span>Risk Control</span>
             {activeTab === "safety" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
@@ -833,7 +847,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
-            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "exchanges"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -854,7 +868,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("network")}
-            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "network"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -874,7 +888,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("about")}
-            className={`relative h-10 flex items-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "about"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -1449,7 +1463,25 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+            <div className="flex flex-wrap gap-2">
+              {([
+                ["Circuit Breaker", cbRef],
+                ["DeltaGuard", dgRef],
+                ["Margin Monitor", mmRef],
+                ["Leverage", levRef],
+              ] as Array<[string, { current: HTMLDivElement | null }]>).map(([label, r]) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => scrollRiskTo(r)}
+                  className="px-3 py-1 rounded-full border border-surface-border bg-surface text-[11px] font-mono text-slate-600 hover:text-slate-900 hover:border-accent transition cursor-pointer"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div ref={cbRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
               <div className="text-slate-800 font-bold text-xs">Circuit Breaker — Halt Limits</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1487,7 +1519,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
-            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+            <div ref={dgRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
               <div className="text-slate-800 font-bold text-xs">DeltaGuard — Net Exposure Guardrail</div>
               <div className="flex items-center justify-between gap-3">
                 <label className="text-slate-600 block text-xs" title="Per-asset signed net exposure tolerance across venues">
@@ -1502,7 +1534,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+            <div ref={mmRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
               <div className="text-slate-800 font-bold text-xs">Margin Monitor — Warning Thresholds</div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1532,6 +1564,35 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
               <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
                 Warning must stay below critical. Feeds risk snapshots, venue LOW_MARGIN / DEPLETED flags, and pre-trade margin gates.
+              </p>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs" title="A venue whose balance read keeps failing holds its last known figures; warn only after this many seconds">
+                  Stale-balance warning after (secs)
+                </label>
+                <input type="number" min="30" max="3600" step="1" disabled={loading} value={staleWarnSecs}
+                  onChange={(e) => setStaleWarnSecs(parseInt(e.target.value, 10) || 0)}
+                  className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+              </div>
+              <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
+                Until then a blip keeps last-known figures — totals and drawdown never treat it as $0.
+              </p>
+            </div>
+
+            <div ref={levRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
+              <div className="text-slate-800 font-bold text-xs">Leverage — Global Max</div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs" title="Hard ceiling on every position: effective leverage is min(strategy target, account max, venue max, this)">
+                  Max leverage
+                </label>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <input type="number" min="1" max="100" step="1" disabled={loading} value={maxLeverage}
+                    onChange={(e) => setMaxLeverage(Math.trunc(Number(e.target.value)) || 0)}
+                    className="w-24 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                  <span className="text-slate-500 text-xs">x</span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
+                Caps every strategy (Risk Control default 10x). Per-strategy targets in the configurators can only lower it — never exceed it. Applies live on save.
               </p>
             </div>
           </div>
