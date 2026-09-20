@@ -1550,3 +1550,8 @@ overhaul pass committed as `23d4aed`).
 - **Ask:** update handoff, spec, commit, push, launch the app.
 - **Done:** `EXCHANGES.md` §12 rewritten for the rebuilt reads (official `/api/v1` paths, funding feed live, book/ticker honestly unavailable); `SPEC.md` rollout paragraph extended with the day's full feature rollup (persisted failure logging, funding filter strip + bot-mirror defaults + 2dp, decay-aware Expected $, hold-aligned Win%, NAS100 merge, Risk Control + 10x ceiling). Committed + pushed (docs-only; code HEAD unchanged since last green build). App relaunched fresh and smoke-checked ALIVE.
 - **Tree note:** only docs staged; worker UI files untouched. Code HEAD: desktop 317/0, math 97/0, tsc/vite/release green (see §60–66).
+
+## 68. Session Handoff — 2026-09-20 (funding strip declutter)
+
+- **Ask (screenshot):** remove the `1/3` counter and `Clear` button from the funding filter-strip header.
+- **Shipped:** header counter + Clear removed (`FundingRadar.tsx`, committed `779bc14`, pushed). The empty-state "Clear filters" affordance stays (only visible when filters hide everything — otherwise a filtered-to-zero list is a dead end). Unused `filtersActive` removed. tsc/vite/release green, app relaunched (PID 577443) clean. Worker files untouched.
