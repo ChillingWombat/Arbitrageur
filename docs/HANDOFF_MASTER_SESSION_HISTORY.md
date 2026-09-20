@@ -1519,3 +1519,9 @@ overhaul pass committed as `23d4aed`).
   - Scan wires it into a new `expected_return_usd` DTO field on both carry + basis paths (hoisted shared lets out of the hold blocks for scope).
   - Card: "Daily" box → "Expected" box (signed $ whole, profit/loss coloring, tooltip with hold + model basis); backend-first with the modal's flat math as stale-backend fallback via shared `expectedCarryUsd`. Detail modal "Projected net carry" upgraded to the same helper (one number everywhere); "Daily income" row kept as informational.
 - **Verification:** math 96/0 (3 new), desktop 317/0, tsc 0, vite 0, release rebuilt, app relaunched (PID 549270) clean. Committed `16de7db`, pushed. Worker files untouched.
+
+## 63. Session Handoff — 2026-09-20 (funding filter defaults mirror bot hurdle)
+
+- **Ask (screenshot):** monitor-gadget filter defaults should equal the bot's threshold values.
+- **Shipped (`FundingRadar.tsx`, committed `0045520`, pushed):** Min Exp now defaults to the auto-carry bot's entry hurdle (Min APR %) converted to 8h BPS via the shared 365d×3 convention (`APR*10000/100/365/3`; 8% → 0.73 BPS), tracking the live `minAprPct` prop until the user overrides (same touched-ref pattern as the spread strip). Display default now shows exactly the bot-eligible set (below-hurdle rows hidden unless the user clears/lowers it). Min Win stays default-off — the funding bot has no win-probability gate (DTO contract: never gates execution), documented in its tooltip. Clear restores bot-mirroring defaults, not blanks.
+- **Verification:** tsc 0, frontend suite pass, vite 0, release rebuilt, app relaunched (PID 551649) clean. Worker files untouched.
