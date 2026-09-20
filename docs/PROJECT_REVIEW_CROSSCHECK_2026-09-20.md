@@ -27,7 +27,7 @@ Accordingly, the safe current product boundary is:
 
 The system should not be called production-ready until the P0/P1 items below are closed and tested with venue-specific sandbox credentials.
 
-- **Post-remediation position:** the fail-closed boundary is now internally coherent. Live strategy entries are disabled; capability semantics distinguish submission from reconciliation; credential IPC and vault lifecycle gaps are closed; paper basis executes exact spot/perp legs; funding dispatch is durable before concurrent execution; close workflows preserve unresolved working orders and venue order IDs; CI/deployment/security controls exist. The remaining blockers to any live-entry claim are real terminal/restart reconciliation, venue sandbox/canary evidence, and reproducible signer provenance.
+- **Post-remediation position:** the fail-closed boundary is now internally coherent and reconciled. Live strategy entries are disabled; capability semantics distinguish submission from polling from strategy-entry readiness; credential IPC and vault lifecycle gaps are closed; paper basis executes exact spot/perp legs; funding dispatch is durable before concurrent execution; close workflows preserve unresolved working orders and venue order IDs; every live-submission adapter exposes validated `fetch_order` polling and a startup+5s supervisor reconciles durable working orders to terminal state with monotonic accounting; signer provenance is functionally verified from pinned upstream source; CI/deployment/security controls exist. The remaining blockers to any live-entry claim are automated residual-leg resolution + cancel retry, and venue sandbox/canary evidence.
 
 ---
 
@@ -129,7 +129,7 @@ A real venue can accept and later fill an order after the engine has declared th
 - Every emergency compensation order is reduce-only where the venue supports that semantic.
 
 **Initial status:** OPEN\
-**Remediation status:** ENTRY-SAFE CLOSURE. New live strategy entries now fail closed globally; `submission_ready`, `strategy_entry_ready`, and `live_ready` are distinct, with `live_ready` requiring reconciliation that no adapter implements yet. Emergency unwind orders are reduce-only, and the otherwise-unreachable live leverage branch now propagates failures instead of ignoring them. Continuous terminal/restart order reconciliation remains an open live-readiness requirement rather than an implemented capability.
+**Remediation status:** ENTRY-SAFE CLOSURE + RECONCILIATION LANDED. New live strategy entries still fail closed globally; `submission_ready`, `strategy_entry_ready`, `live_ready`, and `order_polling_ready` are distinct DTO fields. Every live-submission adapter (Binance, Aster, OKX, Kraken, Vanta, Coinbase, Hyperliquid, Lighter, Robinhood-via-Lighter, Decibel, PopDEX) now implements a validated `fetch_order`, and the desktop reconciliation supervisor polls durable working orders every 5s, re-scans them at startup, applies monotonic fill/fee updates with venue/symbol/order-id response validation, escalates orders working past 15 minutes to `unresolved`, and keeps `in_flight`/`imbalanced`/`unresolved` signals blocking the ticker (a mixed fill+empty-cancel entry maps to `imbalanced`, never `failed`). Kraken's nonzero-execution acknowledgement is resolved through `openorders` + `/fills` aggregation instead of being trusted. Emergency unwind orders are reduce-only, and the live leverage branch propagates failures. Still open for live entry: automated residual-leg resolution and cancel-failure retry, sandbox/canary evidence per venue.
 
 ---
 
@@ -368,7 +368,7 @@ Return a clear unavailable-data error when any required real quote is missing. K
 Classify these operations as submission workflows, persist venue/client IDs before returning, and add reconciliation or provide an explicit operator resolution path. Do not label an acknowledgement as a confirmed close.
 
 **Initial status:** OPEN\
-**Remediation status:** PARTIALLY CLOSED. External closes now persist intent before dispatch (the generated client order ID is the durable signal ID), validate venue/symbol/client/order/quantity/status/price/fee consistency, store venue order IDs on the durable leg, distinguish filled/partial/working/not-filled/unverified, and mark `Closed` only after a fresh account reread confirms flatness. Generic flatten legs now preserve accepted zero-fill and terminal zero-fill order IDs instead of collapsing them to “empty book.” Live account reads now resolve venue-native position symbols through adapter-owned normalization (`BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, Lighter `market_id` mappings, and Binance/Aster scaled contracts kept in venue-native `1000PEPE` units) instead of comparing native strings directly; unknown or ambiguous mappings remain unresolved rather than treated as flat. Still open: continuous venue polling, restart-time order reconciliation, and automatic resolution of working orders.
+**Remediation status:** CLOSED (detection layer) / OPEN (auto-resolution). External closes persist intent before dispatch (the generated client order ID is the durable signal ID), validate venue/symbol/client/order/quantity/status/price/fee consistency, store venue order IDs on the durable leg, distinguish filled/partial/working/not-filled/unverified, and mark `Closed` only after a fresh account reread confirms flatness. Generic flatten legs preserve accepted zero-fill and terminal zero-fill order IDs instead of collapsing them to “empty book.” Live account reads resolve venue-native position symbols through adapter-owned normalization (`BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, Lighter `market_id` mappings, and Binance/Aster scaled contracts kept in venue-native `1000PEPE` units); unknown or ambiguous mappings remain unresolved rather than treated as flat. Continuous venue polling and restart-time reconciliation are now implemented: the `reconciliation` supervisor runs an immediate pass at startup plus a 5s poll over durable nonterminal legs, validates venue/symbol/order-id identity and USD-stable fee currency, applies monotonic cumulative updates, and escalates orders working past 15 minutes to `unresolved`. Order identity is persisted on every submission path — generic flatten legs, `reconcile_signal_legs`, and both `UnresolvedExposure` handlers now record venue and client order ids even for accepted-but-unfilled (working) orders, so no live submission can orphan its pollable handle. Synthetic `sim-*` paper order ids are excluded from the live poll set. Still open: automatic resolution of a working/imbalanced order (cancel-and-retry or residual-leg flatten) — the system detects and durably blocks, it does not yet act.
 
 ---
 
@@ -388,7 +388,7 @@ This independently confirms DeepSeek finding 5.9.
 Verify an approved SHA-256 before load, require an explicit digest for custom overrides, add a CI integrity check, and document upstream provenance/build reproduction. A checksum protects against silent drift but does not substitute for reproducible provenance.
 
 **Initial status:** OPEN\
-**Remediation status:** PARTIALLY CLOSED. The vendored signer is hashed before `dlopen`, the approved SHA-256 is enforced in CI, override libraries require an explicit matching digest, and `native/lighter/README.md` documents the integrity/provenance boundary. Still open: a pinned upstream source commit and reproducible signer build recipe.
+**Remediation status:** CLOSED (functional provenance). The vendored signer is hashed before `dlopen`, the approved SHA-256 is enforced in CI, override libraries require an explicit matching digest, and `native/lighter/README.md` documents the boundary. Provenance is now functionally verified rather than trust-based: `native/lighter/verify/verify_provenance.sh` rebuilds the signer from the pinned upstream tag (`github.com/elliottech/lighter-go` v1.0.10 @ `9d38261d1a4cc5c7211b383ba07a4d6e41604708`, Go 1.24.6, `CGO_ENABLED=1 go build -buildmode=c-shared -trimpath`), confirms both binaries derive the identical public key for a fixed private key, and cryptographically validates signatures from both libraries against the upstream `schnorr.Validate` — byte equality is not required because Go builds are not bit-reproducible and Schnorr signing is randomized. A dedicated CI job runs the same script.
 
 ---
 
@@ -521,7 +521,8 @@ This is a maintainability finding, not a justification for a risky behavior-neut
 | Prediction strategy | Research/scan, execution disabled | Explicitly research/conditional payout only |
 | Statistical arbitrage | Research tooling | Explicitly research tooling |
 | Live adapter signing/submission | Implemented for many venues | Transport capability only; not strategy readiness |
-| Live strategy execution | Unsafe/incomplete | Safely blocked pending terminal and restart reconciliation |
+| Live order polling/restart reconciliation | Missing | Implemented: per-adapter `fetch_order` on all 11 live-submission venues plus a startup+5s supervisor with monotonic updates, identity validation, and 15-minute unresolved escalation |
+| Live strategy execution | Unsafe/incomplete | Safely blocked pending automated residual-leg resolution, cancel retry, and sandbox/canary evidence |
 | Credential vault crypto/file permissions | Implemented | Aligned after bulk IPC removal and lifecycle fixes |
 | 60-second settings-exit lock | Missing | Aligned |
 | Field-scoped credential reveal | UI uses it, legacy bulk IPC remains | Aligned after bulk IPC removal |
@@ -530,7 +531,7 @@ This is a maintainability finding, not a justification for a risky behavior-neut
 | Seasonality/HAR/promotion | Largely implemented | Aligned; remaining AutoTune scope is tracked separately |
 | AutoTune apply/audit | Implemented for selected READY rows | Aligned for selected READY rows |
 | Presets/manual parameter guidance | Missing | Partial: manual guide added; evidence-backed presets remain open |
-| CI/reproducibility/security policy | Missing | Aligned for repository checks; signer source reproducibility remains open |
+| CI/reproducibility/security policy | Missing | Aligned; signer provenance is functionally verified from pinned upstream source in CI |
 | Headless deployment | Health placeholder only | Aligned: templates repaired and placeholder scope documented |
 
 ---
@@ -549,9 +550,9 @@ Local-first desktop research and paper execution, with direct venue connections 
 
 ### Open / Free
 
-- **Risk:** The Rust/React source is MIT/Apache-2.0, but the vendored Lighter signer has no pinned source commit or reproducible build recipe.
-- **Mitigation:** Pin provenance, publish build instructions, verify hashes, and keep all surrounding code forkable.
-- **User escape:** The application can be forked and self-hosted; Lighter live signing remains unavailable if the binary cannot be independently trusted/rebuilt.
+- **Risk:** The Rust/React source is MIT/Apache-2.0, and the vendored Lighter signer is now pinned to `lighter-go` v1.0.10 @ `9d38261d…` with a committed functional-equivalence proof (`native/lighter/verify/verify_provenance.sh`) run in CI.
+- **Mitigation:** Provenance, build recipe, digest verification, and signature validation are all committed; surrounding code remains forkable.
+- **User escape:** The application can be forked and self-hosted; the signer can be rebuilt from upstream source rather than trusted.
 
 ### Privacy
 
@@ -561,15 +562,15 @@ Local-first desktop research and paper execution, with direct venue connections 
 
 ### Security
 
-- **Risk:** CEX custody, local signing keys, asynchronous fills, unverified signer binary, venue-specific leverage/reduce-only semantics, and incomplete live reconciliation can cause loss or lockout.
-- **Mitigation:** Least-privilege keys, encrypted vault, explicit capability matrix, digest verification, fail-closed live entry, durable in-flight state, circuit breaker, and tested compensation.
+- **Risk:** CEX custody, local signing keys, asynchronous fills, venue-specific leverage/reduce-only semantics, and the absence of automated residual-exposure resolution can cause loss or lockout.
+- **Mitigation:** Least-privilege keys, encrypted vault, explicit capability matrix, digest + provenance verification, fail-closed live entry, durable in-flight state with startup/5s reconciliation, circuit breaker, and tested compensation.
 - **User escape:** Direct venue access remains the ultimate recovery path; the app must never be the only way to close or withdraw.
 
 ### Accepted compromises
 
 - Centralized venue and RPC dependencies are inherent to the selected markets.
 - Local SQLite operational history is not application-encrypted.
-- Risk-reducing live order submission may remain available before full automation, but must be explicitly labelled as un-reconciled until a terminal state is confirmed.
+- Risk-reducing live order submission is reconciled to terminal state by the supervisor; an order that cannot be resolved escalates to `unresolved` rather than being assumed filled or cancelled.
 
 ---
 
@@ -578,7 +579,7 @@ Local-first desktop research and paper execution, with direct venue connections 
 ### Phase A — Immediate safety
 
 1. **Closed:** Removed bulk credential IPC and added a registration test that names it.
-2. **Closed at the entry boundary:** Submission readiness and strategy-entry readiness are separate; new live strategy entries fail closed globally. Terminal/restart reconciliation remains a live-readiness feature request, not a hidden assumption.
+2. **Closed at the entry boundary:** Submission readiness and strategy-entry readiness are separate; new live strategy entries fail closed globally. Terminal/restart reconciliation is implemented for all live-submission venues (order polling + startup scan + monotonic ledger updates); what remains gated is automated resolution of mixed-terminal/imbalanced outcomes and cancel-failure retry.
 3. **Closed:** Hyperliquid and close/flatten response handling no longer fabricate fills or treat acknowledgements as terminal facts.
 4. **Closed:** Emergency compensation and flatten paths use reduce-only orders; live leverage failures now propagate if a future entry path reaches them.
 5. **Closed:** Manual lock and the 60-second settings-exit lock are restored and tested.
@@ -592,7 +593,7 @@ Local-first desktop research and paper execution, with direct venue connections 
 
 ### Phase C — Integrity and operations
 
-1. **Partially closed:** Vendored signer integrity is enforced; reproducible upstream provenance remains open.
+1. **Closed:** Vendored signer integrity is enforced and upstream provenance is functionally verified in CI (pinned tag `v1.0.10` @ `9d38261d…`; identical key derivation + signature validation via `schnorr.Validate`).
 2. **Closed:** Toolchain, CI, advisories, secret scanning, Dependabot, and `SECURITY.md` are in place.
 3. **Closed:** `arbitrageur*` deployment templates and systemd-compatible environment defaults exist.
 4. **Closed:** The workspace is formatted and clippy-clean with warnings denied.
@@ -613,7 +614,7 @@ Local-first desktop research and paper execution, with direct venue connections 
 - Basis scan → execute → position → flatten regression passes: **pass**.
 - Bulk credential-read IPC is absent from command registration and frontend allowlists: **pass**.
 - Live-entry safety tests prove submission-only adapters cannot enter a strategy path: **pass**.
-- Git diff reviewed, committed, and pushed with a clean working tree: **pending at document write time**.
+- Git diff reviewed, committed, and pushed with a clean working tree: **pass** (`cf4e8b7` remediation; reconciliation work lands in the follow-up commit).
 
 ---
 
@@ -627,9 +628,9 @@ Independent post-remediation verification produced:
 | `git diff --check` | PASS | No whitespace errors |
 | `cargo check --workspace` | PASS | Clean |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS | All targets checked with warnings denied |
-| `cargo test --workspace --locked` | PASS | 708 tests total: desktop 328, exchanges 150, math 102+52+16, execution 40, others 20 |
-| `cargo test -p arbitrageur-desktop` | PASS | 328/328 tests |
-| `cargo test -p arbitrageur-exchanges` | PASS | 150/150 tests |
+| `cargo test --workspace --locked` | PASS | 716 tests total: desktop 332, exchanges 154, math 102+52+16, execution 40, others 20 |
+| `cargo test -p arbitrageur-desktop` | PASS | 332/332 tests |
+| `cargo test -p arbitrageur-exchanges` | PASS | 154/154 tests |
 | `npm test` | PASS | 210 frontend tests |
 | `npm run build` | PASS | TypeScript typecheck + Vite production build |
 | `npm audit --omit=dev` | PASS | 0 production vulnerabilities |
@@ -640,7 +641,7 @@ Independent post-remediation verification produced:
 | Secret scan (gitleaks, 154 commits) | PASS | 0 leaks after fingerprint-scoped allowlist of 7 confirmed test fixtures/dev sentinels in `.gitleaks.toml` |
 | File modes | PASS | Index modes normalized (644 configs/docs, 755 `backup-sqlite.sh`); NTFS working-tree 777 display is filesystem mapping, not committed |
 
-The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are continuous/restart order reconciliation, venue sandbox/canary evidence, signer source reproducibility, evidence-backed presets, deeper AutoTune feedback joins/WFO, and the staged Tauri-module refactor.
+The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are automated residual-leg resolution and cancel-failure retry (the reconciliation supervisor detects, blocks, and escalates but does not act), venue sandbox/canary evidence, evidence-backed presets, deeper AutoTune feedback joins/WFO, and the staged Tauri-module refactor.
 
 ---
 

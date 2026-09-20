@@ -24,7 +24,7 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
 - Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel
 - Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
 
-Submission transport is not terminal fill reconciliation. No listed venue is live-strategy-entry ready.
+Submission transport is not terminal fill reconciliation. Every live-submission adapter now exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution and cancel retry remain unimplemented, so no listed venue is live-strategy-entry ready.
 
 Account-position matching is adapter-owned. Live flattening asks the adapter to resolve the venue-native position back to the signal leg's exact symbol before sizing or verifying a reduce-only close. Examples: Binance/Aster/PopDEX `BTCUSDT`, Kraken `PF_XBTUSD`, OKX `BTC-USDT-SWAP`, Vanta `PERP_BTC_USDC`, Decibel `BTC-PERP`, and Lighter `market_id`/spot-vs-perp resolution. Unsupported, unknown, or ambiguous mappings fail closed as unresolved exposure; they are never treated as flat.
 
@@ -198,9 +198,10 @@ Robinhood Web3 connects to the Robinhood EVM chain with multi-DEX router support
 ## 6. Aster (Binance-Style Futures DEX)
 
 Native adapter (`AsterAdapter`, venue `aster`, admitted to `get_venues`).
-Public market/account reads plus authenticated submission transport are
-implemented; terminal fill/restart reconciliation is not, so strategy live
-entry remains disabled.
+Public market/account reads, authenticated submission transport, and
+order-status polling (`GET /fapi/v3/order`) are implemented; automated
+residual-leg resolution and cancel retry are not, so strategy live entry
+remains disabled.
 
 - **REST API:** `https://fapi.asterdex.com` (`/fapi/v3/*` recommended,
   `/fapi/v1/*` legacy)

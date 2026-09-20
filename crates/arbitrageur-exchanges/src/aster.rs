@@ -4,7 +4,7 @@ use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
-use arbitrageur_core::types::{dec, Decimal, OrderStatus, OrderType, Side, TimeInForce, VenueId};
+use arbitrageur_core::types::{dec, Decimal, OrderType, Side, TimeInForce, VenueId};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
@@ -443,6 +443,139 @@ impl AsterAdapter {
         let data = serde_json::from_str::<serde_json::Value>(&text)?;
         Ok(data)
     }
+    /// Shared fail-closed parse for `/fapi/v3/order` envelopes (placement ack
+    /// and `fetch_order` poll share the same field shape). `expected_qty` /
+    /// `expected_client_id` constrain identity when the original request is
+    /// known; reconciling polls pass `None` and trust the venue response.
+    fn parse_order_response(
+        &self,
+        v: &serde_json::Value,
+        venue_symbol: &str,
+        canonical_symbol: &str,
+        expected_qty: Option<Decimal>,
+        expected_client_id: Option<&str>,
+        raw: Option<String>,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let returned_symbol = v
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing symbol: {v}"))?;
+        if !returned_symbol.eq_ignore_ascii_case(venue_symbol) {
+            anyhow::bail!(
+                "Aster order response symbol '{returned_symbol}' does not match expected '{venue_symbol}': {v}"
+            );
+        }
+        let order_id = match v.get("orderId") {
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            Some(serde_json::Value::String(s)) => s.trim().to_string(),
+            _ => String::new(),
+        };
+        if order_id.is_empty() || order_id == "0" {
+            anyhow::bail!("Aster order response missing valid orderId: {v}");
+        }
+        let client_order_id = v
+            .get("clientOrderId")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing clientOrderId: {v}"))?;
+        if let Some(expected) = expected_client_id {
+            if client_order_id != expected {
+                anyhow::bail!(
+                    "Aster order response clientOrderId '{client_order_id}' does not match request '{expected}': {v}"
+                );
+            }
+        }
+
+        let raw_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing status: {v}"))?;
+        let orig_qty = dec_from_json(v.get("origQty"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Aster order response missing valid origQty: {v}"))?;
+        if let Some(expected) = expected_qty {
+            if orig_qty != expected {
+                anyhow::bail!(
+                    "Aster order response origQty {orig_qty} does not match request {expected}: {v}"
+                );
+            }
+        }
+        let executed_qty = dec_from_json(v.get("executedQty"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Aster order response missing valid executedQty: {v}")
+            })?;
+        if executed_qty > orig_qty {
+            anyhow::bail!(
+                "Aster order response executedQty {executed_qty} exceeds origQty {orig_qty}: {v}"
+            );
+        }
+        let remaining_qty = orig_qty.saturating_sub(executed_qty);
+
+        let order_status = match raw_status {
+            "FILLED" => OrderStatus::Filled,
+            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "EXPIRED" if executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "EXPIRED" => OrderStatus::Cancelled,
+            "CANCELED" => OrderStatus::Cancelled,
+            "REJECTED" => OrderStatus::Rejected,
+            "NEW" => OrderStatus::New,
+            other => anyhow::bail!("Aster order response has unknown status '{other}': {v}"),
+        };
+        let status_consistent = match order_status {
+            OrderStatus::Filled => executed_qty == orig_qty && remaining_qty == dec!(0),
+            OrderStatus::PartiallyFilled => executed_qty > dec!(0) && executed_qty < orig_qty,
+            OrderStatus::New => executed_qty == dec!(0) && remaining_qty == orig_qty,
+            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
+                executed_qty == dec!(0) && remaining_qty == orig_qty
+            }
+        };
+        if !status_consistent {
+            anyhow::bail!(
+                "Aster order response status {order_status:?} is inconsistent with executedQty {executed_qty}/{orig_qty}: {v}"
+            );
+        }
+        let avg_price = if executed_qty > dec!(0) {
+            Some(
+                dec_from_json(v.get("avgPrice"))
+                    .filter(|p| *p > dec!(0))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("Aster filled order response missing valid avgPrice: {v}")
+                    })?,
+            )
+        } else {
+            None
+        };
+
+        // Aster taker fee: 3.5 BPS
+        let cum_quote = if executed_qty > dec!(0) {
+            dec_from_json(v.get("cumQuote"))
+                .filter(|q| *q >= dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Aster filled order response missing valid cumQuote: {v}")
+                })?
+        } else {
+            dec!(0)
+        };
+        let fee = cum_quote * Decimal::new(35, 5);
+
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: client_order_id.to_string(),
+            venue: self.venue_id.clone(),
+            symbol: canonical_symbol.to_string(),
+            status: order_status,
+            original_qty: orig_qty,
+            filled_qty: executed_qty,
+            remaining_qty,
+            avg_fill_price: avg_price,
+            fee,
+            fee_currency: "USDT".to_string(),
+            raw_response: raw,
+            timestamp: Utc::now(),
+        })
+    }
 }
 
 #[async_trait]
@@ -635,6 +768,10 @@ impl ExchangeAdapter for AsterAdapter {
     }
 
     fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
         true
     }
 
@@ -831,123 +968,14 @@ impl ExchangeAdapter for AsterAdapter {
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!("Failed to parse Aster order response: {e}; body: {text}")
         })?;
-
-        let returned_symbol = v
-            .get("symbol")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Aster order response missing symbol: {v}"))?;
-        if !returned_symbol.eq_ignore_ascii_case(&venue_symbol) {
-            anyhow::bail!(
-                "Aster order response symbol '{returned_symbol}' does not match expected '{venue_symbol}': {v}"
-            );
-        }
-        let order_id = match v.get("orderId") {
-            Some(serde_json::Value::Number(n)) => n.to_string(),
-            Some(serde_json::Value::String(s)) => s.trim().to_string(),
-            _ => String::new(),
-        };
-        if order_id.is_empty() || order_id == "0" {
-            anyhow::bail!("Aster order response missing valid orderId: {v}");
-        }
-        let client_order_id = v
-            .get("clientOrderId")
-            .and_then(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Aster order response missing clientOrderId: {v}"))?;
-        if client_order_id != order.client_order_id {
-            anyhow::bail!(
-                "Aster order response clientOrderId '{client_order_id}' does not match request '{}': {v}",
-                order.client_order_id
-            );
-        }
-
-        let raw_status = v
-            .get("status")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Aster order response missing status: {v}"))?;
-        let orig_qty = dec_from_json(v.get("origQty"))
-            .filter(|q| *q > dec!(0))
-            .ok_or_else(|| anyhow::anyhow!("Aster order response missing valid origQty: {v}"))?;
-        if orig_qty != order.quantity {
-            anyhow::bail!(
-                "Aster order response origQty {orig_qty} does not match request {}: {v}",
-                order.quantity
-            );
-        }
-        let executed_qty = dec_from_json(v.get("executedQty"))
-            .filter(|q| *q >= dec!(0))
-            .ok_or_else(|| {
-                anyhow::anyhow!("Aster order response missing valid executedQty: {v}")
-            })?;
-        if executed_qty > orig_qty {
-            anyhow::bail!(
-                "Aster order response executedQty {executed_qty} exceeds origQty {orig_qty}: {v}"
-            );
-        }
-        let remaining_qty = orig_qty.saturating_sub(executed_qty);
-
-        let order_status = match raw_status {
-            "FILLED" => OrderStatus::Filled,
-            "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
-            "EXPIRED" if executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
-            "EXPIRED" => OrderStatus::Cancelled,
-            "CANCELED" => OrderStatus::Cancelled,
-            "REJECTED" => OrderStatus::Rejected,
-            "NEW" => OrderStatus::New,
-            other => anyhow::bail!("Aster order response has unknown status '{other}': {v}"),
-        };
-        let status_consistent = match order_status {
-            OrderStatus::Filled => executed_qty == orig_qty && remaining_qty == dec!(0),
-            OrderStatus::PartiallyFilled => executed_qty > dec!(0) && executed_qty < orig_qty,
-            OrderStatus::New => executed_qty == dec!(0) && remaining_qty == orig_qty,
-            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
-                executed_qty == dec!(0) && remaining_qty == orig_qty
-            }
-        };
-        if !status_consistent {
-            anyhow::bail!(
-                "Aster order response status {order_status:?} is inconsistent with executedQty {executed_qty}/{orig_qty}: {v}"
-            );
-        }
-        let avg_price = if executed_qty > dec!(0) {
-            Some(
-                dec_from_json(v.get("avgPrice"))
-                    .filter(|p| *p > dec!(0))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("Aster filled order response missing valid avgPrice: {v}")
-                    })?,
-            )
-        } else {
-            None
-        };
-
-        // Aster taker fee: 3.5 BPS
-        let cum_quote = if executed_qty > dec!(0) {
-            dec_from_json(v.get("cumQuote"))
-                .filter(|q| *q >= dec!(0))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Aster filled order response missing valid cumQuote: {v}")
-                })?
-        } else {
-            dec!(0)
-        };
-        let fee = cum_quote * Decimal::new(35, 5);
-
-        Ok(OrderResponse {
-            order_id,
-            client_order_id: client_order_id.to_string(),
-            venue: self.venue_id.clone(),
-            symbol: order.symbol,
-            status: order_status,
-            original_qty: orig_qty,
-            filled_qty: executed_qty,
-            remaining_qty,
-            avg_fill_price: avg_price,
-            fee,
-            fee_currency: "USDT".to_string(),
-            raw_response: Some(text),
-            timestamp: Utc::now(),
-        })
+        self.parse_order_response(
+            &v,
+            &venue_symbol,
+            &order.symbol,
+            Some(order.quantity),
+            Some(order.client_order_id.as_str()),
+            Some(text),
+        )
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
@@ -981,6 +1009,55 @@ impl ExchangeAdapter for AsterAdapter {
             anyhow::bail!("Aster cancel_order failed: {text}");
         }
         Ok(())
+    }
+
+    /// Poll authoritative order state via `GET /fapi/v3/order`. Shares the
+    /// placement-ack field shape, so the same fail-closed parser validates
+    /// symbol/status/quantity coherence; orderId identity is checked
+    /// explicitly after parse.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch order on Aster: API credentials are not configured or vault is locked");
+        }
+        if order_id.trim().is_empty() {
+            anyhow::bail!("Aster fetch_order requires a non-empty order_id");
+        }
+        let venue_symbol = self.resolve_venue_symbol(symbol).await?;
+        let mut params = BTreeMap::new();
+        params.insert("symbol", venue_symbol.clone());
+        params.insert("orderId", order_id.to_string());
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+
+        let (api_key, query_string) = self.sign_params(&params)?;
+        let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
+        let resp = self
+            .client
+            .get(&url)
+            .header("X-MBX-APIKEY", api_key)
+            .send()
+            .await?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Aster fetch_order failed (HTTP {status}): {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Aster fetch_order response: {e}; body: {text}")
+        })?;
+        let out = self.parse_order_response(&v, &venue_symbol, symbol, None, None, Some(text))?;
+        if out.order_id != order_id {
+            anyhow::bail!(
+                "Aster fetch_order returned orderId {} != queried {order_id}",
+                out.order_id
+            );
+        }
+        Ok(out)
     }
 
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {

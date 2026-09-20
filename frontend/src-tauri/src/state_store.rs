@@ -240,6 +240,10 @@ pub struct SignalLeg {
     pub fill_price: Option<f64>,
     pub fee_usd: f64,
     pub venue_order_id: Option<String>,
+    /// Engine-generated client order id, persisted alongside the venue
+    /// order id so venues keyed on client order index (Lighter) can be
+    /// polled by reconciliation after restart.
+    pub client_order_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1168,6 +1172,8 @@ const MIGRATION_V21_SQL: &str = "BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS exe
 /// row — v21 data reads back identically, with symbols populated.
 const MIGRATION_V22_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN symbol TEXT NOT NULL DEFAULT ''; UPDATE signal_legs SET symbol = (SELECT symbol FROM signal_executions WHERE signal_executions.id = signal_legs.signal_id) WHERE symbol = ''; PRAGMA user_version = 22; COMMIT;";
 
+const MIGRATION_V23_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN client_order_id TEXT NOT NULL DEFAULT ''; PRAGMA user_version = 23; COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1537,6 +1543,11 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
         fill_price: row.get(7)?,
         fee_usd: row.get(8)?,
         venue_order_id: row.get(9)?,
+        client_order_id: row
+            .get::<_, Option<String>>(13)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty()),
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
@@ -1609,7 +1620,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 22 {
+        if version > 23 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1740,6 +1751,12 @@ impl StateStore {
         }
         if version <= 21 {
             if let Err(err) = conn.execute_batch(MIGRATION_V22_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 22 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V23_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -2269,9 +2286,15 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         }
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock();
+        // Monotonic write: a stale dispatch-time ack must never regress a
+        // fill the reconciler already recorded from an authoritative poll.
+        // Price/fee follow only when this write advances the cumulative
+        // quantity, so a lagging ack cannot pair new qty with old price.
         let changed = conn.execute(
             "UPDATE signal_legs
-             SET filled_qty = ?3, fill_price = ?4, fee_usd = ?5,
+             SET fill_price = CASE WHEN ?3 >= filled_qty THEN ?4 ELSE fill_price END,
+                 fee_usd = CASE WHEN ?3 >= filled_qty THEN MAX(fee_usd, ?5) ELSE fee_usd END,
+                 filled_qty = MAX(filled_qty, ?3),
                  venue_order_id = COALESCE(?6, venue_order_id), updated_at = ?7
              WHERE signal_id = ?1 AND side = ?2",
             params![
@@ -2305,25 +2328,128 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         signal_id: &str,
         side: LegSide,
         venue_order_id: &str,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<()> {
         let signal_id = normalize_id(signal_id)?;
         let oid = venue_order_id.trim();
         if oid.is_empty() || oid.len() > 256 || oid.chars().any(|c| c.is_control()) {
             anyhow::bail!("invalid venue order id");
         }
+        let cid = client_order_id.map(|c| c.trim()).filter(|c| !c.is_empty());
+        if let Some(c) = cid {
+            if c.len() > 256 || c.chars().any(|ch| ch.is_control()) {
+                anyhow::bail!("invalid client order id");
+            }
+        }
         let now = Utc::now().to_rfc3339();
         let conn = self.conn.lock();
         let changed = conn.execute(
             "UPDATE signal_legs
-             SET venue_order_id = ?3, updated_at = ?4
+             SET venue_order_id = ?3,
+                 client_order_id = COALESCE(?5, client_order_id),
+                 updated_at = ?4
              WHERE signal_id = ?1 AND side = ?2",
-            params![signal_id, side.as_str(), oid, now],
+            params![signal_id, side.as_str(), oid, now, cid],
         )?;
         if changed == 0 {
             anyhow::bail!("signal {signal_id} has no {side:?} leg");
         }
         conn.execute(
             "UPDATE signal_executions SET updated_at = ?2 WHERE id = ?1",
+            params![signal_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// One persisted leg that carries a venue order id on a signal that has
+    /// not reached `closed`/`failed` — the reconciliation poll set.
+    /// `sim-%` order ids are SimulatedExchange synthetic ids — paper fills
+    /// must never be polled against a real venue.
+    pub fn list_pending_order_legs(&self) -> anyhow::Result<Vec<(SignalExecution, SignalLeg)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT l.id FROM signal_legs l
+             JOIN signal_executions e ON e.id = l.signal_id
+             WHERE l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
+               AND l.venue_order_id NOT LIKE 'sim-%'
+               AND e.status IN ('in_flight', 'imbalanced', 'unresolved')",
+        )?;
+        let leg_ids: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        drop(conn);
+        let mut out = Vec::with_capacity(leg_ids.len());
+        for leg_id in leg_ids {
+            let conn = self.conn.lock();
+            let legs = conn.query_row(
+                "SELECT signal_id FROM signal_legs WHERE id = ?1",
+                [&leg_id],
+                |r| r.get::<_, String>(0),
+            );
+            drop(conn);
+            let Ok(signal_id) = legs else { continue };
+            if let Some(exec) = self.get_signal(&signal_id)? {
+                let leg = exec.legs.iter().find(|l| l.id == leg_id).cloned();
+                if let Some(leg) = leg {
+                    out.push((exec, leg));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Apply an authoritative venue order-state snapshot to a leg.
+    /// `filled_qty` and `fee_usd` are cumulative venue values — they only
+    /// ever advance (a venue response reporting less than the recorded fill
+    /// keeps the larger recorded value rather than regressing the ledger).
+    /// `fill_price` replaces the stored price when provided.
+    pub fn apply_leg_order_state(
+        &self,
+        signal_id: &str,
+        side: LegSide,
+        filled_qty: f64,
+        fill_price: Option<f64>,
+        fee_usd: f64,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        if !filled_qty.is_finite() || filled_qty < 0.0 {
+            anyhow::bail!("filled quantity must be finite and nonnegative");
+        }
+        if let Some(p) = fill_price {
+            if !p.is_finite() || p <= 0.0 {
+                anyhow::bail!("fill price must be finite and positive when provided");
+            }
+        }
+        if !fee_usd.is_finite() || fee_usd < 0.0 {
+            anyhow::bail!("fee must be finite and nonnegative");
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE signal_legs
+             SET filled_qty = MAX(filled_qty, ?3),
+                 fill_price = COALESCE(?4, fill_price),
+                 fee_usd = MAX(fee_usd, ?5),
+                 updated_at = ?6
+             WHERE signal_id = ?1 AND side = ?2",
+            params![
+                signal_id,
+                side.as_str(),
+                filled_qty,
+                fill_price,
+                fee_usd,
+                now
+            ],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("signal {signal_id} has no {side:?} leg");
+        }
+        conn.execute(
+            "UPDATE signal_executions
+             SET fees_usd = (SELECT COALESCE(SUM(fee_usd), 0) FROM signal_legs WHERE signal_id = ?1),
+                 updated_at = ?2
+             WHERE id = ?1",
             params![signal_id, now],
         )?;
         Ok(())
@@ -4270,7 +4396,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
                     filled_qty, fill_price, fee_usd, venue_order_id,
-                    created_at, updated_at, symbol
+                    created_at, updated_at, symbol, client_order_id
              FROM signal_legs WHERE signal_id = ?1
              ORDER BY CASE side WHEN 'long' THEN 0 ELSE 1 END",
         )?;
@@ -4328,7 +4454,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 22);
+            assert_eq!(version, 23);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -4876,7 +5002,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 22);
+        assert_eq!(version, 23);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5010,7 +5136,7 @@ mod tests {
             .record_signal_execution(&two_leg_signal("s-ack", "BTC-USDC", None, None))
             .unwrap();
         store
-            .record_leg_order_id("s-ack", LegSide::Short, "venue-order-42")
+            .record_leg_order_id("s-ack", LegSide::Short, "venue-order-42", Some("cid-ack-1"))
             .unwrap();
         let sig = store.get_signal("s-ack").unwrap().unwrap();
         let short = sig
@@ -5019,10 +5145,54 @@ mod tests {
             .find(|l| l.side == LegSide::Short)
             .expect("short leg");
         assert_eq!(short.venue_order_id.as_deref(), Some("venue-order-42"));
+        assert_eq!(short.client_order_id.as_deref(), Some("cid-ack-1"));
         assert_eq!(short.filled_qty, 0.0);
         assert!(store
-            .record_leg_order_id("s-ack", LegSide::Short, "")
+            .record_leg_order_id("s-ack", LegSide::Short, "", None)
             .is_err());
+    }
+
+    #[test]
+    fn pending_order_legs_and_monotonic_fill_state() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_signal_execution(&two_leg_signal("s-recon", "BTC-USDC", None, None))
+            .unwrap();
+        // No order ids yet — nothing to reconcile.
+        assert!(store.list_pending_order_legs().unwrap().is_empty());
+        store
+            .record_leg_order_id("s-recon", LegSide::Short, "ord-77", Some("cid-recon-1"))
+            .unwrap();
+        let pending = store.list_pending_order_legs().unwrap();
+        assert_eq!(pending.len(), 1);
+        let (exec, leg) = &pending[0];
+        assert_eq!(exec.id, "s-recon");
+        assert_eq!(leg.side, LegSide::Short);
+        assert_eq!(leg.venue_order_id.as_deref(), Some("ord-77"));
+
+        // Venue reports cumulative fills: apply 0.4, then 0.7 — monotone up.
+        store
+            .apply_leg_order_state("s-recon", LegSide::Short, 0.4, Some(100.0), 0.01)
+            .unwrap();
+        store
+            .apply_leg_order_state("s-recon", LegSide::Short, 0.7, Some(101.0), 0.02)
+            .unwrap();
+        // A stale venue snapshot reporting less must never regress the ledger.
+        store
+            .apply_leg_order_state("s-recon", LegSide::Short, 0.2, None, 0.005)
+            .unwrap();
+        let sig = store.get_signal("s-recon").unwrap().unwrap();
+        let short = sig.legs.iter().find(|l| l.side == LegSide::Short).unwrap();
+        assert_eq!(short.filled_qty, 0.7);
+        assert_eq!(short.fill_price, Some(101.0));
+        assert_eq!(short.fee_usd, 0.02);
+        assert_eq!(sig.fees_usd, 0.02);
+
+        // Terminal signals drop out of the poll set.
+        store
+            .update_signal_status("s-recon", SignalStatus::Closed, None)
+            .unwrap();
+        assert!(store.list_pending_order_legs().unwrap().is_empty());
     }
 
     #[test]
@@ -5347,7 +5517,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 22);
+            assert_eq!(version, 23);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5718,7 +5888,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 22);
+        assert_eq!(v, 23);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -5838,7 +6008,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 22);
+        assert_eq!(v10, 23);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -6616,5 +6786,26 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM margin_snapshots", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn pending_order_legs_exclude_simulated_ids() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_signal_execution(&two_leg_signal("s-paper", "BTC-USDC", None, None))
+            .unwrap();
+        // Paper fills write synthetic sim-* order ids — they must never be
+        // polled against a real venue.
+        store
+            .record_leg_order_id("s-paper", LegSide::Short, "sim-deadbeef", None)
+            .unwrap();
+        assert!(store.list_pending_order_legs().unwrap().is_empty());
+        // A real venue id on the other leg still enters the poll set.
+        store
+            .record_leg_order_id("s-paper", LegSide::Long, "real-ord-9", None)
+            .unwrap();
+        let pending = store.list_pending_order_legs().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.side, LegSide::Long);
     }
 }

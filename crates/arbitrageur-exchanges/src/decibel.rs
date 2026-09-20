@@ -633,40 +633,221 @@ impl DecibelAdapter {
         Ok(committed.data)
     }
 
-    /// Best-effort extraction of the Decibel order id from commit events.
-    fn extract_order_id(tx: &serde_json::Value, subaccount: &str) -> Option<String> {
-        let events = tx.get("events")?.as_array()?;
-        let sub = subaccount.to_lowercase();
-        for ev in events {
-            let ty = ev.get("type")?.as_str()?;
-            if !ty.contains("OrderEvent") {
+    fn fullnode_url(&self) -> &'static str {
+        if self.is_testnet() {
+            "https://fullnode.testnet.aptoslabs.com/v1"
+        } else {
+            "https://fullnode.mainnet.aptoslabs.com/v1"
+        }
+    }
+}
+
+/// Authoritative outcome decoded from a committed Decibel transaction's
+/// events. `OrderEvent` carries the order lifecycle (`orig_size`,
+/// `remaining_size`, `status.__variant__`); `TradeEvent` carries per-fill
+/// price/size/fee. All chain-unit quantities are de-scaled with the market's
+/// `sz_decimals`/`px_decimals`; fees are balance-sheet (USDC, 6 decimals).
+#[derive(Debug, Default)]
+struct DecibelCommitState {
+    venue_order_id: Option<String>,
+    client_order_id: Option<String>,
+    status_variant: Option<String>,
+    /// Order limit price echoed by the venue (human units), when emitted.
+    order_price: Option<Decimal>,
+    orig_qty: Decimal,
+    remaining_qty: Decimal,
+    filled_qty: Decimal,
+    avg_fill_price: Option<Decimal>,
+    fee_usd: Decimal,
+}
+
+fn dec_unit(v: &serde_json::Value, key: &str, scale: u32) -> Option<Decimal> {
+    let raw = v.get(key)?;
+    let units = raw
+        .as_str()
+        .and_then(|s| Decimal::from_str_exact(s).ok())
+        .or_else(|| raw.as_u64().map(Decimal::from))?;
+    let factor = Decimal::from(10u64.pow(scale.min(18)));
+    Some(units / factor)
+}
+
+/// `OptionType<T>` fields serialise as `{"vec": [...]}`; plain strings and
+/// numbers also appear in the wild.
+fn option_str(v: Option<&serde_json::Value>) -> Option<String> {
+    let v = v?;
+    if let Some(s) = v.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(n) = v.as_u64() {
+        return Some(n.to_string());
+    }
+    v.get("vec")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.first())
+        .map(|inner| {
+            inner
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| inner.as_u64().map(|n| n.to_string()))
+                .unwrap_or_else(|| inner.to_string())
+        })
+}
+
+/// Address-valued event fields arrive either as a plain `"0x.."` string or
+/// as a Move `Object` (`{"inner": "0x.."}`).
+fn event_addr(v: Option<&serde_json::Value>) -> String {
+    v.and_then(|a| {
+        a.as_str()
+            .map(str::to_string)
+            .or_else(|| a.get("inner").and_then(|i| i.as_str()).map(str::to_string))
+    })
+    .unwrap_or_default()
+    .to_lowercase()
+}
+
+/// Scan `tx.events` for our subaccount's `OrderEvent` (last one wins — the
+/// final lifecycle state) plus every `TradeEvent` booked to our account
+/// (each fill emits one maker + one taker row; ours is `account == sub`).
+fn parse_commit_order_state(
+    tx: &serde_json::Value,
+    subaccount: &str,
+    sz_decimals: u32,
+    px_decimals: u32,
+) -> DecibelCommitState {
+    let mut st = DecibelCommitState::default();
+    let Some(events) = tx.get("events").and_then(|e| e.as_array()) else {
+        return st;
+    };
+    let sub = subaccount.trim().to_lowercase();
+    let mut fill_sz = dec!(0);
+    let mut fill_notional_units = dec!(0);
+    let mut fee_units = dec!(0);
+    for ev in events {
+        let Some(ty) = ev.get("type").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let Some(data) = ev.get("data") else {
+            continue;
+        };
+        if ty.contains("OrderEvent") {
+            let user = event_addr(data.get("user"));
+            if user != sub {
                 continue;
             }
-            let data = ev.get("data")?;
-            if let Some(user) = data.get("user").and_then(|u| u.as_str()) {
-                if user.to_lowercase() != sub {
-                    continue;
-                }
+            st.venue_order_id = data
+                .get("order_id")
+                .and_then(|id| {
+                    id.as_str()
+                        .map(str::to_string)
+                        .or_else(|| id.as_u64().map(|n| n.to_string()))
+                        .or_else(|| option_str(id.get("order_id")))
+                })
+                .or(st.venue_order_id);
+            st.client_order_id = option_str(data.get("client_order_id")).or(st.client_order_id);
+            st.status_variant = data
+                .get("status")
+                .and_then(|s| {
+                    s.get("__variant__")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| s.as_str())
+                })
+                .map(str::to_string)
+                .or(st.status_variant);
+            st.order_price = dec_unit(data, "price", px_decimals)
+                .filter(|p| *p > dec!(0))
+                .or(st.order_price);
+            if let Some(o) = dec_unit(data, "orig_size", sz_decimals) {
+                st.orig_qty = o;
             }
-            if let Some(id) = data.get("order_id") {
-                if let Some(s) = id.as_str() {
-                    return Some(s.to_string());
-                }
-                if let Some(n) = id.as_u64() {
-                    return Some(n.to_string());
-                }
-                if let Some(inner) = id.get("order_id") {
-                    if let Some(s) = inner.as_str() {
-                        return Some(s.to_string());
-                    }
-                    if let Some(n) = inner.as_u64() {
-                        return Some(n.to_string());
-                    }
-                }
-                return Some(id.to_string());
+            if let Some(r) = dec_unit(data, "remaining_size", sz_decimals) {
+                st.remaining_qty = r;
+            }
+        } else if ty.contains("TradeEvent") {
+            let acct = event_addr(data.get("account"));
+            if acct != sub {
+                continue;
+            }
+            let sz = data
+                .get("size")
+                .and_then(|s| s.as_str())
+                .and_then(|s| Decimal::from_str_exact(s).ok())
+                .unwrap_or(dec!(0));
+            let px = data
+                .get("price")
+                .and_then(|s| s.as_str())
+                .and_then(|s| Decimal::from_str_exact(s).ok())
+                .unwrap_or(dec!(0));
+            fill_sz += sz;
+            fill_notional_units += sz * px;
+            fee_units += data
+                .get("fee")
+                .and_then(|s| s.as_str())
+                .and_then(|s| Decimal::from_str_exact(s).ok())
+                .unwrap_or(dec!(0));
+        }
+    }
+    let sz_factor = Decimal::from(10u64.pow(sz_decimals.min(18)));
+    let px_factor = Decimal::from(10u64.pow(px_decimals.min(18)));
+    if fill_sz > dec!(0) {
+        st.filled_qty = fill_sz / sz_factor;
+        let vwap_units = fill_notional_units / fill_sz;
+        let vwap = vwap_units / px_factor;
+        // Scale sanity: the documented px unit is the collateral balance
+        // sheet's; a fill VWAP that deviates wildly from the order's own
+        // limit price means the assumed scale is wrong — report no price
+        // rather than write a 10^k-scaled figure into accounting.
+        let plausible = match st.order_price {
+            Some(limit) if limit > dec!(0) => {
+                let ratio = vwap / limit;
+                ratio > dec!(0.5) && ratio < dec!(2.0)
+            }
+            _ => true,
+        };
+        if plausible {
+            st.avg_fill_price = Some(vwap);
+        }
+    } else if st.orig_qty > st.remaining_qty {
+        st.filled_qty = st.orig_qty - st.remaining_qty;
+    }
+    if st.filled_qty < dec!(0) {
+        st.filled_qty = dec!(0);
+    }
+    // Collateral balance-sheet amounts are USDC-denominated (6 decimals).
+    // Negative fee = rebate; expose cost only and never a negative credit
+    // that would inflate computed PnL. Sanity-gate against the fill
+    // notional so a wrong-scale assumption cannot corrupt accounting.
+    let fee = fee_units / Decimal::from(10u64.pow(6));
+    let notional = st
+        .avg_fill_price
+        .or(st.order_price)
+        .map(|p| st.filled_qty * p)
+        .unwrap_or(dec!(0));
+    if fee > dec!(0) && (notional <= dec!(0) || fee <= notional * dec!(0.10)) {
+        st.fee_usd = fee;
+    }
+    st
+}
+
+/// Map a Decibel `OrderEvent` status variant onto `OrderStatus` using the
+/// decoded quantities — `SIZE_REDUCED`/`OPEN` with zero remaining is still a
+/// full fill, and a cancelled order that took a partial fill first reports
+/// truthfully as `Cancelled` with `filled_qty > 0`.
+fn decibel_order_status(variant: Option<&str>, filled: Decimal, remaining: Decimal) -> OrderStatus {
+    let v = variant.unwrap_or("").to_uppercase();
+    match v.as_str() {
+        "FILLED" => OrderStatus::Filled,
+        "CANCELLED" | "CANCELED" => OrderStatus::Cancelled,
+        "REJECTED" => OrderStatus::Rejected,
+        "EXPIRED" => OrderStatus::Expired,
+        _ => {
+            if remaining <= dec!(0) && filled > dec!(0) {
+                OrderStatus::Filled
+            } else if filled > dec!(0) {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::New
             }
         }
-        None
     }
 }
 
@@ -1108,25 +1289,52 @@ impl ExchangeAdapter for DecibelAdapter {
         if hash.is_empty() {
             anyhow::bail!("Decibel submission returned no transaction hash: {tx}");
         }
-        let venue_order_id =
-            Self::extract_order_id(&tx, &subaccount).unwrap_or_else(|| hash.clone());
+        if tx.get("success").and_then(|s| s.as_bool()) == Some(false) {
+            let vm = tx
+                .get("vm_status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            anyhow::bail!("Decibel order transaction {hash} reverted on-chain: {vm}");
+        }
+        let st = parse_commit_order_state(&tx, &subaccount, row.sz_decimals, row.px_decimals);
+        let status = decibel_order_status(st.status_variant.as_deref(), st.filled_qty, {
+            if st.orig_qty > dec!(0) {
+                st.remaining_qty
+            } else {
+                qty - st.filled_qty
+            }
+        });
+        // The persisted order id is the committed transaction hash — the only
+        // handle that resolves authoritatively on-chain after a restart. The
+        // numeric venue order id is preserved in raw_response for support.
+        let venue_order_id = hash.clone();
         Ok(OrderResponse {
             order_id: venue_order_id,
             client_order_id: order.client_order_id.clone(),
             venue: self.venue_id.clone(),
             symbol: order.symbol.clone(),
-            status: OrderStatus::New,
-            original_qty: qty,
-            filled_qty: dec!(0),
-            remaining_qty: qty,
-            avg_fill_price: None,
-            fee: dec!(0),
+            status,
+            original_qty: if st.orig_qty > dec!(0) {
+                st.orig_qty
+            } else {
+                qty
+            },
+            filled_qty: st.filled_qty,
+            remaining_qty: if st.orig_qty > dec!(0) {
+                st.remaining_qty
+            } else {
+                (qty - st.filled_qty).max(dec!(0))
+            },
+            avg_fill_price: st.avg_fill_price,
+            fee: st.fee_usd,
             fee_currency: "USDC".to_string(),
             raw_response: Some(
                 serde_json::json!({
                     "tx_hash": hash,
                     "market": row.market_name,
                     "subaccount": subaccount,
+                    "venue_order_id_num": st.venue_order_id,
+                    "order_status": st.status_variant,
                     "price_chain_units": price_chain,
                     "size_chain_units": size_chain,
                 })
@@ -1134,6 +1342,100 @@ impl ExchangeAdapter for DecibelAdapter {
             ),
             timestamp: Utc::now(),
         })
+    }
+
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        let hash = order_id.trim();
+        if !hash.starts_with("0x") || hash.len() < 10 {
+            anyhow::bail!(
+                "Decibel order status requires the committed transaction hash; '{hash}' is not resolvable on-chain"
+            );
+        }
+        let signer = self.wallet_key()?;
+        let owner = self.owner_address(&signer)?;
+        let subaccount = primary_subaccount_addr(&owner, self.deployment_package())?;
+        let url = format!("{}/transactions/by_hash/{hash}", self.fullnode_url());
+        let resp = self.client.get(&url).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            anyhow::bail!("Decibel transaction {hash} not found on the fullnode");
+        }
+        if !resp.status().is_success() {
+            anyhow::bail!(
+                "Decibel fullnode status {} for transaction {hash}",
+                resp.status()
+            );
+        }
+        let tx: serde_json::Value = resp.json().await?;
+        if tx.get("success").and_then(|s| s.as_bool()) == Some(false) {
+            return Ok(OrderResponse {
+                order_id: order_id.to_string(),
+                client_order_id: client_order_id.unwrap_or_default().to_string(),
+                venue: self.venue_id.clone(),
+                symbol: symbol.to_string(),
+                status: OrderStatus::Rejected,
+                original_qty: dec!(0),
+                filled_qty: dec!(0),
+                remaining_qty: dec!(0),
+                avg_fill_price: None,
+                fee: dec!(0),
+                fee_currency: "USDC".to_string(),
+                raw_response: Some(tx.to_string()),
+                timestamp: Utc::now(),
+            });
+        }
+        let row = self.fetch_market_row(symbol).await?;
+        let st = parse_commit_order_state(&tx, &subaccount, row.sz_decimals, row.px_decimals);
+        if st.status_variant.is_none() && st.venue_order_id.is_none() {
+            anyhow::bail!(
+                "Decibel transaction {hash} carries no OrderEvent for subaccount {subaccount}"
+            );
+        }
+        // Identity: the on-chain client_order_id must match the persisted one
+        // when both are known — a mismatched transaction is not our order.
+        if let (Some(want), Some(got)) = (
+            client_order_id.filter(|s| !s.trim().is_empty()),
+            st.client_order_id.as_deref(),
+        ) {
+            if got != want {
+                anyhow::bail!(
+                    "Decibel transaction {hash} client_order_id '{got}' != persisted '{want}'"
+                );
+            }
+        }
+        let status = decibel_order_status(
+            st.status_variant.as_deref(),
+            st.filled_qty,
+            st.remaining_qty,
+        );
+        let orig = if st.orig_qty > dec!(0) {
+            st.orig_qty
+        } else {
+            st.filled_qty + st.remaining_qty
+        };
+        Ok(OrderResponse {
+            order_id: order_id.to_string(),
+            client_order_id: client_order_id.unwrap_or_default().to_string(),
+            venue: self.venue_id.clone(),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: orig,
+            filled_qty: st.filled_qty,
+            remaining_qty: st.remaining_qty,
+            avg_fill_price: st.avg_fill_price,
+            fee: st.fee_usd,
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(tx.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
@@ -1151,12 +1453,16 @@ impl ExchangeAdapter for DecibelAdapter {
         let mkt_addr = AccountAddress::from_str(&market_addr)
             .map_err(|e| anyhow::anyhow!("Decibel market address invalid: {e}"))?;
 
-        let payload = if let Some(id) = req.order_id.filter(|s| !s.trim().is_empty()) {
-            let num: u128 = id.trim().parse().map_err(|_| {
-                anyhow::anyhow!(
-                    "Decibel numeric order id unparseable ({id}); pass the venue order id or use client_order_id"
-                )
-            })?;
+        // The persisted order id is a committed tx hash (non-numeric); venue
+        // order ids remain numeric. A non-numeric id falls through to the
+        // client-order-id path rather than erroring.
+        let numeric_id = req
+            .order_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|id| id.parse::<u128>().ok());
+        let payload = if let Some(num) = numeric_id {
             InputEntryFunctionData::new(&format!("{package}::{FN_CANCEL_ORDER}"))
                 .arg(sub_addr)
                 .arg(num)
@@ -1358,5 +1664,142 @@ mod tests {
             .account_position_for(&account, "ETH-USDC")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn commit_state_parses_fill_events() {
+        let sub = "0xabc";
+        let tx = serde_json::json!({
+            "hash": "0xdeadbeef",
+            "success": true,
+            "events": [
+                {
+                    "type": "0xpkg::perp_positions::OrderEvent",
+                    "data": {
+                        "user": "0xABC",
+                        "order_id": "42",
+                        "client_order_id": {"vec": ["cid-1"]},
+                        "orig_size": "2000000",
+                        "remaining_size": "0",
+                        "price": "50000000000",
+                        "status": {"__variant__": "FILLED"},
+                    }
+                },
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xabc",
+                        "size": "2000000",
+                        "price": "50050000000",
+                        "fee": "1001000",
+                        "is_taker": true,
+                    }
+                },
+                // Maker's copy of the same fill — must not be counted twice.
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xother",
+                        "size": "2000000",
+                        "price": "50050000000",
+                        "fee": "500",
+                    }
+                }
+            ]
+        });
+        // px_decimals = 6, sz_decimals = 6 → 2.0 units filled at 50050.0.
+        let st = parse_commit_order_state(&tx, sub, 6, 6);
+        assert_eq!(st.venue_order_id.as_deref(), Some("42"));
+        assert_eq!(st.client_order_id.as_deref(), Some("cid-1"));
+        assert_eq!(st.status_variant.as_deref(), Some("FILLED"));
+        assert_eq!(st.filled_qty, dec!(2));
+        assert_eq!(st.avg_fill_price, Some(dec!(50050)));
+        // fee 1,001,000 balance-sheet units → 1.001 USDC.
+        assert_eq!(st.fee_usd, dec!(1.001));
+        assert_eq!(
+            decibel_order_status(st.status_variant.as_deref(), st.filled_qty, dec!(0)),
+            OrderStatus::Filled
+        );
+    }
+
+    #[test]
+    fn commit_state_rejected_and_unknown_scales() {
+        let sub = "0xabc";
+        // REJECTED order, no fills.
+        let tx = serde_json::json!({
+            "events": [{
+                "type": "0xpkg::perp_positions::OrderEvent",
+                "data": {
+                    "user": "0xabc",
+                    "order_id": "7",
+                    "status": {"__variant__": "REJECTED"},
+                    "orig_size": "0", "remaining_size": "0", "price": "0"
+                }
+            }]
+        });
+        let st = parse_commit_order_state(&tx, sub, 6, 6);
+        assert_eq!(st.filled_qty, dec!(0));
+        assert_eq!(
+            decibel_order_status(
+                st.status_variant.as_deref(),
+                st.filled_qty,
+                st.remaining_qty
+            ),
+            OrderStatus::Rejected
+        );
+        // Wrong-scale price (100x the limit) → avg_fill_price withheld.
+        let tx2 = serde_json::json!({
+            "events": [
+                {
+                    "type": "0xpkg::perp_positions::OrderEvent",
+                    "data": {
+                        "user": "0xabc",
+                        "order_id": "9",
+                        "status": {"__variant__": "FILLED"},
+                        "orig_size": "1000000", "remaining_size": "0",
+                        "price": "50000000000"
+                    }
+                },
+                {
+                    "type": "0xpkg::perp_positions::TradeEvent",
+                    "data": {
+                        "account": "0xabc",
+                        "size": "1000000",
+                        "price": "5000000000000",
+                        "fee": "0"
+                    }
+                }
+            ]
+        });
+        let st2 = parse_commit_order_state(&tx2, sub, 6, 6);
+        assert_eq!(st2.filled_qty, dec!(1));
+        assert!(st2.avg_fill_price.is_none());
+    }
+
+    #[test]
+    fn commit_state_partial_then_cancelled() {
+        let sub = "0xabc";
+        let tx = serde_json::json!({
+            "events": [{
+                "type": "0xpkg::perp_positions::OrderEvent",
+                "data": {
+                    "user": "0xabc",
+                    "order_id": "11",
+                    "status": {"__variant__": "CANCELLED"},
+                    "orig_size": "4000000", "remaining_size": "3000000",
+                    "price": "50000000000"
+                }
+            }]
+        });
+        let st = parse_commit_order_state(&tx, sub, 6, 6);
+        assert_eq!(st.filled_qty, dec!(1));
+        assert_eq!(
+            decibel_order_status(
+                st.status_variant.as_deref(),
+                st.filled_qty,
+                st.remaining_qty
+            ),
+            OrderStatus::Cancelled
+        );
     }
 }

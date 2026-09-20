@@ -727,10 +727,12 @@ pub async fn close_external_position_impl(
         return Err(e);
     }
 
-    if let Err(e) = state
-        .state_store
-        .record_leg_order_id(&sid, leg_side, &resp.order_id)
-    {
+    if let Err(e) = state.state_store.record_leg_order_id(
+        &sid,
+        leg_side,
+        &resp.order_id,
+        Some(&expected_client_order_id),
+    ) {
         let note = format!(
             "External close order {} was accepted but its order id could not be persisted: {e}",
             resp.order_id

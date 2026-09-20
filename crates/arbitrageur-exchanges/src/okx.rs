@@ -333,7 +333,9 @@ impl OkxAdapter {
             } else if sym.ends_with("USDC") {
                 (&sym[..sym.len().saturating_sub(4)], "USDC")
             } else {
-                (sym.as_str(), "USDT")
+                anyhow::bail!(
+                    "OKX symbol '{symbol}' has no explicit USDT/USDC quote; refusing to guess"
+                );
             };
             if quote != "USDT" && quote != "USDC" {
                 anyhow::bail!(
@@ -342,6 +344,129 @@ impl OkxAdapter {
             }
             Ok(format!("{}-{}-SWAP", base, quote))
         }
+    }
+
+    /// Single-shot `/trade/order` query. Validates instrument + order-id
+    /// identity, and — when supplied — client-order-id and expected quantity.
+    /// `orig_qty` comes back in base units from `sz * ct_val`, so callers
+    /// reconciling without the original request can trust it as authoritative.
+    async fn query_order_once(
+        &self,
+        inst_id: &str,
+        ord_id: &str,
+        ct_val: Decimal,
+        expected_client_id: Option<&str>,
+        expected_qty: Option<Decimal>,
+    ) -> anyhow::Result<(
+        arbitrageur_core::types::OrderStatus,
+        Decimal,
+        Decimal,
+        Option<Decimal>,
+        Decimal,
+    )> {
+        use arbitrageur_core::types::OrderStatus;
+        let path = format!("/api/v5/trade/order?instId={inst_id}&ordId={ord_id}");
+        let v = self.signed_request("GET", &path, None).await?;
+        let data = v
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing data"))?;
+        let returned_inst = data
+            .get("instId")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing instId: {v}"))?;
+        if returned_inst != inst_id {
+            anyhow::bail!(
+                "OKX order query instId '{returned_inst}' does not match expected '{inst_id}': {v}"
+            );
+        }
+        let returned_ord = data
+            .get("ordId")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing ordId: {v}"))?;
+        if returned_ord != ord_id {
+            anyhow::bail!(
+                "OKX order query ordId '{returned_ord}' does not match expected '{ord_id}': {v}"
+            );
+        }
+        let returned_client = data
+            .get("clOrdId")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing clOrdId: {v}"))?;
+        if let Some(expected) = expected_client_id {
+            if returned_client != expected {
+                anyhow::bail!(
+                    "OKX order query clOrdId '{returned_client}' does not match request '{expected}': {v}"
+                );
+            }
+        }
+        let state = data
+            .get("state")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing state: {v}"))?;
+        let sz_contracts = dec_from_json(data.get("sz"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing valid sz: {v}"))?;
+        let orig_base = sz_contracts * ct_val;
+        if let Some(expected) = expected_qty {
+            if orig_base != expected {
+                anyhow::bail!(
+                    "OKX order query sz {orig_base} does not match requested {expected}: {v}"
+                );
+            }
+        }
+        let acc_contracts = dec_from_json(data.get("accFillSz"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("OKX order query missing valid accFillSz: {v}"))?;
+        let filled_base = acc_contracts * ct_val;
+        if filled_base > orig_base {
+            anyhow::bail!(
+                "OKX order query accFillSz {acc_contracts} exceeds orig size {sz_contracts}: {v}"
+            );
+        }
+        let avg_px = if filled_base > dec!(0) {
+            Some(
+                dec_from_json(data.get("avgPx"))
+                    .filter(|p| *p > dec!(0))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("OKX order query has fill quantity but no valid avgPx: {v}")
+                    })?,
+            )
+        } else {
+            None
+        };
+        let fee = dec_from_json(data.get("fee")).unwrap_or(dec!(0)).abs();
+        let status = match state {
+            "filled" if filled_base == orig_base => OrderStatus::Filled,
+            "filled" => anyhow::bail!(
+                "OKX order query state 'filled' has inconsistent fill {filled_base}/{orig_base}: {v}"
+            ),
+            "partially_filled" if filled_base > dec!(0) && filled_base < orig_base => {
+                OrderStatus::PartiallyFilled
+            }
+            "partially_filled" => anyhow::bail!(
+                "OKX order query state 'partially_filled' has inconsistent fill {filled_base}/{orig_base}: {v}"
+            ),
+            "canceled" | "cancelled" if filled_base > dec!(0) && filled_base < orig_base => {
+                OrderStatus::PartiallyFilled
+            }
+            "canceled" | "cancelled" if filled_base == dec!(0) => OrderStatus::Cancelled,
+            "canceled" | "cancelled" => anyhow::bail!(
+                "OKX order query canceled fill {filled_base}/{orig_base} is inconsistent: {v}"
+            ),
+            "failed" if filled_base == dec!(0) => OrderStatus::Rejected,
+            "failed" => {
+                anyhow::bail!("OKX order query failed with nonzero fill {filled_base}: {v}")
+            }
+            "live" if filled_base == dec!(0) => OrderStatus::New,
+            "live" if filled_base < orig_base => OrderStatus::PartiallyFilled,
+            _ if filled_base > dec!(0) && filled_base < orig_base => OrderStatus::PartiallyFilled,
+            _ if filled_base == orig_base => OrderStatus::Filled,
+            _ => OrderStatus::New,
+        };
+        Ok((status, orig_base, filled_base, avg_px, fee))
     }
 
     /// Poll a resting order for its true fill state (up to ~5s). Returns
@@ -360,112 +485,17 @@ impl OkxAdapter {
         Option<Decimal>,
         Decimal,
     )> {
-        use arbitrageur_core::types::OrderStatus;
         for _ in 0..6 {
-            let path = format!("/api/v5/trade/order?instId={inst_id}&ordId={ord_id}");
-            let v = self.signed_request("GET", &path, None).await?;
-            let data = v
-                .get("data")
-                .and_then(|d| d.as_array())
-                .and_then(|a| a.first())
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing data"))?;
-            let returned_inst = data
-                .get("instId")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing instId: {v}"))?;
-            if returned_inst != inst_id {
-                anyhow::bail!(
-                    "OKX order query instId '{returned_inst}' does not match expected '{inst_id}': {v}"
-                );
-            }
-            let returned_ord = data
-                .get("ordId")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing ordId: {v}"))?;
-            if returned_ord != ord_id {
-                anyhow::bail!(
-                    "OKX order query ordId '{returned_ord}' does not match expected '{ord_id}': {v}"
-                );
-            }
-            let returned_client = data
-                .get("clOrdId")
-                .and_then(|s| s.as_str())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing clOrdId: {v}"))?;
-            if returned_client != order.client_order_id {
-                anyhow::bail!(
-                    "OKX order query clOrdId '{returned_client}' does not match request '{}': {v}",
-                    order.client_order_id
-                );
-            }
-            let state = data
-                .get("state")
-                .and_then(|s| s.as_str())
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing state: {v}"))?;
-            let acc_contracts = dec_from_json(data.get("accFillSz"))
-                .filter(|q| *q >= dec!(0))
-                .ok_or_else(|| anyhow::anyhow!("OKX order query missing valid accFillSz: {v}"))?;
-            let filled_base = acc_contracts * ct_val;
-            if filled_base > order.quantity {
-                anyhow::bail!(
-                    "OKX order query accFillSz {acc_contracts} exceeds requested quantity {}: {v}",
-                    order.quantity
-                );
-            }
-            let avg_px = if filled_base > dec!(0) {
-                Some(
-                    dec_from_json(data.get("avgPx"))
-                        .filter(|p| *p > dec!(0))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "OKX order query has fill quantity but no valid avgPx: {v}"
-                            )
-                        })?,
+            let (status, _orig, filled_base, avg_px, fee) = self
+                .query_order_once(
+                    inst_id,
+                    ord_id,
+                    ct_val,
+                    Some(order.client_order_id.as_str()),
+                    Some(order.quantity),
                 )
-            } else {
-                None
-            };
-            let fee = dec_from_json(data.get("fee")).unwrap_or(dec!(0)).abs();
-            let terminal = matches!(
-                state,
-                "filled" | "partially_filled" | "canceled" | "cancelled" | "failed"
-            );
-            if terminal || filled_base > dec!(0) {
-                let status = match state {
-                    "filled" if filled_base == order.quantity => OrderStatus::Filled,
-                    "filled" => anyhow::bail!(
-                        "OKX order query state 'filled' has inconsistent fill {filled_base}/{}: {v}",
-                        order.quantity
-                    ),
-                    "partially_filled" if filled_base > dec!(0)
-                        && filled_base < order.quantity =>
-                    {
-                        OrderStatus::PartiallyFilled
-                    }
-                    "partially_filled" => anyhow::bail!(
-                        "OKX order query state 'partially_filled' has inconsistent fill {filled_base}/{}: {v}",
-                        order.quantity
-                    ),
-                    "canceled" | "cancelled" if filled_base > dec!(0)
-                        && filled_base < order.quantity =>
-                    {
-                        OrderStatus::PartiallyFilled
-                    }
-                    "canceled" | "cancelled" if filled_base == dec!(0) => OrderStatus::Cancelled,
-                    "canceled" | "cancelled" => anyhow::bail!(
-                        "OKX order query canceled fill {filled_base}/{} is inconsistent: {v}",
-                        order.quantity
-                    ),
-                    "failed" if filled_base == dec!(0) => OrderStatus::Rejected,
-                    "failed" => anyhow::bail!(
-                        "OKX order query failed with nonzero fill {filled_base}: {v}"
-                    ),
-                    _ if filled_base > dec!(0) && filled_base < order.quantity => {
-                        OrderStatus::PartiallyFilled
-                    }
-                    _ if filled_base == order.quantity => OrderStatus::Filled,
-                    _ => OrderStatus::New,
-                };
+                .await?;
+            if status.is_final() || filled_base > dec!(0) {
                 return Ok((status, filled_base, avg_px, fee));
             }
             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
@@ -977,6 +1007,52 @@ impl ExchangeAdapter for OkxAdapter {
         Ok(())
     }
 
+    /// Poll authoritative order state via `GET /api/v5/trade/order`. The
+    /// reconciler may not know the original quantity or client id, so both
+    /// are taken from the venue response (`sz`/`clOrdId`) while instrument
+    /// and order-id identity are still validated fail-closed.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!(
+                "Cannot fetch order on OKX: API credentials are not configured or vault is locked"
+            );
+        }
+        if order_id.trim().is_empty() {
+            anyhow::bail!("OKX fetch_order requires a non-empty order_id");
+        }
+        let inst_id = Self::to_venue_symbol(symbol)?;
+        let ct_val = self.contract_face_value(&inst_id).await?;
+        let (status, orig_base, filled_base, avg_px, fee) = self
+            .query_order_once(&inst_id, order_id, ct_val, None, None)
+            .await?;
+        let remaining = orig_base.saturating_sub(filled_base);
+        let fee_currency = if inst_id.contains("-USDC-") {
+            "USDC"
+        } else {
+            "USDT"
+        };
+        Ok(OrderResponse {
+            order_id: order_id.to_string(),
+            client_order_id: String::new(),
+            venue: VenueId::new("okx"),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: orig_base,
+            filled_qty: filled_base,
+            remaining_qty: remaining,
+            avg_fill_price: avg_px,
+            fee,
+            fee_currency: fee_currency.to_string(),
+            raw_response: None,
+            timestamp: Utc::now(),
+        })
+    }
+
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
         if !self.has_credentials() {
             anyhow::bail!(
@@ -1007,6 +1083,10 @@ impl ExchangeAdapter for OkxAdapter {
             anyhow::bail!("OKX leverage ack mismatch: wanted {leverage}, venue reports {got}");
         }
         Ok(())
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     fn live_order_submission_implemented(&self) -> bool {
@@ -1122,6 +1202,9 @@ mod tests {
         assert!(OkxAdapter::to_venue_symbol("BTC-USD-SWAP").is_err());
         assert!(OkxAdapter::to_venue_symbol("BTC-SOL").is_err());
         assert!(OkxAdapter::to_venue_symbol("BTC-ETH").is_err());
+        // Bare bases carry no explicit quote — reject rather than guess USDT.
+        assert!(OkxAdapter::to_venue_symbol("BTC").is_err());
+        assert!(OkxAdapter::to_venue_symbol("ETH").is_err());
     }
 
     #[test]

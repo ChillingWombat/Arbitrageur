@@ -305,6 +305,141 @@ impl CoinbaseAdapter {
         }
         Ok(format!("{sym}-USD"))
     }
+    /// Shared fail-closed parse for the `/orders` envelope (placement ack and
+    /// `GET /orders/{id}` share the shape). `expected_*` constrain identity
+    /// when the original request is known; reconciliation polls pass `None`
+    /// and take `size`/`client_oid` from the venue response as authoritative.
+    fn parse_order_envelope(
+        &self,
+        v: &serde_json::Value,
+        product_id: &str,
+        expected_qty: Option<Decimal>,
+        expected_client_id: Option<&str>,
+        expected_side: Option<&str>,
+        canonical_symbol: &str,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let order_id = v
+            .get("id")
+            .and_then(|o| o.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order returned no id: {v}"))?
+            .to_string();
+        let returned_product = v
+            .get("product_id")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing product_id: {v}"))?;
+        if returned_product != product_id {
+            anyhow::bail!(
+                "Coinbase order response product_id '{returned_product}' does not match expected '{product_id}': {v}"
+            );
+        }
+        let returned_client = v
+            .get("client_oid")
+            .and_then(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing client_oid: {v}"))?;
+        if let Some(expected) = expected_client_id {
+            if returned_client != expected {
+                anyhow::bail!(
+                    "Coinbase order response client_oid '{returned_client}' does not match request '{expected}': {v}"
+                );
+            }
+        }
+        if let (Some(returned_side), Some(expected)) =
+            (v.get("side").and_then(|s| s.as_str()), expected_side)
+        {
+            if returned_side != expected {
+                anyhow::bail!(
+                    "Coinbase order response side '{returned_side}' does not match expected '{expected}': {v}"
+                );
+            }
+        }
+        let filled_qty = dec_from_json(v.get("filled_size"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| {
+                anyhow::anyhow!("Coinbase order response missing valid filled_size: {v}")
+            })?;
+        let orig_qty = match expected_qty {
+            Some(q) => {
+                if filled_qty > q {
+                    anyhow::bail!(
+                        "Coinbase order response filled_size {filled_qty} exceeds requested {q}: {v}"
+                    );
+                }
+                q
+            }
+            None => dec_from_json(v.get("size"))
+                .filter(|q| *q > dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Coinbase order response missing valid size: {v}")
+                })?,
+        };
+        if filled_qty > orig_qty {
+            anyhow::bail!(
+                "Coinbase order response filled_size {filled_qty} exceeds size {orig_qty}: {v}"
+            );
+        }
+        let remaining_qty = orig_qty.saturating_sub(filled_qty);
+        let raw_status = v
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing status: {v}"))?;
+        let status = match raw_status {
+            "done" | "settled" if filled_qty == orig_qty => OrderStatus::Filled,
+            "done" | "settled" if filled_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "done" | "settled" => OrderStatus::Cancelled,
+            "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
+            "rejected" => {
+                anyhow::bail!("Coinbase rejected order has nonzero filled_size {filled_qty}: {v}")
+            }
+            "open" | "active" | "pending" | "received" if filled_qty == dec!(0) => OrderStatus::New,
+            "open" | "active" | "pending" | "received" => OrderStatus::PartiallyFilled,
+            "cancelled" | "canceled" if filled_qty == dec!(0) => OrderStatus::Cancelled,
+            "cancelled" | "canceled" if filled_qty < orig_qty => OrderStatus::PartiallyFilled,
+            "cancelled" | "canceled" => OrderStatus::Filled,
+            other => anyhow::bail!("Coinbase order response has unknown status '{other}': {v}"),
+        };
+        let avg_fill_price = if filled_qty > dec!(0) {
+            let executed_value = dec_from_json(v.get("executed_value"))
+                .filter(|x| *x > dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Coinbase order response has fill quantity but no valid executed_value: {v}"
+                    )
+                })?;
+            Some(executed_value / filled_qty)
+        } else {
+            None
+        };
+        let fee = if filled_qty > dec!(0) {
+            dec_from_json(v.get("fill_fees"))
+                .filter(|f| *f >= dec!(0))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Coinbase order response has fill quantity but no valid fill_fees: {v}"
+                    )
+                })?
+        } else {
+            dec!(0)
+        };
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: returned_client.to_string(),
+            venue: VenueId::new("coinbase"),
+            symbol: canonical_symbol.to_string(),
+            status,
+            original_qty: orig_qty,
+            filled_qty,
+            remaining_qty,
+            avg_fill_price,
+            fee,
+            fee_currency: "USD".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
 }
 
 #[async_trait]
@@ -488,7 +623,6 @@ impl ExchangeAdapter for CoinbaseAdapter {
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
-        use arbitrageur_core::types::OrderStatus;
         if !self.has_credentials() {
             anyhow::bail!("Cannot place live order on Coinbase: API credentials are not configured or vault is locked");
         }
@@ -559,113 +693,14 @@ impl ExchangeAdapter for CoinbaseAdapter {
         }
         let body = serde_json::to_string(&req)?;
         let v = self.authed("POST", "/orders", Some(body)).await?;
-        let order_id = v
-            .get("id")
-            .and_then(|o| o.as_str())
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Coinbase order returned no id: {v}"))?
-            .to_string();
-        let returned_product = v
-            .get("product_id")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing product_id: {v}"))?;
-        if returned_product != product_id {
-            anyhow::bail!(
-                "Coinbase order response product_id '{returned_product}' does not match expected '{product_id}': {v}"
-            );
-        }
-        let returned_client = v
-            .get("client_oid")
-            .and_then(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing client_oid: {v}"))?;
-        if returned_client != order.client_order_id {
-            anyhow::bail!(
-                "Coinbase order response client_oid '{returned_client}' does not match request '{}': {v}",
-                order.client_order_id
-            );
-        }
-        if let Some(returned_side) = v.get("side").and_then(|s| s.as_str()) {
-            if returned_side != side_str {
-                anyhow::bail!(
-                    "Coinbase order response side '{returned_side}' does not match expected '{side_str}': {v}"
-                );
-            }
-        }
-        let filled_qty = dec_from_json(v.get("filled_size"))
-            .filter(|q| *q >= dec!(0))
-            .ok_or_else(|| {
-                anyhow::anyhow!("Coinbase order response missing valid filled_size: {v}")
-            })?;
-        if filled_qty > order.quantity {
-            anyhow::bail!(
-                "Coinbase order response filled_size {filled_qty} exceeds requested {}: {v}",
-                order.quantity
-            );
-        }
-        let remaining_qty = order.quantity.saturating_sub(filled_qty);
-        let raw_status = v
-            .get("status")
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Coinbase order response missing status: {v}"))?;
-        let status = match raw_status {
-            "done" | "settled" if filled_qty == order.quantity => OrderStatus::Filled,
-            "done" | "settled" => anyhow::bail!(
-                "Coinbase order response '{raw_status}' has inconsistent filled_size {filled_qty}/{}: {v}",
-                order.quantity
-            ),
-            "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
-            "rejected" => anyhow::bail!(
-                "Coinbase rejected order has nonzero filled_size {filled_qty}: {v}"
-            ),
-            "open" | "active" | "pending" if filled_qty == dec!(0) => OrderStatus::New,
-            "open" | "active" | "pending" => OrderStatus::PartiallyFilled,
-            "cancelled" | "canceled" if filled_qty == dec!(0) => OrderStatus::Cancelled,
-            "cancelled" | "canceled" if filled_qty < order.quantity => {
-                OrderStatus::PartiallyFilled
-            }
-            "cancelled" | "canceled" => OrderStatus::Filled,
-            other => anyhow::bail!("Coinbase order response has unknown status '{other}': {v}"),
-        };
-        let avg_fill_price = if filled_qty > dec!(0) {
-            let executed_value = dec_from_json(v.get("executed_value"))
-                .filter(|x| *x > dec!(0))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Coinbase order response has fill quantity but no valid executed_value: {v}"
-                    )
-                })?;
-            Some(executed_value / filled_qty)
-        } else {
-            None
-        };
-        let fee = if filled_qty > dec!(0) {
-            dec_from_json(v.get("fill_fees"))
-                .filter(|f| *f >= dec!(0))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Coinbase order response has fill quantity but no valid fill_fees: {v}"
-                    )
-                })?
-        } else {
-            dec!(0)
-        };
-        Ok(OrderResponse {
-            order_id,
-            client_order_id: returned_client.to_string(),
-            venue: VenueId::new("coinbase"),
-            symbol: order.symbol.clone(),
-            status,
-            original_qty: order.quantity,
-            filled_qty,
-            remaining_qty,
-            avg_fill_price,
-            fee,
-            fee_currency: "USD".to_string(),
-            raw_response: Some(v.to_string()),
-            timestamp: Utc::now(),
-        })
+        self.parse_order_envelope(
+            &v,
+            &product_id,
+            Some(order.quantity),
+            Some(order.client_order_id.as_str()),
+            Some(side_str),
+            &order.symbol,
+        )
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
@@ -683,6 +718,39 @@ impl ExchangeAdapter for CoinbaseAdapter {
         };
         self.authed("DELETE", &path, None).await?;
         Ok(())
+    }
+
+    /// Poll authoritative order state via `GET /orders/{order_id}`. Shares
+    /// the placement-ack envelope; `size` is read from the venue response
+    /// since reconciliation doesn't hold the original request.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch order on Coinbase: API credentials are not configured or vault is locked");
+        }
+        if order_id.trim().is_empty() {
+            anyhow::bail!("Coinbase fetch_order requires a non-empty order_id");
+        }
+        let product_id = Self::to_venue_symbol(symbol)?;
+        let v = self
+            .authed("GET", &format!("/orders/{}", order_id.trim()), None)
+            .await?;
+        let resp = self.parse_order_envelope(&v, &product_id, None, None, None, symbol)?;
+        if resp.order_id != order_id.trim() {
+            anyhow::bail!(
+                "Coinbase fetch_order returned id {} != queried {order_id}",
+                resp.order_id
+            );
+        }
+        Ok(resp)
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     fn live_order_submission_implemented(&self) -> bool {

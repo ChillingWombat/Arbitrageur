@@ -212,6 +212,40 @@ impl LighterAdapter {
         let data = serde_json::from_str::<serde_json::Value>(&text)?;
         Ok(data)
     }
+    /// market_id → canonical engine symbol map, built from the public
+    /// `orderBookDetails` metadata (spot rows become `BASE-SPOT`, perps
+    /// `BASE-USDC`). Used by account and order-resolution paths.
+    async fn market_symbol_map(&self) -> anyhow::Result<HashMap<u64, String>> {
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let mut map = HashMap::new();
+        for item in details
+            .get("order_book_details")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?
+        {
+            let Some(market_id) = item.get("market_id").and_then(|m| m.as_u64()) else {
+                continue;
+            };
+            let base = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            if base.is_empty() {
+                continue;
+            }
+            let is_spot = item
+                .get("market_type")
+                .and_then(|t| t.as_str())
+                .map(|t| t.eq_ignore_ascii_case("spot"))
+                .unwrap_or(false);
+            map.insert(
+                market_id,
+                if is_spot {
+                    format!("{}-SPOT", base.to_uppercase())
+                } else {
+                    format!("{}-USDC", base.to_uppercase())
+                },
+            );
+        }
+        Ok(map)
+    }
 }
 
 #[async_trait]
@@ -514,33 +548,7 @@ impl ExchangeAdapter for LighterAdapter {
             .unwrap_or_default();
         let mut market_symbols = HashMap::new();
         if !pos_list.is_empty() {
-            let details = self.get_json("/api/v1/orderBookDetails").await?;
-            for item in details
-                .get("order_book_details")
-                .and_then(|d| d.as_array())
-                .ok_or_else(|| anyhow::anyhow!("Missing order_book_details in Lighter response"))?
-            {
-                let Some(market_id) = item.get("market_id").and_then(|m| m.as_u64()) else {
-                    continue;
-                };
-                let base = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-                if base.is_empty() {
-                    continue;
-                }
-                let is_spot = item
-                    .get("market_type")
-                    .and_then(|t| t.as_str())
-                    .map(|t| t.eq_ignore_ascii_case("spot"))
-                    .unwrap_or(false);
-                market_symbols.insert(
-                    market_id,
-                    if is_spot {
-                        format!("{}-SPOT", base.to_uppercase())
-                    } else {
-                        format!("{}-USDC", base.to_uppercase())
-                    },
-                );
-            }
+            market_symbols = self.market_symbol_map().await?;
         }
 
         let mut positions = Vec::new();
@@ -664,6 +672,10 @@ impl ExchangeAdapter for LighterAdapter {
             .read()
             .as_ref()
             .is_some_and(|k| !k.trim().is_empty())
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     fn live_order_submission_implemented(&self) -> bool {
@@ -809,6 +821,172 @@ impl ExchangeAdapter for LighterAdapter {
         )?;
         self.submit_signed_tx(&signed).await?;
         Ok(())
+    }
+
+    /// Lighter order-status poll. The persisted venue order id is a sendTx
+    /// hash and Lighter exposes no hash→order lookup, so the durable join
+    /// key is the client order index derived from the engine's persisted
+    /// `client_order_id`. `/api/v1/accountOrders` requires an auth token
+    /// minted locally by the signer — this is pure-local signing plus one
+    /// authenticated GET.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        let cid = client_order_id
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Lighter fetch_order requires the persisted client_order_id")
+            })?;
+        let cidx = lighter_client_order_index(cid);
+        let (account, key_idx, key) = self.signing_identity()?;
+        // Short-lived token: expires ~10 min after minting.
+        let deadline = Utc::now().timestamp() + 600;
+        let token = crate::lighter_signer::create_auth_token(
+            None,
+            &self.base_url,
+            self.chain_id(),
+            key.as_str(),
+            deadline,
+            key_idx as i64,
+            account as i64,
+        )?;
+        let url = format!(
+            "{}/api/v1/accountOrders?account_index={}&client_order_indexes={}",
+            self.base_url, account, cidx
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .header("authorization", token)
+            .send()
+            .await?;
+        let http = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !http.is_success() {
+            anyhow::bail!(
+                "Lighter accountOrders HTTP {}: {}",
+                http.as_u16(),
+                text.chars().take(200).collect::<String>()
+            );
+        }
+        let v: serde_json::Value = serde_json::from_str(&text)?;
+        if v.get("code").and_then(|c| c.as_i64()) != Some(200) {
+            anyhow::bail!(
+                "Lighter accountOrders rejected: {}",
+                v.get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("unknown")
+            );
+        }
+        let orders = v
+            .get("orders")
+            .and_then(|o| o.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Lighter accountOrders response missing orders[]"))?;
+        let row = orders
+            .iter()
+            .find(|o| {
+                o.get("client_order_index")
+                    .and_then(|c| c.as_i64().or_else(|| c.as_u64().map(|u| u as i64)))
+                    == Some(cidx)
+            })
+            // An accepted-but-not-yet-indexed tx is still working, not
+            // failed — the reconciler keeps polling until the deadline.
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Lighter order not yet indexed (client_order_index {})",
+                    cidx
+                )
+            })?;
+
+        // Identity: the row's market must map back to the requested
+        // canonical symbol — a market_index that resolves elsewhere means
+        // the row is not ours to report.
+        let market_id = row
+            .get("market_index")
+            .and_then(|m| m.as_i64().or_else(|| m.as_u64().map(|u| u as i64)))
+            .ok_or_else(|| anyhow::anyhow!("Lighter order row missing market_index"))?;
+        let expected = self
+            .market_symbol_map()
+            .await?
+            .get(&(market_id as u64))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Lighter order row market_index {market_id} unknown"))?;
+        if !expected.eq_ignore_ascii_case(symbol) {
+            anyhow::bail!("Lighter order market mismatch: row is {expected}, expected {symbol}");
+        }
+
+        let parse_amt = |key: &str| -> anyhow::Result<Decimal> {
+            row.get(key)
+                .and_then(|v| v.as_str())
+                .and_then(|s| Decimal::from_str(s).ok())
+                .ok_or_else(|| anyhow::anyhow!("Lighter order row missing/invalid '{key}'"))
+        };
+        let initial = parse_amt("initial_base_amount")?;
+        let filled = parse_amt("filled_base_amount")?;
+        let remaining = parse_amt("remaining_base_amount")?;
+        if initial <= dec!(0) || filled < dec!(0) || filled > initial {
+            anyhow::bail!("Lighter order row inconsistent: initial={initial} filled={filled}");
+        }
+        if (filled + remaining - initial).abs() > dec!(0.00000001) && !remaining.is_zero() {
+            // Rows in terminal states may zero remaining while filled<initial
+            // (cancelled-partial) — only reject truly inconsistent math.
+            let terminal = row
+                .get("status")
+                .and_then(|s| s.as_str())
+                .map(|s| s.starts_with("canceled") || s == "filled")
+                .unwrap_or(false);
+            if !terminal {
+                anyhow::bail!(
+                    "Lighter order row math mismatch: filled {filled} + remaining {remaining} != initial {initial}"
+                );
+            }
+        }
+        let filled_quote = row
+            .get("filled_quote_amount")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Decimal::from_str(s).ok());
+        let avg_price = match (filled_quote, filled > dec!(0)) {
+            (Some(q), true) if q > dec!(0) => Some(q / filled),
+            _ => None,
+        };
+        let status_str = row
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Lighter order row missing status"))?;
+        let status = match status_str {
+            "filled" => OrderStatus::Filled,
+            s if s.starts_with("canceled") => OrderStatus::Cancelled,
+            // in-progress/pending/open are non-terminal
+            _ => {
+                if filled > dec!(0) {
+                    OrderStatus::PartiallyFilled
+                } else {
+                    OrderStatus::New
+                }
+            }
+        };
+        Ok(OrderResponse {
+            // Identity anchor is the client order index; echo the persisted
+            // venue id (sendTx hash) so the caller's order_id check passes.
+            order_id: order_id.to_string(),
+            client_order_id: cid.to_string(),
+            venue: self.venue_id.clone(),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: initial,
+            filled_qty: filled,
+            remaining_qty: remaining.max(dec!(0)),
+            avg_fill_price: avg_price,
+            // Lighter accountOrders does not report fees — never fabricate.
+            fee: dec!(0),
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
     }
 
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {

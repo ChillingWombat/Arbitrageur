@@ -8,9 +8,9 @@
 >
 > Session 73 (2026-09-20): the ticker universe is now discovered from live venue-reported perpetual markets; `PERP_TICKERS` is metadata/benchmark fallback only, not an allowlist. Exact `BASE-QUOTE` markets need ≥2 admitted reporting venues. Bulk venue mark prices seed dynamic sizing and auto-filter evaluation. USDC and USDT listings remain distinct instruments.
 >
-> Session 74 (2026-09-20 remediation): capability vocabulary is now separated into market/account reads, signing/submission, cancellation, terminal fill reconciliation, paper strategy support, and live strategy-entry readiness. Several adapters can submit orders, but no adapter is live-entry ready because durable terminal/restart reconciliation is not implemented. Live flatten position reads resolve venue-native account symbols through adapter-owned normalization and fail closed on unknown/ambiguous mappings. `docs/CAPABILITIES.md` is the authoritative current-state matrix; older absolute claims in this file are historical requirements/intent.
+> Session 74–77 (2026-09-20 remediation): capability vocabulary is now separated into market/account reads, signing/submission, cancellation, order-status polling, terminal fill reconciliation, paper strategy support, and live strategy-entry readiness. All eleven live-submission adapters implement validated `fetch_order` polling and the desktop reconciliation supervisor re-scans working orders at startup and every 5s with monotonic, identity-checked ledger updates. No adapter is live-entry ready because automated residual-leg resolution and cancel-failure retry are not implemented and no sandbox/canary evidence exists. Live flatten position reads resolve venue-native account symbols through adapter-owned normalization and fail closed on unknown/ambiguous mappings. `docs/CAPABILITIES.md` is the authoritative current-state matrix; older absolute claims in this file are historical requirements/intent.
 ## Parts & status
-1. **Core engine (V2)** — ✅ Implemented for authenticated reads, market data, and paper strategy paths — live submission exists at adapter transport level, but **new live strategy entries remain disabled** pending terminal fill and restart reconciliation.
+1. **Core engine (V2)** — ✅ Implemented for authenticated reads, market data, paper strategy paths, and terminal/restart order reconciliation — live submission exists at adapter transport level, but **new live strategy entries remain disabled** pending automated residual-exposure resolution and sandbox/canary evidence.
 2. **Session-aware seasonality layer** — 🟡 Partially implemented — session profiles + `get_session_profile` IPC exist; full phased rollout pending.
 3. **Spread Range Monitor (Opportunity Radar)** — ✅ Implemented as OpportunityRadar — note the display-vs-engine split: the Min Exp table floor lives on the gadget strip, not the Configurator.
 4. **Terminal navigation safeguards** — ✅ Implemented — layout grid, portfolio monitor, settings nav, pause/continue, 5X leverage default.
@@ -20,7 +20,7 @@
 
 ## Part 1 — Core engine (V2)
 
-> Status: ✅ Implemented for research and paper strategy paths — adapter transport can submit on some venues, but new live strategy entries are disabled fail-closed until durable fill/cancel/restart reconciliation is implemented and evidenced.
+> Status: ✅ Implemented for research and paper strategy paths — adapter transport can submit on eleven venues and working orders are reconciled to terminal state by the startup+periodic supervisor, but new live strategy entries are disabled fail-closed until automated residual-leg resolution and cancel retry are implemented and evidenced.
 
 ## System Specification: Next-Generation Cross-Market Arbitrage Engine & Terminal (V2)
 
@@ -248,10 +248,11 @@ pub struct TickerStrategyConfigDto {
    - One-time backfill: schema v20 rescales pre-fix `lighter`/`robinhood` rows (`rate_8h / 8`, `interval_hours = 8`); Hyperliquid hourly semantics confirmed against its UI (0.0013%/h) and left unchanged.
 9. **Live Submission Rollout (2026-09-20, bounded)**:
    - Binance USDT-M: place/cancel/leverage over signed `/fapi` (HMAC-SHA256, venue-native contract units incl. scaled `1000PEPE` symbols, 5 BPS taker accounting) + HMAC/sign/parse unit tests. OKX swaps: place/cancel/leverage over signed `/api/v5` (base64 HMAC preimage, contract-size conversion via `ctVal`, fill polling) + sign/contracts/parse tests. Vault credential plumbing for both already existed. 2026-09-20 update: Lighter live submission is IMPLEMENTED (vendored `liblighter_signer.so` Go signer, nextNonce → Sign → sendTx, `live_order_submission_implemented()=true` incl. Robinhood deployment; vault `api_key_index` plumbed through `state.rs`). Remaining: Arcus (no public API exists — stays fail-closed by design); then the reconciled two-leg live dispatcher. Decibel live submission IMPLEMENTED 2026-09-20 (aptos-sdk entry-function tx, mainnet vectors verified); Decibel reads (balances/positions/funding) rebuilt same day on official /api/v1 paths (book WS-only upstream). Later 2026-09-20: execution failures recorded to a persisted (v21) Log Monitor feed on all six execute commands; funding scanner gained a Venue/Min-Exp/Min-Win strip (defaults mirror bot thresholds) + decay-aware Expected $ replacing flat Daily; Win% hold-aligned with Expected; US100==TECH100 merged to NAS100; Risk Control tab (subcategories, equal tabs, global max leverage 10x ceiling).
-   - Current boundary: adapter submission exists, but no adapter implements terminal two-leg fill/cancel/restart reconciliation. Live mode is therefore limited to authenticated account reads and explicit risk-reducing close submissions; strategy entries remain disabled. `docs/CAPABILITIES.md` is the authoritative venue/strategy matrix.
+   - Current boundary: adapter submission exists and every live-submission venue implements `fetch_order` order-status polling reconciled by the startup+5s supervisor, but no adapter implements automated residual-leg resolution or cancel-failure retry. Live mode is therefore limited to authenticated account reads and explicit risk-reducing close submissions; strategy entries remain disabled. `docs/CAPABILITIES.md` is the authoritative venue/strategy matrix.
 8. **Live-Mode Honesty (2026-09-20)**:
    - `ExchangeAdapter::live_order_submission_implemented` (default false) is true for adapters whose `place_order` genuinely submits: Hyperliquid, Lighter, Robinhood-Lighter, Vanta, Aster, PopDEX, Binance, OKX, Coinbase, Kraken, and Decibel. The old `supports_live_execution` flag is aspirational and must not gate promises.
    - `ExchangeAdapter::live_order_reconciliation_implemented` (default false) remains unimplemented across admitted venues, so `live_ready` / `strategy_entry_ready` are false even when `submission_ready` is true. Live-mode strategy dispatch refuses with the reconciliation caveat; Paper Starting Balance input is disabled/greyed in Live Trading mode.
+   - `ExchangeAdapter::order_status_polling_implemented` (default false) is true for every live-submission venue (Binance, Aster, OKX, Kraken, Vanta, Coinbase, Hyperliquid, Lighter, Robinhood, Decibel, PopDEX) and surfaces as `orderPollingReady` on the capability DTO — it means an authoritative `fetch_order` exists, not that entries are permitted.
 7. **Paper Funding Carry Execution (2026-09-20)**:
    - `execute_funding_carry_impl` is no longer a stub: paper-only dispatch (live mode refused) mirroring the triangle executor — rescan + match the pair, min-APR hurdle, execution lock, dispatch-time books for both legs, blocking-signal + existing-position guards, per-venue margin checks, full-fill-or-bust paper legs, equity accounting, and ONE two-legged `funding` signal so the Funding dock aggregates a single open carry position. Below-hurdle and stale pairs refuse with reasons instead of executing.
 6. **Triangle Scanner Integrity (2026-09-20)**:
@@ -509,9 +510,10 @@ The trader needs a radar that continuously answers, for every directional
 
 **Non-Goals / current boundary**
 
-- Live/real-money strategy entries — adapter submission transport exists on
-  some venues, but no strategy is live-entry ready until terminal and restart
-  reconciliation exist.
+- Live/real-money strategy entries — adapter submission transport and
+  order-status reconciliation exist on all live-submission venues, but no
+  strategy is live-entry ready until automated residual-leg resolution and
+  cancel retry are implemented and sandbox/canary evidence exists.
 - The Phase-2 autonomous bot exists as an opt-in **paper** path; it is not a
   live-trading bot.
 - New persistence schema — v1 reuses `spread_samples`; a dedicated

@@ -29,6 +29,12 @@ struct SignedTxResponse {
     err: *mut c_char,
 }
 
+#[repr(C)]
+struct StrOrErr {
+    str: *mut c_char,
+    err: *mut c_char,
+}
+
 type CreateClientFn =
     unsafe extern "C" fn(*mut c_char, *mut c_char, c_int, c_int, i64) -> *mut c_char;
 #[allow(clippy::too_many_arguments)]
@@ -55,6 +61,7 @@ type SignCreateOrderFn = unsafe extern "C" fn(
 ) -> SignedTxResponse;
 type SignCancelOrderFn =
     unsafe extern "C" fn(c_int, i64, c_uchar, i64, c_int, i64) -> SignedTxResponse;
+type CreateAuthTokenFn = unsafe extern "C" fn(i64, c_int, i64) -> StrOrErr;
 type FreeFn = unsafe extern "C" fn(*mut c_void);
 
 /// Signed Lighter L2 transaction ready for `POST /api/v1/sendTx`.
@@ -191,6 +198,7 @@ struct LoadedLib {
     create_client: CreateClientFn,
     sign_create_order: SignCreateOrderFn,
     sign_cancel_order: SignCancelOrderFn,
+    create_auth_token: CreateAuthTokenFn,
     free_ptr: FreeFn,
 }
 
@@ -205,6 +213,7 @@ impl LoadedLib {
                 create_client: *lib.get(b"CreateClient")?,
                 sign_create_order: *lib.get(b"SignCreateOrder")?,
                 sign_cancel_order: *lib.get(b"SignCancelOrder")?,
+                create_auth_token: *lib.get(b"CreateAuthToken")?,
                 free_ptr: *lib.get(b"Free")?,
                 _lib: lib,
             })
@@ -396,6 +405,68 @@ pub fn sign_cancel_order(
             account_index,
         );
         lib.take_response(resp)
+    }
+}
+
+/// Create a Lighter API auth token locally (no network). The token is the
+/// `authorization` header value for authenticated indexer endpoints such
+/// as `/api/v1/accountOrders`.
+///
+/// `deadline_unix` is the token's expiry as seconds since epoch; callers
+/// should pass a short horizon (minutes, not days) so a leaked token is
+/// worthless quickly.
+#[allow(clippy::too_many_arguments)]
+pub fn create_auth_token(
+    lib_path_hint: Option<&str>,
+    base_url: &str,
+    chain_id: u32,
+    api_key_private_key: &str,
+    deadline_unix: i64,
+    api_key_index: i64,
+    account_index: i64,
+) -> anyhow::Result<String> {
+    let _guard = signer_lock().lock();
+    let lib = LoadedLib::load_from_hint(lib_path_hint)?;
+    unsafe {
+        let url = CString::new(base_url.trim())?;
+        let key = CString::new(api_key_private_key.trim())?;
+        let url_raw = url.into_raw();
+        let key_raw = key.into_raw();
+        let err = (lib.create_client)(
+            url_raw,
+            key_raw,
+            chain_id as c_int,
+            api_key_index as c_int,
+            account_index,
+        );
+        drop(CString::from_raw(url_raw));
+        drop(CString::from_raw(key_raw));
+        let err_str = if err.is_null() {
+            None
+        } else {
+            let s = CStr::from_ptr(err as *const c_char)
+                .to_string_lossy()
+                .into_owned();
+            (lib.free_ptr)(err as *mut c_void);
+            Some(s)
+        };
+        if let Some(e) = err_str {
+            if !e.trim().is_empty() {
+                anyhow::bail!("Lighter signer CreateClient failed: {}", e);
+            }
+        }
+        let resp = (lib.create_auth_token)(deadline_unix, api_key_index as c_int, account_index);
+        let err = lib.take_string(resp.err);
+        let token = lib.take_string(resp.str);
+        if let Some(e) = err {
+            if !e.trim().is_empty() {
+                anyhow::bail!("Lighter signer CreateAuthToken failed: {}", e);
+            }
+        }
+        let token = token
+            .filter(|t| !t.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Lighter signer returned an empty auth token"))?;
+        Ok(token)
     }
 }
 

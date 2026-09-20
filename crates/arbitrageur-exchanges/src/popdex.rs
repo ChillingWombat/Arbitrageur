@@ -379,6 +379,29 @@ fn client_oid_bytes(s: &str) -> [u8; 32] {
     b
 }
 
+/// First present string value among candidate keys on an order row — the
+/// account API's field naming varies between open and history feeds.
+fn popdex_field(row: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| {
+        row.get(*k).and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_u64().map(|n| n.to_string()))
+        })
+    })
+}
+
+/// First parseable numeric among candidate keys (string or number values).
+fn popdex_num(row: &serde_json::Value, keys: &[&str]) -> Option<Decimal> {
+    keys.iter().find_map(|k| {
+        row.get(*k).and_then(|v| {
+            v.as_str()
+                .and_then(|s| Decimal::from_str_exact(s).ok())
+                .or_else(|| v.as_f64().and_then(rust_decimal::Decimal::from_f64_retain))
+        })
+    })
+}
+
 /// Compute the `OrderCreate` event topic0 (used to extract `orderId`).
 fn order_create_topic() -> B256 {
     alloy::primitives::keccak256(
@@ -1148,6 +1171,159 @@ impl ExchangeAdapter for PopDexAdapter {
             .await?;
         let _ = receipt;
         Ok(())
+    }
+
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        let main = self.main_account()?;
+        let order_id = order_id.trim();
+        if order_id.is_empty() || order_id.starts_with("tx:") {
+            anyhow::bail!(
+                "PopDEX fetch_order requires the venue order id; '{order_id}' is not resolvable via the orders API"
+            );
+        }
+        let venue = Self::venue_symbol(symbol);
+        // Open orders first, then terminal history — the /orders feed only
+        // lists resting orders, so a filled/cancelled order is found in
+        // history or nowhere (not-found stays working until the reconciler's
+        // deadline, never assumed terminal).
+        let open: Vec<serde_json::Value> = self
+            .rest_get(&format!(
+                "/api/v1/account/{main}/orders?symbol={venue}&limit=100"
+            ))
+            .await?;
+        let history: Vec<serde_json::Value> = self
+            .rest_get(&format!(
+                "/api/v1/account/{main}/history/orders?symbol={venue}&limit=100"
+            ))
+            .await?;
+        let client_hex = client_order_id
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format!("0x{}", hex::encode(client_oid_bytes(s.trim()))));
+        let matches = |row: &serde_json::Value| -> bool {
+            let rid = popdex_field(row, &["orderId", "id", "order_id", "orderID"]);
+            if rid.as_deref() == Some(order_id) {
+                return true;
+            }
+            let cid = popdex_field(
+                row,
+                &[
+                    "clientOrderId",
+                    "clientId",
+                    "client_order_id",
+                    "clientOrderID",
+                ],
+            );
+            if let (Some(cid), Some(want)) = (cid.as_deref(), client_order_id) {
+                if cid == want || Some(cid.to_string()) == client_hex {
+                    return true;
+                }
+            }
+            false
+        };
+        let row = open.iter().find(|r| matches(r));
+        let open_row = row.is_some();
+        let row = row.or_else(|| history.iter().find(|r| matches(r)));
+        let Some(row) = row else {
+            anyhow::bail!(
+                "PopDEX order {order_id} not found in open or history orders for {venue}"
+            );
+        };
+        // Symbol must agree when the row carries one.
+        if let Some(rs) = popdex_field(row, &["symbol", "symbolName", "pair"]) {
+            if !rs.eq_ignore_ascii_case(&venue) {
+                anyhow::bail!(
+                    "PopDEX order {order_id} returned symbol '{rs}' != queried '{venue}'"
+                );
+            }
+        }
+        let orig = popdex_num(
+            row,
+            &[
+                "origQty",
+                "orderQty",
+                "qty",
+                "origSize",
+                "orderSize",
+                "size",
+            ],
+        )
+        .unwrap_or(dec!(0));
+        let filled = popdex_num(
+            row,
+            &[
+                "execQty",
+                "filledQty",
+                "executedQty",
+                "cumQty",
+                "filledSize",
+                "execSize",
+                "filled",
+            ],
+        )
+        .unwrap_or(dec!(0));
+        let remaining = popdex_num(row, &["remainQty", "remainingQty", "leavesQty"])
+            .unwrap_or((orig - filled).max(dec!(0)));
+        let avg = popdex_num(
+            row,
+            &["avgPrice", "avgFillPrice", "execPrice", "averagePrice"],
+        )
+        .filter(|p| *p > dec!(0));
+        let fee = popdex_num(row, &["feeUsd", "tradeFee", "fee", "feeAmount"])
+            .unwrap_or(dec!(0))
+            .max(dec!(0));
+        let raw_status = popdex_field(row, &["status", "state", "orderStatus"])
+            .unwrap_or_default()
+            .to_uppercase();
+        let status = match raw_status.as_str() {
+            "FILLED" | "FILL" | "FILLED_ALL" => OrderStatus::Filled,
+            "CANCELLED" | "CANCELED" | "CANCEL" => OrderStatus::Cancelled,
+            "REJECTED" | "FAILED" => OrderStatus::Rejected,
+            "EXPIRED" => OrderStatus::Expired,
+            "PARTIALLY_FILLED" | "PARTIAL" | "PARTIALLYFILLED" => OrderStatus::PartiallyFilled,
+            _ => {
+                if !open_row {
+                    // Terminal feed without a recognizable status: derive from
+                    // quantities — full fill → Filled, empty → Cancelled,
+                    // partial stays ambiguous (PartiallyFilled keeps the leg
+                    // in_flight for the reconciler's deadline escalation).
+                    if orig > dec!(0) && filled >= orig {
+                        OrderStatus::Filled
+                    } else if filled > dec!(0) {
+                        OrderStatus::PartiallyFilled
+                    } else {
+                        OrderStatus::Cancelled
+                    }
+                } else if filled > dec!(0) {
+                    OrderStatus::PartiallyFilled
+                } else {
+                    OrderStatus::New
+                }
+            }
+        };
+        Ok(OrderResponse {
+            order_id: order_id.to_string(),
+            client_order_id: client_order_id.unwrap_or_default().to_string(),
+            venue: self.venue_id(),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: orig,
+            filled_qty: filled,
+            remaining_qty: remaining.max(dec!(0)),
+            avg_fill_price: avg,
+            fee,
+            fee_currency: "USDT".to_string(),
+            raw_response: Some(row.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
@@ -2087,5 +2263,36 @@ mod tests {
         assert!(s.contains("approveAgent"));
         assert!(s.contains("0xagent"));
         assert!(s.contains(POPDEX_ACCOUNT_PRECOMPILE));
+    }
+
+    #[test]
+    fn popdex_row_helpers_parse_variant_fields() {
+        let row = serde_json::json!({
+            "orderId": "123456789",
+            "clientOrderId": "0x6369642d31000000000000000000000000000000000000000000000000000000",
+            "symbol": "BTCUSDT",
+            "status": "FILLED",
+            "origQty": "0.5",
+            "execQty": "0.5",
+            "avgPrice": "60100.5",
+            "feeUsd": "0.03"
+        });
+        assert_eq!(
+            popdex_field(&row, &["orderId", "id"]).as_deref(),
+            Some("123456789")
+        );
+        assert_eq!(popdex_num(&row, &["execQty", "filledQty"]), Some(dec!(0.5)));
+        assert_eq!(
+            popdex_num(&row, &["avgPrice"]).filter(|p| *p > dec!(0)),
+            Some(dec!(60100.5))
+        );
+        // client_oid_bytes("cid-1") → "cid-1" right-padded to 32 bytes.
+        let want = format!("0x{}", hex::encode(client_oid_bytes("cid-1")));
+        assert_eq!(
+            want,
+            "0x6369642d31000000000000000000000000000000000000000000000000000000"
+        );
+        let cid = popdex_field(&row, &["clientOrderId"]).unwrap();
+        assert_eq!(cid, want);
     }
 }

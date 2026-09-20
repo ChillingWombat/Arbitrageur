@@ -112,6 +112,28 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Cancel an existing order.
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()>;
 
+    /// Poll a previously submitted order, returning the venue-attributed
+    /// current state (status, cumulative fill quantity, average fill price,
+    /// fee when reported). `symbol` is the engine's canonical symbol;
+    /// adapters map it to the venue spelling internally. `order_id` is the
+    /// persisted venue order id; `client_order_id` is the engine-generated
+    /// id persisted alongside it — venues that key orders by client index
+    /// (Lighter) require it, and other venues may cross-check it.
+    /// Default: fail-closed — venues without an order-status endpoint report
+    /// unsupported so the reconciliation loop skips them rather than
+    /// assuming a state.
+    async fn fetch_order(
+        &self,
+        _symbol: &str,
+        _order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        anyhow::bail!(
+            "Order-status polling is not implemented for venue {}",
+            self.name()
+        )
+    }
+
     /// Subscribe to live L2 orderbook updates via WebSocket.
     async fn subscribe_orderbook(
         &self,
@@ -156,10 +178,20 @@ pub trait ExchangeAdapter: Send + Sync {
         false
     }
 
-    /// Whether live strategy entries are safe end to end: terminal fill
-    /// reconciliation for both legs, cancellation recovery, and restart
-    /// reconciliation. Submission alone is not sufficient, so no adapter
-    /// overrides this yet and all live strategy entries stay blocked.
+    /// Whether `fetch_order` returns authoritative venue state for a
+    /// persisted order id — the adapter-level primitive the reconciliation
+    /// supervisor polls. True only when the venue endpoint is wired and its
+    /// response is validated fail-closed.
+    fn order_status_polling_implemented(&self) -> bool {
+        false
+    }
+
+    /// Whether live strategy entries are safe end to end. The reconciliation
+    /// supervisor provides terminal-state polling, restart recovery, and
+    /// residual-exposure blocking; what remains unimplemented is automated
+    /// resolution — flattening a residual leg after a mixed-terminal entry —
+    /// and cancel-failure retry. Until those exist, no adapter overrides
+    /// this and all live strategy entries stay blocked.
     fn live_order_reconciliation_implemented(&self) -> bool {
         false
     }

@@ -258,6 +258,304 @@ impl KrakenAdapter {
         Ok(v)
     }
 
+    /// Authenticated GET with explicit query params (nonce + params are both
+    /// signed inside `post_data` and appended to the URL).
+    async fn authed_get_params(
+        &self,
+        path: &str,
+        params: &std::collections::BTreeMap<&str, String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        use std::fmt::Write;
+        let (api_key, api_secret) = self.credentials()?;
+        let nonce = Utc::now().timestamp_millis().to_string();
+        let mut post_data = String::from("nonce=");
+        post_data.push_str(&nonce);
+        for (k, v) in params {
+            let _ = write!(post_data, "&{k}={v}");
+        }
+        let endpoint = path.strip_prefix("/derivatives").unwrap_or(path);
+        let authent = Self::sign_futures(&api_secret, endpoint, &nonce, &post_data)?;
+        let url = format!("{}{}?{}", self.futures_base_url, path, post_data);
+        let resp = self
+            .client
+            .get(&url)
+            .header("APIKey", api_key.to_string())
+            .header("Nonce", nonce)
+            .header("Authent", authent)
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("Kraken GET {path} transport failure: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("Kraken GET {path} failed (HTTP {status}): {text}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
+            anyhow::anyhow!("Failed to parse Kraken {path} response: {e}; body: {text}")
+        })?;
+        if v.get("result").and_then(|r| r.as_str()) != Some("success") {
+            anyhow::bail!("Kraken GET {path} error response: {text}");
+        }
+        Ok(v)
+    }
+
+    /// Aggregate `/fills` rows attributed to `order_id` into
+    /// `(filled_base_qty, volume_weighted_avg_px, total_fee)`. Rows with a
+    /// mismatched order id or instrument cause an error — never silently
+    /// mixed into the fill math. Returns `None` when no fills exist.
+    fn aggregate_fills(
+        fills_v: &serde_json::Value,
+        order_id: &str,
+        venue_sym: &str,
+        ct: Decimal,
+    ) -> anyhow::Result<Option<(Decimal, Decimal, Decimal)>> {
+        let fills = fills_v
+            .get("fills")
+            .and_then(|f| f.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut qty_contracts = dec!(0);
+        let mut notional = dec!(0);
+        let mut fee = dec!(0);
+        for f in &fills {
+            let fid = f
+                .get("order_id")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| anyhow::anyhow!("Kraken fills row missing order_id: {f}"))?;
+            if fid != order_id {
+                continue;
+            }
+            let fsym = f.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            if !fsym.is_empty() && fsym != venue_sym {
+                anyhow::bail!(
+                    "Kraken fill for order {order_id} reports symbol '{fsym}' != '{venue_sym}': {f}"
+                );
+            }
+            let size = dec_from_json(f.get("size"))
+                .filter(|q| *q > dec!(0))
+                .ok_or_else(|| anyhow::anyhow!("Kraken fill row missing valid size: {f}"))?;
+            let px = dec_from_json(f.get("price"))
+                .filter(|p| *p > dec!(0))
+                .ok_or_else(|| anyhow::anyhow!("Kraken fill row missing valid price: {f}"))?;
+            qty_contracts += size;
+            notional += size * px;
+            // Kraken reports per-fill fees only on some account tiers;
+            // absent fields contribute zero rather than a guess.
+            fee += dec_from_json(f.get("fee"))
+                .or_else(|| dec_from_json(f.get("feePaid")))
+                .unwrap_or_default()
+                .abs();
+        }
+        if qty_contracts <= dec!(0) {
+            return Ok(None);
+        }
+        let vwap = notional / qty_contracts;
+        Ok(Some((qty_contracts * ct, vwap, fee)))
+    }
+
+    /// Resolve an order's authoritative state from Kraken Futures by
+    /// combining `/orders` (open orders), `/orders/status` (5-second event
+    /// window), and `/fills` (executed quantity + price detail).
+    ///
+    /// Fail-closed semantics: an order absent from open orders with fills
+    /// that cannot be proven terminal comes back `PartiallyFilled` — the
+    /// reconciler keeps polling and escalates to `unresolved` on deadline
+    /// rather than ever assuming the order ended. `avg_fill_price` is `None`
+    /// when the venue cannot prove it; downstream consumers treat that as
+    /// needing manual resolution, never as a zero-price fill.
+    async fn resolve_order_state(
+        &self,
+        symbol: &str,
+        order_id: &str,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let ct = self.contract_size_for(symbol).await?;
+        let venue_sym = Self::to_futures_symbol(symbol)?;
+
+        // 1) Open orders snapshot.
+        let open_v = self.authed_get("/derivatives/api/v3/orders").await?;
+        let mut open_entry: Option<serde_json::Value> = None;
+        if let Some(arr) = open_v.get("openOrders").and_then(|o| o.as_array()) {
+            for o in arr {
+                let oid = o
+                    .get("order_id")
+                    .or_else(|| o.get("orderId"))
+                    .and_then(|s| s.as_str());
+                if oid == Some(order_id) {
+                    open_entry = Some(o.clone());
+                    break;
+                }
+            }
+        }
+
+        // 2) Fill aggregation (authoritative qty/px/fee when available).
+        let mut fill_params = std::collections::BTreeMap::new();
+        fill_params.insert("orderIds", order_id.to_string());
+        let fills_v = self
+            .authed_get_params("/derivatives/api/v3/fills", &fill_params)
+            .await?;
+        let fill_agg = Self::aggregate_fills(&fills_v, order_id, &venue_sym, ct)?;
+
+        let build = |status: OrderStatus,
+                     orig: Decimal,
+                     filled: Decimal,
+                     avg_px: Option<Decimal>,
+                     fee: Decimal,
+                     raw: serde_json::Value|
+         -> anyhow::Result<OrderResponse> {
+            if filled > orig && orig > dec!(0) {
+                anyhow::bail!(
+                    "Kraken order {order_id} filled {filled} exceeds original {orig}: {raw}"
+                );
+            }
+            Ok(OrderResponse {
+                order_id: order_id.to_string(),
+                client_order_id: String::new(),
+                venue: VenueId::new("kraken"),
+                symbol: symbol.to_string(),
+                status,
+                original_qty: orig,
+                filled_qty: filled,
+                remaining_qty: orig.saturating_sub(filled),
+                avg_fill_price: avg_px,
+                fee,
+                fee_currency: "USD".to_string(),
+                raw_response: Some(raw.to_string()),
+                timestamp: Utc::now(),
+            })
+        };
+
+        if let Some(o) = open_entry {
+            let osym = o.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+            if !osym.is_empty() && osym != venue_sym {
+                anyhow::bail!(
+                    "Kraken open order {order_id} symbol '{osym}' != expected '{venue_sym}': {o}"
+                );
+            }
+            let qty_c = dec_from_json(o.get("quantity"))
+                .filter(|q| *q > dec!(0))
+                .ok_or_else(|| anyhow::anyhow!("Kraken open order missing quantity: {o}"))?;
+            let filled_c = dec_from_json(o.get("filled"))
+                .filter(|q| *q >= dec!(0))
+                .ok_or_else(|| anyhow::anyhow!("Kraken open order missing filled: {o}"))?;
+            let orig = qty_c * ct;
+            let filled = filled_c * ct;
+            if let Some((fq, _, _)) = &fill_agg {
+                if (*fq - filled).abs() > ct / dec!(2) {
+                    anyhow::bail!(
+                        "Kraken open order {order_id} filled {filled} disagrees with fills {fq}: {o}"
+                    );
+                }
+            }
+            let status = if filled <= dec!(0) {
+                OrderStatus::New
+            } else if filled < orig {
+                OrderStatus::PartiallyFilled
+            } else {
+                OrderStatus::Filled
+            };
+            return build(
+                status,
+                orig,
+                filled,
+                fill_agg.map(|(_, px, _)| px),
+                fill_agg.map(|(_, _, f)| f).unwrap_or_default(),
+                o,
+            );
+        }
+
+        // 3) Terminal event window (open/filled/cancelled in last ~5s).
+        let mut st_params = std::collections::BTreeMap::new();
+        st_params.insert("orderIds", order_id.to_string());
+        let st_v = self
+            .authed_post("/derivatives/api/v3/orders/status", &st_params)
+            .await?;
+        if let Some(arr) = st_v.get("orders").and_then(|o| o.as_array()) {
+            for entry in arr {
+                let o = entry.get("order").unwrap_or(entry);
+                let oid = o
+                    .get("order_id")
+                    .or_else(|| o.get("orderId"))
+                    .and_then(|s| s.as_str());
+                if oid != Some(order_id) {
+                    continue;
+                }
+                let osym = o.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
+                if !osym.is_empty() && osym != venue_sym {
+                    anyhow::bail!(
+                        "Kraken order status for {order_id} reports symbol '{osym}' != '{venue_sym}': {entry}"
+                    );
+                }
+                let raw_status = entry.get("status").and_then(|s| s.as_str()).unwrap_or("");
+                let qty_c = dec_from_json(o.get("quantity")).unwrap_or_default();
+                let filled_c = dec_from_json(o.get("filled")).unwrap_or_default();
+                let orig = qty_c * ct;
+                let filled = if filled_c * ct > dec!(0) {
+                    filled_c * ct
+                } else {
+                    fill_agg.map(|(q, _, _)| q).unwrap_or_default()
+                };
+                let status = match raw_status {
+                    "FULLY_EXECUTED" => OrderStatus::Filled,
+                    "ENTERED_BOOK" => {
+                        if filled >= orig && orig > dec!(0) {
+                            OrderStatus::Filled
+                        } else if filled > dec!(0) {
+                            OrderStatus::PartiallyFilled
+                        } else {
+                            OrderStatus::New
+                        }
+                    }
+                    "CANCELLED" | "TRIGGER_ACTIVATION_FAILURE" | "TRIGGER_PLACED" => {
+                        OrderStatus::Cancelled
+                    }
+                    "REJECTED" => OrderStatus::Rejected,
+                    other => anyhow::bail!(
+                        "Kraken order status for {order_id} returned unknown status '{other}': {entry}"
+                    ),
+                };
+                return build(
+                    status,
+                    orig.max(filled),
+                    filled,
+                    fill_agg.map(|(_, px, _)| px),
+                    fill_agg.map(|(_, _, f)| f).unwrap_or_default(),
+                    entry.clone(),
+                );
+            }
+        }
+
+        // 4) Event window expired: derive state from fills alone.
+        match fill_agg {
+            Some((filled, vwap, fee)) => {
+                // Not open, has fills, no terminal event: cannot distinguish
+                // "fully filled" from "cancelled after partial" — stay
+                // PartiallyFilled so the reconciler keeps the order alive
+                // and escalates to `unresolved` on deadline.
+                build(
+                    OrderStatus::PartiallyFilled,
+                    filled,
+                    filled,
+                    Some(vwap),
+                    fee,
+                    fills_v,
+                )
+            }
+            None => {
+                // Not open, no fills, no event: terminal zero-fill
+                // (cancelled/expired). Rejection is impossible post-ack.
+                build(
+                    OrderStatus::Cancelled,
+                    dec!(0),
+                    dec!(0),
+                    None,
+                    dec!(0),
+                    serde_json::json!({"resolved_by": "absence", "order_id": order_id}),
+                )
+            }
+        }
+    }
+
     /// Contracts per engine base unit for a canonical symbol (from the public
     /// instrument list; cached upstream by the rate limiter).
     async fn contract_size_for(&self, symbol: &str) -> anyhow::Result<Decimal> {
@@ -464,7 +762,7 @@ impl KrakenAdapter {
             };
             (*base, *quote)
         } else {
-            (sym.as_str(), "USD")
+            anyhow::bail!("Kraken symbol '{symbol}' has no explicit quote; refusing to guess USD");
         };
         if !matches!(quote, "USD" | "USDC" | "USDT") {
             anyhow::bail!(
@@ -875,12 +1173,34 @@ impl ExchangeAdapter for KrakenAdapter {
             .and_then(|s| s.as_str())
             .ok_or_else(|| anyhow::anyhow!("Kraken sendorder missing status: {v}"))?;
         let status = match raw_status {
-            // These terminal/nonzero-fill states carry no fill quantity or
-            // price in the send acknowledgement. Refuse to fabricate them as
-            // either fills or harmless zero-fill states.
-            "filled" | "partiallyFilled" => anyhow::bail!(
-                "Kraken sendorder returned '{raw_status}' without fill detail; reconcile order {order_id} manually: {v}"
-            ),
+            // Nonzero-fill acks carry no fill detail — resolve the real
+            // quantities/prices/fees from /orders, /orders/status and /fills
+            // instead of fabricating. Bounded: ~4 attempts over ~2s.
+            "filled" | "partiallyFilled" => {
+                let mut resolved = None;
+                let mut last_err: Option<anyhow::Error> = None;
+                for attempt in 0..4 {
+                    if attempt > 0 {
+                        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                    }
+                    match self.resolve_order_state(&order.symbol, &order_id).await {
+                        Ok(state) if state.filled_qty > dec!(0) || state.status.is_final() => {
+                            let mut out = state;
+                            out.client_order_id = order.client_order_id.clone();
+                            resolved = Some(out);
+                            break;
+                        }
+                        Ok(_) => continue,
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                return match resolved {
+                    Some(r) => Ok(r),
+                    None => anyhow::bail!(
+                        "Kraken sendorder returned '{raw_status}' for order {order_id} but fill state could not be resolved ({last_err:?}); reconcile manually: {v}"
+                    ),
+                };
+            }
             "cancelled" | "expired" => OrderStatus::Cancelled,
             "rejected" => OrderStatus::Rejected,
             "placed" | "open" | "pending" => OrderStatus::New,
@@ -922,6 +1242,27 @@ impl ExchangeAdapter for KrakenAdapter {
         self.authed_post("/derivatives/api/v3/cancelorder", &params)
             .await?;
         Ok(())
+    }
+
+    /// Poll authoritative order state. See `resolve_order_state` for the
+    /// fail-closed semantics (open-orders + status-events + fills).
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch order on Kraken: API credentials are not configured or vault is locked");
+        }
+        if order_id.trim().is_empty() {
+            anyhow::bail!("Kraken fetch_order requires a non-empty order_id");
+        }
+        self.resolve_order_state(symbol, order_id).await
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     fn live_order_submission_implemented(&self) -> bool {
@@ -1043,6 +1384,51 @@ mod tests {
         assert!(KrakenAdapter::to_futures_symbol("PI_XBTUSD").is_err());
         assert!(KrakenAdapter::to_futures_symbol("BTC-SOL").is_err());
         assert!(KrakenAdapter::to_futures_symbol("BTC-ETH").is_err());
+        // Bare bases have no explicit quote — reject rather than assume USD.
+        assert!(KrakenAdapter::to_futures_symbol("BTC").is_err());
+        assert!(KrakenAdapter::to_futures_symbol("ETH").is_err());
+    }
+
+    #[test]
+    fn aggregate_fills_computes_vwap_and_fee() {
+        let fills = serde_json::json!({
+            "result": "success",
+            "fills": [
+                {"fill_id": "f1", "order_id": "ord-1", "symbol": "PF_XBTUSD",
+                 "side": "buy", "size": "2", "price": "100", "fee": "0.1"},
+                {"fill_id": "f2", "order_id": "ord-1", "symbol": "PF_XBTUSD",
+                 "side": "buy", "size": "1", "price": "110", "fee": "0.05"},
+                {"fill_id": "f3", "order_id": "ord-other", "symbol": "PF_ETHUSD",
+                 "side": "sell", "size": "9", "price": "3000"}
+            ]
+        });
+        // Contract size 0.001 BTC: 3 contracts -> 0.003 BTC.
+        let (qty, vwap, fee) =
+            KrakenAdapter::aggregate_fills(&fills, "ord-1", "PF_XBTUSD", dec!(0.001))
+                .unwrap()
+                .expect("fills exist");
+        assert_eq!(qty, dec!(0.003));
+        // vwap = (2*100 + 1*110) / 3 = 103.333...
+        assert!((vwap - dec!(103.3333)).abs() < dec!(0.001));
+        assert_eq!(fee, dec!(0.15));
+        // Wrong order id -> None, not a silent zero.
+        assert!(
+            KrakenAdapter::aggregate_fills(&fills, "ord-x", "PF_XBTUSD", dec!(0.001))
+                .unwrap()
+                .is_none()
+        );
+        // Symbol mismatch on an attributed fill fails closed.
+        let bad = serde_json::json!({
+            "fills": [{"order_id": "ord-1", "symbol": "PF_ETHUSD", "size": "1", "price": "10"}]
+        });
+        assert!(KrakenAdapter::aggregate_fills(&bad, "ord-1", "PF_XBTUSD", dec!(0.001)).is_err());
+        // Malformed size fails closed.
+        let malformed = serde_json::json!({
+            "fills": [{"order_id": "ord-1", "symbol": "PF_XBTUSD", "size": "0", "price": "10"}]
+        });
+        assert!(
+            KrakenAdapter::aggregate_fills(&malformed, "ord-1", "PF_XBTUSD", dec!(0.001)).is_err()
+        );
     }
 
     #[test]

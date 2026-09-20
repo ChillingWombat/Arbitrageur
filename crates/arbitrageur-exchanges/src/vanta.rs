@@ -971,6 +971,124 @@ impl ExchangeAdapter for VantaAdapter {
         anyhow::bail!("Vanta cancel requires an order_id or client_order_id")
     }
 
+    /// Poll authoritative order state via `GET /v1/order/{order_id}`.
+    /// Orderly returns `status`, `quantity`, `executed_quantity`, and
+    /// `average_executed_price` in venue-native units — validated
+    /// fail-closed before they reach the ledger.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        if order_id.trim().is_empty() {
+            anyhow::bail!("Vanta fetch_order requires a non-empty order_id");
+        }
+        let venue_symbol = Self::to_vanta_symbol(symbol)?;
+        let sign_path = format!("/v1/order/{}", order_id.trim());
+        let v = self.signed_orderly("GET", &sign_path, "").await?;
+        let data = v
+            .get("data")
+            .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing data: {v}"))?;
+        let returned_id = data
+            .get("order_id")
+            .and_then(|o| {
+                o.as_i64()
+                    .map(|n| n.to_string())
+                    .or_else(|| o.as_str().map(str::to_string))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing order_id: {v}"))?;
+        if returned_id != order_id.trim() {
+            anyhow::bail!(
+                "Vanta fetch_order returned order_id {returned_id} != queried {order_id}: {v}"
+            );
+        }
+        let returned_symbol = data
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing symbol: {v}"))?;
+        if returned_symbol != venue_symbol {
+            anyhow::bail!(
+                "Vanta fetch_order symbol '{returned_symbol}' != expected '{venue_symbol}': {v}"
+            );
+        }
+        let orig_qty = dec_from_json(data.get("quantity"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing quantity: {v}"))?;
+        let filled_qty = dec_from_json(data.get("executed_quantity"))
+            .filter(|q| *q >= dec!(0))
+            .unwrap_or_default();
+        if filled_qty > orig_qty {
+            anyhow::bail!(
+                "Vanta fetch_order executed_quantity {filled_qty} exceeds quantity {orig_qty}: {v}"
+            );
+        }
+        let raw_status = data
+            .get("status")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing status: {v}"))?;
+        let status = match raw_status {
+            "FILLED" | "COMPLETED" => OrderStatus::Filled,
+            "PARTIAL_FILLED" | "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
+            "NEW" | "OPEN" | "PENDING" | "REPLACED" | "INCOMPLETE" => OrderStatus::New,
+            "CANCELLED" | "CANCELED" | "EXPIRED" => OrderStatus::Cancelled,
+            "REJECTED" | "FAILED" => OrderStatus::Rejected,
+            other => anyhow::bail!("Vanta fetch_order unknown status '{other}': {v}"),
+        };
+        let consistent = match status {
+            OrderStatus::Filled => filled_qty == orig_qty,
+            OrderStatus::PartiallyFilled => filled_qty > dec!(0) && filled_qty < orig_qty,
+            OrderStatus::New => filled_qty == dec!(0),
+            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => true,
+        };
+        if !consistent {
+            anyhow::bail!(
+                "Vanta fetch_order status {status:?} inconsistent with executed {filled_qty}/{orig_qty}: {v}"
+            );
+        }
+        let avg_px = if filled_qty > dec!(0) {
+            Some(
+                dec_from_json(data.get("average_executed_price"))
+                    .filter(|p| *p > dec!(0))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Vanta fetch_order has executed qty but no average_executed_price: {v}"
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let fee = dec_from_json(data.get("total_fee"))
+            .or_else(|| dec_from_json(data.get("fee")))
+            .unwrap_or_default()
+            .abs();
+        Ok(OrderResponse {
+            order_id: returned_id,
+            client_order_id: data
+                .get("client_order_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            venue: VenueId::new("vanta"),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: orig_qty,
+            filled_qty,
+            remaining_qty: orig_qty.saturating_sub(filled_qty),
+            avg_fill_price: avg_px,
+            fee,
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
+    }
+
     fn live_order_submission_implemented(&self) -> bool {
         true
     }

@@ -132,51 +132,39 @@ impl BinanceAdapter {
         Ok(data)
     }
 
-    fn to_venue_symbol(symbol: &str) -> anyhow::Result<(String, bool)> {
-        let sym = symbol.trim().to_uppercase();
+    /// Map a canonical/engine symbol to the exact Binance venue spelling.
+    /// `BASE-QUOTE` and `BASEQUOTE` (explicit quote) are preserved verbatim —
+    /// `BTC-USDC` routes to `BTCUSDC`, `1000PEPE-USDT` to `1000PEPEUSDT`.
+    /// Bare bases without an explicit quote are rejected rather than guessed
+    /// onto USDT, and no 1000x aliasing or unit scaling is applied: live
+    /// `exchangeInfo` lists `1000PEPE` as the actual base asset, so venue
+    /// quantities are already denominated in that unit.
+    fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
+        let sym = symbol.trim().to_uppercase().replace('/', "-");
         let (base, quote) = if sym.contains('-') {
-            let parts: Vec<&str> = sym.split('-').collect();
-            let b = parts[0];
-            let q = parts.get(1).copied().unwrap_or("");
-            (b, q)
-        } else if sym.ends_with("USDT") {
-            (&sym[..sym.len().saturating_sub(4)], "USDT")
-        } else if sym.ends_with("USDC") {
-            (&sym[..sym.len().saturating_sub(4)], "USDC")
+            let parts: Vec<&str> = sym.split('-').filter(|p| !p.is_empty()).collect();
+            let [base, quote] = parts.as_slice() else {
+                anyhow::bail!("Binance symbol '{symbol}' is not BASE-QUOTE");
+            };
+            (*base, *quote)
+        } else if let Some(base) = sym.strip_suffix("USDT") {
+            (base, "USDT")
+        } else if let Some(base) = sym.strip_suffix("USDC") {
+            (base, "USDC")
         } else {
-            (sym.as_str(), "USDT")
+            anyhow::bail!(
+                "Binance symbol '{symbol}' has no explicit USDT/USDC quote; refusing to guess"
+            );
         };
-        if !quote.is_empty() && quote != "USDT" && quote != "USDC" && quote != "USD" {
+        if base.is_empty()
+            || !base.chars().all(|c| c.is_ascii_alphanumeric())
+            || !matches!(quote, "USDT" | "USDC")
+        {
             anyhow::bail!(
                 "Binance futures markets are quoted in USDT/USDC; '{symbol}' is not supported"
             );
         }
-        // Canonical inputs may already carry the venue's 1000x prefix
-        // (universe spells it `1000PEPE-USDT` from exchangeInfo baseAsset);
-        // normalize onto the same scaled venue contract.
-        let base_norm = base
-            .strip_prefix("1000")
-            .filter(|r| {
-                [
-                    "PEPE", "BONK", "SHIB", "FLOKI", "LUNC", "XEC", "RATS", "SATS", "CAT", "CHEEMS",
-                ]
-                .contains(r)
-            })
-            .unwrap_or(base);
-        let res = match base_norm {
-            "PEPE" => ("1000PEPEUSDT".to_string(), true),
-            "BONK" => ("1000BONKUSDT".to_string(), true),
-            "SHIB" => ("1000SHIBUSDT".to_string(), true),
-            "FLOKI" => ("1000FLOKIUSDT".to_string(), true),
-            "LUNC" => ("1000LUNCUSDT".to_string(), true),
-            "XEC" => ("1000XECUSDT".to_string(), true),
-            "RATS" => ("1000RATSUSDT".to_string(), true),
-            "SATS" => ("1000SATSUSDT".to_string(), true),
-            "CAT" => ("1000CATUSDT".to_string(), true),
-            "CHEEMS" => ("1000CHEEMSUSDT".to_string(), true),
-            b => (format!("{}USDT", b), false),
-        };
-        Ok(res)
+        Ok(format!("{base}{quote}"))
     }
 
     /// Convert an account row such as `BTCUSDT` or `1000PEPEUSDT` back to the
@@ -252,15 +240,6 @@ impl BinanceAdapter {
         Ok((api_key.to_string(), signed))
     }
 
-    /// Venue quantity for an engine quantity (×1000 on 1000-prefixed contracts).
-    fn scale_order_qty(qty: Decimal, is_1000x: bool) -> Decimal {
-        if is_1000x {
-            qty * dec!(1000)
-        } else {
-            qty
-        }
-    }
-
     /// Pure parse of a USDT-M `/fapi/v1/order` response. Split out so the
     /// wire mapping (statuses, fills, 1000-contract economics) is unit-tested
     /// without touching the network. Malformed responses fail closed: an
@@ -271,7 +250,7 @@ impl BinanceAdapter {
         order: &OrderRequest,
     ) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
-        let (expected_venue_symbol, is_1000x) = Self::to_venue_symbol(&order.symbol)?;
+        let expected_venue_symbol = Self::to_venue_symbol(&order.symbol)?;
         let venue_symbol = v
             .get("symbol")
             .and_then(|s| s.as_str())
@@ -304,33 +283,30 @@ impl BinanceAdapter {
             .get("status")
             .and_then(|s| s.as_str())
             .ok_or_else(|| anyhow::anyhow!("Binance order response missing status: {v}"))?;
-        let scale = if is_1000x { dec!(1000) } else { dec!(1) };
-        let venue_orig_qty = dec_from_json(v.get("origQty"))
+        let orig_qty = dec_from_json(v.get("origQty"))
             .filter(|q| *q > dec!(0))
             .ok_or_else(|| anyhow::anyhow!("Binance order response missing valid origQty: {v}"))?;
-        let expected_venue_qty = Self::scale_order_qty(order.quantity, is_1000x);
-        if venue_orig_qty != expected_venue_qty {
+        if orig_qty != order.quantity {
             anyhow::bail!(
-                "Binance order response origQty {venue_orig_qty} does not match request {expected_venue_qty}: {v}"
+                "Binance order response origQty {orig_qty} does not match request {}: {v}",
+                order.quantity
             );
         }
-        let venue_executed_qty = dec_from_json(v.get("executedQty"))
+        let executed_qty = dec_from_json(v.get("executedQty"))
             .filter(|q| *q >= dec!(0))
             .ok_or_else(|| {
                 anyhow::anyhow!("Binance order response missing valid executedQty: {v}")
             })?;
-        if venue_executed_qty > venue_orig_qty {
+        if executed_qty > orig_qty {
             anyhow::bail!(
-                "Binance order response executedQty {venue_executed_qty} exceeds origQty {venue_orig_qty}: {v}"
+                "Binance order response executedQty {executed_qty} exceeds origQty {orig_qty}: {v}"
             );
         }
-        let orig_qty = venue_orig_qty / scale;
-        let executed_qty = venue_executed_qty / scale;
         let remaining_qty = orig_qty.saturating_sub(executed_qty);
         let order_status = match raw_status {
             "FILLED" => OrderStatus::Filled,
             "PARTIALLY_FILLED" => OrderStatus::PartiallyFilled,
-            "EXPIRED" if venue_executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "EXPIRED" if executed_qty > dec!(0) => OrderStatus::PartiallyFilled,
             "EXPIRED" => OrderStatus::Cancelled,
             "CANCELED" => OrderStatus::Cancelled,
             "REJECTED" => OrderStatus::Rejected,
@@ -338,31 +314,29 @@ impl BinanceAdapter {
             other => anyhow::bail!("Binance order response has unknown status '{other}': {v}"),
         };
         let status_consistent = match order_status {
-            OrderStatus::Filled => venue_executed_qty == venue_orig_qty && remaining_qty == dec!(0),
-            OrderStatus::PartiallyFilled => {
-                venue_executed_qty > dec!(0) && venue_executed_qty < venue_orig_qty
-            }
-            OrderStatus::New => venue_executed_qty == dec!(0) && remaining_qty == orig_qty,
+            OrderStatus::Filled => executed_qty == orig_qty && remaining_qty == dec!(0),
+            OrderStatus::PartiallyFilled => executed_qty > dec!(0) && executed_qty < orig_qty,
+            OrderStatus::New => executed_qty == dec!(0) && remaining_qty == orig_qty,
             OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
-                venue_executed_qty == dec!(0) && remaining_qty == orig_qty
+                executed_qty == dec!(0) && remaining_qty == orig_qty
             }
         };
         if !status_consistent {
             anyhow::bail!(
-                "Binance order response status {order_status:?} is inconsistent with executedQty {venue_executed_qty}/{venue_orig_qty}: {v}"
+                "Binance order response status {order_status:?} is inconsistent with executedQty {executed_qty}/{orig_qty}: {v}"
             );
         }
-        let avg_price = if venue_executed_qty > dec!(0) {
-            let venue_px = dec_from_json(v.get("avgPrice"))
+        let avg_price = if executed_qty > dec!(0) {
+            let px = dec_from_json(v.get("avgPrice"))
                 .filter(|p| *p > dec!(0))
                 .ok_or_else(|| {
                     anyhow::anyhow!("Binance filled order response missing valid avgPrice: {v}")
                 })?;
-            Some(venue_px * scale)
+            Some(px)
         } else {
             None
         };
-        let cum_quote = if venue_executed_qty > dec!(0) {
+        let cum_quote = if executed_qty > dec!(0) {
             dec_from_json(v.get("cumQuote"))
                 .filter(|q| *q >= dec!(0))
                 .ok_or_else(|| {
@@ -653,28 +627,28 @@ impl ExchangeAdapter for BinanceAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let (venue_sym, is_1000x) = Self::to_venue_symbol(symbol)?;
+        let venue_sym = Self::to_venue_symbol(symbol)?;
         let path = format!(
             "/fapi/v1/depth?symbol={}&limit={}",
             venue_sym, ORDERBOOK_LIMIT
         );
         let val = self.get_json(&path).await?;
 
+        // Venue-native units: depth prices/quantities are already denominated
+        // in the listed contract (e.g. 1000PEPE contracts) — no scaling.
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
-        let scale_p = if is_1000x { dec!(1000) } else { dec!(1) };
-        let scale_q = if is_1000x { dec!(1000) } else { dec!(1) };
 
         if let Some(bids) = val.get("bids").and_then(|b| b.as_array()) {
             for b in bids {
                 if let Some((p, q)) = parse_pair(b) {
-                    book.bids.push(BookLevel::new(p / scale_p, q * scale_q));
+                    book.bids.push(BookLevel::new(p, q));
                 }
             }
         }
         if let Some(asks) = val.get("asks").and_then(|a| a.as_array()) {
             for a in asks {
                 if let Some((p, q)) = parse_pair(a) {
-                    book.asks.push(BookLevel::new(p / scale_p, q * scale_q));
+                    book.asks.push(BookLevel::new(p, q));
                 }
             }
         }
@@ -686,13 +660,12 @@ impl ExchangeAdapter for BinanceAdapter {
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
-        let (venue_sym, is_1000x) = Self::to_venue_symbol(symbol)?;
+        let venue_sym = Self::to_venue_symbol(symbol)?;
         let path = format!("/fapi/v1/ticker/bookTicker?symbol={}", venue_sym);
         let val = self.get_json(&path).await?;
 
-        let scale_p = if is_1000x { dec!(1000) } else { dec!(1) };
-        let bid = dec_from_json(val.get("bidPrice")).unwrap_or(dec!(0)) / scale_p;
-        let ask = dec_from_json(val.get("askPrice")).unwrap_or(dec!(0)) / scale_p;
+        let bid = dec_from_json(val.get("bidPrice")).unwrap_or(dec!(0));
+        let ask = dec_from_json(val.get("askPrice")).unwrap_or(dec!(0));
         let last = if bid > dec!(0) && ask > dec!(0) {
             (bid + ask) / dec!(2)
         } else {
@@ -710,7 +683,7 @@ impl ExchangeAdapter for BinanceAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let (venue_sym, _is_1000x) = Self::to_venue_symbol(symbol)?;
+        let venue_sym = Self::to_venue_symbol(symbol)?;
         let path = format!("/fapi/v1/premiumIndex?symbol={}", venue_sym);
         let val = self.get_json(&path).await?;
 
@@ -808,7 +781,11 @@ impl ExchangeAdapter for BinanceAdapter {
                 item.get("symbol").and_then(|s| s.as_str()),
                 dec_from_json(item.get("quoteVolume")),
             ) {
-                out.insert(sym.to_string(), vol);
+                // Canonical `BASE-QUOTE` keys so downstream matchers resolve
+                // regardless of venue spelling (BTCUSDT -> BTC-USDT).
+                if let Ok(key) = Self::canonical_account_symbol(sym) {
+                    out.insert(key, vol);
+                }
             }
         }
         Ok(out)
@@ -838,8 +815,7 @@ impl ExchangeAdapter for BinanceAdapter {
         if order.quantity <= dec!(0) {
             anyhow::bail!("Binance order quantity must be positive");
         }
-        let (venue_symbol, is_1000x) = Self::to_venue_symbol(&order.symbol)?;
-        let venue_qty = Self::scale_order_qty(order.quantity, is_1000x);
+        let venue_symbol = Self::to_venue_symbol(&order.symbol)?;
         let mut params = BTreeMap::new();
         params.insert("symbol", venue_symbol);
         let side_str = match order.side {
@@ -864,14 +840,12 @@ impl ExchangeAdapter for BinanceAdapter {
         if let Some(tif) = tif_str {
             params.insert("timeInForce", tif.to_string());
         }
-        params.insert("quantity", venue_qty.to_string());
+        params.insert("quantity", order.quantity.to_string());
         if let Some(p) = order.price {
             if p <= dec!(0) {
                 anyhow::bail!("Binance order limit price must be positive");
             }
-            // Venue price scale follows the contract (÷1000 on 1000-prefixed).
-            let venue_px = if is_1000x { p / dec!(1000) } else { p };
-            params.insert("price", venue_px.to_string());
+            params.insert("price", p.to_string());
         }
         if order.reduce_only {
             params.insert("reduceOnly", "true".to_string());
@@ -890,7 +864,7 @@ impl ExchangeAdapter for BinanceAdapter {
         if !self.has_credentials() {
             anyhow::bail!("Cannot cancel live order on Binance: API credentials are not configured or vault is locked");
         }
-        let (venue_symbol, _) = Self::to_venue_symbol(&req.symbol)?;
+        let venue_symbol = Self::to_venue_symbol(&req.symbol)?;
         let mut params = BTreeMap::new();
         params.insert("symbol", venue_symbol);
         if let Some(id) = req.order_id {
@@ -926,7 +900,7 @@ impl ExchangeAdapter for BinanceAdapter {
         if !(1..=125).contains(&leverage) {
             anyhow::bail!("Binance leverage {leverage} out of range 1..=125");
         }
-        let (venue_symbol, _) = Self::to_venue_symbol(symbol)?;
+        let venue_symbol = Self::to_venue_symbol(symbol)?;
         let mut params = BTreeMap::new();
         params.insert("symbol", venue_symbol);
         params.insert("leverage", leverage.to_string());
@@ -938,6 +912,63 @@ impl ExchangeAdapter for BinanceAdapter {
             anyhow::bail!("Binance leverage ack mismatch: wanted {leverage}, venue reports {got}");
         }
         Ok(())
+    }
+
+    /// Poll authoritative order state via `GET /fapi/v1/order`. Same field
+    /// shape as the placement ack, so the fail-closed parser is reused —
+    /// quantities/prices arrive venue-native, matching submission.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        if !self.has_credentials() {
+            anyhow::bail!("Cannot fetch order on Binance: API credentials are not configured or vault is locked");
+        }
+        if order_id.trim().is_empty() {
+            anyhow::bail!("Binance fetch_order requires a non-empty order_id");
+        }
+        let venue_symbol = Self::to_venue_symbol(symbol)?;
+        let mut params = BTreeMap::new();
+        params.insert("symbol", venue_symbol);
+        params.insert("orderId", order_id.to_string());
+        params.insert("timestamp", Utc::now().timestamp_millis().to_string());
+        params.insert("recvWindow", "5000".to_string());
+        let v = self.signed_get("/fapi/v1/order", &params).await?;
+
+        // Probe request echoes response fields so the shared parser validates
+        // symbol + status/quantity coherence; orderId identity is checked
+        // explicitly below.
+        let probe = OrderRequest {
+            client_order_id: v
+                .get("clientOrderId")
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            venue: self.venue_id.clone(),
+            symbol: symbol.to_string(),
+            side: Side::Buy,
+            order_type: OrderType::Limit,
+            price: None,
+            quantity: dec_from_json(v.get("origQty")).unwrap_or_default(),
+            time_in_force: TimeInForce::GoodTilCancelled,
+            post_only: false,
+            reduce_only: false,
+            created_at: Utc::now(),
+        };
+        let resp = Self::parse_order_response(&v, &probe)?;
+        if resp.order_id != order_id {
+            anyhow::bail!(
+                "Binance fetch_order returned orderId {} != queried {order_id}",
+                resp.order_id
+            );
+        }
+        Ok(resp)
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        true
     }
 
     fn live_order_submission_implemented(&self) -> bool {
@@ -980,17 +1011,11 @@ mod tests {
     }
 
     #[test]
-    fn order_qty_scales_on_1000_contracts() {
-        assert_eq!(BinanceAdapter::scale_order_qty(dec!(0.5), false), dec!(0.5));
-        assert_eq!(BinanceAdapter::scale_order_qty(dec!(0.5), true), dec!(500));
-    }
-
-    #[test]
     fn parse_order_response_maps_statuses_and_fees() {
         use arbitrageur_core::order::OrderRequest;
         use arbitrageur_core::types::{OrderStatus, Side};
         let order =
-            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDC", Side::Buy, dec!(0.01));
+            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDT", Side::Buy, dec!(0.01));
         let v: serde_json::Value = serde_json::json!({
             "symbol": "BTCUSDT",
             "orderId": 12345,
@@ -1025,7 +1050,7 @@ mod tests {
         use arbitrageur_core::order::OrderRequest;
         use arbitrageur_core::types::Side;
         let order =
-            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDC", Side::Buy, dec!(0.01));
+            OrderRequest::new_market(VenueId::new("binance"), "BTC-USDT", Side::Buy, dec!(0.01));
         let base = serde_json::json!({
             "symbol": "BTCUSDT",
             "orderId": 12345,
@@ -1090,29 +1115,63 @@ mod tests {
     }
 
     #[test]
-    fn to_venue_symbol_accepts_1000x_canonical_spelling() {
-        // Universe spells the venue baseAsset verbatim (`1000PEPE-USDT`).
+    fn to_venue_symbol_preserves_quote_and_1000x_base() {
+        // Exact-quote preservation: BTC-USDC must never route to BTCUSDT.
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("BTC-USDC").unwrap(),
+            "BTCUSDC"
+        );
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("BTC-USDT").unwrap(),
+            "BTCUSDT"
+        );
+        // 1000-prefixed contracts are venue-native units — verbatim passthrough,
+        // no scaling flag. `PEPE-USDT` stays `PEPEUSDT` (a different listing).
         assert_eq!(
             BinanceAdapter::to_venue_symbol("1000PEPE-USDT").unwrap(),
-            ("1000PEPEUSDT".to_string(), true)
+            "1000PEPEUSDT"
         );
         assert_eq!(
             BinanceAdapter::to_venue_symbol("PEPE-USDT").unwrap(),
-            ("1000PEPEUSDT".to_string(), true)
+            "PEPEUSDT"
         );
+        // Concatenated explicit-quote spellings also work.
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("ETHUSDT").unwrap(),
+            "ETHUSDT"
+        );
+        assert_eq!(
+            BinanceAdapter::to_venue_symbol("1000PEPEUSDT").unwrap(),
+            "1000PEPEUSDT"
+        );
+        // Bare bases and foreign quotes fail closed.
+        assert!(BinanceAdapter::to_venue_symbol("PEPE").is_err());
+        assert!(BinanceAdapter::to_venue_symbol("BTC").is_err());
+        assert!(BinanceAdapter::to_venue_symbol("BTC-SOL").is_err());
+        assert!(BinanceAdapter::to_venue_symbol("BTC-EUR").is_err());
     }
 
     #[test]
-    fn to_venue_symbol_normalizes_and_rejects_cross() {
-        assert_eq!(
-            BinanceAdapter::to_venue_symbol("BTC-USDT").unwrap(),
-            ("BTCUSDT".to_string(), false)
-        );
-        assert_eq!(
-            BinanceAdapter::to_venue_symbol("PEPE-USDT").unwrap(),
-            ("1000PEPEUSDT".to_string(), true)
-        );
-        assert!(BinanceAdapter::to_venue_symbol("BTC-SOL").is_err());
-        assert!(BinanceAdapter::to_venue_symbol("BTC-ETH").is_err());
+    fn parse_order_response_keeps_1000x_qty_venue_native() {
+        use arbitrageur_core::order::OrderRequest;
+        use arbitrageur_core::types::{OrderStatus, Side};
+        // Engine qty 5 on `1000PEPE-USDT` = 5 venue contracts — submitted
+        // verbatim, so the ack must echo origQty=5, not 5000.
+        let order =
+            OrderRequest::new_market(VenueId::new("binance"), "1000PEPE-USDT", Side::Buy, dec!(5));
+        let v: serde_json::Value = serde_json::json!({
+            "symbol": "1000PEPEUSDT",
+            "orderId": 777,
+            "clientOrderId": order.client_order_id,
+            "status": "FILLED",
+            "origQty": "5",
+            "executedQty": "5",
+            "avgPrice": "0.012",
+            "cumQuote": "0.06"
+        });
+        let resp = BinanceAdapter::parse_order_response(&v, &order).unwrap();
+        assert_eq!(resp.status, OrderStatus::Filled);
+        assert_eq!(resp.filled_qty, dec!(5));
+        assert_eq!(resp.avg_fill_price, Some(dec!(0.012)));
     }
 }

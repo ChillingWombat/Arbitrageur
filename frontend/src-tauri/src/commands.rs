@@ -3715,6 +3715,15 @@ fn reconcile_signal_legs(
             .to_string()
             .parse::<f64>()
             .map_err(|_| "unparseable fee".to_string())?;
+        // Persist accepted order identity even on a zero-fill (working) leg —
+        // the reconciliation supervisor needs it to reach terminal state.
+        if !leg.order_id.is_empty() {
+            let cid = (!leg.client_order_id.is_empty())
+                .then_some(leg.client_order_id.as_str());
+            let _ = state
+                .state_store
+                .record_leg_order_id(signal_id, side, leg.order_id.as_str(), cid);
+        }
         if filled > 0.0 {
             let px = leg
                 .avg_fill_price
@@ -4533,6 +4542,19 @@ async fn execute_spatial_arbitrage_inner(
                         .and_then(|p| p.to_string().parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let fee = f.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    // Keep the venue order id reachable even when the leg was
+                    // accepted but unfilled — reconciliation polls it to
+                    // terminal state instead of losing the exposure.
+                    if !f.order_id.is_empty() {
+                        let cid = (!f.client_order_id.is_empty())
+                            .then_some(f.client_order_id.as_str());
+                        let _ = state.state_store.record_leg_order_id(
+                            &signal_id,
+                            side,
+                            f.order_id.as_str(),
+                            cid,
+                        );
+                    }
                     if filled > 0.0 && px > 0.0 {
                         let _ = state.state_store.apply_leg_fill(
                             &signal_id,
@@ -5585,6 +5607,19 @@ pub async fn execute_funding_carry_impl(
                         .and_then(|p| p.to_string().parse::<f64>().ok())
                         .unwrap_or(0.0);
                     let fee = f.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    // Keep the venue order id reachable even when the leg was
+                    // accepted but unfilled — reconciliation polls it to
+                    // terminal state instead of losing the exposure.
+                    if !f.order_id.is_empty() {
+                        let cid = (!f.client_order_id.is_empty())
+                            .then_some(f.client_order_id.as_str());
+                        let _ = state.state_store.record_leg_order_id(
+                            &signal_id,
+                            side,
+                            f.order_id.as_str(),
+                            cid,
+                        );
+                    }
                     if filled > 0.0 && px > 0.0 {
                         let _ = state.state_store.apply_leg_fill(
                             &signal_id,
@@ -6237,14 +6272,32 @@ async fn flatten_leg_on_paper(
     Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
 }
 
+/// Outcome of one flatten-leg dispatch. `fill` is present only when the
+/// venue reported an actual fill; `order_id`/`client_order_id` are present
+/// whenever the venue accepted the order so the reconciler can keep polling
+/// a working order instead of losing it.
+struct FlattenLegOutcome {
+    order_id: Option<String>,
+    client_order_id: Option<String>,
+    fill: Option<(Decimal, Decimal, Decimal)>,
+}
+
 /// Place a reduce-only market order on a venue (paper or live) to close one
-/// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
-async fn flatten_leg(
-    args: FlattenLegArgs<'_>,
-    is_live: bool,
-) -> Result<Option<(Decimal, Decimal, Decimal, String)>, String> {
+/// filled leg.
+async fn flatten_leg(args: FlattenLegArgs<'_>, is_live: bool) -> Result<FlattenLegOutcome, String> {
     if !is_live {
-        return flatten_leg_on_paper(args).await;
+        return flatten_leg_on_paper(args).await.map(|res| match res {
+            Some((q, p, f, oid)) => FlattenLegOutcome {
+                order_id: Some(oid),
+                client_order_id: None,
+                fill: Some((q, p, f)),
+            },
+            None => FlattenLegOutcome {
+                order_id: None,
+                client_order_id: None,
+                fill: None,
+            },
+        });
     }
     let FlattenLegArgs {
         state,
@@ -6271,19 +6324,32 @@ async fn flatten_leg(
     let mut order =
         arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
     order.reduce_only = true;
+    let client_order_id = order.client_order_id.clone();
 
     let resp = adapter
         .place_order(order)
         .await
         .map_err(|e| e.to_string())?;
-    if resp.filled_qty <= dec!(0) {
-        return Ok(None);
-    }
-    let px = resp
-        .avg_fill_price
-        .filter(|p| *p > dec!(0))
-        .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
-    Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
+    let order_id = (!resp.order_id.trim().is_empty()).then(|| resp.order_id.clone());
+    let fill = if resp.filled_qty > dec!(0) {
+        let px = resp
+            .avg_fill_price
+            .filter(|p| *p > dec!(0))
+            .ok_or_else(|| {
+                format!(
+                    "flatten fill on order {} reports no positive price",
+                    resp.order_id
+                )
+            })?;
+        Some((resp.filled_qty, px, resp.fee))
+    } else {
+        None
+    };
+    Ok(FlattenLegOutcome {
+        order_id,
+        client_order_id: Some(client_order_id),
+        fill,
+    })
 }
 
 /// Close the attributed virtual-ledger lot for a flattened signal family and
@@ -6741,32 +6807,53 @@ pub async fn flatten_ticker_positions_with_type_impl(
             )
             .await
             {
-                Ok(Some((qty, px, fee, oid))) => {
-                    state
-                        .state_store
-                        .apply_leg_fill(
+                Ok(outcome) => {
+                    // Persist the accepted order id BEFORE any fill write so a
+                    // working order is always reachable by the reconciliation
+                    // supervisor — a zero-fill ack must not orphan the order.
+                    if let (true, Some(oid)) = (is_live, outcome.order_id.as_deref()) {
+                        if let Err(e) = state.state_store.record_leg_order_id(
                             &close_id,
                             t.leg_side,
-                            dec_to_f64(qty, "fill quantity")?,
-                            dec_to_f64(px, "fill price")?,
-                            dec_to_f64(fee, "fill fee")?,
-                            Some(oid.as_str()),
-                        )
-                        .map_err(|e| e.to_string())?;
-                    out.legs_closed += 1;
-                    leg_desc.push(format!("{} {:?} {}/{}", t.venue, t.leg_side, qty, t.qty));
-                    if qty < t.qty {
-                        out.notes.push(format!(
-                            "{}: {} leg partially closed {}/{}",
-                            sig.id, t.venue, qty, t.qty
-                        ));
+                            oid,
+                            outcome.client_order_id.as_deref(),
+                        ) {
+                            out.notes.push(format!(
+                                "{}: {} leg order {oid} accepted but id persistence failed: {e}",
+                                sig.id, t.venue
+                            ));
+                        }
                     }
-                }
-                Ok(None) => {
-                    out.notes.push(format!(
-                        "{}: {} leg got no fill (empty book)",
-                        sig.id, t.venue
-                    ));
+                    match outcome.fill {
+                        Some((qty, px, fee)) => {
+                            state
+                                .state_store
+                                .apply_leg_fill(
+                                    &close_id,
+                                    t.leg_side,
+                                    dec_to_f64(qty, "fill quantity")?,
+                                    dec_to_f64(px, "fill price")?,
+                                    dec_to_f64(fee, "fill fee")?,
+                                    outcome.order_id.as_deref(),
+                                )
+                                .map_err(|e| e.to_string())?;
+                            out.legs_closed += 1;
+                            leg_desc
+                                .push(format!("{} {:?} {}/{}", t.venue, t.leg_side, qty, t.qty));
+                            if qty < t.qty {
+                                out.notes.push(format!(
+                                    "{}: {} leg partially closed {}/{}",
+                                    sig.id, t.venue, qty, t.qty
+                                ));
+                            }
+                        }
+                        None => {
+                            out.notes.push(format!(
+                                "{}: {} leg got no fill (empty book or still working)",
+                                sig.id, t.venue
+                            ));
+                        }
+                    }
                 }
                 Err(e) => {
                     out.notes
@@ -6958,6 +7045,11 @@ pub struct VenueCapabilityDto {
     pub live_ready: bool,
     pub submission_ready: bool,
     pub strategy_entry_ready: bool,
+    /// Whether `fetch_order` is wired for this venue — the adapter-level
+    /// primitive the reconciliation supervisor polls. Distinct from
+    /// `strategy_entry_ready`, which additionally requires two-leg
+    /// coordination guarantees that remain blocked.
+    pub order_polling_ready: bool,
 }
 
 pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<VenueCapabilityDto> {
@@ -6981,6 +7073,7 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
                 live_ready,
                 submission_ready,
                 strategy_entry_ready,
+                order_polling_ready: adapter.order_status_polling_implemented(),
             }
         })
         .collect()

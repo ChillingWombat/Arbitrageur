@@ -56,6 +56,14 @@ pub enum HlActionWire {
     },
 }
 
+fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
+    match v? {
+        serde_json::Value::String(s) => Decimal::from_str(s).ok(),
+        serde_json::Value::Number(n) => Decimal::from_str(&n.to_string()).ok(),
+        _ => None,
+    }
+}
+
 fn keccak256(data: &[u8]) -> [u8; 32] {
     let mut hasher = Keccak256::new();
     hasher.update(data);
@@ -926,6 +934,158 @@ impl ExchangeAdapter for HyperliquidAdapter {
         Ok(())
     }
 
+    /// Poll authoritative order state via `orderStatus` + `userFills`.
+    /// `orderStatus` proves the terminal state and residual size; `userFills`
+    /// supplies the volume-weighted price and fee. When fills fall outside
+    /// the venue's recent-fill window the average price comes back `None` —
+    /// never fabricated.
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        _client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        use arbitrageur_core::types::OrderStatus;
+        let user = {
+            let guard = self.wallet_address.read();
+            guard
+                .as_deref()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(ToString::to_string)
+        }
+        .ok_or_else(|| anyhow::anyhow!("Hyperliquid order fetch requires a wallet address"))?;
+        let oid = order_id.trim().parse::<u64>().map_err(|e| {
+            anyhow::anyhow!("Invalid Hyperliquid order_id '{order_id}': must be integer oid: {e}")
+        })?;
+        let coin = perp_coin(symbol)?;
+
+        let v = self
+            .post_info(json!({"type": "orderStatus", "user": user, "oid": oid}))
+            .await?;
+        match v.get("status").and_then(|s| s.as_str()) {
+            Some("order") => {}
+            Some("unknownOid") => {
+                anyhow::bail!(
+                    "Hyperliquid orderStatus reports unknown oid {oid}; order state unresolvable"
+                )
+            }
+            _ => anyhow::bail!("Hyperliquid orderStatus malformed response: {v}"),
+        }
+        let inner = v
+            .get("order")
+            .and_then(|o| o.get("order"))
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing order detail: {v}"))?;
+        let returned_oid = inner
+            .get("oid")
+            .and_then(|o| o.as_u64())
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing oid: {v}"))?;
+        if returned_oid != oid {
+            anyhow::bail!(
+                "Hyperliquid orderStatus returned oid {returned_oid} != queried {oid}: {v}"
+            );
+        }
+        let returned_coin = inner
+            .get("coin")
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing coin: {v}"))?;
+        if !returned_coin.eq_ignore_ascii_case(&coin) {
+            anyhow::bail!(
+                "Hyperliquid orderStatus coin '{returned_coin}' != expected '{coin}': {v}"
+            );
+        }
+        let orig_sz = dec_from_json(inner.get("origSz"))
+            .filter(|q| *q > dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing origSz: {v}"))?;
+        let remaining_sz = dec_from_json(inner.get("sz"))
+            .filter(|q| *q >= dec!(0))
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing sz: {v}"))?;
+        if remaining_sz > orig_sz {
+            anyhow::bail!(
+                "Hyperliquid orderStatus sz {remaining_sz} exceeds origSz {orig_sz}: {v}"
+            );
+        }
+        let filled_qty = orig_sz - remaining_sz;
+        let raw_status = v
+            .get("order")
+            .and_then(|o| o.get("status"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing status: {v}"))?;
+        let status = match raw_status {
+            "open" if filled_qty > dec!(0) => OrderStatus::PartiallyFilled,
+            "open" => OrderStatus::New,
+            "filled" if filled_qty == orig_sz => OrderStatus::Filled,
+            "filled" => anyhow::bail!(
+                "Hyperliquid orderStatus 'filled' has inconsistent sz {remaining_sz}/{orig_sz}: {v}"
+            ),
+            "canceled"
+            | "marginCanceled"
+            | "delistedCanceled"
+            | "liquidatedCanceled"
+            | "expired"
+            | "selfTradeCanceled"
+            | "siblingFilledCanceled"
+            | "triggered"
+            | "scheduledCancel" => {
+                if filled_qty > dec!(0) && filled_qty < orig_sz {
+                    OrderStatus::PartiallyFilled
+                } else {
+                    OrderStatus::Cancelled
+                }
+            }
+            "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
+            other => anyhow::bail!("Hyperliquid orderStatus unknown status '{other}': {v}"),
+        };
+
+        // Best-effort fill detail: aggregate userFills for this oid to get a
+        // true vwap + fee. Rows are venue-validated on coin and oid.
+        let fills_v = self
+            .post_info(json!({"type": "userFills", "user": user}))
+            .await
+            .unwrap_or_else(|_| json!({"fills": []}));
+        let mut fqty = dec!(0);
+        let mut fnotional = dec!(0);
+        let mut ffee = dec!(0);
+        if let Some(rows) = fills_v.as_array() {
+            for f in rows {
+                let fid = f.get("oid").and_then(|o| o.as_u64());
+                if fid != Some(oid) {
+                    continue;
+                }
+                if f.get("coin").and_then(|s| s.as_str()) != Some(returned_coin) {
+                    continue;
+                }
+                let sz = dec_from_json(f.get("sz")).unwrap_or_default();
+                let px = dec_from_json(f.get("px")).unwrap_or_default();
+                if sz > dec!(0) && px > dec!(0) {
+                    fqty += sz;
+                    fnotional += sz * px;
+                }
+                ffee += dec_from_json(f.get("fee")).unwrap_or_default().abs();
+            }
+        }
+        let avg_px = if fqty > dec!(0) {
+            Some(fnotional / fqty)
+        } else {
+            None
+        };
+        Ok(OrderResponse {
+            order_id: order_id.to_string(),
+            client_order_id: String::new(),
+            venue: VenueId::new("hyperliquid"),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: orig_sz,
+            filled_qty,
+            remaining_qty: remaining_sz,
+            avg_fill_price: avg_px,
+            fee: ffee,
+            fee_currency: "USDC".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
     async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
         anyhow::bail!(
             "Leverage updates are not implemented for venue {}",
@@ -934,6 +1094,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
         true
     }
 

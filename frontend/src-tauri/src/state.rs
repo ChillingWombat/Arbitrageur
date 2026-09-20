@@ -1027,6 +1027,9 @@ pub struct AppEngineState {
     pub virtual_ledger: RwLock<arbitrageur_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
+    /// Serializes reconciliation passes so the periodic supervisor and any
+    /// manual trigger never run overlapping venue polls.
+    pub reconcile_lock: tokio::sync::Mutex<()>,
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
@@ -1430,6 +1433,7 @@ impl AppEngineState {
             virtual_ledger,
             is_paused: RwLock::new(false),
             execution_lock: tokio::sync::Mutex::new(()),
+            reconcile_lock: tokio::sync::Mutex::new(()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
             sample_prune_at: Mutex::new(0),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),

@@ -1281,7 +1281,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Strategy entries remain disabled until terminal two-leg fill reconciliation, cancellation recovery, and restart reconciliation are implemented. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries remain disabled until automatic residual-exposure compensation, cancellation retry recovery, and venue canary validation are in place. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1852,7 +1852,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <span>REAL CAPITAL AT RISK</span>
             </p>
             <p className="text-slate-700 leading-normal font-sans text-xs">
-              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. New live strategy entries remain disabled until terminal fill and restart reconciliation are implemented.
+              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. Open orders are polled for authoritative fill state at startup and every few seconds. New live strategy entries remain disabled until residual-exposure auto-compensation and cancellation retry recovery are implemented.
             </p>
           </div>
 

@@ -5,7 +5,7 @@
 
 This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, the controls designed for them, and an operational runbook.
 
-> **Current capability boundary:** the controls below describe the engineered/paper path and the safety architecture. New live strategy entries are disabled until terminal fill/cancel/expiry and restart reconciliation exist. Do not interpret this runbook as proof that live trading, automatic unwinds, or remote signing are currently enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
+> **Current capability boundary:** the controls below describe the engineered/paper path and the safety architecture. Working orders are reconciled to terminal fill/cancel/expiry by the startup+5s supervisor and recovered after restart, but automated residual-leg resolution and cancel retry are not implemented, so new live strategy entries remain disabled. Do not interpret this runbook as proof that live trading, automatic unwinds, or remote signing are currently enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
 
 ---
 

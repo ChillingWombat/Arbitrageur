@@ -7,6 +7,7 @@ mod equity_attribution;
 mod external_positions;
 mod feed;
 mod monitor;
+mod reconciliation;
 mod seasonality;
 mod state;
 mod state_store;
@@ -77,6 +78,12 @@ fn main() {
             }
         });
     }
+
+    // Spawn the live-order reconciliation supervisor. Runs an immediate
+    // startup pass (restart recovery for orders accepted before shutdown),
+    // then polls every 5s until each persisted working order reaches a
+    // terminal venue state or escalates to `unresolved` on deadline.
+    reconciliation::spawn_supervisor(engine_state.clone());
 
     // Spawn the WebSocket-first orderbook feed supervisors. REST polling
     // stays as the cold-start/stale fallback; dead WS lanes go stale.

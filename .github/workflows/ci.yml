@@ -74,6 +74,21 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=high
 
+  signer-provenance:
+    name: Lighter signer functional provenance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Go toolchain
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.6"
+
+      - name: Verify vendored signer against pinned upstream source
+        run: bash crates/arbitrageur-exchanges/native/lighter/verify/verify_provenance.sh
+
   supply-chain:
     name: Rust advisories and secret scan
     runs-on: ubuntu-latest

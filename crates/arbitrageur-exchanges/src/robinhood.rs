@@ -116,8 +116,23 @@ impl ExchangeAdapter for RobinhoodAdapter {
         self.inner.supports_live_execution()
     }
 
+    async fn fetch_order(
+        &self,
+        symbol: &str,
+        order_id: &str,
+        client_order_id: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        self.inner
+            .fetch_order(symbol, order_id, client_order_id)
+            .await
+    }
+
     fn live_order_submission_implemented(&self) -> bool {
         self.inner.live_order_submission_implemented()
+    }
+
+    fn order_status_polling_implemented(&self) -> bool {
+        self.inner.order_status_polling_implemented()
     }
 
     fn has_live_credentials(&self) -> bool {

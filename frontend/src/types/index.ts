@@ -29,6 +29,8 @@ export interface VenueCapabilityDto {
   liveReady: boolean;
   submissionReady: boolean;
   strategyEntryReady: boolean;
+  /** Adapter-level order-status polling is wired (reconciler primitive). */
+  orderPollingReady: boolean;
 }
 
 export interface VenueVolumesDto {
