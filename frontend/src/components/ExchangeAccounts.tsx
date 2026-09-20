@@ -610,16 +610,16 @@ const PopdexAgentToolkit: React.FC<{
 
         <div className={stepCard}>
           <div className="text-xs font-mono font-bold text-slate-800">3 · Approve in your own wallet</div>
-          <p className="text-[10px] font-sans text-slate-400">Builds the official <span className="font-mono">approveAgent</span> call. Sign it with the MAIN key in MetaMask/Rabby — never paste the main key here.</p>
+          <p className="text-[10px] font-sans text-slate-400">The signer page can generate the agent key too — or build the approval here and sign it with the MAIN key in MetaMask/Rabby. Never paste the main key here.</p>
           <div className="flex flex-wrap gap-2">
             <button type="button" disabled={busy !== null || !main || !agentAddr} onClick={() => void run("build", async () => {
               setApprove(await api.buildPopdexApproveTx(main.trim(), agentAddr, network));
             })} className={btnAccent}>
               <ShieldCheck className="w-3.5 h-3.5" /> {busy === "build" ? "Building…" : "Build approval"}
             </button>
-            <button type="button" disabled={busy !== null || !main || !agentAddr} onClick={() => void run("open", async () => {
+            <button type="button" disabled={busy !== null || !main} onClick={() => void run("open", async () => {
               setSignerPath(await api.openPopdexSignerPage(main.trim(), agentAddr, network));
-            })} className={btnGhost} title="Opens a locally-generated signer page in your browser; your wallet extension signs there">
+            })} className={btnGhost} title="Opens a locally-generated page: generate the agent key there if needed, then sign with your wallet">
               <ExternalLink className="w-3.5 h-3.5" /> Open wallet signer
             </button>
           </div>

@@ -9905,6 +9905,39 @@ pub(crate) fn get_session_profile_impl(
 mod tests {
     use super::*;
 
+    #[test]
+    fn signer_page_renders_complete_flow() {
+        use arbitrageur_exchanges::popdex::PopDexNetwork;
+        let main = "0x1111111111111111111111111111111111111111";
+        let agent = "0x2222222222222222222222222222222222222222";
+        let html = render_popdex_signer_page(main, agent, PopDexNetwork::Testnet).unwrap();
+        // Flow elements present.
+        for marker in [
+            "ethers",
+            "approveAgent",
+            "createRandom",
+            "wallet_switchEthereumChain",
+            "34952",
+            "testnet-app.popdex.xyz",
+            main,
+            agent,
+        ] {
+            assert!(html.contains(marker), "signer page missing {marker}");
+        }
+        // No unfilled placeholders; the page never asks for the MAIN key —
+        // no private-key input exists, only the generated agent key display.
+        assert!(!html.contains("{main_js}"));
+        assert!(!html.contains("MAIN_PRIVATE_KEY"));
+        assert!(!html.contains("type=\"password\""));
+        // Pre-filled agent may be blank (generated on-page instead).
+        let blank = render_popdex_signer_page(main, "", PopDexNetwork::Mainnet).unwrap();
+        assert!(blank.contains("2184"));
+        // Bad inputs fail closed before any file is written.
+        assert!(render_popdex_signer_page("", agent, PopDexNetwork::Mainnet).is_err());
+        assert!(render_popdex_signer_page(main, "nope", PopDexNetwork::Mainnet).is_err());
+        assert!(render_popdex_signer_page("nope", agent, PopDexNetwork::Mainnet).is_err());
+    }
+
     fn setup_test_state_with_venues() -> AppEngineState {
         let state = AppEngineState::new();
         {
@@ -16993,35 +17026,42 @@ pub async fn check_popdex_agent(
     })
 }
 
-/// Write a self-contained wallet-signer page (pre-filled approveAgent call)
-/// to the OS temp dir and open it in the system browser, where the user's
-/// wallet extension/app signs with the MAIN key. Returns the file path.
-#[tauri::command]
-pub async fn open_popdex_signer_page(
-    main: String,
-    agent: String,
-    network: String,
+/// Render the self-contained wallet-signer page (pure, unit-tested).
+fn render_popdex_signer_page(
+    main: &str,
+    agent: &str,
+    net: arbitrageur_exchanges::popdex::PopDexNetwork,
 ) -> Result<String, String> {
-    use arbitrageur_exchanges::popdex::{
-        build_approve_agent_calldata, PopDexNetwork,
-    };
-    let net = popdex_toolkit_network(&network)?;
-    let (rpc_url, chain_id, explorer, app_host) = match net {
+    use arbitrageur_exchanges::popdex::PopDexNetwork;
+    let (rpc_url, chain_id, explorer) = match net {
         PopDexNetwork::Mainnet => (
             arbitrageur_exchanges::popdex::POPDEX_MAINNET_RPC,
             arbitrageur_exchanges::popdex::POPDEX_MAINNET_CHAIN_ID,
             "https://app.popdex.xyz/explorer",
-            "https://app.popdex.xyz",
         ),
         PopDexNetwork::Testnet => (
             arbitrageur_exchanges::popdex::POPDEX_TESTNET_RPC,
             arbitrageur_exchanges::popdex::POPDEX_TESTNET_CHAIN_ID,
             "https://testnet-app.popdex.xyz/explorer",
-            "https://testnet-app.popdex.xyz",
         ),
     };
-    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
-    let data = build_approve_agent_calldata(&agent, &main, now_ms).map_err(|e| e.to_string())?;
+    // Validate the main address now; the agent may be blank (generated on-page).
+    // A bad agent address is rejected here too when one is supplied.
+    if main.trim().is_empty() {
+        return Err("main account address is required".to_string());
+    }
+    {
+        use arbitrageur_exchanges::popdex::build_approve_agent_calldata;
+        let agent_probe = agent.trim();
+        let probe = if agent_probe.is_empty() {
+            "0x0000000000000000000000000000000000000000".to_string()
+        } else {
+            agent_probe.to_string()
+        };
+        let _validated =
+            build_approve_agent_calldata(&probe, main.trim(), 1_700_000_000_000u64)
+                .map_err(|e| e.to_string())?;
+    }
     let to = arbitrageur_exchanges::popdex::POPDEX_ACCOUNT_PRECOMPILE;
     // JSON-escape every injected value so the page cannot break out.
     let js = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string());
@@ -17029,26 +17069,65 @@ pub async fn open_popdex_signer_page(
         r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PopDEX Agent Approval (local signer page)</title>
+<title>PopDEX Agent Setup (local signer page)</title>
 <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
-<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#1e293b}}code{{background:#f1f5f9;padding:2px 6px;border-radius:6px;word-break:break-all}}.card{{border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:12px 0}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer}}button:disabled{{opacity:.5}}.warn{{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 14px;font-size:13px}}</style>
+<style>body{{font-family:system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 16px;color:#1e293b}}code{{background:#f1f5f9;padding:2px 6px;border-radius:6px;word-break:break-all}}input{{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;font-family:monospace;font-size:12px}}.card{{border:1px solid #e2e8f0;border-radius:12px;padding:16px;margin:12px 0}}button{{background:#2563eb;color:#fff;border:0;border-radius:8px;padding:10px 18px;font-weight:700;cursor:pointer;margin:4px 8px 4px 0}}button:disabled{{opacity:.5}}button.ghost{{background:#f1f5f9;color:#334155}}.warn{{background:#fef9c3;border:1px solid #fde047;border-radius:8px;padding:10px 14px;font-size:13px}}.ok{{background:#dcfce7;border:1px solid #86efac;border-radius:8px;padding:10px 14px;font-size:13px}}.step{{font-weight:700;margin:0 0 4px}}.keybox{{background:#0f172a;color:#e2e8f0;border-radius:8px;padding:10px 12px;word-break:break-all;font-family:monospace;font-size:12px}}</style>
 </head><body>
-<h2>PopDEX Agent Approval</h2>
-<p class="warn"><b>Check before signing:</b> this page was generated locally by Arbitrageur. It only ever proposes the official <code>approveAgent</code> call from the <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a> (Step 4). Your main key never leaves your wallet.</p>
-<div class="card"><div>Main (delegator): <code id="main"></code></div>
-<div>Agent: <code id="agent"></code></div>
-<div>Contract: <code id="to"></code></div>
-<div>Chain: <code id="chain"></code> · RPC: <code id="rpc"></code></div></div>
-<button id="go">1 · Connect wallet &amp; sign approval</button>
-<p id="out"></p>
-<p>After the transaction confirms, return to Arbitrageur → Agent Setup Toolkit → <b>Verify</b>, then Save Account.</p>
+<h2>PopDEX Agent Setup</h2>
+<p class="warn"><b>Check before signing:</b> this page was generated locally by Arbitrageur. It only ever proposes the official <code>approveAgent</code> call from the <a href="https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api">PopDEX API guide</a> (Step 4). Your main key never leaves your wallet. Main account: <code id="main"></code></p>
+
+<div class="card"><p class="step">1 · Generate the agent key (here, in your browser)</p>
+<p style="font-size:13px">Fresh randomness, never reused — a revoked address must never be re-approved (replay risk).</p>
+<button id="gen">Generate new agent key</button>
+<div id="agentBox" style="display:none">
+<div>Agent address: <code id="agentAddr"></code> <button class="ghost" id="copyAddr">Copy</button></div>
+<div>Agent private key (shown once — save it now):</div>
+<div class="keybox" id="agentKey"></div>
+<button class="ghost" id="copyKey">Copy private key</button>
+</div>
+<p style="font-size:13px">Or paste an existing fresh agent address: <input id="agentIn" placeholder="0x…"></p>
+</div>
+
+<div class="card"><p class="step">2 · Approve it with your main wallet</p>
+<div style="font-size:13px">Contract: <code id="to"></code> · Chain: <code id="chain"></code></div>
+<button id="go">Connect wallet &amp; sign approval</button>
+<p id="out" style="font-size:13px"></p>
+</div>
+
+<div class="card"><p class="step">3 · Finish in Arbitrageur</p>
+<p style="font-size:13px">Copy the agent private key into the PopDEX account card → <b>Save Account</b> → Agent Setup Toolkit → <b>Verify</b> → enable.</p></div>
+
 <script>
-const MAIN={main_js}, AGENT={agent_js}, TO={to_js}, DATA={data_js};
-const RPC={rpc_js}, CHAIN={chain_id}, EXPLORER={explorer_js}, APP={app_js};
-main.textContent=MAIN; agent.textContent=AGENT; to.textContent=TO; chain.textContent=CHAIN; rpc.textContent=RPC;
+const MAIN={main_js}, PREFILL_AGENT={agent_js}, TO={to_js};
+const RPC={rpc_js}, CHAIN={chain_id}, EXPLORER={explorer_js};
+const AGENT_ABI = ["function approveAgent(address agent, address delegator, bytes32 name, uint64 expiresAt, uint64 initialNonce, bool isGlobal) external"];
+let agentAddr = PREFILL_AGENT || "", agentKey = "";
+main.textContent=MAIN; to.textContent=TO; chain.textContent=CHAIN+" · "+RPC; agentIn.value=PREFILL_AGENT || "";
+function copyText(txt, done) {{
+  (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject())
+    .then(()=>{{done.textContent="Copied ✓";setTimeout(()=>done.textContent=done.dataset.label,1500);}})
+    .catch(()=>{{done.textContent="Select & copy manually";}});
+}}
+gen.onclick = async () => {{
+  try {{
+    const w = ethers.Wallet.createRandom();
+    agentAddr = w.address; agentKey = w.privateKey;
+    agentAddrEl().textContent = agentAddr; agentKeyEl().textContent = agentKey;
+    agentIn.value = agentAddr; agentBox.style.display = "block";
+    out.textContent = "";
+  }} catch(e) {{ out.textContent = "Generation failed (ethers could not load — check connection): " + e; }}
+}};
+function agentAddrEl(){{return document.getElementById("agentAddr");}}
+function agentKeyEl(){{return document.getElementById("agentKey");}}
+copyAddr.onclick = () => copyText(agentAddr, copyAddr);
+copyAddr.dataset.label = "Copy"; copyKey.dataset.label = "Copy private key";
+copyKey.onclick = () => copyText(agentKey, copyKey);
+agentIn.oninput = () => {{ agentAddr = agentIn.value.trim(); }};
 go.onclick = async () => {{
   out.textContent = "";
   try {{
+    agentAddr = (agentIn.value || agentAddr).trim();
+    if (!/^0x[0-9a-fA-F]{{40}}$/.test(agentAddr)) {{ out.textContent = "Generate or paste a valid agent address first."; return; }}
     if (!window.ethereum) {{ out.textContent = "No wallet found in this browser — install MetaMask/Rabby (or open this file in a wallet browser) and retry."; return; }}
     const provider = new ethers.BrowserProvider(window.ethereum);
     await provider.send("eth_requestAccounts", []);
@@ -17061,23 +17140,38 @@ go.onclick = async () => {{
     }}
     const signer = await provider.getSigner();
     if ((await signer.getAddress()).toLowerCase() !== MAIN.toLowerCase()) {{ out.textContent = "Connected wallet is not the main account " + MAIN; return; }}
+    const iface = new ethers.Interface(AGENT_ABI);
+    const data = iface.encodeFunctionData("approveAgent", [agentAddr, MAIN, ethers.ZeroHash, 0, Date.now(), false]);
     go.disabled = true; out.textContent = "Sending approveAgent… confirm in your wallet.";
-    const tx = await signer.sendTransaction({{to: TO, data: DATA}});
+    const tx = await signer.sendTransaction({{to: TO, data}});
     out.textContent = "Submitted: " + tx.hash + " — waiting for confirmation…";
     await tx.wait();
-    out.textContent = "Approved ✓ (" + tx.hash + "). Return to Arbitrageur and press Verify.";
+    out.innerHTML = "Approved ✓ (" + tx.hash + "). Copy the agent private key above into Arbitrageur, then Verify + Save.";
   }} catch(e) {{ go.disabled = false; out.textContent = "Failed: " + (e.info?.error?.message || e.message || e); }}
 }};
 </script></body></html>"#,
         main_js = js(main.trim()),
         agent_js = js(agent.trim()),
         to_js = js(to),
-        data_js = js(&data),
         rpc_js = js(rpc_url),
         chain_id = chain_id,
         explorer_js = js(explorer),
-        app_js = js(app_host),
     );
+    Ok(html)
+}
+
+/// Write a self-contained wallet-signer page (pre-filled approveAgent call)
+/// to the OS temp dir and open it in the system browser, where the user's
+/// wallet extension/app signs with the MAIN key. Returns the file path.
+#[tauri::command]
+pub async fn open_popdex_signer_page(
+    main: String,
+    agent: String,
+    network: String,
+) -> Result<String, String> {
+    let net = popdex_toolkit_network(&network)?;
+    // render_* validates main/agent (agent may be blank — generated on-page).
+    let html = render_popdex_signer_page(main.trim(), agent.trim(), net)?;
     let mut path = std::env::temp_dir();
     path.push(format!("arbitrageur-popdex-approve-{}.html", chrono::Utc::now().timestamp_millis()));
     std::fs::write(&path, html).map_err(|e| format!("cannot write signer page: {e}"))?;
