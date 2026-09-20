@@ -1087,6 +1087,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [toolkitOpen, setToolkitOpen] = useState(false);
 
   const handleCreate = async () => {
     setBusy(true);
@@ -1199,7 +1200,17 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
           </div>
         )}
 
-        <div className="flex justify-end pt-1">
+        <div className="flex justify-end pt-1 gap-2">
+          {venue.toLowerCase() === "popdex" && (
+            <button
+              type="button"
+              onClick={() => setToolkitOpen(true)}
+              className="px-3 py-2 rounded-lg text-xs font-mono font-bold bg-accent-dim border border-accent-line text-accent hover:brightness-95 transition cursor-pointer flex items-center gap-1.5"
+              title="Generate an agent key, approve it in your own wallet, verify on-chain"
+            >
+              <KeyRound className="w-3.5 h-3.5" /> Agent Setup Toolkit — generate key & approve
+            </button>
+          )}
           <button
             type="button"
             disabled={busy}
@@ -1209,6 +1220,13 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
             <span>{busy ? "Saving..." : "Save Account"}</span>
           </button>
         </div>
+        {toolkitOpen && venue.toLowerCase() === "popdex" && (
+          <PopdexAgentToolkit
+            initialMain={(drafts["walletAddress"] ?? "").trim()}
+            onUseKey={(k) => setDrafts((d) => ({ ...d, privateKey: k }))}
+            onClose={() => setToolkitOpen(false)}
+          />
+        )}
       </div>
     </div>
   );
