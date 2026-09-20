@@ -628,8 +628,8 @@ Independent post-remediation verification produced:
 | `git diff --check` | PASS | No whitespace errors |
 | `cargo check --workspace` | PASS | Clean |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | PASS | All targets checked with warnings denied |
-| `cargo test --workspace --locked` | PASS | 718 tests total: desktop 334, exchanges 154, math 102+52+16, execution 40, others 20 |
-| `cargo test -p arbitrageur-desktop` | PASS | 334/334 tests |
+| `cargo test --workspace --locked` | PASS | 728 tests total: desktop 354, exchanges 155, math 102+52+16, execution 40, others 20 |
+| `cargo test -p arbitrageur-desktop` | PASS | 354/354 tests |
 | `cargo test -p arbitrageur-exchanges` | PASS | 154/154 tests |
 | `npm test` | PASS | 210 frontend tests |
 | `npm run build` | PASS | TypeScript typecheck + Vite production build |

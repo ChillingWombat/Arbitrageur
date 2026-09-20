@@ -511,6 +511,11 @@ fn residual_leg_quantities(
 /// reconciled like every other live order. Dedup: skips while any child is
 /// still open; bounded by `MAX_RESIDUAL_ATTEMPTS` total children.
 async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
+    // Serialize against the manual flatten path: the dedup check and the
+    // child-signal insert must be atomic with any other dispatcher touching
+    // this family, or a manual flatten mid-pass could double-submit the
+    // residual.
+    let _exec_guard = state.execution_lock.lock().await;
     let exec = match state.state_store.get_signal(signal_id) {
         Ok(Some(e)) => e,
         _ => return,

@@ -1666,8 +1666,27 @@ overhaul pass committed as `23d4aed`).
   dead feature). Migration v24 rebuilds the table with the full allowed
   set; a replay-migration test proves row preservation + a regression
   guard asserts every `ALLOWED_STRATEGY_IDS` value inserts.
-- **Verification:** 345 desktop + 155 exchange tests, full workspace
+- **End-to-end reconciler coverage:** a `#[cfg(test)]` adapter registry on
+  `AppEngineState` lets tests inject scripted venues; `MockVenue` scripts
+  `fetch_order`/`place_order`/`cancel_order`. e2e passes now verify
+  filled→balanced, fill+empty→imbalanced, poll-error→preserve→escalate,
+  stale-working→bounded cancel (budget via kv), external close→closed,
+  identity-mismatch→never applies, and the full residual auto-flatten loop
+  (child persisted with order id → reduce-only order → child closed →
+  parent closed) plus flag-off = no dispatch.
+- **Race fix:** `dispatch_residual_flatten` now holds `execution_lock`
+  across the dedup check + child insert so a manual flatten can't
+  double-submit a residual mid-pass.
+- **Operator cancel:** `cancel_venue_order` command (risk-reducing only,
+  vault-gated in live mode) + per-leg "cancel order" action on the
+  attention strip; `SignalLegDto` gained `symbol` + `clientOrderId`.
+- **Venue canonicalization:** `normalize_venue` now maps aliases to
+  canonical ids at write time — a leg persisted as 'hl' would have failed
+  the reconciler's identity check forever.
+- **Verification:** 354 desktop + 155 exchange tests, full workspace
   clippy -D warnings, tsc, frontend tests (210) and build all green.
 - Commits: `75b76e5` (Decibel scan + reconcile command), `0a47f8c`
-  (derivation matrix tests), `3ec57aa` (attention strip), plus the v24
-  migration fix.
+  (derivation matrix tests), `3ec57aa` (attention strip), `200b0d8`
+  (v24 'external' CHECK fix), `3665957`/`9981d8c` (e2e reconciler +
+  residual flatten coverage), `cf0fb3a` (venue canonicalization),
+  `20b6622` (logged persistence failures), `c297d64` (operator cancel).
