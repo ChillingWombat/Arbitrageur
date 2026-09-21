@@ -2114,3 +2114,23 @@ clippy+fmt clean, app restarted on the new binary.
 
 - `QuoteObservation.top_depth_usd` is fed a constant 1.0 — `spread_samples` does not persist depth, so VWMA degenerates to equal-weighting. If depth weighting ever matters, extend the sample schema.
 - Series granularity = `spread_samples` batch cadence (per poll tick), not fixed-frequency bars; the window sizes are in observations.
+
+## Fill-feedback loop: measured slippage into AutoTune friction (schema v27)
+
+### What shipped
+
+- `signal_legs.intended_price` (v27) persists the dispatch-time quote each leg was priced against. Populated only where a trustworthy book exists at dispatch: spread entries take `buy_ref`/`sell_ref`, funding entries take the long ask / short bid. Flatten children, external-position closures, reconciliation residual legs, triangle legs, and all pre-v27 rows carry NULL — a missing quote is honest absence, never backfilled from the fill price.
+- `StateStore::leg_slippage_samples_bps(venue, limit)` returns direction-aware realized slippage per leg (longs: `fill − intended`; shorts: `intended − fill`; bps of intended; positive = adverse) for legs carrying both prices and a nonzero fill.
+- AutoTune (`get_autotune_recommendation_impl`) sums each selected venue's qty-weighted median slippage (≥5 samples required per venue, ≤200 most recent legs) into `friction_fit_bps`/`friction_val_bps` alongside the static fee estimate — the recommender now prices measured execution cost. When no venue clears the floor the term is exactly 0 and `readiness.measured_slippage_bps` reports `None` (never fabricated).
+- Autotune preview modal evidence line appends `slippage ±X.Xbps measured` when present.
+
+### Verification
+
+- 367/367 desktop tests incl. new `test_v27_intended_price_roundtrip`, `test_v27_slippage_direction_aware_and_missing_data`, `test_migration_v27_intended_price_defaults_null`, `test_autotune_measured_slippage_feeds_friction`; 210/210 frontend; tsc + clippy(-D warnings) + fmt clean.
+
+### Pickup notes
+
+- `intended_price` semantics = the reference quote at dispatch, not the limit price sent — for marketable-limit/taker orders it equals the touched level; if a venue ever prices orders off a different basis, revisit per-path.
+- Slippage samples are per-venue (not per-pair): a pair whose second venue has <5 fills contributes only the measured side — strictly additive information over the prior zero-slippage assumption.
+- Median is used (robust to outlier fills); a mean would overreact to wicks.
+- Signed value: negative measured slippage (fills beating quote) reduces friction below fee-sum — real price improvement is allowed to help the tune.

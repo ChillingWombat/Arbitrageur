@@ -484,6 +484,10 @@ function normalizeAutotuneReadiness(r: any): AutotuneReadinessDto {
     total_pair_observations: Math.max(0, Math.floor(Number(r?.total_pair_observations) || 0)),
     min_observations_required: minReq,
     obs_floor_met: r?.obs_floor_met === true,
+    measured_slippage_bps: (() => {
+      const v = Number(r?.measured_slippage_bps ?? r?.measuredSlippageBps);
+      return Number.isFinite(v) ? v : null;
+    })(),
     blockers,
   };
 }

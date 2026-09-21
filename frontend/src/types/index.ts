@@ -365,6 +365,10 @@ export interface AutotuneReadinessDto {
   total_pair_observations: number;
   min_observations_required: number;
   obs_floor_met: boolean;
+  /** Qty-weighted median realized slippage (bps) summed over the selected
+   * venues' recent filled legs — null until ≥5 legs carry both intended
+   * and fill prices. Negative means fills beat the dispatch quote. */
+  measured_slippage_bps: number | null;
   blockers: string[];
 }
 
