@@ -6,12 +6,14 @@
 //! `crate::commands` re-exports below.
 
 use crate::commands::{
-    cached_venue_volumes, canonical_sliding_window, effective_venue_fee_bps,
-    get_strategy_params_impl, get_ticker_strategy_config_impl, save_strategy_params_impl,
-    save_ticker_strategy_config_impl, validate_market_symbol, BASELINE_RETENTION_MS,
+    cached_venue_volumes, effective_venue_fee_bps, validate_market_symbol, BASELINE_RETENTION_MS,
 };
 use crate::monitor::PAIR_ALIGN_GAP_MS;
 use crate::state::{AppEngineState, StrategyParamsDto, TickerStrategyConfigDto};
+use crate::strategy_config::{
+    canonical_sliding_window, get_strategy_params_impl, get_ticker_strategy_config_impl,
+    save_strategy_params_impl, save_ticker_strategy_config_impl,
+};
 use arbitrageur_math::autotune::{recommend, TuneHistory, TuneParams};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};

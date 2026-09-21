@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod accounts;
 mod attribution;
 mod auto_exec;
 mod autotune;
@@ -8,11 +9,14 @@ mod equity_attribution;
 mod external_positions;
 mod feed;
 mod monitor;
+mod monitor_ipc;
 mod num;
+mod performance;
 mod reconciliation;
 mod seasonality;
 mod state;
 mod state_store;
+mod strategy_config;
 mod strategy_filters;
 mod vault;
 mod ws_primary;
