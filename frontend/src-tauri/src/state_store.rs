@@ -3791,18 +3791,6 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             .optional()?)
     }
 
-    /// Drop every expected-equity baseline. Called on trading-mode
-    /// transitions: paper and live equity are different accounts sharing
-    /// this table by venue id, so a baseline seeded in one mode must never
-    /// be compared against the other mode's first read (it would record a
-    /// fake deposit/withdrawal event).
-    pub fn clear_equity_expectations(&self) -> anyhow::Result<()> {
-        self.conn
-            .lock()
-            .execute("DELETE FROM paper_equity_expectations", [])?;
-        Ok(())
-    }
-
     /// Persist (or refresh) one paper account's expected-equity baseline.
     pub fn set_equity_expectation(
         &self,

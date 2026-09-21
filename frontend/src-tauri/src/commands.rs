@@ -7336,7 +7336,6 @@ pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLo
 }
 
 pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool, String> {
-    let was_live = *state.is_live_mode.read();
     if enabled {
         let is_unlocked = state.vault.write().is_unlocked();
         if !is_unlocked {
@@ -7366,10 +7365,6 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
             s.trading_mode = "real".to_string();
         }
         let _ = state.state_store.kv_set("engine.trading_mode", "real");
-        if !was_live {
-            // Paper baselines must not survive into live equity tracking.
-            let _ = state.state_store.clear_equity_expectations();
-        }
         Ok(true)
     } else {
         *state.is_live_mode.write() = false;
@@ -7378,10 +7373,6 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
             s.trading_mode = "paper".to_string();
         }
         let _ = state.state_store.kv_set("engine.trading_mode", "paper");
-        if was_live {
-            // Symmetric: live baselines must not seed the paper tracker.
-            let _ = state.state_store.clear_equity_expectations();
-        }
         Ok(false)
     }
 }
@@ -11026,8 +11017,13 @@ pub async fn get_venue_balances_impl(
 
                     if equity_usd.is_finite() {
                         let now_ms = Utc::now().timestamp_millis();
+                        // Live equity tracks under `live-{venue}`: the
+                        // shared expectations table is keyed by bare venue
+                        // id on the paper path, and a paper baseline must
+                        // never be compared against real account equity
+                        // (it would log a fake deposit/withdrawal event).
                         match state.state_store.check_account_equity(
-                            vid,
+                            &format!("live-{vid}"),
                             equity_usd,
                             &position_signature(&account.positions),
                             now_ms,
