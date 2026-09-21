@@ -1690,3 +1690,47 @@ overhaul pass committed as `23d4aed`).
   (v24 'external' CHECK fix), `3665957`/`9981d8c` (e2e reconciler +
   residual flatten coverage), `cf0fb3a` (venue canonicalization),
   `20b6622` (logged persistence failures), `c297d64` (operator cancel).
+
+## 80. Session Handoff — 2026-09-20 (opt-in live entry gate + canary surface)
+
+- **Live strategy entries are now operator-gated rather than hard-blocked.**
+  New `EngineSettingsDto` fields `live_entry_enabled` (default false) and
+  `live_entry_max_notional_usd` (default 0 — refuses everything). The
+  spatial two-leg path replaces its blanket refusal with `live_entry_gate`
+  (opt-in flag + unlocked vault + per-venue `live_order_submission` /
+  `order_status_polling` / `has_live_credentials`) plus
+  `live_entry_notional_guard` after VWAP sizing — any leg whose qty × entry
+  VWAP exceeds the cap is REFUSED, never clamped. `strategy_entry_ready`
+  now additionally requires the opt-in flag.
+- **Scope honesty:** only the spatial path has real live dispatch —
+  triangle and funding still run paper simulators below their gates and now
+  refuse in live mode with an explicit "spatial-only" message.
+- **Canary trigger:** `execute_spatial_arbitrage` accepts
+  `canary_max_loss_bps` (0–50, live only): the profit-hurdle check relaxes
+  to `expected_net >= -loss` so a mechanics test can pay bounded
+  spread+fees. Canary signals carry a `CANARY:` note. Batch/radar paths
+  always pass `None`. A Safety-tab panel (visible only when live entries
+  are enabled in Live mode) submits one pair: symbol / buy venue / sell
+  venue / qty / accepted loss.
+- **`live_order_reconciliation_implemented`** now defaults to
+  `order_status_polling_implemented()` — the machinery (poll supervisor,
+  opt-in residual auto-flatten, bounded cancel retry) exists; the flag's
+  meaning is "adapter participates," not "venue-proven."
+- **Live `set_leverage` failures now log loudly** (were silently dropped) —
+  a rejected change means the order submits at existing leverage.
+- **Tests:** extended `test_live_trading_unlock_and_execution_capabilities`
+  — flag-off refusal (venue-independent), gate opens on opt-in with
+  credentialed venues, uncredentialed venue refuses, `strategy_entry_ready`
+  tracks the opt-in, and the notional guard refuses unset/over-cap while
+  passing under-cap legs.
+- **ZEC safety:** the entry path refuses any symbol with an existing
+  position on either venue (`acc.get_position` after live account fetch);
+  reconciliation and flatten machinery only ever touch engine-persisted
+  signal legs — account positions are never swept.
+- **Verification:** clippy -D warnings clean; 354 desktop + frontend 210
+  tests + tsc + vite build green.
+- **Files:** `frontend/src-tauri/src/{commands,state}.rs`,
+  `crates/arbitrageur-core/src/exchange.rs`,
+  `frontend/src/{components/EngineSettings.tsx,services/api.ts,types/index.ts}`,
+  `docs/{CAPABILITIES.md,RUNBOOK.md,PROJECT_REVIEW_CROSSCHECK_2026-09-20.md}`,
+  `SPEC.md`.

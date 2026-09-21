@@ -134,3 +134,32 @@ derives the signal status:
 Synthetic paper order ids (`sim-%`) are excluded from venue polling. An
 operator can force an immediate pass via **Reconcile Orders Now** on the
 Portfolio monitor (command `reconcile_orders_now`, returns a poll summary).
+
+### 2.4 Live entry canary procedure
+
+Live strategy entries are **opt-in**: off by default, bounded, and only on
+the spatial two-leg path (triangle and funding live dispatch is not built).
+
+To run one minimal real-money entry:
+
+1. Unlock the credential vault; set Trading Mode to **Live Trading**.
+2. Engine Settings → Safety: enable **Auto-flatten residual exposure**
+   (recommended so a mixed outcome self-heals) and **Enable live strategy
+   entries**; set **Live max notional per leg** just above both venues'
+   minimums (e.g. $15–25).
+3. Pick a symbol with **no open position on either venue** — the entry
+   refuses if `fetch_account` shows one. Keep existing positions untouched:
+   the system never sweeps account positions; it only manages signal legs
+   it created.
+4. In the canary panel (visible only when live entries are enabled in Live
+   mode): symbol, buy venue, sell venue, qty per leg, accepted loss bps
+   (≤50 — this pays the spread+fees to test mechanics). Run it.
+5. Watch: `signal_executions`/`signal_legs` rows (venue order ids must be
+   populated), the reconciliation supervisor (5s polls → `balanced`), the
+   venue accounts (two small positions), and `execution_log`.
+6. Close via the external-close / flatten path and confirm `closed` after
+   venue polling and a fresh account reread.
+
+Expected canary cost is the spread + taker fees on both legs — typically a
+few cents at minimal size. Any `imbalanced`/`unresolved` outcome blocks the
+ticker, appears on the radar attention strip, and is handled per §2.2.

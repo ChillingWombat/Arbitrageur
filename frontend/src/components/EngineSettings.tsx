@@ -126,6 +126,16 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
   const [autoResolveResidual, setAutoResolveResidual] = useState(false);
+  const [liveEntryEnabled, setLiveEntryEnabled] = useState(false);
+  const [liveEntryMaxNotional, setLiveEntryMaxNotional] = useState(0);
+  // Canary run state (Safety → live entries)
+  const [canarySymbol, setCanarySymbol] = useState("ETH-USDC");
+  const [canaryBuyVenue, setCanaryBuyVenue] = useState("hyperliquid");
+  const [canarySellVenue, setCanarySellVenue] = useState("lighter");
+  const [canaryQty, setCanaryQty] = useState(0.005);
+  const [canaryLossBps, setCanaryLossBps] = useState(25);
+  const [canaryRunning, setCanaryRunning] = useState(false);
+  const [canaryResult, setCanaryResult] = useState<string | null>(null);
   const [staleWarnSecs, setStaleWarnSecs] = useState(300);
   // Networking & VPS
   const [engineRpcPort, setEngineRpcPort] = useState(8787);
@@ -426,6 +436,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
         setMaxLeverage(s.max_leverage ?? 10);
         setAutoResolveResidual(s.auto_resolve_residual_exposure ?? false);
+        setLiveEntryEnabled(s.live_entry_enabled ?? false);
+        setLiveEntryMaxNotional(s.live_entry_max_notional_usd ?? 0);
         setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
@@ -577,6 +589,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
         max_leverage: Math.trunc(Number(maxLeverage)) || 0,
         auto_resolve_residual_exposure: autoResolveResidual,
+        live_entry_enabled: liveEntryEnabled,
+        live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
         balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
         spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
         spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
@@ -1284,7 +1298,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries remain disabled until automatic residual-exposure compensation, cancellation retry recovery, and venue canary validation are in place. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
+                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries are off by default and require the explicit canary opt-in in Safety with a per-leg notional cap. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1619,6 +1633,88 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 enabled (currently disabled pending venue canary evidence).
               </label>
             </div>
+
+            <div className="flex items-start gap-2.5 pt-1 border-t border-slate-200 mt-2">
+              <input type="checkbox" id="live-entry-enabled" disabled={loading}
+                checked={liveEntryEnabled}
+                onChange={(e) => setLiveEntryEnabled(e.target.checked)}
+                className="mt-0.5 accent-red-600" />
+              <label htmlFor="live-entry-enabled" className="text-xs text-slate-700 leading-snug">
+                <span className="font-bold text-red-700">Enable live strategy entries (canary).</span>{" "}
+                Permits REAL-money two-leg spatial entries while Trading Mode
+                is Live. Every leg is refused above the notional cap below —
+                caps are never clamped. Order polling, residual auto-flatten,
+                and cancel retry run continuously, but they are not yet
+                proven against real venues: a failed leg can leave one-sided
+                exposure you must close manually. Start with the smallest
+                size that satisfies both venues' minimums.
+              </label>
+            </div>
+            <div>
+              <label className="text-xs font-semibold text-slate-600">Live max notional per leg (USD)</label>
+              <input type="number" min="0" step="1" disabled={loading}
+                value={liveEntryMaxNotional}
+                onChange={(e) => setLiveEntryMaxNotional(Number(e.target.value))}
+                className="w-full mt-1 rounded border border-slate-300 px-2 py-1 text-sm" />
+              <p className="text-xs text-slate-500 mt-0.5">
+                Hard cap on each leg's qty × entry VWAP. 0 refuses every live
+                entry. For a canary set it just above both venues' minimum
+                notionals (e.g. 15–25).
+              </p>
+            </div>
+
+            {liveEntryEnabled && tradingMode === "real" && (
+              <div className="rounded border border-red-300 bg-red-50 p-2.5 space-y-2">
+                <p className="text-[11px] font-bold text-red-700 tracking-wide">
+                  LIVE CANARY — one minimal two-leg entry
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canarySymbol}
+                    onChange={(e) => setCanarySymbol(e.target.value)} placeholder="symbol e.g. ETH-USDC" />
+                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" type="number" step="any" min="0"
+                    value={canaryQty} onChange={(e) => setCanaryQty(Number(e.target.value))} placeholder="qty per leg" />
+                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canaryBuyVenue}
+                    onChange={(e) => setCanaryBuyVenue(e.target.value)} placeholder="buy venue" />
+                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canarySellVenue}
+                    onChange={(e) => setCanarySellVenue(e.target.value)} placeholder="sell venue" />
+                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" type="number" min="0" max="50"
+                    value={canaryLossBps} onChange={(e) => setCanaryLossBps(Number(e.target.value))} placeholder="max accepted loss bps" />
+                </div>
+                <p className="text-[11px] text-slate-600 leading-snug">
+                  Submits ONE IOC pair on real venues with the profit hurdle
+                  relaxed down to the accepted loss above (spread+fees are the
+                  test cost, ≤ 50 bps). All other checks still apply: notional
+                  cap, margin, depth, delta-neutrality, ticker blocking,
+                  reconciliation. Pick a symbol with NO open position — a leg
+                  fill may stay open and need a manual close.
+                </p>
+                <button
+                  disabled={canaryRunning || loading}
+                  onClick={async () => {
+                    setCanaryRunning(true);
+                    setCanaryResult(null);
+                    try {
+                      const r = await api.executeSpatialArbitrage(
+                        canarySymbol.trim(), canaryBuyVenue.trim(), canarySellVenue.trim(),
+                        canaryQty, undefined, undefined, undefined, 1, 1, undefined,
+                        canaryLossBps,
+                      );
+                      setCanaryResult(r.execution_success ? `FILLED: ${r.message}` : `REFUSED: ${r.message}`);
+                    } catch (e) {
+                      setCanaryResult(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
+                    } finally {
+                      setCanaryRunning(false);
+                    }
+                  }}
+                  className="w-full rounded bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1.5 transition disabled:opacity-50"
+                >
+                  {canaryRunning ? "Submitting real orders…" : "Run live canary entry"}
+                </button>
+                {canaryResult && (
+                  <p className="text-[11px] font-mono whitespace-pre-wrap bg-white rounded border border-slate-200 p-1.5 max-h-28 overflow-auto">{canaryResult}</p>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -1873,7 +1969,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <span>REAL CAPITAL AT RISK</span>
             </p>
             <p className="text-slate-700 leading-normal font-sans text-xs">
-              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. Open orders are polled for authoritative fill state at startup and every few seconds. New live strategy entries remain disabled until residual-exposure auto-compensation and cancellation retry recovery are implemented.
+              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. Open orders are polled for authoritative fill state at startup and every few seconds. New live strategy entries stay disabled unless the canary opt-in in Safety is enabled with a per-leg notional cap.
             </p>
           </div>
 

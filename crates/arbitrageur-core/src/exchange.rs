@@ -186,14 +186,15 @@ pub trait ExchangeAdapter: Send + Sync {
         false
     }
 
-    /// Whether live strategy entries are safe end to end. The reconciliation
-    /// supervisor provides terminal-state polling, restart recovery, and
-    /// residual-exposure blocking; what remains unimplemented is automated
-    /// resolution — flattening a residual leg after a mixed-terminal entry —
-    /// and cancel-failure retry. Until those exist, no adapter overrides
-    /// this and all live strategy entries stay blocked.
+    /// Whether the adapter participates in live order reconciliation. The
+    /// desktop supervisor provides the machinery — terminal-state polling,
+    /// restart recovery, residual-exposure blocking, opt-in residual
+    /// auto-resolution, and bounded cancel retry — so the per-adapter
+    /// requirement reduces to a working `fetch_order`. Implemented-but-not-
+    /// venue-proven: strategy entries additionally require the operator's
+    /// `live_entry_enabled` opt-in and notional cap.
     fn live_order_reconciliation_implemented(&self) -> bool {
-        false
+        self.order_status_polling_implemented()
     }
 
     /// Whether authenticated live trading credentials are loaded in memory for this adapter.

@@ -608,7 +608,8 @@ export const api = {
     baselineMeanSpreadBps?: number,
     positionStep?: number,
     maxUnits?: number,
-    nominalHurdleBps?: number
+    nominalHurdleBps?: number,
+    canaryMaxLossBps?: number
   ): Promise<SimStepResultDto> {
     return invokeDesktop<SimStepResultDto>("execute_spatial_arbitrage", {
       symbol,
@@ -621,6 +622,7 @@ export const api = {
       positionStep,
       maxUnits,
       nominalHurdleBps,
+      canaryMaxLossBps,
     });
   },
 

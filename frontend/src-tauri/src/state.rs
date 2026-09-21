@@ -466,6 +466,18 @@ pub struct EngineSettingsDto {
     /// always happen; auto-compensation is an explicit operator decision.
     #[serde(default)]
     pub auto_resolve_residual_exposure: bool,
+    /// Opt-in: allow live strategy entries on the spatial two-leg path.
+    /// Reconciliation machinery (poll supervisor, residual auto-resolution,
+    /// bounded cancel retry) is implemented but not yet venue-proven —
+    /// this flag is the explicit operator decision to accept that risk.
+    /// Off by default: live mode stays read + risk-reducing closes only.
+    #[serde(default)]
+    pub live_entry_enabled: bool,
+    /// Per-leg notional cap (USD) for live strategy entries. A leg whose
+    /// qty × entry VWAP exceeds this is refused, never clamped. 0 (the
+    /// default) refuses every live entry even when `live_entry_enabled`.
+    #[serde(default)]
+    pub live_entry_max_notional_usd: f64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -639,6 +651,8 @@ impl Default for EngineSettingsDto {
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
             max_leverage: default_max_leverage(),
             auto_resolve_residual_exposure: false,
+            live_entry_enabled: false,
+            live_entry_max_notional_usd: 0.0,
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,

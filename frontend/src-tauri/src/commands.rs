@@ -35,7 +35,64 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
-const LIVE_EXECUTION_DISABLED: &str = "Live strategy entry is disabled pending venue sandbox/canary evidence for the reconciliation supervisor (order polling, residual auto-resolution, cancel retry all implemented but unproven against real venues); switch to Paper Trading for strategy entries";
+/// Strategies whose live dispatch is built: spatial two-leg only. Triangle
+/// and funding legs still dispatch on paper simulators below their gates,
+/// so live mode keeps refusing there until a real dispatch exists.
+const LIVE_ENTRY_SPATIAL_ONLY: &str = "Live execution is currently implemented for the spatial two-leg path only; this strategy's live dispatch is not built. Use Paper Trading.";
+
+/// Live strategy-entry gate. Live mode without `live_entry_enabled` stays
+/// read + risk-reducing closes. Entry is admitted only when the operator
+/// opted in, the vault is unlocked, and every leg's adapter both submits
+/// and polls orders (the reconciler requires `fetch_order`). The machinery
+/// is implemented but not yet venue-proven — the opt-in is the operator
+/// accepting that.
+fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result<(), String> {
+    if !state.settings.read().live_entry_enabled {
+        return Err("Live strategy entries are disabled — enable 'live_entry_enabled' in Engine Settings (Safety) to opt in. Order polling, residual auto-resolution, and cancel retry are implemented but not yet proven against real venues".into());
+    }
+    if !state.vault.write().is_unlocked() {
+        return Err("Live strategy entries require an unlocked credential vault".into());
+    }
+    for venue in venues {
+        let adapter = state
+            .get_adapter(venue)
+            .ok_or_else(|| format!("Venue '{venue}' is not admitted for live execution"))?;
+        if !adapter.live_order_submission_implemented() {
+            return Err(format!("Venue '{venue}' has no live order submission"));
+        }
+        if !adapter.order_status_polling_implemented() {
+            return Err(format!(
+                "Venue '{venue}' has no order-status polling for reconciliation"
+            ));
+        }
+        if !adapter.has_live_credentials() {
+            return Err(format!("Venue '{venue}' has no live credentials loaded"));
+        }
+    }
+    Ok(())
+}
+
+/// Per-leg notional cap for live entries — refuses (never clamps) when any
+/// leg's qty × entry VWAP exceeds the configured maximum. A cap of 0
+/// refuses every live entry even with `live_entry_enabled`.
+fn live_entry_notional_guard(
+    state: &AppEngineState,
+    legs: &[(&str, Decimal)],
+) -> Result<(), String> {
+    let cap = state.settings.read().live_entry_max_notional_usd;
+    if !cap.is_finite() || cap <= 0.0 {
+        return Err("live_entry_max_notional_usd is not configured — set a per-leg USD cap in Engine Settings (Safety) before live entries".into());
+    }
+    for (venue, notional) in legs {
+        let n = notional.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
+        if !n.is_finite() || n <= 0.0 || n > cap {
+            return Err(format!(
+                "Live entry leg on {venue} has notional ${n:.2} outside the $0.01–${cap:.2} per-leg cap — refused (caps never clamp)"
+            ));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemStatusDto {
@@ -2257,7 +2314,7 @@ pub async fn execute_triangle_arbitrage_impl(
         );
     }
     if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
 
     let adapter = state.get_adapter(&params.venue).ok_or_else(|| {
@@ -2301,7 +2358,7 @@ pub async fn execute_triangle_arbitrage_impl(
         );
     }
     if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
     let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols)
         .await
@@ -3873,7 +3930,7 @@ async fn execute_spatial_arbitrage_inner(
     }
     let is_live = *state.is_live_mode.read();
     if is_live {
-        return Err("Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries".into());
+        live_entry_gate(state, &[buy_venue, sell_venue])?;
     }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
 
@@ -4057,6 +4114,19 @@ async fn execute_spatial_arbitrage_inner(
         return Err("Requested quantity exceeds executable book depth within IOC limits".into());
     }
 
+    // Live canary bound: refuse (never clamp) when either leg's notional
+    // exceeds the operator cap. Runs after VWAP sizing so it measures the
+    // real executable notional, not the caller's intent.
+    if is_live {
+        live_entry_notional_guard(
+            state,
+            &[
+                (buy_venue, qty_dec * buy_vwap),
+                (sell_venue, qty_dec * sell_vwap),
+            ],
+        )?;
+    }
+
     let target_profit_bps = state
         .strategy_params
         .read()
@@ -4216,8 +4286,17 @@ async fn execute_spatial_arbitrage_inner(
             .await
             .map_err(|e| e.to_string())?;
     } else {
-        let _ = buy_adapter.set_leverage(symbol, target_leverage).await;
-        let _ = sell_adapter.set_leverage(symbol, target_leverage).await;
+        // Live leverage set is best-effort: venues may reject no-op changes
+        // or cap at account level. A rejected change is NOT fatal (the order
+        // submits at existing leverage) but must be visible — an operator
+        // reading "5x" while the venue kept 20x changes margin math.
+        for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
+            if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
+                tracing::warn!(
+                    "live set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
+                );
+            }
+        }
     }
 
     let (buy_exec, sell_exec): (
@@ -4521,8 +4600,12 @@ async fn execute_spatial_arbitrage_inner(
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
-                    "{trim_note}Paper position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
-                    buy_venue, sell_venue, attempt_pnl_f, expected_capture_f
+                    "{trim_note}{} position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
+                    if is_live { "Live" } else { "Paper" },
+                    buy_venue,
+                    sell_venue,
+                    attempt_pnl_f,
+                    expected_capture_f
                 ),
             })
         }
@@ -5016,7 +5099,7 @@ pub async fn execute_funding_carry_impl(
             }
         }
         issues.push(
-            "two-leg live fills need atomic dispatch + reconciliation, which is not built yet"
+            "funding two-leg live dispatch is not built — live entries are currently spatial-only"
                 .to_string(),
         );
         return Err(format!(
@@ -5124,7 +5207,7 @@ pub async fn execute_funding_carry_impl(
         );
     }
     if *state.is_live_mode.read() {
-        return Err(LIVE_EXECUTION_DISABLED.into());
+        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
 
     // Dispatch-time books per EXACT leg symbol: hub-first (120s), else a
@@ -7087,8 +7170,10 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
             let supports_live = adapter.live_order_submission_implemented();
             let has_credentials = adapter.has_live_credentials();
             let submission_ready = is_unlocked && supports_live && has_credentials;
-            let strategy_entry_ready =
-                is_unlocked && adapter.live_order_reconciliation_implemented() && has_credentials;
+            let strategy_entry_ready = is_unlocked
+                && adapter.live_order_reconciliation_implemented()
+                && has_credentials
+                && state.settings.read().live_entry_enabled;
             let live_ready = strategy_entry_ready;
             VenueCapabilityDto {
                 venue: vid.to_string(),
@@ -15367,34 +15452,77 @@ mod tests {
         assert!(live_ok);
         assert!(*state.is_live_mode.read());
 
-        // 7a. Live strategy entry refuses globally, before any signal is
-        // inserted or any account/book/order work is dispatched.
+        // 7a. Live strategy entry refuses while `live_entry_enabled` is off,
+        // before any signal is inserted or any account/book/order work is
+        // dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
             "futures", &state,
         )
         .await;
-        assert_eq!(
-            sim_err.unwrap_err(),
-            "Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries"
-        );
+        assert!(sim_err
+            .unwrap_err()
+            .contains("Live strategy entries are disabled"));
         assert!(state
             .state_store
             .blocking_signals("BTC-USDC")
             .expect("blocking signals")
             .is_empty());
 
-        // 7b. The refusal is venue-independent: the same message is returned
+        // 7b. The refusal is venue-independent: the same gate fires
         // regardless of which venues the route names.
         let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "decibel", 100.0, None, None, None, None, None, None, None,
             "futures", &state,
         )
         .await;
-        assert_eq!(
-            decibel_err.unwrap_err(),
-            "Live strategy entry is disabled pending venue sandbox/canary evidence — order polling, residual auto-resolution, and cancel retry are implemented but unproven against real venues; switch to Paper Trading for strategy entries"
+        assert!(decibel_err
+            .unwrap_err()
+            .contains("Live strategy entries are disabled"));
+
+        // 7c. Opt-in path: with the flag on, the vault unlocked, and both
+        // venues credentialed + submission/polling-capable, the gate passes
+        // — unit-level so no orderbook network call is made.
+        assert!(live_entry_gate(&state, &["aster", "hyperliquid"]).is_err());
+        state.settings.write().live_entry_enabled = true;
+        live_entry_gate(&state, &["aster", "hyperliquid"]).expect("gate opens on opt-in");
+        // A venue with submission but no loaded credentials still refuses.
+        assert!(live_entry_gate(&state, &["aster", "popdex"])
+            .unwrap_err()
+            .contains("no live credentials"));
+        // strategy_entry_ready now reflects the opt-in for credentialed
+        // submission+polling venues, and stays off for uncredentialed ones.
+        let caps = get_venue_execution_capabilities_impl(&state);
+        assert!(
+            caps.iter()
+                .find(|c| c.venue == "aster")
+                .expect("aster")
+                .strategy_entry_ready
         );
+        assert!(
+            !caps
+                .iter()
+                .find(|c| c.venue == "popdex")
+                .expect("popdex")
+                .strategy_entry_ready
+        );
+        state.settings.write().live_entry_enabled = false;
+
+        // 7d. The per-leg notional cap refuses (never clamps) — cap unset,
+        // cap exceeded, and a sane under-cap leg.
+        let guard_err = live_entry_notional_guard(&state, &[("aster", dec!(10))]);
+        assert!(guard_err
+            .unwrap_err()
+            .contains("live_entry_max_notional_usd"));
+        state.settings.write().live_entry_max_notional_usd = 25.0;
+        assert!(live_entry_notional_guard(&state, &[("aster", dec!(30))])
+            .unwrap_err()
+            .contains("per-leg cap"));
+        live_entry_notional_guard(
+            &state,
+            &[("aster", dec!(12.5)), ("hyperliquid", dec!(11.0))],
+        )
+        .expect("under-cap legs pass");
 
         // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
         let flat_res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
