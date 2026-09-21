@@ -1719,22 +1719,6 @@ overhaul pass committed as `23d4aed`).
 - **Live `set_leverage` failures now log loudly** (were silently dropped) —
   a rejected change means the order submits at existing leverage.
 - **Tests:** extended `test_live_trading_unlock_and_execution_capabilities`
-  — flag-off refusal (venue-independent), gate opens on opt-in with
-  credentialed venues, uncredentialed venue refuses, `strategy_entry_ready`
-  tracks the opt-in, and the notional guard refuses unset/over-cap while
-  passing under-cap legs.
-- **ZEC safety:** the entry path refuses any symbol with an existing
-  position on either venue (`acc.get_position` after live account fetch);
-  reconciliation and flatten machinery only ever touch engine-persisted
-  signal legs — account positions are never swept.
-- **Verification:** clippy -D warnings clean; 354 desktop + frontend 210
-  tests + tsc + vite build green.
-- **Files:** `frontend/src-tauri/src/{commands,state}.rs`,
-  `crates/arbitrageur-core/src/exchange.rs`,
-  `frontend/src/{components/EngineSettings.tsx,services/api.ts,types/index.ts}`,
-  `docs/{CAPABILITIES.md,RUNBOOK.md,PROJECT_REVIEW_CROSSCHECK_2026-09-20.md}`,
-  `SPEC.md`.
-
 ## 81. Session Handoff — 2026-09-21 (first live canary: order-identity fix, WS/monitor live-mode restoration, Lighter REST reduction, endpoint wiring)
 
 ### What was attempted

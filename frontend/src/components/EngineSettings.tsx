@@ -28,7 +28,6 @@ import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
 import { VenueLogo } from "./VenueLogo";
-import { ToggleSwitch } from "./ToggleSwitch";
 import { VenueAccountsSection } from "./ExchangeAccounts";
 
 
@@ -113,7 +112,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [maxStorageGb, setMaxStorageGb] = useState("");
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
   const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
-  const [fastWarmupEnabled, setFastWarmupEnabled] = useState(true);
 
   // Safety: overall circuit-breaker + safety-net limits
   const [cbMaxDdUsd, setCbMaxDdUsd] = useState(25000);
@@ -138,9 +136,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [canaryResult, setCanaryResult] = useState<string | null>(null);
   const [staleWarnSecs, setStaleWarnSecs] = useState(300);
   // Networking & VPS
-  const [engineRpcPort, setEngineRpcPort] = useState(8787);
-  const [engineWsPort, setEngineWsPort] = useState(8789);
-  const [bindAddress, setBindAddress] = useState("127.0.0.1");
 
   // Exchange Enablement Toggles
   const [hlEnabled, setHlEnabled] = useState(false);
@@ -176,7 +171,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Robinhood EVM
   const [robinhoodWallet, setRobinhoodWallet] = useState("");
   const [robinhoodPrivateKey, setRobinhoodPrivateKey] = useState("");
-  const [robinhoodRpcUrl, setRobinhoodRpcUrl] = useState("https://rpc.robinhood.network");
   const [robinhoodRouter, setRobinhoodRouter] = useState("0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
   const [robinhoodSubaccountIndex, setRobinhoodSubaccountIndex] = useState<string>("");
 
@@ -215,8 +209,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [kalshiUrl, setKalshiUrl] = useState("https://trading-api.kalshi.com");
 
   // Referrals, About & Links
-  const [referralLighter, setReferralLighter] = useState("https://app.lighter.xyz/?referral=SOLO&source=none");
-  const [referralRobinhood, setReferralRobinhood] = useState("https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
   const [sponsorLink, setSponsorLink] = useState("https://buymeacoffee.com/dav1d1010");
   const [version, setVersion] = useState("v1.2.0");
   const [gitRepo, setGitRepo] = useState("https://github.com/Dav1D1010/Arbitrageur");
@@ -419,13 +411,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMaxHistoryDays(retentionDaysToInput(s.spread_samples_max_days));
         setMaxStorageGb(retentionGbToInput(s.spread_samples_max_gb));
 
-        setEngineRpcPort(s.engine_rpc_port ?? 8787);
-        setEngineWsPort(s.engine_ws_port ?? 8789);
-        setBindAddress(s.bind_address || "127.0.0.1");
 
         setTradingMode(s.trading_mode === "real" ? "real" : "paper");
         setPaperStartingBalance(s.paper_starting_balance_usd ?? 100000);
-        setFastWarmupEnabled(s.fast_warmup_enabled ?? true);
         setCbMaxDdUsd(s.cb_max_daily_drawdown_usd ?? 25000);
         setCbMaxDdPct(s.cb_max_daily_drawdown_pct ?? 5);
         setCbMaxErrors(s.cb_max_consecutive_errors ?? 5);
@@ -459,7 +447,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
         setRobinhoodWallet(s.robinhood_wallet || "");
         setRobinhoodPrivateKey(s.robinhood_private_key || "");
-        setRobinhoodRpcUrl(s.robinhood_rpc_url || "https://rpc.robinhood.network");
         setRobinhoodRouter(s.robinhood_router || "0x89e5DB8B5aA49aA85AC63f691524311AEB649eba");
         setRobinhoodSubaccountIndex(s.robinhood_subaccount_index?.toString() ?? "");
 
@@ -503,8 +490,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setKrakenFuturesSecret(s.kraken_futures_secret || "");
         setKrakenFuturesUrl(s.kraken_futures_url || "https://futures.kraken.com");
 
-        setReferralLighter(s.referral_lighter || "https://app.lighter.xyz/?referral=SOLO&source=none");
-        setReferralRobinhood(s.referral_robinhood || "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none");
         setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
         setVersion(s.version || "v1.2.0");
         setGitRepo(s.git_repo || "https://github.com/Dav1D1010/Arbitrageur");
@@ -573,12 +558,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         hsm_url: hsmUrl,
         hmac_token: hmacToken,
         min_depth_ratio: minDepthRatio,
-        engine_rpc_port: engineRpcPort,
-        engine_ws_port: engineWsPort,
-        bind_address: bindAddress,
+        engine_rpc_port: 8787, // reserved — no desktop listener consumes it
+        engine_ws_port: 8789, // reserved — no desktop listener consumes it
+        bind_address: "127.0.0.1", // reserved — no desktop listener consumes it
         trading_mode: tradingMode,
         paper_starting_balance_usd: paperStartingBalance,
-        fast_warmup_enabled: fastWarmupEnabled,
+        fast_warmup_enabled: true, // reserved — warm-up reuse not implemented
         cb_max_daily_drawdown_usd: Number(cbMaxDdUsd) || 0,
         cb_max_daily_drawdown_pct: Number(cbMaxDdPct) || 0,
         cb_max_consecutive_errors: Math.trunc(Number(cbMaxErrors)) || 0,
@@ -639,7 +624,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         vanta_subaccount_index: vantaSubaccountIndex ? parseInt(vantaSubaccountIndex, 10) : undefined,
         robinhood_wallet: robinhoodWallet.trim(),
         robinhood_private_key: robinhoodPrivateKey.trim(),
-        robinhood_rpc_url: robinhoodRpcUrl.trim(),
+        robinhood_rpc_url: "https://rpc.robinhood.network", // reserved — chain RPC unused
         robinhood_router: robinhoodRouter.trim(),
         robinhood_subaccount_index: robinhoodSubaccountIndex ? parseInt(robinhoodSubaccountIndex, 10) : undefined,
         polymarket_api_key: polymarketApiKey.trim(),
@@ -649,8 +634,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         kalshi_api_key_id: kalshiApiKeyId.trim(),
         kalshi_private_key: kalshiPrivateKey.trim(),
         kalshi_url: kalshiUrl.trim(),
-        referral_lighter: referralLighter,
-        referral_robinhood: referralRobinhood,
+        referral_lighter: "https://app.lighter.xyz/?referral=SOLO&source=none",
+        referral_robinhood: "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none",
         sponsor_link: sponsorLink,
         version: version,
         git_repo: gitRepo,
@@ -1399,23 +1384,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
-            {/* Orderbook Fast Warm-up */}
-            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs flex items-center justify-between gap-4">
-              <div className="space-y-1 min-w-0">
-                <label className="text-slate-800 font-bold block text-xs">Orderbook Cache Warm-Up</label>
-                <p className="text-xs text-slate-500">
-                  {fastWarmupEnabled
-                    ? "Cached Warm-Up: Reuses persisted orderbook quotes to shorten the warm-up window when appropriate — warm-up still runs, just faster."
-                    : "Cold Start: Starts orderbook buffer from scratch on every launch (requires the full warm-up window)."}
-                </p>
-              </div>
-              <ToggleSwitch
-                checked={fastWarmupEnabled}
-                onChange={setFastWarmupEnabled}
-                disabled={loading}
-              />
-            </div>
-
             {/* Historical Price Data */}
             <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="space-y-1 min-w-0">
@@ -1726,47 +1694,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             <div className="border-b border-surface-border pb-2.5">
               <h3 className="text-[13px] font-mono font-bold text-slate-900 flex items-center space-x-2">
                 <Globe className="w-4 h-4 text-accent" />
-                <span>Engine Ports & 24/7 VPS Background Daemon</span>
+                <span>24/7 VPS Background Daemon</span>
               </h3>
               <p className="text-xs text-slate-500 font-mono mt-0.5">
-                Configure RPC / WebSocket listener ports and deploy headlessly on cloud servers
+                Deploy the standalone binary headlessly on a cloud server
               </p>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs font-mono">
-              <div className="flex items-center justify-between gap-3">
-                <label className="text-slate-600 flex-1">Engine RPC Port:</label>
-                <input
-                  type="number"
-                  disabled={loading}
-                  value={engineRpcPort}
-                  onChange={(e) => setEngineRpcPort(parseInt(e.target.value, 10) || 8787)}
-                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-3">
-                <label className="text-slate-600 flex-1">Engine WebSocket Port:</label>
-                <input
-                  type="number"
-                  disabled={loading}
-                  value={engineWsPort}
-                  onChange={(e) => setEngineWsPort(parseInt(e.target.value, 10) || 8789)}
-                  className="w-24 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </div>
-
-              <div className="flex items-center justify-between gap-3">
-                <label className="text-slate-600 flex-1">Bind Address:</label>
-                <input
-                  type="text"
-                  disabled={loading}
-                  value={bindAddress}
-                  placeholder="127.0.0.1 or 0.0.0.0"
-                  onChange={(e) => setBindAddress(e.target.value)}
-                  className="w-32 shrink-0 px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono"
-                />
-              </div>
             </div>
 
             {/* VPS Daemon Deployment Guide */}

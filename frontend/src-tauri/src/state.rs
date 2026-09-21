@@ -417,6 +417,9 @@ pub struct EngineSettingsDto {
     pub min_depth_ratio: f64,
 
     // Networking & Ports
+    // Reserved — validated on save but no desktop listener consumes them.
+    // The headless daemon (`arbitrageur serve`) takes its own --bind/--port
+    // flags; these fields exist for a future embedded server surface.
     #[serde(default = "default_engine_rpc_port")]
     pub engine_rpc_port: u16,
     #[serde(default = "default_engine_ws_port")]
@@ -429,6 +432,8 @@ pub struct EngineSettingsDto {
     pub trading_mode: String, // "paper" or "real"
     #[serde(default = "default_paper_starting_balance")]
     pub paper_starting_balance_usd: f64,
+    // Reserved — the warm-up cache reuse this describes is not implemented;
+    // kept so saved settings stay schema-compatible.
     #[serde(default = "default_fast_warmup_enabled")]
     pub fast_warmup_enabled: bool,
 
@@ -572,6 +577,8 @@ pub struct EngineSettingsDto {
     pub robinhood_wallet: String,
     #[serde(default)]
     pub robinhood_private_key: String,
+    // Reserved — no code path reads a Robinhood chain RPC today; the
+    // Robinhood venue adapter speaks the Lighter REST protocol instead.
     #[serde(default = "default_robinhood_rpc_url")]
     pub robinhood_rpc_url: String,
     #[serde(default = "default_robinhood_router")]
