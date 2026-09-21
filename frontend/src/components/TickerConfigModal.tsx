@@ -296,10 +296,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // Per-strategy slippage for the futures/spread path
   const [futuresMaxSlippageBps, setFuturesMaxSlippageBps] = useState<number>(15.0);
 
-  // Passive limit unwinds/rebalances (paper-only)
+  // Passive limit unwinds/rebalances. Per-strategy mode selects the source:
+  // "inherit" → global Engine Settings policy, "custom" → the per-strategy
+  // params below, "off" → always market exits.
   const [futuresPassive, setFuturesPassive] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
   const [fundingPassive, setFundingPassive] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
   const [spotPassive, setSpotPassive] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
+  const [futuresPassiveMode, setFuturesPassiveMode] = useState<"inherit" | "custom" | "off">("inherit");
+  const [fundingPassiveMode, setFundingPassiveMode] = useState<"inherit" | "custom" | "off">("inherit");
+  const [spotPassiveMode, setSpotPassiveMode] = useState<"inherit" | "custom" | "off">("inherit");
 
   // Per-strategy auto-hide filters ("" = off)
   const [autoMinVolumeUsd, setAutoMinVolumeUsd] = useState<string>("");
@@ -387,6 +392,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         setFuturesPassive({ ...DEFAULT_PASSIVE_UNWIND, ...(p.futuresPassiveUnwind ?? {}) });
         setFundingPassive({ ...DEFAULT_PASSIVE_UNWIND, ...(p.fundingPassiveUnwind ?? {}) });
         setSpotPassive({ ...DEFAULT_PASSIVE_UNWIND, ...(p.spotPassiveUnwind ?? {}) });
+        // Legacy rows carry "" — auto-resolve: an enabled per-strategy config
+        // was a custom policy before the mode field existed.
+        const resolveMode = (m: string | undefined, cfg: PassiveUnwindDto | undefined): "inherit" | "custom" | "off" =>
+          m === "inherit" || m === "custom" || m === "off" ? m : (cfg?.enabled ? "custom" : "inherit");
+        setFuturesPassiveMode(resolveMode(p.futuresPassiveMode, p.futuresPassiveUnwind));
+        setFundingPassiveMode(resolveMode(p.fundingPassiveMode, p.fundingPassiveUnwind));
+        setSpotPassiveMode(resolveMode(p.spotPassiveMode, p.spotPassiveUnwind));
       })
       .catch((err) => {
         console.warn("Failed to load strategy params in modal:", err);
@@ -566,6 +578,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setFuturesPassive({ ...DEFAULT_PASSIVE_UNWIND });
     setFundingPassive({ ...DEFAULT_PASSIVE_UNWIND });
     setSpotPassive({ ...DEFAULT_PASSIVE_UNWIND });
+    setFuturesPassiveMode("inherit");
+    setFundingPassiveMode("inherit");
+    setSpotPassiveMode("inherit");
   };
 
   const handleRevealAll = async () => {
@@ -613,8 +628,14 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </SettingRow>
   );
 
-  /** Shared Passive Limit Unwind block */
-  const renderPassiveBlock = (value: PassiveUnwindDto, setValue: (v: PassiveUnwindDto) => void) => {
+  /** Shared Passive Limit Unwind block — per-strategy mode selects the
+   *  config source: inherit the global policy, a custom override, or off. */
+  const renderPassiveBlock = (
+    value: PassiveUnwindDto,
+    setValue: (v: PassiveUnwindDto) => void,
+    mode: "inherit" | "custom" | "off",
+    setMode: (m: "inherit" | "custom" | "off") => void,
+  ) => {
     const set = (patch: Partial<PassiveUnwindDto>) => setValue({ ...value, ...patch });
     return (
       <div className="bg-surface p-4 rounded-xl border border-surface-border shadow-2xs space-y-3 transition hover:border-slate-300">
@@ -622,12 +643,48 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="text-xs font-semibold font-sans text-slate-800">Passive Limit Unwind</span>
-              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. OFF = market exits as today." />
+              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. Inherit uses the global Engine Settings → Execution policy; Custom uses the params below; Off = market exits." />
             </div>
             <p className="text-[11px] font-sans text-slate-400 font-normal mt-0.5 leading-normal">
-              Paper-only · timeout-bound · market fallback · off = market exit
+              timeout-bound · market fallback · emergency exits always market
             </p>
           </div>
+          <div
+            role="group"
+            aria-label="Limit exit source"
+            className="h-7 flex items-stretch rounded-lg border border-surface-border bg-surface overflow-hidden shrink-0"
+          >
+            {(["inherit", "custom", "off"] as const).map((m, i) => (
+              <button
+                key={m}
+                type="button"
+                aria-pressed={mode === m}
+                onClick={() => setMode(m)}
+                className={`px-2.5 text-[11px] font-mono font-bold transition cursor-pointer ${i > 0 ? "border-l border-surface-border" : ""} ${
+                  mode === m ? "bg-accent text-white" : "text-slate-500 hover:text-slate-800 hover:bg-slate-100/70"
+                }`}
+              >
+                {m === "inherit" ? "Global" : m === "custom" ? "Custom" : "Off"}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {mode === "inherit" && (
+          <p className="text-[11px] font-sans text-slate-400 leading-normal">
+            Follows the global policy in Engine Settings → Execution → Passive Limit Unwind.
+          </p>
+        )}
+        {mode === "off" && (
+          <p className="text-[11px] font-sans text-slate-400 leading-normal">
+            This strategy always exits at market — the limit-exit method is never used for it.
+          </p>
+        )}
+
+        {mode === "custom" && (
+        <>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-xs font-medium font-sans text-slate-700">Enable custom limit exits</span>
           <SwitchToggle
             size="sm"
             checked={value.enabled}
@@ -735,6 +792,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             />
           </div>
         </div>
+        </>
+        )}
       </div>
     );
   };
@@ -1275,7 +1334,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       {renderTrimBlock(spotLiqTrimPct, setSpotLiqTrimPct)}
 
-      {renderPassiveBlock(spotPassive, setSpotPassive)}
+      {renderPassiveBlock(spotPassive, setSpotPassive, spotPassiveMode, setSpotPassiveMode)}
     </div>
   );
 
@@ -1417,6 +1476,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         activeStrategyTab === "funding" ? fundingPassive : (currentRecord?.fundingPassiveUnwind ?? { ...DEFAULT_PASSIVE_UNWIND }),
       spotPassiveUnwind:
         activeStrategyTab === "spot" ? spotPassive : (currentRecord?.spotPassiveUnwind ?? { ...DEFAULT_PASSIVE_UNWIND }),
+      futuresPassiveMode:
+        activeStrategyTab === "futures" ? futuresPassiveMode : (currentRecord?.futuresPassiveMode ?? "inherit"),
+      fundingPassiveMode:
+        activeStrategyTab === "funding" ? fundingPassiveMode : (currentRecord?.fundingPassiveMode ?? "inherit"),
+      spotPassiveMode:
+        activeStrategyTab === "spot" ? spotPassiveMode : (currentRecord?.spotPassiveMode ?? "inherit"),
     };
 
     const validationErrors = validateStrategyParams(updatedParams);
@@ -1580,9 +1645,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Passive Unwind Execution</h3>
                   <p className="text-[11px] font-sans text-slate-400 mt-0.5">Pegged limit order execution with market fallbacks</p>
                 </div>
-                {activeStrategyTab === "futures" && renderPassiveBlock(futuresPassive, setFuturesPassive)}
-                {activeStrategyTab === "funding" && renderPassiveBlock(fundingPassive, setFundingPassive)}
-                {activeStrategyTab === "spot" && renderPassiveBlock(spotPassive, setSpotPassive)}
+                {activeStrategyTab === "futures" && renderPassiveBlock(futuresPassive, setFuturesPassive, futuresPassiveMode, setFuturesPassiveMode)}
+                {activeStrategyTab === "funding" && renderPassiveBlock(fundingPassive, setFundingPassive, fundingPassiveMode, setFundingPassiveMode)}
+                {activeStrategyTab === "spot" && renderPassiveBlock(spotPassive, setSpotPassive, spotPassiveMode, setSpotPassiveMode)}
               </div>
             ) : (
               /* Strategy-Specific Sections */

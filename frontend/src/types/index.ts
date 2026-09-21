@@ -239,6 +239,14 @@ export interface StrategyParamsDto {
   futuresPassiveUnwind?: PassiveUnwindDto;
   fundingPassiveUnwind?: PassiveUnwindDto;
   spotPassiveUnwind?: PassiveUnwindDto;
+  // How each strategy resolves its limit-exit config:
+  //   "inherit" → the global EngineSettings.passive_unwind policy;
+  //   "custom"  → this strategy's own PassiveUnwindDto;
+  //   "off"     → never passive, always market.
+  // "" (legacy rows) auto-resolves: enabled config ⇒ "custom", else "inherit".
+  futuresPassiveMode?: "inherit" | "custom" | "off" | "";
+  fundingPassiveMode?: "inherit" | "custom" | "off" | "";
+  spotPassiveMode?: "inherit" | "custom" | "off" | "";
 }
 
 export interface MatrixCellDto {
@@ -686,6 +694,10 @@ export interface EngineSettingsDto {
   live_entry_enabled?: boolean;
   /** Per-leg USD notional cap for live entries; 0 refuses all. */
   live_entry_max_notional_usd?: number;
+  /** Global Passive Limit Unwind policy (Execution section). Strategies on
+   * `*PassiveMode = "inherit"` use this; the popup's Auto Limit mode runs
+   * it too. Serialized camelCase like PassiveUnwindDto. */
+  passive_unwind?: PassiveUnwindDto;
   balance_stale_warn_secs?: number;
 
   // Subaccount mappings
@@ -736,6 +748,23 @@ export interface ExternalPositionDto {
   systemQty: number;
   externalQty: number;
   closeSupported: boolean;
+  updatedAt: string;
+}
+
+/** A persisted one-shot scheduled exit (Portfolio Monitor → Close →
+ *  Schedule). status: pending | firing | fired | failed | cancelled. */
+export interface ScheduledExitDto {
+  id: string;
+  venue: string;
+  symbol: string;
+  side: "buy" | "sell";
+  closePct: number;
+  mode: "auto" | "limit" | "market";
+  limitPrice: number | null;
+  executeAtMs: number;
+  status: string;
+  note: string | null;
+  createdAt: string;
   updatedAt: string;
 }
 

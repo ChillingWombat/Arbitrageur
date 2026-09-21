@@ -37,6 +37,7 @@ import type {
   CloseResultDto,
   ExternalPositionDto,
   ExternalPositionsResponse,
+  ScheduledExitDto,
 } from "../types";
 
 const usd = (v: number) =>
@@ -71,9 +72,13 @@ export const ExternalPositionsGadget: React.FC = () => {
   const [rec, setRec] = useState<CloseRecommendationDto | null>(null);
   const [recBusy, setRecBusy] = useState(false);
   const [recError, setRecError] = useState<string | null>(null);
-  const [mode, setMode] = useState<"limit" | "market">("limit");
+  const [mode, setMode] = useState<"auto" | "limit" | "market">("limit");
   const [limitPx, setLimitPx] = useState("");
   const [takerBps, setTakerBps] = useState("5");
+  const [closePct, setClosePct] = useState("100");
+  const [scheduleAt, setScheduleAt] = useState("");
+  const [schedules, setSchedules] = useState<ScheduledExitDto[]>([]);
+  const [schedBusy, setSchedBusy] = useState(false);
   const [armed, setArmed] = useState(false);
   const [closing, setClosing] = useState(false);
   const [result, setResult] = useState<CloseResultDto | null>(null);
@@ -86,6 +91,11 @@ export const ExternalPositionsGadget: React.FC = () => {
       setLoadError(null);
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
+    }
+    try {
+      setSchedules(await api.listScheduledExits());
+    } catch {
+      /* schedule list is informational — never block the position read */
     }
   }, []);
 
@@ -154,6 +164,10 @@ export const ExternalPositionsGadget: React.FC = () => {
     void loadRec(selected, Number.isFinite(fee) && fee >= 0 ? fee : 5);
   }, [selectedKey, takerBps]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const parsedPct = Number(closePct);
+  const pctValid = Number.isFinite(parsedPct) && parsedPct > 0 && parsedPct <= 100;
+  const estCloseQty = selected && pctValid ? (selected.externalQty * parsedPct) / 100 : null;
+
   const doClose = async () => {
     if (!selected || closing) return;
     if (!armed) {
@@ -168,6 +182,7 @@ export const ExternalPositionsGadget: React.FC = () => {
         symbol: selected.symbol,
         mode,
         limitPrice: mode === "limit" ? Number(limitPx) : null,
+        closePct: pctValid ? parsedPct : 100,
       });
       setResult(r);
       setArmed(false);
@@ -178,6 +193,52 @@ export const ExternalPositionsGadget: React.FC = () => {
       setClosing(false);
     }
   };
+
+  const doSchedule = async () => {
+    if (!selected || schedBusy) return;
+    const ms = new Date(scheduleAt).getTime();
+    if (!Number.isFinite(ms) || ms <= Date.now()) {
+      setCloseError("Pick a future time for the scheduled exit");
+      return;
+    }
+    setSchedBusy(true);
+    setCloseError(null);
+    try {
+      await api.scheduleExternalExit({
+        venue: selected.venue,
+        symbol: selected.symbol,
+        side: selected.side,
+        mode,
+        limitPrice: mode === "limit" ? Number(limitPx) : null,
+        closePct: pctValid ? parsedPct : 100,
+        executeAtMs: ms,
+      });
+      setScheduleAt("");
+      void load();
+    } catch (e) {
+      setCloseError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSchedBusy(false);
+    }
+  };
+
+  const cancelSchedule = async (id: string) => {
+    try {
+      await api.cancelScheduledExit(id);
+      void load();
+    } catch (e) {
+      setCloseError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const pendingForSelected = selected
+    ? schedules.filter(
+        (s) =>
+          s.status === "pending" &&
+          s.venue.toLowerCase() === selected.venue.toLowerCase() &&
+          s.symbol.toLowerCase() === selected.symbol.toLowerCase(),
+      )
+    : [];
 
   const closeDisabledReason = !data
     ? "Loading positions…"
@@ -400,9 +461,17 @@ export const ExternalPositionsGadget: React.FC = () => {
                 </div>
               )}
 
-              {/* Mode + limit + fee controls, then the guarded submit. */}
+              {/* Mode + limit + size + fee controls, then the guarded submit. */}
               <div className="flex flex-wrap items-end gap-2">
-                <div className="flex gap-1.5">
+                <div className="flex gap-1.5" role="group" aria-label="Exit mode">
+                  <button
+                    type="button"
+                    onClick={() => { setMode("auto"); setArmed(false); }}
+                    className={tabCls(mode === "auto")}
+                    title="Auto Limit: works the global Passive Limit Unwind policy — pegged limit, re-priced on timeout, market fallback so the exit always completes"
+                  >
+                    Auto Limit
+                  </button>
                   <button type="button" onClick={() => { setMode("limit"); setArmed(false); }} className={tabCls(mode === "limit")}>
                     Limit
                   </button>
@@ -421,6 +490,20 @@ export const ExternalPositionsGadget: React.FC = () => {
                     />
                   </label>
                 )}
+                {mode === "auto" && (
+                  <span className="text-[10px] font-mono text-slate-400 pb-2 max-w-40 leading-tight">
+                    global policy: pegged limit → reprice on timeout → market fallback
+                  </span>
+                )}
+                <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit time">
+                  <span className="text-[11px] font-mono font-bold text-slate-500">CLOSE %</span>
+                  <input
+                    value={closePct}
+                    onChange={(e) => { setClosePct(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
+                    inputMode="decimal"
+                    className={`w-20 px-2.5 py-1.5 bg-surface border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent ${pctValid ? "border-surface-border" : "border-loss"}`}
+                  />
+                </label>
                 <label className="space-y-1" title="Taker-fee assumption for the friction estimate (verify on the venue fee schedule)">
                   <span className="text-[11px] font-mono font-bold text-slate-500">TAKER FEE (BPS)</span>
                   <input
@@ -433,7 +516,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => void doClose()}
-                  disabled={closeDisabledReason != null || closing}
+                  disabled={closeDisabledReason != null || closing || !pctValid}
                   className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed ${
                     armed
                       ? "bg-loss text-white border-loss-border"
@@ -441,8 +524,50 @@ export const ExternalPositionsGadget: React.FC = () => {
                   }`}
                   title={closeDisabledReason ?? (armed ? "Click again to submit the live reduce-only order" : "Arm the close, then confirm")}
                 >
-                  {closing ? "Submitting…" : armed ? `Confirm ${mode.toUpperCase()} close` : `Close ${mode.toUpperCase()} via bot`}
+                  {closing ? "Submitting…" : armed ? `Confirm ${mode === "auto" ? "AUTO LIMIT" : mode.toUpperCase()} close` : `Close ${mode === "auto" ? "AUTO LIMIT" : mode.toUpperCase()} via bot`}
                 </button>
+              </div>
+              {estCloseQty != null && parsedPct < 100 && (
+                <div className="text-[11px] font-mono text-slate-500">
+                  ≈ {num(estCloseQty)} {selected.base} of {num(selected.externalQty)} — remainder stays open
+                </div>
+              )}
+              {/* Schedule: fire this exit once at a local time (e.g. just
+                  after a funding timestamp). The order dispatches through the
+                  same path with a fresh account re-read at fire time. */}
+              <div className="flex flex-wrap items-end gap-2 pt-2 border-t border-surface-border/60">
+                <label className="space-y-1" title="One-shot scheduled exit at this local time — e.g. hold through a funding timestamp, then close">
+                  <span className="text-[11px] font-mono font-bold text-slate-500">SCHEDULE AT</span>
+                  <input
+                    type="datetime-local"
+                    value={scheduleAt}
+                    min={new Date(Date.now() + 60_000 - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)}
+                    onChange={(e) => setScheduleAt(e.target.value)}
+                    className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void doSchedule()}
+                  disabled={closeDisabledReason != null || schedBusy || scheduleAt === "" || !pctValid}
+                  className="px-3 py-2 rounded-lg text-xs font-mono font-bold border transition cursor-pointer bg-surface text-slate-600 border-surface-border hover:text-slate-900 hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
+                  title="Persist a one-shot scheduled close — fires the selected mode at the picked time (funding-harvest exits: schedule just past the funding timestamp)"
+                >
+                  {schedBusy ? "Scheduling…" : `Schedule ${mode === "auto" ? "AUTO" : mode.toUpperCase()} ${parsedPct || 100}%`}
+                </button>
+                {pendingForSelected.map((s) => (
+                  <span key={s.id} className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-accent-dim/50 border border-accent-line/40 text-[10px] font-mono text-slate-700">
+                    {s.mode.toUpperCase()} {s.closePct}% @ {new Date(s.executeAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    <button
+                      type="button"
+                      onClick={() => void cancelSchedule(s.id)}
+                      className="text-slate-400 hover:text-loss cursor-pointer"
+                      title="Cancel this scheduled exit"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </span>
+                ))}
               </div>
               {closeDisabledReason && (
                 <div className="text-[11px] font-mono text-slate-500">{closeDisabledReason}</div>

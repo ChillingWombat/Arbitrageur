@@ -23,7 +23,8 @@ import {
   retentionDaysToInput,
   retentionGbToInput,
 } from "../services/retention";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto } from "../types";
+import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
@@ -107,6 +108,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Guardrails & Execution Modes (slippage is per-strategy now: each bot
   // configurator carries its own max_slippage_bps gate)
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
+  // Global Passive Limit Unwind policy — strategies on "inherit" use this;
+  // the Portfolio Monitor's Auto Limit exit runs it too.
+  const [passiveUnwind, setPassiveUnwind] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
   // Historical retention: empty string = unlimited (None on the backend)
   const [maxHistoryDays, setMaxHistoryDays] = useState("");
   const [maxStorageGb, setMaxStorageGb] = useState("");
@@ -408,6 +412,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setHsmUrl(s.hsm_url || "http://127.0.0.1:8787/sign");
         setHmacToken(s.hmac_token || "");
         setMinDepthRatio(s.min_depth_ratio ?? 3.0);
+        setPassiveUnwind({
+          enabled: s.passive_unwind?.enabled === true,
+          spreadPercentile: s.passive_unwind?.spreadPercentile ?? DEFAULT_PASSIVE_UNWIND.spreadPercentile,
+          timeoutSecs: s.passive_unwind?.timeoutSecs ?? DEFAULT_PASSIVE_UNWIND.timeoutSecs,
+          maxTries: s.passive_unwind?.maxTries ?? DEFAULT_PASSIVE_UNWIND.maxTries,
+          maxSpreadBps: s.passive_unwind?.maxSpreadBps ?? DEFAULT_PASSIVE_UNWIND.maxSpreadBps,
+          maxFastVolBps: s.passive_unwind?.maxFastVolBps ?? DEFAULT_PASSIVE_UNWIND.maxFastVolBps,
+        });
         setMaxHistoryDays(retentionDaysToInput(s.spread_samples_max_days));
         setMaxStorageGb(retentionGbToInput(s.spread_samples_max_gb));
 
@@ -576,6 +588,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         auto_resolve_residual_exposure: autoResolveResidual,
         live_entry_enabled: liveEntryEnabled,
         live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
+        passive_unwind: {
+          enabled: passiveUnwind.enabled,
+          spreadPercentile: Number(passiveUnwind.spreadPercentile) || 0,
+          timeoutSecs: Math.trunc(Number(passiveUnwind.timeoutSecs)) || 0,
+          maxTries: Math.trunc(Number(passiveUnwind.maxTries)) || 0,
+          maxSpreadBps: Number(passiveUnwind.maxSpreadBps) || 0,
+          maxFastVolBps: Number(passiveUnwind.maxFastVolBps) || 0,
+        },
         balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
         spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
         spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
@@ -1381,6 +1401,77 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
                   Virtual equity per paper account. Saving resets paper accounts and clears open positions.
                 </p>
+              </div>
+            </div>
+
+            {/* Global Passive Limit Unwind — single limit-exit policy */}
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="space-y-1 min-w-0">
+                <label className="text-slate-800 font-bold text-xs flex items-center">
+                  Passive Limit Unwind (Limit Exits)
+                  <InfoTooltip
+                    position="bottom"
+                    text={"The shared limit-exit policy. When enabled, reduce-exit paths (strategy flattens, the Portfolio Monitor's Auto Limit mode, scheduled auto exits) first work a pegged limit order: mid-spread by default, re-priced on timeout, with a market fallback so exposure is never left open.\n\nEach strategy chooses in its own configurator: Inherit (this policy), Custom (its own params), or Off (always market). Emergency flattens and kill-switch paths always stay market — this never slows a panic exit."}
+                  />
+                </label>
+                <p className="text-xs text-slate-500">
+                  Single place to manage the limit-exit method. Strategies set to “Inherit” follow this policy; each can override or opt out in its own configurator.
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs">Enable limit exits globally</label>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={passiveUnwind.enabled}
+                  disabled={loading}
+                  onClick={() => setPassiveUnwind({ ...passiveUnwind, enabled: !passiveUnwind.enabled })}
+                  className={`relative h-5 w-9 rounded-full transition cursor-pointer ${passiveUnwind.enabled ? "bg-accent" : "bg-slate-300"}`}
+                >
+                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${passiveUnwind.enabled ? "left-4.5" : "left-0.5"}`} />
+                </button>
+              </div>
+              <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${passiveUnwind.enabled ? "" : "opacity-50 pointer-events-none"}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Peg inside the spread: 0 = aggressive touch (fill odds like market), 50 = mid, 100 = passive edge (best price, lowest touch odds)">
+                    Peg percentile (0–100)
+                  </label>
+                  <input type="number" min="0" max="100" step="1" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.spreadPercentile}
+                    onChange={(e) => setPassiveUnwind({ ...passiveUnwind, spreadPercentile: parseFloat(e.target.value) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Seconds each limit attempt works before it is cancelled and re-priced">
+                    Attempt timeout (s)
+                  </label>
+                  <input type="number" min="1" max="300" step="1" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.timeoutSecs}
+                    onChange={(e) => setPassiveUnwind({ ...passiveUnwind, timeoutSecs: parseInt(e.target.value, 10) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Limit attempts before the exit falls back to a market order">
+                    Max tries
+                  </label>
+                  <input type="number" min="1" max="10" step="1" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.maxTries}
+                    onChange={(e) => setPassiveUnwind({ ...passiveUnwind, maxTries: parseInt(e.target.value, 10) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Calm gate: skip the passive attempt when the live spread is wider than this (bps)">
+                    Max spread (bps)
+                  </label>
+                  <input type="number" min="0.1" step="any" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.maxSpreadBps}
+                    onChange={(e) => setPassiveUnwind({ ...passiveUnwind, maxSpreadBps: parseFloat(e.target.value) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Calm gate: skip the passive attempt when fast volatility exceeds this (bps)">
+                    Max fast vol (bps)
+                  </label>
+                  <input type="number" min="0.1" step="any" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.maxFastVolBps}
+                    onChange={(e) => setPassiveUnwind({ ...passiveUnwind, maxFastVolBps: parseFloat(e.target.value) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
               </div>
             </div>
 

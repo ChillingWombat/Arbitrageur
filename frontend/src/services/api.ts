@@ -33,6 +33,7 @@ import type {
   VenueBalanceInfo,
   ExternalPositionsResponse,
   CloseRecommendationDto,
+  ScheduledExitDto,
   CloseResultDto,
   StrategyMetrics,
   StrategyFillPnl,
@@ -301,6 +302,9 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
       futuresPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
       fundingPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
       spotPassiveUnwind: { ...DEFAULT_PASSIVE_UNWIND },
+      futuresPassiveMode: "inherit",
+      fundingPassiveMode: "inherit",
+      spotPassiveMode: "inherit",
     };
   }
   return {
@@ -340,7 +344,14 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
     futuresPassiveUnwind: normalizePassive(p.futuresPassiveUnwind ?? p.futures_passive_unwind),
     fundingPassiveUnwind: normalizePassive(p.fundingPassiveUnwind ?? p.funding_passive_unwind),
     spotPassiveUnwind: normalizePassive(p.spotPassiveUnwind ?? p.spot_passive_unwind),
+    futuresPassiveMode: normalizePassiveMode(p.futuresPassiveMode ?? p.futures_passive_mode),
+    fundingPassiveMode: normalizePassiveMode(p.fundingPassiveMode ?? p.funding_passive_mode),
+    spotPassiveMode: normalizePassiveMode(p.spotPassiveMode ?? p.spot_passive_mode),
   };
+}
+
+function normalizePassiveMode(v: any): "inherit" | "custom" | "off" | "" {
+  return v === "custom" || v === "off" || v === "inherit" ? v : "";
 }
 
 export function normalizeStrategyTicker(r: any): StrategyTickerDto {
@@ -351,6 +362,25 @@ export function normalizeStrategyTicker(r: any): StrategyTickerDto {
     blockReason: typeof (r?.blockReason ?? r?.block_reason) === "string"
       ? (r.blockReason ?? r.block_reason)
       : null,
+  };
+}
+
+/** Scheduled-exit rows serialize snake_case from the store; normalize once
+ *  so components only ever see camelCase. */
+export function normalizeScheduledExit(r: any): ScheduledExitDto {
+  return {
+    id: String(r?.id ?? ""),
+    venue: String(r?.venue ?? ""),
+    symbol: String(r?.symbol ?? ""),
+    side: r?.side === "sell" ? "sell" : "buy",
+    closePct: Number(r?.closePct ?? r?.close_pct ?? 100),
+    mode: r?.mode === "limit" || r?.mode === "market" ? r.mode : "auto",
+    limitPrice: r?.limitPrice ?? r?.limit_price ?? null,
+    executeAtMs: Number(r?.executeAtMs ?? r?.execute_at_ms ?? 0),
+    status: String(r?.status ?? "pending"),
+    note: r?.note ?? null,
+    createdAt: String(r?.createdAt ?? r?.created_at ?? ""),
+    updatedAt: String(r?.updatedAt ?? r?.updated_at ?? ""),
   };
 }
 
@@ -916,8 +946,19 @@ export const api = {
   async recommendExternalClose(venue: string, symbol: string, takerFeeBps?: number): Promise<CloseRecommendationDto> {
     return invokeDesktop<CloseRecommendationDto>("recommend_external_close", { venue, symbol, takerFeeBps: takerFeeBps ?? null });
   },
-  async closeExternalPosition(input: { venue: string; symbol: string; mode: string; limitPrice?: number | null }): Promise<CloseResultDto> {
+  async closeExternalPosition(input: { venue: string; symbol: string; mode: "auto" | "limit" | "market"; limitPrice?: number | null; closePct?: number | null }): Promise<CloseResultDto> {
     return invokeDesktop<CloseResultDto>("close_external_position", { input });
+  },
+  async scheduleExternalExit(input: { venue: string; symbol: string; side: "long" | "short"; mode: "auto" | "limit" | "market"; limitPrice?: number | null; closePct?: number | null; executeAtMs: number }): Promise<ScheduledExitDto> {
+    const row = await invokeDesktop<any>("schedule_external_exit", { input });
+    return normalizeScheduledExit(row);
+  },
+  async listScheduledExits(): Promise<ScheduledExitDto[]> {
+    const rows = await invokeDesktop<any[]>("list_scheduled_exits");
+    return (Array.isArray(rows) ? rows : []).map(normalizeScheduledExit);
+  },
+  async cancelScheduledExit(id: string): Promise<void> {
+    return invokeDesktop<void>("cancel_scheduled_exit", { id });
   },
   async getUtilisationHistory(venue: string, windowHours?: number): Promise<UtilisationHistory> {
     return invokeDesktop<UtilisationHistory>("get_utilisation_history", {

@@ -1905,3 +1905,63 @@ live orderbook". Root cause chain:
    edge policy. Consider capping/chunking subscriptions.
 3. ZEC untouched — do not sweep.
 4. HL vault credential still holds a 20-byte address — needs 32-byte key.
+
+## 83. Session Handoff — 2026-09-21 (unified limit-exit management: global policy + per-strategy selection + live-safe passive unwind + scheduled/partial popup exits)
+
+### What shipped
+
+- **Global limit-exit policy**: `EngineSettingsDto.passive_unwind`
+  (`PassiveUnwindConfig`, camelCase-serialized) — one shared config in
+  System Settings → Execution → "Passive Limit Unwind". Validated on save;
+  disabled by default.
+- **Per-strategy selection**: `StrategyParamsDto.{futures,funding,spot}_passive_mode`
+  ∈ `inherit` | `custom` | `off`. Legacy `""` auto-resolves (enabled
+  strategy cfg ⇒ custom, else inherit). Strategies without a record
+  (triangle, external residuals) inherit the global policy. Resolution in
+  `commands.rs::passive_cfg_for`.
+- **Live-safe driver**: `execute_passive_reduce_live` in
+  `crates/arbitrageur-execution/src/passive_unwind.rs`. Unlike the paper
+  probe: submit responses are acceptances (`New`/0 on Lighter), each
+  attempt polls `fetch_order` (750ms cadence, ≤3 misses) until
+  filled/terminal/`timeout_secs`, then cancels and confirms terminal
+  before re-pegging. Unverifiable cancel/fill state → market-close the
+  remainder only; never stacks a second resting reduce order behind an
+  unverified one. Aggregate `OrderResponse` combines per-attempt fills
+  (qty-weighted avg px, summed fees, last order id). Wired into
+  `flatten_leg` live branch (emergency_market bypasses) and popup auto
+  mode via `FlattenLiveRefresh` (hub-first → single-flight REST →
+  validate → mirror).
+- **Partial + scheduled + auto popup exits** (`external_positions.rs`):
+  `CloseExternalPositionInput` gains `closePct` (fresh residual %, (0,100],
+  step-floored via `close_target_qty`) and mode `"auto"` (global policy;
+  refuses when disabled). `ScheduleExitInput` → `scheduled_exits` table
+  (migration **v25**): pending → firing → fired|failed|cancelled;
+  `claim_scheduled_exit` is an atomic pending→firing UPDATE so restarts
+  never double-fire; dispatch reuses the full close path (live gate, vault,
+  fresh re-read, reduce-only, `extclose-` ledger record).
+  `spawn_exit_scheduler` (10s tick) is spawned in `main.rs`; IPC:
+  `schedule_external_exit` / `list_scheduled_exits` / `cancel_scheduled_exit`.
+- **UI**: `EngineSettings.tsx` gains the global card (enable switch + 5
+  params); `TickerConfigModal.tsx` passive block gains a
+  Global/Custom/Off segmented control (custom reveals the param grid +
+  enable toggle); `ExternalPositionsGadget.tsx` close dialog gains the
+  Auto Limit mode, Close % input (est qty shown), and a Schedule row with
+  pending chips + cancel.
+
+### Verification
+
+- 23/23 `passive_unwind` tests (5 new live-driver: poll-fill,
+  cancel-before-reprice, exhaustion→market, unverifiable-cancel no-stack,
+  partial+market blend); 357/357 desktop (2 new scheduled-exit CRUD/claim
+  + `close_target_qty` pct/step); clippy+fmt clean; `npm test` + vite
+  build green.
+
+### Pickup notes
+
+- Auto Limit and scheduled auto exits refuse when the global policy is
+  disabled — that refusal is by design (operator opt-in).
+- Scheduled rows are one-shot; the UI computes `executeAtMs` as the next
+  local occurrence of the picked time. A missed-while-closed schedule
+  fires immediately on next boot (execute_at <= now ⇒ due).
+- The scheduler dispatches even while the vault later locks → row lands
+  `failed` with the close-path error; user re-arms by scheduling again.

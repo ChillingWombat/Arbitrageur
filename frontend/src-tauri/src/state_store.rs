@@ -644,6 +644,28 @@ pub struct SpatialEntryBaseline {
     pub entry_ts_ms: i64,
 }
 
+/// A one-shot user-scheduled position close (Portfolio Monitor → Close →
+/// Schedule). `side` is the *position* side ('buy' = long, 'sell' = short);
+/// the dispatch computes the opposing reduce-only close side. `mode`
+/// mirrors the popup: 'auto' runs the passive limit unwind, 'limit' rests
+/// at `limit_price`, 'market' takes immediately. Status lifecycle:
+/// pending → fired | failed | cancelled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledExit {
+    pub id: String,
+    pub venue: String,
+    pub symbol: String,
+    pub side: String,
+    pub close_pct: f64,
+    pub mode: String,
+    pub limit_price: Option<f64>,
+    pub execute_at_ms: i64,
+    pub status: String,
+    pub note: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 /// Separate row cap for the signal-event audit log. Retention shares the
 /// spread-sample `max_days` cutoff (same setting, one pass), but the cap is
 /// independent so a chatty pair can never evict price history — and price
@@ -1225,6 +1247,33 @@ PRAGMA user_version = 24;
 COMMIT;
 PRAGMA foreign_keys = ON;";
 
+/// v25 adds the scheduled-exit table: one-shot, user-requested position
+/// closes that fire at a wall-clock time (e.g. just before a funding
+/// timestamp). Each row captures the venue/symbol/position-side identity,
+/// the fraction to close, the exit mode the popup selected
+/// (auto-passive / manual limit / market), and a status lifecycle
+/// (pending → fired | failed | cancelled) so a restart re-arms pending
+/// rows without duplicating an execution that already dispatched.
+const MIGRATION_V25_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE scheduled_exits (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 64),
+    venue TEXT NOT NULL COLLATE NOCASE CHECK(length(venue) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    side TEXT NOT NULL CHECK(side IN ('buy', 'sell')),
+    close_pct REAL NOT NULL CHECK(close_pct > 0 AND close_pct <= 100),
+    mode TEXT NOT NULL CHECK(mode IN ('auto', 'limit', 'market')),
+    limit_price REAL CHECK(limit_price IS NULL OR limit_price > 0),
+    execute_at_ms INTEGER NOT NULL CHECK(execute_at_ms >= 0),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'firing', 'fired', 'failed', 'cancelled')),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX ix_scheduled_exits_status_due ON scheduled_exits(status, execute_at_ms);
+PRAGMA user_version = 25;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1609,6 +1658,23 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
     })
 }
 
+fn scheduled_exit_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduledExit> {
+    Ok(ScheduledExit {
+        id: row.get(0)?,
+        venue: row.get(1)?,
+        symbol: row.get(2)?,
+        side: row.get(3)?,
+        close_pct: row.get(4)?,
+        mode: row.get(5)?,
+        limit_price: row.get(6)?,
+        execute_at_ms: row.get(7)?,
+        status: row.get(8)?,
+        note: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
 impl StateStore {
     pub fn default_path() -> PathBuf {
         let base = if let Ok(home) = std::env::var("HOME") {
@@ -1676,7 +1742,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 24 {
+        if version > 25 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1819,6 +1885,12 @@ impl StateStore {
         }
         if version <= 23 {
             if let Err(err) = conn.execute_batch(MIGRATION_V24_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 24 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V25_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -4466,6 +4538,112 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// Insert a pending scheduled exit. Ids are caller-minted
+    /// (`sched-exit-*`); inserting an existing id fails on the PK.
+    pub fn insert_scheduled_exit(&self, exit: &ScheduledExit) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO scheduled_exits
+                (id, venue, symbol, side, close_pct, mode, limit_price,
+                 execute_at_ms, status, note, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![
+                exit.id,
+                exit.venue,
+                exit.symbol,
+                exit.side,
+                exit.close_pct,
+                exit.mode,
+                exit.limit_price,
+                exit.execute_at_ms,
+                exit.status,
+                exit.note,
+                exit.created_at,
+                exit.updated_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// List scheduled exits, newest first. `status` filters (e.g.
+    /// "pending" for the scheduler, None for the full audit view).
+    pub fn list_scheduled_exits(&self, status: Option<&str>) -> anyhow::Result<Vec<ScheduledExit>> {
+        let conn = self.conn.lock();
+        let sql = "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
+                          execute_at_ms, status, note, created_at, updated_at
+                   FROM scheduled_exits";
+        let rows = match status {
+            Some(s) => {
+                let mut stmt = conn.prepare(&format!(
+                    "{sql} WHERE status = ?1 ORDER BY execute_at_ms ASC"
+                ))?;
+                let r = stmt
+                    .query_map([s], scheduled_exit_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                r
+            }
+            None => {
+                let mut stmt = conn.prepare(&format!("{sql} ORDER BY created_at DESC"))?;
+                let r = stmt
+                    .query_map([], scheduled_exit_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                drop(stmt);
+                r
+            }
+        };
+        Ok(rows)
+    }
+
+    /// Pending exits due at or before `now_ms`, due-time ascending.
+    pub fn due_scheduled_exits(&self, now_ms: i64) -> anyhow::Result<Vec<ScheduledExit>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
+                    execute_at_ms, status, note, created_at, updated_at
+             FROM scheduled_exits
+             WHERE status = 'pending' AND execute_at_ms <= ?1
+             ORDER BY execute_at_ms ASC",
+        )?;
+        let rows = stmt
+            .query_map([now_ms], scheduled_exit_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Atomically claim a pending exit for dispatch (pending → firing).
+    /// `true` only for the caller that won the transition — a restart or a
+    /// duplicate tick can never dispatch the same row twice.
+    pub fn claim_scheduled_exit(&self, id: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE scheduled_exits SET status = 'firing', updated_at = ?2
+             WHERE id = ?1 AND status = 'pending'",
+            rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Transition a scheduled exit's status with a note. Transitions are
+    /// one-way: a row already terminal (fired/failed/cancelled) is not
+    /// touched, which keeps a restart from re-firing a dispatched exit.
+    /// 'firing' rows (claimed mid-dispatch) may still resolve.
+    pub fn set_scheduled_exit_status(
+        &self,
+        id: &str,
+        status: &str,
+        note: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE scheduled_exits SET status = ?2, note = COALESCE(?3, note),
+                    updated_at = ?4
+             WHERE id = ?1 AND status IN ('pending', 'firing')",
+            rusqlite::params![id, status, note, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
     fn legs_for(conn: &Connection, signal_id: &str) -> rusqlite::Result<Vec<SignalLeg>> {
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
@@ -4528,7 +4706,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 24);
+            assert_eq!(version, 25);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -5076,7 +5254,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 24);
+        assert_eq!(version, 25);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5591,7 +5769,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 24);
+            assert_eq!(version, 25);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -5962,7 +6140,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 24);
+        assert_eq!(v, 25);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -6082,7 +6260,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 24);
+        assert_eq!(v10, 25);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -6916,7 +7094,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 24);
+        assert_eq!(v, 25);
         let kept: String = conn
             .query_row(
                 "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
@@ -6999,6 +7177,94 @@ mod tests {
                     }],
                 })
                 .unwrap_or_else(|e| panic!("strategy id {sid} failed CHECK: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_scheduled_exits_crud_and_claim() {
+        let store = StateStore::open_in_memory().unwrap();
+        let now = "2026-09-21T00:00:00Z".to_string();
+        let row = ScheduledExit {
+            id: "sched-exit-1".into(),
+            venue: "lighter".into(),
+            symbol: "ETH-USDC".into(),
+            side: "buy".into(),
+            close_pct: 50.0,
+            mode: "auto".into(),
+            limit_price: None,
+            execute_at_ms: 1_800_000_000_000,
+            status: "pending".into(),
+            note: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        store.insert_scheduled_exit(&row).unwrap();
+
+        // Due-scan sees it only when execute_at has passed.
+        assert!(store
+            .due_scheduled_exits(1_799_999_999_999)
+            .unwrap()
+            .is_empty());
+        let due = store.due_scheduled_exits(1_800_000_000_000).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].id, "sched-exit-1");
+
+        // Claim is atomic: the second claim loses, so a restart or
+        // overlapping tick can never dispatch the same exit twice.
+        assert!(store.claim_scheduled_exit("sched-exit-1").unwrap());
+        assert!(!store.claim_scheduled_exit("sched-exit-1").unwrap());
+
+        // Firing resolves to a terminal status; later writes can't reopen.
+        store
+            .set_scheduled_exit_status("sched-exit-1", "fired", Some("filled"))
+            .unwrap();
+        store
+            .set_scheduled_exit_status("sched-exit-1", "pending", Some("reopen?"))
+            .unwrap();
+        let listed = store.list_scheduled_exits(None).unwrap();
+        assert_eq!(listed[0].status, "fired");
+        assert_eq!(listed[0].note.as_deref(), Some("filled"));
+
+        // Terminal rows are invisible to the due scan and unclaimable.
+        assert!(store.due_scheduled_exits(i64::MAX).unwrap().is_empty());
+        assert!(!store.claim_scheduled_exit("sched-exit-1").unwrap());
+    }
+
+    #[test]
+    fn test_scheduled_exits_reject_bad_rows() {
+        let store = StateStore::open_in_memory().unwrap();
+        let now = "2026-09-21T00:00:00Z".to_string();
+        let base = ScheduledExit {
+            id: "x".into(),
+            venue: "lighter".into(),
+            symbol: "ETH-USDC".into(),
+            side: "buy".into(),
+            close_pct: 100.0,
+            mode: "market".into(),
+            limit_price: None,
+            execute_at_ms: 1,
+            status: "pending".into(),
+            note: None,
+            created_at: now.clone(),
+            updated_at: now,
+        };
+        for (i, mutate) in [
+            |r: &mut ScheduledExit| r.close_pct = 0.0,
+            |r: &mut ScheduledExit| r.close_pct = 101.0,
+            |r: &mut ScheduledExit| r.mode = "garbage".into(),
+            |r: &mut ScheduledExit| r.side = "flat".into(),
+            |r: &mut ScheduledExit| r.status = "bogus".into(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut bad = base.clone();
+            bad.id = format!("bad-{i}");
+            mutate(&mut bad);
+            assert!(
+                store.insert_scheduled_exit(&bad).is_err(),
+                "row {i} must fail CHECK"
+            );
         }
     }
 }

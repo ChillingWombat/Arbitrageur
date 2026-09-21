@@ -42,7 +42,7 @@
 use std::sync::Arc;
 
 use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::order::{OrderRequest, OrderResponse};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{Decimal, OrderStatus, Side, VenueId};
 use serde::{Deserialize, Serialize};
@@ -339,6 +339,30 @@ async fn market_fallback(
 /// all (config invalid, bad qty, or the fallback placement itself errored).
 /// Any placed fill — limit or market — is returned as `Ok(report)`; partial
 /// fills are surfaced in the response exactly as the venue reported them.
+/// Fresh book → calm gates → pegged limit price for one attempt. `Err`
+/// carries the human-readable reason the caller should fall back to
+/// market with; `Ok(price)` is the validated peg.
+async fn peg_for_attempt(
+    refresher: &dyn PassiveBookRefresh,
+    side: Side,
+    cfg: &PassiveUnwindConfig,
+    fast_vol_bps: Option<f64>,
+) -> Result<Decimal, String> {
+    let book = refresher
+        .fresh_book()
+        .await
+        .map_err(|e| format!("book refresh failed: {e:#}"))?;
+    let (Some(bid), Some(ask)) = (book.best_bid_price(), book.best_ask_price()) else {
+        return Err("book missing touch".to_string());
+    };
+    let spread = spread_bps(bid, ask).ok_or_else(|| "uncrossable book".to_string())?;
+    if !calm_gate_ok(spread, fast_vol_bps, cfg) {
+        return Err(format!("calm gate failed (spread {spread:.2} bps)"));
+    }
+    limit_price_for(side, bid, ask, cfg.spread_percentile)
+        .ok_or_else(|| "limit pricing failed".to_string())
+}
+
 pub async fn execute_passive_reduce(
     paper: &Arc<dyn ExchangeAdapter>,
     refresher: &dyn PassiveBookRefresh,
@@ -368,73 +392,11 @@ pub async fn execute_passive_reduce(
     let mut limit_prices: Vec<Decimal> = Vec::new();
     let mut tries: u32 = 0;
     while tries < cfg.max_tries {
-        let book = match refresher.fresh_book().await {
-            Ok(b) => b,
-            Err(e) => {
-                return market_fallback(
-                    paper,
-                    symbol,
-                    side,
-                    qty,
-                    format!("book refresh failed: {e:#}"),
-                    tries,
-                    limit_prices,
-                )
-                .await;
-            }
-        };
-        let (Some(bid), Some(ask)) = (book.best_bid_price(), book.best_ask_price()) else {
-            return market_fallback(
-                paper,
-                symbol,
-                side,
-                qty,
-                "book missing touch".to_string(),
-                tries,
-                limit_prices,
-            )
-            .await;
-        };
-        let spread = match spread_bps(bid, ask) {
-            Some(s) => s,
-            None => {
-                return market_fallback(
-                    paper,
-                    symbol,
-                    side,
-                    qty,
-                    "uncrossable book".to_string(),
-                    tries,
-                    limit_prices,
-                )
-                .await;
-            }
-        };
-        if !calm_gate_ok(spread, fast_vol_bps, cfg) {
-            return market_fallback(
-                paper,
-                symbol,
-                side,
-                qty,
-                format!("calm gate failed (spread {spread:.2} bps)"),
-                tries,
-                limit_prices,
-            )
-            .await;
-        }
-        let price = match limit_price_for(side, bid, ask, cfg.spread_percentile) {
-            Some(p) => p,
-            None => {
-                return market_fallback(
-                    paper,
-                    symbol,
-                    side,
-                    qty,
-                    "limit pricing failed".to_string(),
-                    tries,
-                    limit_prices,
-                )
-                .await;
+        let price = match peg_for_attempt(refresher, side, cfg, fast_vol_bps).await {
+            Ok(p) => p,
+            Err(reason) => {
+                return market_fallback(paper, symbol, side, qty, reason, tries, limit_prices)
+                    .await;
             }
         };
         tries += 1;
@@ -544,6 +506,312 @@ pub async fn execute_passive_reduce(
         limit_prices,
     )
     .await
+}
+
+/// Live-venue driver — same peg/timeout/fallback policy as the sim path,
+/// but a live limit order *rests*: venues (Lighter especially) can return
+/// `New`/zero-filled on submission while the order works. Each attempt
+/// therefore polls `fetch_order` until the order is filled, terminal, or
+/// `timeout_secs` elapses, then cancels the resting order and confirms a
+/// terminal state before re-pegging. When the cancel/fill state cannot be
+/// verified the loop stops and market-closes only the *remaining* qty —
+/// a second resting reduce order is never stacked behind an unverified
+/// one. The aggregate `response` combines every attempt's fills
+/// (qty-weighted avg price, summed fees, last order id) so callers record
+/// one honest fill record.
+pub async fn execute_passive_reduce_live(
+    adapter: &Arc<dyn ExchangeAdapter>,
+    refresher: &dyn PassiveBookRefresh,
+    symbol: &str,
+    side: Side,
+    qty: Decimal,
+    cfg: &PassiveUnwindConfig,
+    fast_vol_bps: Option<f64>,
+) -> anyhow::Result<PassiveReduceReport> {
+    cfg.validate().map_err(anyhow::Error::msg)?;
+    if qty <= Decimal::ZERO {
+        anyhow::bail!("passive reduce quantity must be positive");
+    }
+    let venue = adapter.venue_id();
+    if !cfg.enabled {
+        return market_fallback(
+            adapter,
+            symbol,
+            side,
+            qty,
+            "passive unwind disabled".to_string(),
+            0,
+            Vec::new(),
+        )
+        .await;
+    }
+
+    let mut limit_prices: Vec<Decimal> = Vec::new();
+    let mut tries: u32 = 0;
+    let mut attempts: Vec<OrderResponse> = Vec::new();
+    let mut filled_total = Decimal::ZERO;
+
+    while tries < cfg.max_tries && filled_total < qty {
+        let price = match peg_for_attempt(refresher, side, cfg, fast_vol_bps).await {
+            Ok(p) => p,
+            Err(reason) => {
+                return finish_live(
+                    adapter,
+                    symbol,
+                    side,
+                    qty,
+                    filled_total,
+                    reason,
+                    tries,
+                    limit_prices,
+                    attempts,
+                )
+                .await;
+            }
+        };
+        tries += 1;
+        limit_prices.push(price);
+        let order =
+            build_limit_reduce_order(venue.clone(), symbol, side, qty - filled_total, price);
+        let mut cur = match adapter.place_order(order).await {
+            Ok(r) => r,
+            Err(e) => {
+                if tries < cfg.max_tries {
+                    tokio::time::sleep(std::time::Duration::from_secs(cfg.timeout_secs)).await;
+                    continue;
+                }
+                return finish_live(
+                    adapter,
+                    symbol,
+                    side,
+                    qty,
+                    filled_total,
+                    format!("limit attempts errored: {e:#}"),
+                    tries,
+                    limit_prices,
+                    attempts,
+                )
+                .await;
+            }
+        };
+
+        // Poll authoritative order state until terminal, fully filled, or
+        // the attempt's timeout expires. Missed polls are tolerated (the
+        // resting order may take a beat to index) but bounded.
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(cfg.timeout_secs);
+        let mut poll_misses = 0u32;
+        loop {
+            if cur.status.is_final() || cur.filled_qty >= cur.original_qty {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            match adapter
+                .fetch_order(symbol, &cur.order_id, Some(&cur.client_order_id))
+                .await
+            {
+                Ok(polled) => {
+                    cur = polled;
+                    poll_misses = 0;
+                }
+                Err(_) => {
+                    poll_misses += 1;
+                    if poll_misses >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Still working (or state unverifiable) at timeout: cancel and
+        // confirm terminal before another attempt may rest on the book.
+        if !cur.status.is_final() && cur.filled_qty < cur.original_qty {
+            let _ = adapter
+                .cancel_order(CancelRequest {
+                    venue: venue.clone(),
+                    symbol: symbol.to_string(),
+                    order_id: Some(cur.order_id.clone()).filter(|s| !s.is_empty()),
+                    client_order_id: Some(cur.client_order_id.clone()).filter(|s| !s.is_empty()),
+                })
+                .await;
+            match adapter
+                .fetch_order(symbol, &cur.order_id, Some(&cur.client_order_id))
+                .await
+            {
+                Ok(p) => cur = p,
+                Err(e) => {
+                    attempts.push(cur);
+                    return finish_live(
+                        adapter,
+                        symbol,
+                        side,
+                        qty,
+                        attempts.iter().fold(Decimal::ZERO, |a, r| a + r.filled_qty),
+                        format!("cancel/fill state unverifiable — stopping limit loop ({e:#})"),
+                        tries,
+                        limit_prices,
+                        attempts,
+                    )
+                    .await;
+                }
+            }
+            if !cur.status.is_final() {
+                attempts.push(cur);
+                return finish_live(
+                    adapter,
+                    symbol,
+                    side,
+                    qty,
+                    attempts.iter().fold(Decimal::ZERO, |a, r| a + r.filled_qty),
+                    "cancel unconfirmed — refusing to stack a second resting reduce order"
+                        .to_string(),
+                    tries,
+                    limit_prices,
+                    attempts,
+                )
+                .await;
+            }
+        }
+
+        filled_total += cur.filled_qty;
+        attempts.push(cur);
+    }
+
+    if filled_total >= qty {
+        return Ok(PassiveReduceReport {
+            outcome: PassiveOutcome::LimitFilled,
+            limit_tries: tries,
+            limit_prices,
+            response: combine_live_attempts(adapter.venue_id(), symbol, qty, &attempts),
+        });
+    }
+    finish_live(
+        adapter,
+        symbol,
+        side,
+        qty,
+        filled_total,
+        format!("unfilled after {tries} limit tries"),
+        tries,
+        limit_prices,
+        attempts,
+    )
+    .await
+}
+
+/// Market-close the remaining qty after the limit loop stops, then fold
+/// every attempt's response into one aggregate record. Mirrors the sim
+/// path's outcome taxonomy.
+#[allow(clippy::too_many_arguments)]
+async fn finish_live(
+    adapter: &Arc<dyn ExchangeAdapter>,
+    symbol: &str,
+    side: Side,
+    requested: Decimal,
+    filled_so_far: Decimal,
+    reason: String,
+    tries: u32,
+    limit_prices: Vec<Decimal>,
+    mut attempts: Vec<OrderResponse>,
+) -> anyhow::Result<PassiveReduceReport> {
+    let remaining = requested - filled_so_far;
+    let had_limit_fill = attempts.iter().any(|r| r.filled_qty > Decimal::ZERO);
+    if remaining <= Decimal::ZERO {
+        return Ok(PassiveReduceReport {
+            outcome: if had_limit_fill {
+                PassiveOutcome::LimitFilled
+            } else {
+                PassiveOutcome::MarketFallback { reason }
+            },
+            limit_tries: tries,
+            limit_prices,
+            response: combine_live_attempts(adapter.venue_id(), symbol, requested, &attempts),
+        });
+    }
+    match adapter
+        .place_order(build_market_fallback_order(
+            adapter.venue_id(),
+            symbol,
+            side,
+            remaining,
+        ))
+        .await
+    {
+        Ok(mkt) => {
+            attempts.push(mkt);
+            Ok(PassiveReduceReport {
+                outcome: if had_limit_fill {
+                    PassiveOutcome::LimitPartialThenMarket
+                } else {
+                    PassiveOutcome::MarketFallback { reason }
+                },
+                limit_tries: tries,
+                limit_prices,
+                response: combine_live_attempts(adapter.venue_id(), symbol, requested, &attempts),
+            })
+        }
+        Err(e) => {
+            let resp = combine_live_attempts(adapter.venue_id(), symbol, requested, &attempts);
+            Ok(PassiveReduceReport {
+                outcome: PassiveOutcome::MarketFallback {
+                    reason: format!("{reason}; market fallback errored: {e:#}"),
+                },
+                limit_tries: tries,
+                limit_prices,
+                response: resp,
+            })
+        }
+    }
+}
+
+/// Combine every live attempt's terminal response into one honest record:
+/// summed fills/fees, qty-weighted average price, last order/client id
+/// retained for audit. An empty attempt set yields a zero-fill record
+/// (callers still need a shaped response to persist the outcome).
+fn combine_live_attempts(
+    venue: VenueId,
+    symbol: &str,
+    requested: Decimal,
+    attempts: &[OrderResponse],
+) -> OrderResponse {
+    let filled: Decimal = attempts.iter().map(|r| r.filled_qty).sum();
+    let fee: Decimal = attempts.iter().map(|r| r.fee).sum();
+    let px_num: Decimal = attempts
+        .iter()
+        .filter(|r| r.filled_qty > Decimal::ZERO)
+        .map(|r| r.avg_fill_price.unwrap_or(Decimal::ZERO) * r.filled_qty)
+        .sum();
+    let avg = if filled > Decimal::ZERO && px_num > Decimal::ZERO {
+        Some(px_num / filled)
+    } else {
+        None
+    };
+    let last = attempts.last();
+    let status = if filled >= requested && requested > Decimal::ZERO {
+        OrderStatus::Filled
+    } else if filled > Decimal::ZERO {
+        OrderStatus::PartiallyFilled
+    } else {
+        last.map(|r| r.status).unwrap_or(OrderStatus::New)
+    };
+    OrderResponse {
+        order_id: last.map(|r| r.order_id.clone()).unwrap_or_default(),
+        client_order_id: last.map(|r| r.client_order_id.clone()).unwrap_or_default(),
+        venue,
+        symbol: symbol.to_string(),
+        status,
+        original_qty: requested,
+        filled_qty: filled,
+        remaining_qty: (requested - filled).max(Decimal::ZERO),
+        avg_fill_price: avg,
+        fee,
+        fee_currency: last.map(|r| r.fee_currency.clone()).unwrap_or_default(),
+        raw_response: None,
+        timestamp: chrono::Utc::now(),
+    }
 }
 
 /// Combine a partial limit fill with its market remainder-take into one
@@ -1196,5 +1464,374 @@ mod tests {
         )
         .await
         .is_err());
+    }
+
+    // ---- live-driver tests -------------------------------------------------
+    //
+    // `ScriptedLive` models the real-venue contract the paper probe does not:
+    // limit submission returns an *acceptance* (New/0, Lighter-style), the
+    // order rests, and its state is only knowable through `fetch_order`
+    // polls. Each submitted limit order pops one scripted poll queue; market
+    // orders always fill fully.
+
+    #[derive(Debug)]
+    enum Poll {
+        /// Order still working; payload is the cumulative fill so far.
+        Working(Decimal),
+        Filled,
+        Cancelled,
+        /// fetch_order transport failure.
+        Error,
+    }
+
+    struct LiveOrder {
+        req: OrderRequest,
+        polls: Mutex<VecDeque<Poll>>,
+        cancelled: Mutex<bool>,
+    }
+
+    /// orders[i] is the poll script for the i-th limit order submitted.
+    /// Market orders are never scripted — they fill on submission.
+    struct ScriptedLive {
+        venue: VenueId,
+        order_scripts: Mutex<VecDeque<VecDeque<Poll>>>,
+        orders: Mutex<Vec<Arc<LiveOrder>>>,
+        cancels: Mutex<usize>,
+    }
+
+    impl ScriptedLive {
+        fn new(order_scripts: Vec<Vec<Poll>>) -> Self {
+            Self {
+                venue: VenueId::new("test"),
+                order_scripts: Mutex::new(order_scripts.into_iter().map(Into::into).collect()),
+                orders: Mutex::new(Vec::new()),
+                cancels: Mutex::new(0),
+            }
+        }
+
+        fn cancel_count(&self) -> usize {
+            *self.cancels.lock().expect("test mutex")
+        }
+    }
+
+    fn live_resp(order: &LiveOrder, status: OrderStatus, filled: Decimal) -> OrderResponse {
+        OrderResponse {
+            order_id: order.req.client_order_id.clone(),
+            client_order_id: order.req.client_order_id.clone(),
+            venue: order.req.venue.clone(),
+            symbol: order.req.symbol.clone(),
+            status,
+            original_qty: order.req.quantity,
+            filled_qty: filled,
+            remaining_qty: (order.req.quantity - filled).max(Decimal::ZERO),
+            avg_fill_price: (filled > Decimal::ZERO).then_some(dec!(100.5)),
+            fee: if filled > Decimal::ZERO {
+                dec!(0.01)
+            } else {
+                Decimal::ZERO
+            },
+            fee_currency: "USDC".to_string(),
+            raw_response: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for ScriptedLive {
+        fn venue_id(&self) -> VenueId {
+            self.venue.clone()
+        }
+        fn name(&self) -> &str {
+            "scripted-live"
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            Ok(vec![])
+        }
+        async fn fetch_orderbook(&self, _symbol: &str) -> anyhow::Result<OrderBook> {
+            Ok(test_book(dec!(100), dec!(101)))
+        }
+        async fn fetch_ticker(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            Ok(arbitrageur_core::quote::Ticker {
+                venue: self.venue.clone(),
+                symbol: symbol.to_string(),
+                bid: dec!(100),
+                ask: dec!(101),
+                last: dec!(100.5),
+                timestamp: chrono::Utc::now(),
+            })
+        }
+        async fn fetch_funding_rate(
+            &self,
+            symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            Ok(arbitrageur_core::quote::FundingRate {
+                venue: self.venue.clone(),
+                symbol: symbol.to_string(),
+                rate: dec!(0.0001),
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: chrono::Utc::now(),
+                timestamp: chrono::Utc::now(),
+            })
+        }
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            Ok(arbitrageur_core::position::AccountSnapshot {
+                venue: self.venue.clone(),
+                equity: dec!(10000),
+                free_margin: dec!(10000),
+                maintenance_margin: dec!(0),
+                margin_usage_pct: dec!(0),
+                balances: vec![],
+                positions: vec![],
+                timestamp: chrono::Utc::now(),
+            })
+        }
+        async fn place_order(&self, req: OrderRequest) -> anyhow::Result<OrderResponse> {
+            // Market fallback orders fill immediately at touch.
+            if matches!(req.order_type, arbitrageur_core::types::OrderType::Market) {
+                let order = LiveOrder {
+                    req,
+                    polls: Mutex::new(VecDeque::new()),
+                    cancelled: Mutex::new(false),
+                };
+                let resp = live_resp(&order, OrderStatus::Filled, order.req.quantity);
+                self.orders
+                    .lock()
+                    .expect("test mutex")
+                    .push(Arc::new(order));
+                return Ok(resp);
+            }
+            // Limit orders: Lighter-style acceptance — New, zero reported
+            // fill; the truth only arrives via fetch_order polls.
+            let polls = self
+                .order_scripts
+                .lock()
+                .expect("test mutex")
+                .pop_front()
+                .unwrap_or_default();
+            let order = Arc::new(LiveOrder {
+                req,
+                polls: Mutex::new(polls),
+                cancelled: Mutex::new(false),
+            });
+            let resp = live_resp(&order, OrderStatus::New, Decimal::ZERO);
+            self.orders.lock().expect("test mutex").push(order);
+            Ok(resp)
+        }
+        async fn fetch_order(
+            &self,
+            _symbol: &str,
+            order_id: &str,
+            _client_order_id: Option<&str>,
+        ) -> anyhow::Result<OrderResponse> {
+            let orders = self.orders.lock().expect("test mutex");
+            let order = orders
+                .iter()
+                .find(|o| o.req.client_order_id == order_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("unknown order {order_id}"))?;
+            drop(orders);
+            let step = order.polls.lock().expect("test mutex").pop_front();
+            let cancelled = *order.cancelled.lock().expect("test mutex");
+            Ok(match step {
+                // Transport failures beat state — a cancelled order whose
+                // confirm-read fails is exactly the unverifiable case.
+                Some(Poll::Error) => anyhow::bail!("scripted poll failure"),
+                // A Working step observed after cancel = the venue's
+                // cancelled-with-partial-fill state.
+                Some(Poll::Working(f)) if cancelled => live_resp(&order, OrderStatus::Cancelled, f),
+                Some(Poll::Working(f)) => live_resp(
+                    &order,
+                    if f > Decimal::ZERO {
+                        OrderStatus::PartiallyFilled
+                    } else {
+                        OrderStatus::New
+                    },
+                    f,
+                ),
+                Some(Poll::Filled) => live_resp(&order, OrderStatus::Filled, order.req.quantity),
+                Some(Poll::Cancelled) | None if cancelled => {
+                    live_resp(&order, OrderStatus::Cancelled, Decimal::ZERO)
+                }
+                Some(Poll::Cancelled) => live_resp(&order, OrderStatus::Cancelled, Decimal::ZERO),
+                None => live_resp(&order, OrderStatus::New, Decimal::ZERO),
+            })
+        }
+        async fn cancel_order(
+            &self,
+            req: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            *self.cancels.lock().expect("test mutex") += 1;
+            let id = req.order_id.or(req.client_order_id).unwrap_or_default();
+            let orders = self.orders.lock().expect("test mutex");
+            if let Some(order) = orders.iter().find(|o| o.req.client_order_id == id) {
+                *order.cancelled.lock().expect("test mutex") = true;
+            }
+            Ok(())
+        }
+    }
+
+    /// Attempt-timeout=0 exercises the cancel+reprice edge instantly; the
+    /// working-poll path is covered by the 1s-timeout fill test.
+    fn live_cfg(timeout_secs: u64, max_tries: u32) -> PassiveUnwindConfig {
+        PassiveUnwindConfig {
+            enabled: true,
+            spread_percentile: 50.0,
+            timeout_secs,
+            max_tries,
+            max_spread_bps: 200.0,
+            max_fast_vol_bps: 10.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_limit_fills_via_polling() {
+        // Submit returns New/0 (acceptance only); the first poll reports the
+        // fill — the driver must not mistake New for untouched.
+        let live: Arc<dyn ExchangeAdapter> = Arc::new(ScriptedLive::new(vec![vec![Poll::Filled]]));
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let report = execute_passive_reduce_live(
+            &live,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &live_cfg(1, 3),
+            None,
+        )
+        .await
+        .expect("reduce resolves");
+        assert_eq!(report.outcome, PassiveOutcome::LimitFilled);
+        assert_eq!(report.response.filled_qty, dec!(1));
+        assert_eq!(report.limit_tries, 1);
+    }
+
+    #[tokio::test]
+    async fn live_unfilled_attempt_cancels_before_reprice() {
+        // timeout=0: no poll window — the attempt is cancelled, confirmed
+        // terminal via fetch_order, then re-pegged. Attempt 2's confirm
+        // fetch reports a late fill (venue raced the cancel).
+        let adapter = Arc::new(ScriptedLive::new(vec![
+            vec![Poll::Working(dec!(0))],
+            vec![Poll::Filled],
+        ]));
+        let live: Arc<dyn ExchangeAdapter> = adapter.clone();
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let report = execute_passive_reduce_live(
+            &live,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &live_cfg(0, 3),
+            None,
+        )
+        .await
+        .expect("reduce resolves");
+        assert_eq!(report.outcome, PassiveOutcome::LimitFilled);
+        assert_eq!(report.limit_tries, 2);
+        assert_eq!(report.limit_prices.len(), 2);
+        assert_eq!(report.response.filled_qty, dec!(1));
+        // Every working attempt was cancelled before the next peg.
+        assert_eq!(adapter.cancel_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn live_exhaustion_falls_back_to_market() {
+        // Three attempts, each confirmed cancelled with zero fill → the
+        // remainder goes to a market reduce-only order.
+        let adapter = Arc::new(ScriptedLive::new(vec![
+            vec![Poll::Working(dec!(0))],
+            vec![Poll::Working(dec!(0))],
+            vec![Poll::Working(dec!(0))],
+        ]));
+        let live: Arc<dyn ExchangeAdapter> = adapter.clone();
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let report = execute_passive_reduce_live(
+            &live,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &live_cfg(0, 3),
+            None,
+        )
+        .await
+        .expect("reduce resolves");
+        assert!(matches!(
+            report.outcome,
+            PassiveOutcome::MarketFallback { .. }
+        ));
+        assert_eq!(report.response.filled_qty, dec!(1));
+        assert_eq!(adapter.cancel_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn live_unverifiable_cancel_stops_stacking_orders() {
+        // The post-cancel fetch errors — the driver cannot prove the resting
+        // order is dead, so it must NOT peg another limit; it market-closes
+        // the remainder instead.
+        let adapter = Arc::new(ScriptedLive::new(vec![vec![
+            Poll::Error,
+            Poll::Error,
+            Poll::Error,
+            Poll::Error,
+        ]]));
+        let live: Arc<dyn ExchangeAdapter> = adapter.clone();
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let report = execute_passive_reduce_live(
+            &live,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &live_cfg(0, 3),
+            None,
+        )
+        .await
+        .expect("reduce resolves");
+        // Exactly one limit order was ever resting.
+        assert_eq!(adapter.orders.lock().expect("test mutex").len(), 2); // 1 limit + 1 market
+        assert!(matches!(
+            report.outcome,
+            PassiveOutcome::MarketFallback { .. }
+        ));
+        assert_eq!(report.response.filled_qty, dec!(1));
+    }
+
+    #[tokio::test]
+    async fn live_partial_fill_then_market_remainder() {
+        // Attempt 1 partially fills 0.4 then confirms cancelled; remaining
+        // 0.6 takes the market fallback. Combined response is honest: full
+        // qty, weighted average price, summed fees.
+        let adapter = Arc::new(ScriptedLive::new(vec![vec![
+            Poll::Working(dec!(0.4)),
+            Poll::Cancelled,
+        ]]));
+        let live: Arc<dyn ExchangeAdapter> = adapter.clone();
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let report = execute_passive_reduce_live(
+            &live,
+            &refresh,
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            &live_cfg(0, 3),
+            None,
+        )
+        .await
+        .expect("reduce resolves");
+        assert_eq!(report.outcome, PassiveOutcome::LimitPartialThenMarket);
+        assert_eq!(report.response.filled_qty, dec!(1));
+        // limit 0.4 @ 100.5 + market 0.6 @ 100.5 → vwap 100.5
+        assert_eq!(report.response.avg_fill_price, Some(dec!(100.5)));
+        assert_eq!(report.response.fee, dec!(0.02));
     }
 }

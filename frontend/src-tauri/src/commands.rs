@@ -1970,7 +1970,7 @@ fn sweep_flatten_qty(residual: Decimal, capped: Decimal, step: Decimal) -> Decim
 /// One full grid step for `symbol` from its ticker config (the min tradable
 /// unit for sweep purposes). Unknown or invalid configs yield zero, which
 /// disables the sweep (plain capped-close semantics).
-fn flatten_step_qty(state: &AppEngineState, symbol: &str) -> Decimal {
+pub(crate) fn flatten_step_qty(state: &AppEngineState, symbol: &str) -> Decimal {
     state
         .strategy_configs
         .read()
@@ -6227,19 +6227,40 @@ fn dec_to_f64(value: Decimal, what: &str) -> Result<f64, String> {
     Ok(f)
 }
 
-/// Resolve the passive-unwind controls for a flatten. Only strategies with
-/// a live reduce surface (futures/funding/spot) can return `Some`, and only
-/// when enabled with a valid record — everything else (including triangle,
-/// radar, unknown ids, and invalid records) falls back to market exits.
+/// Resolve the passive-unwind controls for a flatten. Precedence:
+///   strategy `*_passive_mode` = "off"     → never passive (market);
+///   "custom"                              → the strategy's own config;
+///   "inherit"/unset                       → the global engine policy;
+///   unset + a legacy enabled per-strategy config → "custom" (rows saved
+///   before the mode field keep their behavior).
+/// Any path without its own strategy record (triangle, radar, external
+/// residuals) inherits the global policy. `Some` only when the resolved
+/// config is enabled and valid — everything else falls back to market.
 fn passive_cfg_for(state: &AppEngineState, strategy_id: &str) -> Option<PassiveUnwindConfig> {
     let key = strategy_id.trim().to_lowercase();
     let map = state.strategy_params.read();
-    let params = map.get(key.as_str())?;
-    let cfg = match key.as_str() {
-        "futures" => params.futures_passive_unwind,
-        "funding" => params.funding_passive_unwind,
-        "spot" => params.spot_passive_unwind,
-        _ => return None,
+    let params = map.get(key.as_str());
+    let (mode_raw, custom) = match key.as_str() {
+        "futures" => params.map(|p| (p.futures_passive_mode.as_str(), p.futures_passive_unwind)),
+        "funding" => params.map(|p| (p.funding_passive_mode.as_str(), p.funding_passive_unwind)),
+        "spot" => params.map(|p| (p.spot_passive_mode.as_str(), p.spot_passive_unwind)),
+        _ => None,
+    }
+    .unwrap_or(("", PassiveUnwindConfig::default()));
+    let mode = match mode_raw.trim() {
+        "" => {
+            if custom.enabled {
+                "custom"
+            } else {
+                "inherit"
+            }
+        }
+        m => m,
+    };
+    let cfg = match mode {
+        "off" => return None,
+        "custom" => custom,
+        _ => state.settings.read().passive_unwind,
     };
     if cfg.enabled && cfg.validate().is_ok() {
         Some(cfg)
@@ -6295,6 +6316,45 @@ impl PassiveBookRefresh for FlattenPaperRefresh<'_> {
             .replace_orderbook(b.clone())
             .map_err(anyhow::Error::msg)?;
         Ok(b)
+    }
+}
+
+/// Live-venue refresher for passive re-pegs: a fresh WS-fed hub book wins;
+/// otherwise the single-flight REST fetch is validated and mirrored into
+/// the hub — the same resolution order every other live read takes.
+pub(crate) struct FlattenLiveRefresh<'a> {
+    pub(crate) state: &'a AppEngineState,
+    pub(crate) venue_id: VenueId,
+    pub(crate) symbol: String,
+    pub(crate) adapter: Arc<dyn ExchangeAdapter>,
+}
+
+#[async_trait::async_trait]
+impl PassiveBookRefresh for FlattenLiveRefresh<'_> {
+    async fn fresh_book(&self) -> anyhow::Result<OrderBook> {
+        match crate::ws_primary::resolve_book_ws_first(
+            &self.state.market_data_hub,
+            &self.state.orderbook_flights,
+            &self.adapter,
+            &self.symbol,
+            std::time::Duration::from_secs(2),
+        )
+        .await
+        {
+            Some(crate::ws_primary::ResolvedBook::Ws(b))
+            | Some(crate::ws_primary::ResolvedBook::Cached(b)) => {
+                validate_adapter_book(&b, &self.venue_id, &self.symbol)
+                    .map_err(|e| anyhow::anyhow!("Flatten order book rejected: {e}"))?;
+                Ok(b)
+            }
+            Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
+                validate_adapter_book(&b, &self.venue_id, &self.symbol)
+                    .map_err(|e| anyhow::anyhow!("Flatten order book rejected: {e}"))?;
+                self.state.market_data_hub.update_orderbook(b.clone());
+                Ok(b)
+            }
+            None => anyhow::bail!("no live orderbook for {} on {}", self.symbol, self.venue_id),
+        }
     }
 }
 
@@ -6457,10 +6517,10 @@ async fn flatten_leg(args: FlattenLegArgs<'_>, is_live: bool) -> Result<FlattenL
         symbol,
         side,
         qty,
-        sig_id: _,
-        notes: _,
-        strategy_id: _,
-        execution_type: _,
+        sig_id,
+        notes,
+        strategy_id,
+        execution_type,
     } = args;
     let adapter = state
         .get_adapter(venue)
@@ -6473,6 +6533,57 @@ async fn flatten_leg(args: FlattenLegArgs<'_>, is_live: bool) -> Result<FlattenL
     if qty <= dec!(0) {
         return Err("Invalid leg quantity".to_string());
     }
+
+    // Passive limit unwind (opt-in; emergency flattens stay market-only).
+    // The live driver polls fetch_order while the limit works and cancels
+    // before re-pegging — resting reduce orders are never stacked.
+    let passive_cfg = match execution_type {
+        Some("emergency_market") => None,
+        _ => passive_cfg_for(state, strategy_id),
+    };
+    if let Some(cfg) = passive_cfg {
+        let refresher = FlattenLiveRefresh {
+            state,
+            venue_id: adapter.venue_id(),
+            symbol: symbol.to_string(),
+            adapter: adapter.clone(),
+        };
+        let report = arbitrageur_execution::passive_unwind::execute_passive_reduce_live(
+            &adapter, &refresher, symbol, side, qty, &cfg, None,
+        )
+        .await
+        .map_err(|e| format!("passive reduce failed: {e:#}"))?;
+        match &report.outcome {
+            PassiveOutcome::LimitFilled => notes.push(format!(
+                "{sig_id}: {venue} leg passively closed {qty} (limit, {} tries)",
+                report.limit_tries
+            )),
+            PassiveOutcome::LimitPartialThenMarket => notes.push(format!(
+                "{sig_id}: {venue} leg limit-partial, remainder at market ({qty})"
+            )),
+            PassiveOutcome::MarketFallback { reason } => notes.push(format!(
+                "{sig_id}: {venue} leg passive skipped, market exit ({reason})"
+            )),
+        }
+        let resp = report.response;
+        let order_id = (!resp.order_id.trim().is_empty()).then(|| resp.order_id.clone());
+        let fill = if resp.filled_qty > dec!(0) {
+            let px = resp
+                .avg_fill_price
+                .filter(|p| *p > dec!(0))
+                .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
+            Some((resp.filled_qty, px, resp.fee))
+        } else {
+            None
+        };
+        return Ok(FlattenLegOutcome {
+            order_id,
+            client_order_id: (!resp.client_order_id.trim().is_empty())
+                .then(|| resp.client_order_id.clone()),
+            fill,
+        });
+    }
+
     let mut order =
         arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
     order.reduce_only = true;
@@ -7447,6 +7558,9 @@ pub fn save_engine_settings_impl(
     }
     if !settings.min_depth_ratio.is_finite() || settings.min_depth_ratio < 1.0 {
         return Err("Min depth ratio must be at least 1.0".into());
+    }
+    if let Err(e) = settings.passive_unwind.validate() {
+        return Err(format!("Passive Limit Unwind settings: {e}"));
     }
     if settings.engine_rpc_port == 0
         || settings.engine_ws_port == 0
@@ -8968,6 +9082,17 @@ pub fn save_strategy_params_impl(
         if cfg.enabled && cfg.timeout_secs < 1 {
             return Err(format!(
                 "{label}: timeout_secs must be at least 1 when enabled"
+            ));
+        }
+    }
+    for (label, mode) in [
+        ("futures_passive_mode", params.futures_passive_mode.as_str()),
+        ("funding_passive_mode", params.funding_passive_mode.as_str()),
+        ("spot_passive_mode", params.spot_passive_mode.as_str()),
+    ] {
+        if !matches!(mode.trim(), "" | "inherit" | "custom" | "off") {
+            return Err(format!(
+                "{label} must be 'inherit', 'custom' or 'off' (got '{mode}')"
             ));
         }
     }

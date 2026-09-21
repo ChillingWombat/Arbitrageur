@@ -89,6 +89,11 @@ fn main() {
     // stays as the cold-start/stale fallback; dead WS lanes go stale.
     feed::spawn_all(engine_state.clone());
 
+    // Spawn the scheduled-exit dispatcher: durable `scheduled_exits` rows
+    // fire through the normal reduce-only close path at their wall-clock
+    // time; the claim transition keeps restarts idempotent.
+    external_positions::spawn_exit_scheduler(engine_state.clone());
+
     tauri::Builder::default()
         .manage(engine_state)
         .setup(|app| {
@@ -168,6 +173,9 @@ fn main() {
             external_positions::get_external_positions,
             external_positions::recommend_external_close,
             external_positions::close_external_position,
+            external_positions::schedule_external_exit,
+            external_positions::list_scheduled_exits,
+            external_positions::cancel_scheduled_exit,
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::get_strategy_fill_pnl,

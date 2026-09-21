@@ -108,10 +108,34 @@ pub struct CloseRecommendationDto {
 pub struct CloseExternalPositionInput {
     pub venue: String,
     pub symbol: String,
-    /// "limit" | "market".
+    /// "auto" (passive limit unwind w/ fallback) | "limit" | "market".
     pub mode: String,
     pub limit_price: Option<f64>,
     pub taker_fee_bps: Option<f64>,
+    /// Percentage of the external residual to close; default 100.
+    /// The quantity is computed from a fresh account re-read, never the
+    /// stale UI figure, and floored to the venue's configured qty step.
+    pub close_pct: Option<f64>,
+}
+
+/// User request to fire one external close at a future wall-clock time
+/// (e.g. just past a funding timestamp). `executeAtMs` is the next local
+/// occurrence computed by the UI; the row fires once and is durable across
+/// restarts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleExitInput {
+    pub venue: String,
+    pub symbol: String,
+    /// Position side shown in the popup ("long" | "short") — recorded for
+    /// audit; the dispatch re-reads the live position and derives the
+    /// closing side itself, so a flipped position fails closed.
+    pub side: String,
+    /// "auto" | "limit" | "market" — same semantics as the close dialog.
+    pub mode: String,
+    pub limit_price: Option<f64>,
+    pub close_pct: Option<f64>,
+    pub execute_at_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +216,25 @@ fn f64_dec(v: f64) -> Option<Decimal> {
         return None;
     }
     Decimal::from_str(&v.to_string()).ok()
+}
+
+/// Percent-of-residual close quantity: `pct`% of `ext`, floored down to the
+/// venue qty step when the raw target exceeds one step (a sub-step target
+/// passes through — the venue's own min-qty rule then decides). `None`
+/// when pct is not finite or out of (0,100], or the result is non-positive.
+/// Never rounds up past the position.
+fn close_target_qty(ext: f64, pct: f64, step: Decimal) -> Option<Decimal> {
+    if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+        return None;
+    }
+    let mut q = f64_dec(ext * pct / 100.0)?;
+    if step > dec!(0) && q > step {
+        q = (q / step).floor() * step;
+    }
+    if q <= dec!(0) {
+        return None;
+    }
+    Some(q)
 }
 
 /// Sum of open system leg qtys on (venue, exact symbol, side-sign). Only
@@ -646,8 +689,21 @@ pub async fn close_external_position_impl(
         return Err(format!("No live credentials for {venue_lc}"));
     }
     let mode = input.mode.trim().to_lowercase();
-    if mode != "limit" && mode != "market" {
-        return Err("mode must be 'limit' or 'market'".into());
+    if !matches!(mode.as_str(), "auto" | "limit" | "market") {
+        return Err("mode must be 'auto', 'limit' or 'market'".into());
+    }
+    let close_pct = input.close_pct.unwrap_or(100.0);
+    if !close_pct.is_finite() || close_pct <= 0.0 || close_pct > 100.0 {
+        return Err("closePct must be a finite percentage in (0, 100]".into());
+    }
+    if mode == "auto" {
+        let cfg = state.settings.read().passive_unwind;
+        if !cfg.enabled || cfg.validate().is_err() {
+            return Err(
+                "Auto Limit Exit needs Passive Limit Unwind enabled and valid in Engine Settings → Execution — or choose Limit/Market"
+                    .into(),
+            );
+        }
     }
     // Fresh re-read: never close a quantity observed seconds ago.
     let account = adapter
@@ -677,47 +733,61 @@ pub async fn close_external_position_impl(
             "Nothing external left to close in {base} on {venue_lc}"
         ));
     }
-    let qty_dec =
-        f64_dec(ext).ok_or_else(|| "External quantity is not finite — refusing".to_string())?;
+    // Percentage of the *fresh* residual, floored to the configured qty
+    // step — never the stale UI figure, never rounded up past the position.
+    let step = crate::commands::flatten_step_qty(state, &live.symbol);
+    let qty_dec = close_target_qty(ext, close_pct, step).ok_or_else(|| {
+        format!("{close_pct}% of {ext} {base} yields no closable quantity at the venue's qty step")
+    })?;
     let close_side = if long { Side::Sell } else { Side::Buy };
-    let mut order = if mode == "limit" {
-        let px = input
-            .limit_price
-            .filter(|p| p.is_finite() && *p > 0.0)
-            .and_then(f64_dec)
-            .ok_or_else(|| {
-                "Limit close needs a positive limit_price (use the recommendation)".to_string()
-            })?;
-        let mut o = OrderRequest::new_limit(
-            VenueId::from(venue_lc.clone()),
-            live.symbol.clone(),
-            close_side,
-            px,
-            qty_dec,
-        );
-        o.reduce_only = true;
-        o
-    } else {
-        let mut o = OrderRequest::new_market(
-            VenueId::from(venue_lc.clone()),
-            live.symbol.clone(),
-            close_side,
-            qty_dec,
-        );
-        o.reduce_only = true;
-        o
+    let mint_id = || {
+        format!(
+            "extclose-{}-{}-{:08x}",
+            venue_lc,
+            Utc::now().timestamp_millis(),
+            rand::random::<u32>()
+        )
     };
-    // Tag the client order so venue-side fills reconcile to this flow.
-    order.client_order_id = format!(
-        "extclose-{}-{}-{:08x}",
-        venue_lc,
-        Utc::now().timestamp_millis(),
-        rand::random::<u32>()
-    );
-    let expected_client_order_id = order.client_order_id.clone();
-    let expected_symbol = order.symbol.clone();
-    let expected_qty = order.quantity;
-    let sid = expected_client_order_id.clone();
+    // Auto mode runs the passive driver — its per-attempt client ids are
+    // internal, so the signal id is minted here and the persisted order id
+    // is the last attempt's (the only one that can still be working).
+    let (order, expected_client_order_id, sid) = if mode == "auto" {
+        (None, String::new(), mint_id())
+    } else {
+        let mut o = if mode == "limit" {
+            let px = input
+                .limit_price
+                .filter(|p| p.is_finite() && *p > 0.0)
+                .and_then(f64_dec)
+                .ok_or_else(|| {
+                    "Limit close needs a positive limit_price (use the recommendation)".to_string()
+                })?;
+            let mut o = OrderRequest::new_limit(
+                VenueId::from(venue_lc.clone()),
+                live.symbol.clone(),
+                close_side,
+                px,
+                qty_dec,
+            );
+            o.reduce_only = true;
+            o
+        } else {
+            let mut o = OrderRequest::new_market(
+                VenueId::from(venue_lc.clone()),
+                live.symbol.clone(),
+                close_side,
+                qty_dec,
+            );
+            o.reduce_only = true;
+            o
+        };
+        // Tag the client order so venue-side fills reconcile to this flow.
+        o.client_order_id = mint_id();
+        let cid = o.client_order_id.clone();
+        (Some(o), cid.clone(), cid)
+    };
+    let expected_symbol = live.symbol.clone();
+    let expected_qty = qty_dec;
     let leg_side = if long { LegSide::Short } else { LegSide::Long };
 
     // Persist the close intent before dispatch. If the process dies after the
@@ -731,13 +801,17 @@ pub async fn close_external_position_impl(
             symbol: live.symbol.clone(),
             route_id: None,
             expected_net_usd: None,
-            note: Some(format!("External {base} close via bot ({mode})")),
+            note: Some(if close_pct < 100.0 {
+                format!("External {base} close via bot ({mode}, {close_pct}% of {ext})")
+            } else {
+                format!("External {base} close via bot ({mode})")
+            }),
             legs: vec![NewSignalLeg {
                 account_id: None,
                 venue: venue_lc.clone(),
                 side: leg_side,
                 symbol: Some(live.symbol.clone()),
-                intended_qty: ext,
+                intended_qty: dec_f64(qty_dec),
             }],
         })
         .map_err(|e| format!("Failed to persist external close intent: {e}"))?;
@@ -749,21 +823,62 @@ pub async fn close_external_position_impl(
     };
 
     let _guard = state.execution_lock.lock().await;
-    let resp = match adapter.place_order(order).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            let note = format!(
-                "External close submission returned an error after dispatch; verify venue state before retrying: {e}"
-            );
-            mark_unresolved(&note);
-            return Err(format!("Close order failed on {venue_lc}: {e}"));
+    let resp = if mode == "auto" {
+        let cfg = state.settings.read().passive_unwind;
+        let refresher = crate::commands::FlattenLiveRefresh {
+            state,
+            venue_id: adapter.venue_id(),
+            symbol: live.symbol.clone(),
+            adapter: adapter.clone(),
+        };
+        match arbitrageur_execution::passive_unwind::execute_passive_reduce_live(
+            &adapter,
+            &refresher,
+            &live.symbol,
+            close_side,
+            qty_dec,
+            &cfg,
+            None,
+        )
+        .await
+        {
+            Ok(report) => report.response,
+            Err(e) => {
+                let note = format!(
+                    "External auto-close failed after dispatch; verify venue state before retrying: {e:#}"
+                );
+                mark_unresolved(&note);
+                return Err(format!("Auto close failed on {venue_lc}: {e:#}"));
+            }
+        }
+    } else {
+        match adapter
+            .place_order(order.expect("limit/market builds an order"))
+            .await
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let note = format!(
+                    "External close submission returned an error after dispatch; verify venue state before retrying: {e}"
+                );
+                mark_unresolved(&note);
+                return Err(format!("Close order failed on {venue_lc}: {e}"));
+            }
         }
     };
 
+    // Auto mode: the driver mints per-attempt client ids; the combined
+    // response carries the last attempt's, which is the only order that can
+    // still be working — persist that identity (validated self-consistently).
+    let effective_client_order_id = if mode == "auto" {
+        resp.client_order_id.clone()
+    } else {
+        expected_client_order_id.clone()
+    };
     if let Err(e) = validate_close_response(
         &adapter.venue_id(),
         &expected_symbol,
-        &expected_client_order_id,
+        &effective_client_order_id,
         expected_qty,
         &resp,
     ) {
@@ -779,7 +894,7 @@ pub async fn close_external_position_impl(
         &sid,
         leg_side,
         &resp.order_id,
-        Some(&expected_client_order_id),
+        Some(&effective_client_order_id),
     ) {
         let note = format!(
             "External close order {} was accepted but its order id could not be persisted: {e}",
@@ -907,6 +1022,162 @@ pub async fn close_external_position_impl(
     })
 }
 
+// --- Scheduled exits ---------------------------------------------------------
+
+/// Persist a one-shot scheduled close. All the close-path safety gates are
+/// re-checked at fire time (live mode, vault, fresh account re-read); the
+/// checks here only refuse schedules that could never dispatch.
+pub async fn schedule_external_exit_impl(
+    input: ScheduleExitInput,
+    state: &AppEngineState,
+) -> Result<crate::state_store::ScheduledExit, String> {
+    if !*state.is_live_mode.read() {
+        return Err("Switch to Live Trading to schedule exits — scheduled closes dispatch real reduce-only orders".into());
+    }
+    if !state.vault.write().is_unlocked() {
+        return Err("Vault is locked. Unlock before scheduling an exit.".into());
+    }
+    let venue_lc = input.venue.trim().to_lowercase();
+    let adapter = state
+        .get_adapter(&venue_lc)
+        .ok_or_else(|| format!("Unknown venue '{}'", input.venue))?;
+    if !adapter.live_order_submission_implemented() || !adapter.has_live_credentials() {
+        return Err(format!(
+            "{venue_lc} cannot take live close orders (unsupported or no credentials)"
+        ));
+    }
+    let mode = input.mode.trim().to_lowercase();
+    if !matches!(mode.as_str(), "auto" | "limit" | "market") {
+        return Err("mode must be 'auto', 'limit' or 'market'".into());
+    }
+    if mode == "limit" {
+        match input.limit_price {
+            Some(p) if p.is_finite() && p > 0.0 => {}
+            _ => return Err("A scheduled limit exit needs a positive limitPrice".into()),
+        }
+    }
+    if mode == "auto" {
+        let cfg = state.settings.read().passive_unwind;
+        if !cfg.enabled || cfg.validate().is_err() {
+            return Err(
+                "Scheduled auto exit needs Passive Limit Unwind enabled in Engine Settings → Execution"
+                    .into(),
+            );
+        }
+    }
+    let close_pct = input.close_pct.unwrap_or(100.0);
+    if !close_pct.is_finite() || close_pct <= 0.0 || close_pct > 100.0 {
+        return Err("closePct must be a finite percentage in (0, 100]".into());
+    }
+    let now_ms = Utc::now().timestamp_millis();
+    let max_horizon_ms = now_ms + 7 * 24 * 60 * 60 * 1000;
+    if input.execute_at_ms <= now_ms {
+        return Err("Scheduled time is in the past — pick the next occurrence".into());
+    }
+    if input.execute_at_ms > max_horizon_ms {
+        return Err("Scheduled exits are one-shot within 7 days — pick a nearer time".into());
+    }
+    let side = match input.side.trim().to_lowercase().as_str() {
+        "long" => "buy",
+        "short" => "sell",
+        other => return Err(format!("side must be 'long' or 'short', got '{other}'")),
+    };
+    let now = Utc::now().to_rfc3339();
+    let row = crate::state_store::ScheduledExit {
+        id: format!("sched-exit-{}-{:08x}", now_ms, rand::random::<u32>()),
+        venue: venue_lc,
+        symbol: input.symbol.trim().to_string(),
+        side: side.to_string(),
+        close_pct,
+        mode,
+        limit_price: input.limit_price.filter(|p| p.is_finite() && *p > 0.0),
+        execute_at_ms: input.execute_at_ms,
+        status: "pending".into(),
+        note: None,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    state
+        .state_store
+        .insert_scheduled_exit(&row)
+        .map_err(|e| format!("Failed to persist scheduled exit: {e}"))?;
+    Ok(row)
+}
+
+/// Dispatch every due scheduled exit. Each row is claimed atomically
+/// (pending → firing) before dispatch so a restart or overlapping tick can
+/// never fire it twice. Dispatch reuses the full close path: live-mode +
+/// vault gates, fresh account re-read, system-owned subtraction, reduce-only
+/// order, reconciliation record.
+pub async fn run_due_scheduled_exits(state: &AppEngineState) {
+    let now_ms = Utc::now().timestamp_millis();
+    let due = match state.state_store.due_scheduled_exits(now_ms) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!("scheduled-exit scan failed: {e}");
+            return;
+        }
+    };
+    for exit in due {
+        match state.state_store.claim_scheduled_exit(&exit.id) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                tracing::warn!("scheduled-exit {} claim failed: {e}", exit.id);
+                continue;
+            }
+        }
+        tracing::info!(
+            "scheduled-exit {} firing: {} {} {} {}% ({})",
+            exit.id,
+            exit.venue,
+            exit.symbol,
+            exit.side,
+            exit.close_pct,
+            exit.mode
+        );
+        let res = close_external_position_impl(
+            CloseExternalPositionInput {
+                venue: exit.venue.clone(),
+                symbol: exit.symbol.clone(),
+                mode: exit.mode.clone(),
+                limit_price: exit.limit_price,
+                taker_fee_bps: None,
+                close_pct: Some(exit.close_pct),
+            },
+            state,
+        )
+        .await;
+        match res {
+            Ok(r) => {
+                let _ = state.state_store.set_scheduled_exit_status(
+                    &exit.id,
+                    "fired",
+                    Some(&format!("{} [{}]", r.note, r.status)),
+                );
+            }
+            Err(e) => {
+                let _ = state
+                    .state_store
+                    .set_scheduled_exit_status(&exit.id, "failed", Some(&e));
+                tracing::warn!("scheduled-exit {} failed: {e}", exit.id);
+            }
+        }
+    }
+}
+
+/// Background scheduler: 10s tick, fires due rows. Spawned once at app
+/// start; the store's claim transition makes restarts idempotent.
+pub fn spawn_exit_scheduler(state: Arc<AppEngineState>) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+        loop {
+            tick.tick().await;
+            run_due_scheduled_exits(&state).await;
+        }
+    });
+}
+
 // --- Tauri wrappers -------------------------------------------------------------
 
 #[tauri::command]
@@ -932,6 +1203,44 @@ pub async fn close_external_position(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<CloseResultDto, String> {
     close_external_position_impl(input, &state).await
+}
+
+#[tauri::command]
+pub async fn schedule_external_exit(
+    input: ScheduleExitInput,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::state_store::ScheduledExit, String> {
+    schedule_external_exit_impl(input, &state).await
+}
+
+#[tauri::command]
+pub async fn list_scheduled_exits(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<crate::state_store::ScheduledExit>, String> {
+    state
+        .state_store
+        .list_scheduled_exits(None)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cancel_scheduled_exit(
+    id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    // Only pending rows are cancellable — a claimed/fired row is left as
+    // the honest audit record.
+    let conn_ok = state
+        .state_store
+        .claim_scheduled_exit(&id)
+        .map_err(|e| e.to_string())?;
+    if !conn_ok {
+        return Err("Schedule is not pending (already fired or cancelled)".into());
+    }
+    state
+        .state_store
+        .set_scheduled_exit_status(&id, "cancelled", Some("cancelled by user"))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -971,6 +1280,28 @@ mod tests {
         assert!(vwap_for_size(&[], 1.0).is_none());
         assert!(vwap_for_size(&levels, 0.0).is_none());
         assert!(vwap_for_size(&[(100.0, 0.0)], 1.0).is_none());
+    }
+
+    #[test]
+    fn close_target_qty_pct_and_step() {
+        // Full residual at 100%.
+        assert_eq!(close_target_qty(0.5, 100.0, dec!(0)), Some(dec!(0.5)));
+        // 50% of 0.005 = 0.0025, floored to 0.001 step → 0.002.
+        assert_eq!(
+            close_target_qty(0.005, 50.0, dec!(0.001)),
+            Some(dec!(0.002))
+        );
+        // Sub-step target passes through — venue min-qty decides.
+        assert_eq!(
+            close_target_qty(0.0005, 100.0, dec!(0.001)),
+            Some(dec!(0.0005))
+        );
+        // Out-of-range / non-finite / zero all fail closed.
+        for pct in [0.0, -1.0, 100.1, f64::NAN, f64::INFINITY] {
+            assert!(close_target_qty(1.0, pct, dec!(0)).is_none(), "pct {pct}");
+        }
+        // Zero residual → nothing.
+        assert!(close_target_qty(0.0, 50.0, dec!(0)).is_none());
     }
 
     #[test]

@@ -194,6 +194,19 @@ pub struct StrategyParamsDto {
     pub funding_passive_unwind: PassiveUnwindConfig,
     #[serde(default)]
     pub spot_passive_unwind: PassiveUnwindConfig,
+    // Per-strategy limit-exit selection relative to the global
+    // `EngineSettingsDto.passive_unwind` policy:
+    //   "inherit" → use the global policy (enabled or not);
+    //   "custom"  → use this strategy's own PassiveUnwindConfig as-is;
+    //   "off"     → never passive for this strategy — always market.
+    // Empty (legacy rows saved before this field) auto-resolves:
+    // an enabled strategy config means "custom", otherwise "inherit".
+    #[serde(default)]
+    pub futures_passive_mode: String,
+    #[serde(default)]
+    pub funding_passive_mode: String,
+    #[serde(default)]
+    pub spot_passive_mode: String,
 }
 
 impl StrategyParamsDto {
@@ -238,6 +251,9 @@ impl StrategyParamsDto {
             futures_passive_unwind: PassiveUnwindConfig::default(),
             funding_passive_unwind: PassiveUnwindConfig::default(),
             spot_passive_unwind: PassiveUnwindConfig::default(),
+            futures_passive_mode: String::new(),
+            funding_passive_mode: String::new(),
+            spot_passive_mode: String::new(),
         }
     }
 }
@@ -483,6 +499,13 @@ pub struct EngineSettingsDto {
     /// default) refuses every live entry even when `live_entry_enabled`.
     #[serde(default)]
     pub live_entry_max_notional_usd: f64,
+    /// Global Passive Limit Unwind policy (System Settings → Execution):
+    /// the single shared limit-exit configuration. Strategies with
+    /// `*_passive_mode = "inherit"` (the default) use this record; "custom"
+    /// uses the strategy's own params; "off" always market-exits. The
+    /// popup's Auto Limit mode also runs this policy. Disabled by default.
+    #[serde(default)]
+    pub passive_unwind: PassiveUnwindConfig,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -660,6 +683,7 @@ impl Default for EngineSettingsDto {
             auto_resolve_residual_exposure: false,
             live_entry_enabled: false,
             live_entry_max_notional_usd: 0.0,
+            passive_unwind: PassiveUnwindConfig::default(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
