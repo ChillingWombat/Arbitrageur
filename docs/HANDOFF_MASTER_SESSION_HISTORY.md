@@ -2244,3 +2244,27 @@ clippy+fmt clean, app restarted on the new binary.
 
 - commands.rs retains: scan/quotes, risk overview, capabilities/live-mode policy, equity snapshots, seasonality/session IPC, shared execution helpers, and the ~8k-line `mod tests`.
 - Refactor finding 4.16 closed in the crosscheck doc. `state_store.rs` decomposition left as optional follow-up.
+
+## WS feed hardening — vanta dead-endpoint removal + instant-kill backoff
+
+### Diagnosis (verified via bare-client probes)
+
+- **Vanta**: `wss://ws-evm.orderly.org/ws/stream/public` accepts the upgrade then sends WS Close(1000) to *every* client — Python probe with no messages, dummy account ids, and well-formed `0x`-shaped ids all close identically. Orderly's documented public stream is `/ws/stream/{account_id}` and requires a **registered** account_id. The `/public` fallback could never work.
+- **Hyperliquid**: bare clients (Python stdlib AND the identical tokio-tungstenite 0.23 stack under both rustls and native-tls) connect and stream fine — even a 234-sub instant burst. Only this app's connections get RST/EOF ~300ms in → venue-side per-IP/pattern block, fed by the reconnect churn itself. REST unaffected (11k samples/hr).
+- **Lighter/Robinhood**: healthy, hold for hours.
+
+### What shipped
+
+- `feed.rs`: removed the dead vanta `/public` fallback — missing/invalid `vanta_account_id` now returns `FeedOutcome::Disabled` (60s re-check; REST covers the venue). Deleted `vanta_public_ws_url` from `ws.rs`.
+- `feed.rs`: 50ms pacing between subscribe-burst frames + 30s `Ping` keepalive on the hyperliquid and vanta read loops (matches the lighter lane's structure).
+- `feed.rs`: instant-kill escalation — a full lane cycle under 5s counts as an instant kill; ≥5 consecutive → ~5min jittered backoff instead of climbing to only ~2min.
+- `feed.rs`: `tracing::debug!` for non-book/unknown-topic frames on HL/vanta so future close reasons are visible.
+
+### Verification
+
+- Live: `vanta WS disabled: ... WS skipped, REST only` logged cleanly, no more churn; lighter+robinhood streaming normally. HL retries at growing backoff (venue block persists — bare clients pass, app conns are killed; a dedicated egress IP is the remaining option if WS is wanted for HL).
+
+### Pickup notes
+
+- HL WS remains venue-blocked for this host's connection pattern; REST feed covers the venue. If HL WS is ever required, options: dedicated egress IP, or reduce conn-per-IP pressure.
+- `FeedOutcome::Disabled` is the fail-closed pattern for config-gated lanes.

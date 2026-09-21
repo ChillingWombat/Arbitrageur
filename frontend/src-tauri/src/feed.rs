@@ -8,8 +8,8 @@ use arbitrageur_exchanges::ws::{
     apply_lighter_delta, hyperliquid_subscribe_message, lighter_book_from_sides,
     lighter_default_market_symbol_map, lighter_delta_continuous, lighter_market_symbol_map,
     lighter_subscribe_message, lighter_ws_url, parse_hyperliquid_l2book_data, parse_lighter_delta,
-    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_public_ws_url, vanta_subscribe_message,
-    vanta_ws_url, HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS,
+    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_subscribe_message, vanta_ws_url,
+    HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS,
 };
 use chrono::Utc;
 use futures::{Sink, SinkExt, StreamExt};
@@ -23,10 +23,21 @@ use crate::state_store::VenueSampleEntry;
 /// is derived exactly like the main Lighter lane.
 const ROBINHOOD_LIGHTER_BASE_URL: &str = "https://api.rh.lighter.xyz";
 
+/// Generic WS keepalive for venues without a protocol-level heartbeat
+/// (hyperliquid, vanta). Lighter uses `LIGHTER_KEEPALIVE_SECS`.
+const WS_KEEPALIVE_SECS: u64 = 30;
+
+/// Delay between subscription frames during the connect burst — instant
+/// floods get the connection RST by venue-side WS flood protection.
+const SUB_BURST_PACE_MS: u64 = 50;
+
 /// Outcome of one connection attempt: keep supervising or stop the lane.
 enum FeedOutcome {
     Stop,
     Reconnect,
+    /// Lane cannot run without config the venue requires (e.g. a registered
+    /// Orderly account_id). Rest-checked on a slow cadence — not a failure.
+    Disabled,
 }
 
 /// Spawn one supervisor task per admitted WS venue. REST polling stays
@@ -76,6 +87,7 @@ fn venue_ws_enabled(state: &AppEngineState, venue: &str) -> bool {
 
 async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
     let mut fail_streak: u32 = 0;
+    let mut instant_kills: u32 = 0;
     loop {
         // Keep WS feeds alive in live mode: a real-time pushed book is
         // fresher than any REST poll, and every WS-fed read is one less REST
@@ -93,8 +105,15 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
         }
+        let started = std::time::Instant::now();
         match run_connection(venue, &state).await {
             Ok(FeedOutcome::Stop) => return,
+            Ok(FeedOutcome::Disabled) => {
+                // Required config missing (e.g. unregistered venue account_id)
+                // — recheck slowly in case the operator supplies it.
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                continue;
+            }
             Ok(FeedOutcome::Reconnect) => {
                 tracing::info!("feed: {venue} connection ended; reconnecting");
             }
@@ -103,10 +122,20 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
             }
         }
         fail_streak = (fail_streak + 1).min(8);
-        tokio::time::sleep(Duration::from_secs(
-            arbitrageur_exchanges::ws::jittered_reconnect_backoff_secs(fail_streak),
-        ))
-        .await;
+        // A lane whose whole cycle (REST pre-flight + connect + subscribe)
+        // finishes in <5s died essentially instantly — venue-side rejection.
+        // Tight retries feed the block; back off to ~5 minutes on a streak.
+        if started.elapsed() < Duration::from_secs(5) {
+            instant_kills = instant_kills.saturating_add(1);
+        } else {
+            instant_kills = 0;
+        }
+        let backoff_secs = if instant_kills >= 5 {
+            300.0 * arbitrageur_exchanges::ws::jitter_ratio_20(rand::random::<f64>())
+        } else {
+            arbitrageur_exchanges::ws::jittered_reconnect_backoff_secs(fail_streak) as f64
+        };
+        tokio::time::sleep(Duration::from_secs_f64(backoff_secs.max(1.0))).await;
     }
 }
 
@@ -238,12 +267,26 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     for coin in coin_map.keys() {
         let frame = hyperliquid_subscribe_message(coin).to_string();
         write.send(Message::Text(frame)).await?;
+        // Pace the burst: servers RST connections that flood subscribes.
+        tokio::time::sleep(Duration::from_millis(SUB_BURST_PACE_MS)).await;
     }
     tracing::info!(
         "feed: hyperliquid WS connected; subscribed {} coins",
         coin_map.len()
     );
-    while let Some(msg) = read.next().await {
+    let mut keepalive = tokio::time::interval(Duration::from_secs(WS_KEEPALIVE_SECS));
+    keepalive.tick().await;
+    loop {
+        let msg = tokio::select! {
+            _ = keepalive.tick() => {
+                write.send(Message::Ping(Vec::new())).await?;
+                continue;
+            }
+            msg = read.next() => msg,
+        };
+        let Some(msg) = msg else {
+            return Ok(FeedOutcome::Reconnect);
+        };
         let msg = msg?;
         let Message::Text(text) = msg else {
             continue;
@@ -252,6 +295,7 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
             continue;
         };
         if val.get("channel").and_then(|c| c.as_str()) != Some("l2Book") {
+            tracing::debug!("feed: hyperliquid non-book frame: {text}");
             continue;
         }
         let (Some(data), Some(coin)) = (
@@ -270,7 +314,6 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
             Err(e) => tracing::debug!("feed: hyperliquid dropped frame for {coin}: {e}"),
         }
     }
-    Ok(FeedOutcome::Reconnect)
 }
 
 struct LighterLaneBook {
@@ -444,12 +487,14 @@ where
 
 async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     let account_id = state.settings.read().vanta_account_id.clone();
-    let ws_url = if account_id.trim().is_empty() {
-        vanta_public_ws_url()
-    } else {
-        match vanta_ws_url(&account_id) {
-            Ok(url) => url,
-            Err(_) => vanta_public_ws_url(),
+    // Orderly closes `/ws/stream/public` and unregistered account ids with a
+    // 1000 right after upgrade — no account_id means this lane cannot run
+    // (REST polling still covers the venue).
+    let ws_url = match vanta_ws_url(&account_id) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::info!("feed: vanta WS disabled: {e}");
+            return Ok(FeedOutcome::Disabled);
         }
     };
     let venue_id = VenueId::new("vanta");
@@ -466,12 +511,25 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     for (sub_id, base) in (1u64..).zip(topics.values()) {
         let frame = vanta_subscribe_message(sub_id, base).to_string();
         write.send(Message::Text(frame)).await?;
+        tokio::time::sleep(Duration::from_millis(SUB_BURST_PACE_MS)).await;
     }
     tracing::info!(
         "feed: vanta WS connected; subscribed {} topics",
         topics.len()
     );
-    while let Some(msg) = read.next().await {
+    let mut keepalive = tokio::time::interval(Duration::from_secs(WS_KEEPALIVE_SECS));
+    keepalive.tick().await;
+    loop {
+        let msg = tokio::select! {
+            _ = keepalive.tick() => {
+                write.send(Message::Ping(Vec::new())).await?;
+                continue;
+            }
+            msg = read.next() => msg,
+        };
+        let Some(msg) = msg else {
+            return Ok(FeedOutcome::Reconnect);
+        };
         let msg = msg?;
         let Message::Text(text) = msg else {
             continue;
@@ -480,9 +538,11 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
             continue;
         };
         let Some(topic) = val.get("topic").and_then(|t| t.as_str()) else {
+            tracing::debug!("feed: vanta untopiced frame: {text}");
             continue;
         };
         let Some(symbol) = topics.get(topic).cloned() else {
+            tracing::debug!("feed: vanta frame for unknown topic {topic}: {text}");
             continue;
         };
         match parse_vanta_ws_book(&venue_id, &symbol, topic, &val) {
@@ -490,7 +550,6 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
             Err(e) => tracing::debug!("feed: vanta dropped frame for {topic}: {e}"),
         }
     }
-    Ok(FeedOutcome::Reconnect)
 }
 
 #[cfg(test)]
