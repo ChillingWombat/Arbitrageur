@@ -393,6 +393,18 @@ export interface AutotuneApplyResultDto {
   audit_id: number | null;
 }
 
+/** Per-ticker AutoTune cadence. "manual" (default) never auto-runs;
+ * "periodic" re-tunes every period_secs; "continuous" every
+ * continuous_min_secs. Non-manual modes auto-apply READY rows with the
+ * same audit trail as the manual apply path. */
+export interface TickerAutotuneModeDto {
+  symbol: string;
+  mode: "manual" | "periodic" | "continuous";
+  last_run_ms: number | null;
+  period_secs: number;
+  continuous_min_secs: number;
+}
+
 export interface TickerMarketQuoteDto {
   symbol: string;
   base: string;

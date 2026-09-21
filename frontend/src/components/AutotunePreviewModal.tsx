@@ -1,6 +1,10 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { X, Copy, Check, FlaskConical } from "lucide-react";
-import type { AutotuneRecommendationDto, AutotuneApplyResultDto } from "../types";
+import type {
+  AutotuneRecommendationDto,
+  AutotuneApplyResultDto,
+  TickerAutotuneModeDto,
+} from "../types";
 import { api } from "../services/api";
 
 export interface AutotunePreviewModalProps {
@@ -62,6 +66,39 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
   const [applying, setApplying] = useState(false);
   const [applyError, setApplyError] = useState<string | null>(null);
   const [applyResult, setApplyResult] = useState<AutotuneApplyResultDto | null>(null);
+  const [mode, setMode] = useState<"manual" | "periodic" | "continuous">("manual");
+  const [modeInfo, setModeInfo] = useState<TickerAutotuneModeDto | null>(null);
+  const [modeBusy, setModeBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .getTickerAutotuneMode(symbol)
+      .then((m) => {
+        if (alive) {
+          setMode(m.mode);
+          setModeInfo(m);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [symbol]);
+
+  const handleModeChange = async (next: "manual" | "periodic" | "continuous") => {
+    if (modeBusy || next === mode) return;
+    setModeBusy(true);
+    try {
+      const m = await api.setTickerAutotuneMode(symbol, next);
+      setMode(m.mode);
+      setModeInfo(m);
+    } catch {
+      /* keep prior mode on failure */
+    } finally {
+      setModeBusy(false);
+    }
+  };
 
   const readyParams = useMemo(
     () =>
@@ -269,6 +306,33 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
         </div>
 
         <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end space-x-3 shrink-0 font-mono text-xs">
+          <label
+            className="flex items-center space-x-1.5 mr-auto text-slate-600"
+            title="manual = on-demand only · periodic = auto-tune+apply every period (default 6h) · continuous = every 15m. Non-manual modes auto-apply READY rows with the same audit trail."
+          >
+            <span className="uppercase tracking-wide text-[10px] text-slate-500">AutoTune</span>
+            <select
+              value={mode}
+              disabled={modeBusy}
+              onChange={(e) =>
+                handleModeChange(e.target.value as "manual" | "periodic" | "continuous")
+              }
+              className="px-1.5 py-1 bg-surface border border-surface-border rounded text-[11px] text-slate-700 cursor-pointer disabled:opacity-50"
+            >
+              <option value="manual">manual</option>
+              <option value="periodic">
+                periodic ({modeInfo ? `${Math.round(modeInfo.period_secs / 3600)}h` : "6h"})
+              </option>
+              <option value="continuous">
+                continuous ({modeInfo ? `${Math.round(modeInfo.continuous_min_secs / 60)}m` : "15m"})
+              </option>
+            </select>
+            {modeInfo?.last_run_ms != null && (
+              <span className="text-[10px] text-slate-400">
+                last {new Date(modeInfo.last_run_ms).toLocaleTimeString()}
+              </span>
+            )}
+          </label>
           <button
             type="button"
             onClick={handleCopy}

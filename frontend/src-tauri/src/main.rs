@@ -95,6 +95,13 @@ fn main() {
     // time; the claim transition keeps restarts idempotent.
     external_positions::spawn_exit_scheduler(engine_state.clone());
 
+    // Spawn the AutoTune scheduler: per-ticker `autotune.mode.*` entries —
+    // 'periodic' re-tunes every autotune.period_secs (default 6h),
+    // 'continuous' every autotune.continuous_min_secs (default 15m);
+    // manual (the default) never auto-runs. Applies READY rows through the
+    // same audited path as the manual apply.
+    commands::spawn_autotune_scheduler(engine_state.clone());
+
     tauri::Builder::default()
         .manage(engine_state)
         .setup(|app| {
@@ -151,6 +158,8 @@ fn main() {
             commands::get_account_equity_events,
             commands::get_autotune_recommendation,
             commands::apply_autotune_selected,
+            commands::get_ticker_autotune_mode,
+            commands::set_ticker_autotune_mode,
             commands::run_seasonality_promotion,
             commands::get_vault_status,
             commands::initialize_vault,

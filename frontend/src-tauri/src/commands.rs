@@ -10462,6 +10462,7 @@ pub async fn apply_autotune_rows_inner(
     report: &AutotuneRecommendationDto,
     selected: &[String],
     now_ms: i64,
+    source: &str,
 ) -> Result<AutotuneApplyResultDto, String> {
     validate_market_symbol(symbol)?;
     if now_ms <= 0 {
@@ -10548,6 +10549,7 @@ pub async fn apply_autotune_rows_inner(
         })
         .collect();
     let detail_json = serde_json::json!({
+        "source": source,
         "buy_venue": report.buy_venue,
         "sell_venue": report.sell_venue,
         "fit_from_ms": report.banner.fit_from_ms,
@@ -10586,7 +10588,7 @@ pub async fn apply_autotune_selected_impl(
 ) -> Result<AutotuneApplyResultDto, String> {
     let report = get_autotune_recommendation_impl(symbol, state).await?;
     let now_ms = Utc::now().timestamp_millis();
-    apply_autotune_rows_inner(state, symbol, &report, selected, now_ms).await
+    apply_autotune_rows_inner(state, symbol, &report, selected, now_ms, "manual").await
 }
 
 #[tauri::command]
@@ -10596,6 +10598,227 @@ pub async fn apply_autotune_selected(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<AutotuneApplyResultDto, String> {
     apply_autotune_selected_impl(&symbol, &selected, &state).await
+}
+
+// ---------------------------------------------------------------------------
+// Per-ticker AutoTune modes + scheduler.
+//
+// `autotune.mode.{SYMBOL}` ∈ {manual (default), periodic, continuous}:
+// periodic re-tunes every `autotune.period_secs` (default 6h), continuous
+// every `autotune.continuous_min_secs` (default 15m). Both auto-apply READY
+// rows through the same audited path as the manual apply (detail.source =
+// the mode); manual and unknown modes never auto-run. The last-run stamp is
+// written BEFORE the pass so a slow or failing run backs off a full
+// interval instead of hot-looping.
+// ---------------------------------------------------------------------------
+
+const AUTOTUNE_MODE_PREFIX: &str = "autotune.mode.";
+const AUTOTUNE_LAST_RUN_PREFIX: &str = "autotune.last_run_ms.";
+const AUTOTUNE_PERIOD_SECS_KEY: &str = "autotune.period_secs";
+const AUTOTUNE_CONT_MIN_SECS_KEY: &str = "autotune.continuous_min_secs";
+const AUTOTUNE_DEFAULT_PERIOD_SECS: i64 = 6 * 3600;
+const AUTOTUNE_DEFAULT_CONT_MIN_SECS: i64 = 900;
+const AUTOTUNE_MODES: [&str; 3] = ["manual", "periodic", "continuous"];
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct TickerAutotuneModeDto {
+    pub symbol: String,
+    /// manual | periodic | continuous
+    pub mode: String,
+    /// Last scheduler pass for this symbol, epoch ms (None = never).
+    pub last_run_ms: Option<i64>,
+    /// Effective cadence for periodic mode, seconds.
+    pub period_secs: i64,
+    /// Effective minimum cadence for continuous mode, seconds.
+    pub continuous_min_secs: i64,
+}
+
+fn autotune_i64_kv(state: &AppEngineState, key: &str, default: i64) -> i64 {
+    state
+        .state_store
+        .kv_get(key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn autotune_mode_dto(symbol: &str, state: &AppEngineState) -> TickerAutotuneModeDto {
+    let mode = state
+        .state_store
+        .kv_get(&format!("{AUTOTUNE_MODE_PREFIX}{symbol}"))
+        .ok()
+        .flatten()
+        .filter(|m| AUTOTUNE_MODES.contains(&m.as_str()))
+        .unwrap_or_else(|| "manual".to_string());
+    let last_run_ms = state
+        .state_store
+        .kv_get(&format!("{AUTOTUNE_LAST_RUN_PREFIX}{symbol}"))
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse::<i64>().ok());
+    TickerAutotuneModeDto {
+        symbol: symbol.to_string(),
+        mode,
+        last_run_ms,
+        period_secs: autotune_i64_kv(
+            state,
+            AUTOTUNE_PERIOD_SECS_KEY,
+            AUTOTUNE_DEFAULT_PERIOD_SECS,
+        ),
+        continuous_min_secs: autotune_i64_kv(
+            state,
+            AUTOTUNE_CONT_MIN_SECS_KEY,
+            AUTOTUNE_DEFAULT_CONT_MIN_SECS,
+        ),
+    }
+}
+
+pub fn get_ticker_autotune_mode_impl(
+    symbol: &str,
+    state: &AppEngineState,
+) -> Result<TickerAutotuneModeDto, String> {
+    validate_market_symbol(symbol)?;
+    Ok(autotune_mode_dto(symbol, state))
+}
+
+#[tauri::command]
+pub fn get_ticker_autotune_mode(
+    symbol: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<TickerAutotuneModeDto, String> {
+    get_ticker_autotune_mode_impl(&symbol, &state)
+}
+
+pub fn set_ticker_autotune_mode_impl(
+    symbol: &str,
+    mode: &str,
+    state: &AppEngineState,
+) -> Result<TickerAutotuneModeDto, String> {
+    validate_market_symbol(symbol)?;
+    let mode = mode.trim().to_ascii_lowercase();
+    if !AUTOTUNE_MODES.contains(&mode.as_str()) {
+        return Err(format!(
+            "unknown autotune mode '{mode}' — expected manual|periodic|continuous"
+        ));
+    }
+    let key = format!("{AUTOTUNE_MODE_PREFIX}{symbol}");
+    if mode == "manual" {
+        // Default behavior — drop the key so the scheduler's prefix scan
+        // stays tight.
+        state
+            .state_store
+            .kv_delete(&key)
+            .map_err(|e| e.to_string())?;
+    } else {
+        state
+            .state_store
+            .kv_set(&key, &mode)
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(autotune_mode_dto(symbol, state))
+}
+
+#[tauri::command]
+pub fn set_ticker_autotune_mode(
+    symbol: String,
+    mode: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<TickerAutotuneModeDto, String> {
+    set_ticker_autotune_mode_impl(&symbol, &mode, &state)
+}
+
+/// One scheduler pass: tune every due symbol and auto-apply READY rows.
+/// Returns the number of symbols evaluated. Symbols whose recommendation
+/// errors or produces no READY rows still advance their last-run stamp.
+pub async fn run_scheduled_autotune(state: &AppEngineState) -> Result<usize, String> {
+    let now_ms = Utc::now().timestamp_millis();
+    let period_secs = autotune_i64_kv(
+        state,
+        AUTOTUNE_PERIOD_SECS_KEY,
+        AUTOTUNE_DEFAULT_PERIOD_SECS,
+    );
+    let cont_secs = autotune_i64_kv(
+        state,
+        AUTOTUNE_CONT_MIN_SECS_KEY,
+        AUTOTUNE_DEFAULT_CONT_MIN_SECS,
+    );
+    let keys = state
+        .state_store
+        .kv_keys_with_prefix(AUTOTUNE_MODE_PREFIX)
+        .map_err(|e| e.to_string())?;
+    let mut ran = 0usize;
+    for key in keys {
+        let symbol = &key[AUTOTUNE_MODE_PREFIX.len()..];
+        let mode = state
+            .state_store
+            .kv_get(&key)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let interval_secs = match mode.as_str() {
+            "periodic" => period_secs,
+            "continuous" => cont_secs,
+            _ => continue,
+        };
+        let last_key = format!("{AUTOTUNE_LAST_RUN_PREFIX}{symbol}");
+        let last = state
+            .state_store
+            .kv_get(&last_key)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(0);
+        if now_ms - last < interval_secs * 1000 {
+            continue;
+        }
+        state
+            .state_store
+            .kv_set(&last_key, &now_ms.to_string())
+            .map_err(|e| e.to_string())?;
+        ran += 1;
+        match get_autotune_recommendation_impl(symbol, state).await {
+            Ok(report) => {
+                let ready: Vec<String> = report
+                    .rows
+                    .iter()
+                    .filter(|r| r.status == "READY")
+                    .map(|r| r.param.clone())
+                    .filter(|p| AUTOTUNE_APPLYABLE.contains(&p.as_str()))
+                    .collect();
+                if ready.is_empty() {
+                    continue;
+                }
+                if let Err(e) =
+                    apply_autotune_rows_inner(state, symbol, &report, &ready, now_ms, &mode).await
+                {
+                    tracing::warn!("scheduled autotune apply failed for {symbol}: {e}");
+                } else {
+                    tracing::info!(
+                        "scheduled autotune ({mode}) applied {} row(s) for {symbol}",
+                        ready.len()
+                    );
+                }
+            }
+            Err(e) => tracing::warn!("scheduled autotune recommend failed for {symbol}: {e}"),
+        }
+    }
+    Ok(ran)
+}
+
+/// Background supervisor: checks per-ticker modes every 60s and runs due
+/// tunes. Inert unless a ticker is explicitly set to periodic/continuous.
+pub fn spawn_autotune_scheduler(state: Arc<AppEngineState>) {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = run_scheduled_autotune(&state).await {
+                tracing::warn!("autotune scheduler pass failed: {e}");
+            }
+        }
+    });
 }
 
 #[tauri::command]
@@ -17573,6 +17796,98 @@ mod tests {
         assert!((got - expect).abs() < 1e-9, "got {got}, want {expect}");
     }
 
+    #[test]
+    fn test_ticker_autotune_mode_validation_and_default() {
+        let state = AppEngineState::new();
+        // Unset → manual default with empty run stamp.
+        let dto = get_ticker_autotune_mode_impl("BTC-USDC", &state).unwrap();
+        assert_eq!(dto.mode, "manual");
+        assert_eq!(dto.last_run_ms, None);
+        assert!(dto.period_secs > 0 && dto.continuous_min_secs > 0);
+        // Unknown modes fail closed.
+        assert!(set_ticker_autotune_mode_impl("BTC-USDC", "hourly", &state).is_err());
+        // manual is the default — setting it deletes the key outright so the
+        // scheduler's prefix scan never enumerates it.
+        set_ticker_autotune_mode_impl("BTC-USDC", "periodic", &state).unwrap();
+        assert_eq!(
+            get_ticker_autotune_mode_impl("BTC-USDC", &state)
+                .unwrap()
+                .mode,
+            "periodic"
+        );
+        set_ticker_autotune_mode_impl("BTC-USDC", "manual", &state).unwrap();
+        assert_eq!(
+            get_ticker_autotune_mode_impl("BTC-USDC", &state)
+                .unwrap()
+                .mode,
+            "manual"
+        );
+        assert!(state
+            .state_store
+            .kv_get("autotune.mode.BTC-USDC")
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scheduled_autotune_periodic_applies_and_backs_off() {
+        // Seeded history → READY rows exist; periodic mode applies them
+        // with an audit line tagged source="periodic", stamps last_run,
+        // and an immediate second pass is not due.
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let n = 400usize;
+        for i in 0..n {
+            let phase = 2.0 * std::f64::consts::PI * (i % 8) as f64 / 8.0;
+            let mid_a = 100.0 + 0.4 * phase.sin();
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - ((n - i) as i64) * 60_000,
+                &[("hyperliquid", mid_a), ("lighter", 100.4)],
+            );
+        }
+        // A manual-mode sibling must never be touched by the scheduler.
+        set_ticker_autotune_mode_impl("BTC-USDC", "periodic", &state).unwrap();
+        set_ticker_autotune_mode_impl("ETH-USDC", "manual", &state).unwrap();
+        let ran = run_scheduled_autotune(&state)
+            .await
+            .expect("scheduler pass");
+        assert_eq!(ran, 1);
+        let dto = get_ticker_autotune_mode_impl("BTC-USDC", &state).unwrap();
+        assert!(dto.last_run_ms.is_some(), "last_run stamped");
+        // Not due again — the stamp gates the interval.
+        let ran2 = run_scheduled_autotune(&state).await.unwrap();
+        assert_eq!(ran2, 0);
+        let events = state
+            .state_store
+            .recent_autotune_apply_events("BTC-USDC", 10)
+            .unwrap();
+        assert_eq!(events.len(), 1, "one scheduler apply audited");
+        assert!(
+            events[0].detail_json.contains("\"source\":\"periodic\""),
+            "audit detail tags the scheduler source: {}",
+            events[0].detail_json
+        );
+        let applied: serde_json::Value = serde_json::from_str(&events[0].applied_json).unwrap();
+        assert!(applied.as_object().map(|m| !m.is_empty()).unwrap_or(false));
+        // ETH-USDC manual → no audit events at all.
+        assert!(state
+            .state_store
+            .recent_autotune_apply_events("ETH-USDC", 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_scheduled_autotune_no_modes_is_noop() {
+        // Zero configured tickers → zero work; the scheduler is inert by
+        // default (fail-closed on the opt-in boundary).
+        let state = AppEngineState::new();
+        let ran = run_scheduled_autotune(&state).await.unwrap();
+        assert_eq!(ran, 0);
+    }
+
     #[tokio::test]
     async fn test_save_strategy_params_rejects_invalid_sizing() {
         let state = AppEngineState::new();
@@ -17684,7 +17999,7 @@ mod tests {
             "windowPercentile".to_string(),
             "slidingWindowSecs".to_string(),
         ];
-        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now, "manual")
             .await
             .expect("apply");
         assert_eq!(
@@ -17728,7 +18043,7 @@ mod tests {
         let now = Utc::now().timestamp_millis();
         let report = autotune_fixture_report(&[]);
         let selected = vec!["targetProfitBps".to_string(), "maxStepUsd".to_string()];
-        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+        let res = apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now, "manual")
             .await
             .expect("apply");
         assert!(res.applied.is_empty());
@@ -17755,7 +18070,7 @@ mod tests {
         let report = autotune_fixture_report(&[("targetProfitBps", 8.5)]);
         let selected = vec!["targetProfitBps".to_string(), "bogusParam".to_string()];
         assert!(
-            apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now)
+            apply_autotune_rows_inner(&state, "BTC-USDC", &report, &selected, now, "manual")
                 .await
                 .is_err()
         );
@@ -17769,7 +18084,7 @@ mod tests {
             .expect("audit read")
             .is_empty());
         assert!(
-            apply_autotune_rows_inner(&state, "BTC-USDC", &report, &[], 0)
+            apply_autotune_rows_inner(&state, "BTC-USDC", &report, &[], 0, "manual")
                 .await
                 .is_err(),
             "broken clock must refuse"
@@ -17807,7 +18122,7 @@ mod tests {
             };
             let sel = selected.clone();
             handles.push(tokio::spawn(async move {
-                apply_autotune_rows_inner(&s, "BTC-USDC", &r, &sel, now).await
+                apply_autotune_rows_inner(&s, "BTC-USDC", &r, &sel, now, "manual").await
             }));
         }
         for h in handles {
