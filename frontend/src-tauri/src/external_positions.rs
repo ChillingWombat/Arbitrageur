@@ -1169,7 +1169,7 @@ pub async fn run_due_scheduled_exits(state: &AppEngineState) {
 /// Background scheduler: 10s tick, fires due rows. Spawned once at app
 /// start; the store's claim transition makes restarts idempotent.
 pub fn spawn_exit_scheduler(state: Arc<AppEngineState>) {
-    tokio::spawn(async move {
+    tauri::async_runtime::spawn(async move {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tick.tick().await;
