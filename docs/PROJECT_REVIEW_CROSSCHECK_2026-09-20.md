@@ -468,7 +468,7 @@ This independently confirms DeepSeek finding 5.8.
 This is a maintainability finding, not a justification for a risky behavior-neutral mega-refactor in the same safety patch.
 
 **Initial status:** OPEN / staged refactor recommended\
-**Remediation status:** IN PROGRESS — stage 1 landed (AutoTune domain extracted to `frontend/src-tauri/src/autotune.rs`, ~950 lines; `commands.rs` 21625 → 20695; IPC paths preserved via `pub(crate) use` re-export; 371 desktop tests green). Remaining stages — vault/account, spatial execution, funding/basis, portfolio/risk, calibration/seasonality, capabilities — continue incrementally per this finding's own caution against a behavior-neutral mega-refactor.
+**Remediation status:** IN PROGRESS — stages 1–5 landed. `commands.rs` 21625 → 18555 lines across five domain extractions: `autotune.rs` (recommend/apply/modes/scheduler), `strategy_config.rs` (ticker configs + universal params), `accounts.rs` (vault lifecycle, credential profiles, strategy routes, venue balances), `performance.rs` (strategy metrics, forecast calibration, fill P&L, WFO), `monitor_ipc.rs` (radar IPC + monitor→execution entry). All IPC command paths preserved via `pub(crate) use` glob re-exports — zero call-site churn; 371 desktop tests green per stage. Remaining stages — spatial/triangle execution core, funding scan+carry (four non-contiguous regions), capabilities/live-mode policy — continue incrementally per this finding's own caution against a behavior-neutral mega-refactor.
 
 ---
 
