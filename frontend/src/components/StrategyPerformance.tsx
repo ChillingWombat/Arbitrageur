@@ -26,6 +26,7 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
   const [loading, setLoading] = useState(true);
   const [calibrating, setCalibrating] = useState(false);
   const [wfoResult, setWfoResult] = useState<WfoOptimizationResult | null>(null);
+  const [wfoError, setWfoError] = useState<string | null>(null);
   const [forecastCal, setForecastCal] = useState<CalibrationReportDto | null>(null);
 
   const loadMetrics = async () => {
@@ -46,11 +47,12 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
   const runCalibration = async () => {
     setCalibrating(true);
+    setWfoError(null);
     try {
       const result = await api.runWfoCalibration(activeSymbol);
       setWfoResult(result);
     } catch (err) {
-      console.error("Failed to run WFO calibration:", err);
+      setWfoError(err instanceof Error ? err.message : String(err));
     } finally {
       setCalibrating(false);
     }
@@ -264,16 +266,22 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
 
           <button
             onClick={runCalibration}
-            disabled
-            title="Native WFO requires recorded quote history — not yet available"
+            disabled={calibrating}
+            title="Walk-forward optimization over recorded spread history for the active symbol"
             className="px-2 py-2 bg-accent hover:bg-blue-600 disabled:opacity-50 text-white rounded-lg text-xs font-mono font-medium transition shadow-xs flex items-center space-x-2 shrink-0 cursor-pointer"
           >
             <Sliders className={`w-3.5 h-3.5 ${calibrating ? "animate-spin" : ""}`} />
             <span>
-              {calibrating ? "Optimizing..." : "WFO unavailable — recorded quote history required"}
+              {calibrating ? "Optimizing..." : `Run WFO — ${activeSymbol}`}
             </span>
           </button>
         </div>
+
+        {wfoError && (
+          <div className="p-3 rounded-xl bg-loss-dim border border-loss-border text-xs font-mono text-loss">
+            {wfoError}
+          </div>
+        )}
 
         {wfoResult && (
           <div className="space-y-4 pt-1">

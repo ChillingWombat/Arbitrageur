@@ -321,10 +321,10 @@ pub fn run_walk_forward_optimization(
         return WfoOptimizationResult {
             optimal_estimator: BaselineEstimatorType::VWMA,
             optimal_window_size: 50,
-            in_sample_score: 1.0,
-            out_of_sample_score: 1.0,
+            in_sample_score: 0.0,
+            out_of_sample_score: 0.0,
             candidate_evaluations: vec![],
-            recommendation_notes: "Insufficient quote updates for statistical WFO (<40 ticks). Defaulting to depth-weighted VWMA(50).".into(),
+            recommendation_notes: "Insufficient quote updates for statistical WFO (<40 ticks). Defaulting to depth-weighted VWMA(50); scores are unmeasured.".into(),
         };
     }
 
@@ -375,16 +375,19 @@ pub fn run_walk_forward_optimization(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let best = evaluations.first().cloned().unwrap_or(EstimatorEvaluation {
-        estimator: BaselineEstimatorType::VWMA,
-        window_size: 50,
-        in_sample_sharpe: 1.5,
-        out_of_sample_sharpe: 1.4,
-        tracking_error_bps: 2.1,
-        simulated_net_profit_bps: 25.0,
-        win_rate_pct: 80.0,
-        total_trades: 5,
-    });
+    let Some(best) = evaluations.first().cloned() else {
+        return WfoOptimizationResult {
+            optimal_estimator: BaselineEstimatorType::VWMA,
+            optimal_window_size: 50,
+            in_sample_score: 0.0,
+            out_of_sample_score: 0.0,
+            candidate_evaluations: vec![],
+            recommendation_notes:
+                "No estimator/window candidate was evaluable on the in-sample split; widen the \
+                 candidate windows or collect more history."
+                    .into(),
+        };
+    };
 
     let notes = format!(
         "Optimal estimator selected: {} with window of {} ticks. Out-of-sample Sharpe: {:.2}, Net captured: +{:.1} BPS across {} trades (Win rate: {:.1}%).",

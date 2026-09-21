@@ -11784,10 +11784,106 @@ pub fn get_utilisation_history_impl(
 }
 
 pub async fn run_wfo_calibration_impl(
-    _symbol: &str,
-    _state: &AppEngineState,
+    symbol: &str,
+    state: &AppEngineState,
 ) -> Result<WfoOptimizationResult, String> {
-    Err("WFO calibration is unavailable until sufficient recorded quote history exists".into())
+    let sym = crate::state_store::canonical_base(symbol);
+    if sym.is_empty() {
+        return Err("invalid symbol".into());
+    }
+
+    // Rebuild the executable cross-venue edge series from recorded book
+    // samples: at each timestamp, buy the cheapest ask and sell the richest
+    // bid across *different* venues — the same edge the spread radar trades.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let samples = state
+        .state_store
+        .spread_samples(&sym, 0, now_ms)
+        .map_err(|e| e.to_string())?;
+
+    let mut groups: std::collections::BTreeMap<i64, Vec<&crate::state_store::SpreadSample>> =
+        std::collections::BTreeMap::new();
+    for s in &samples {
+        groups.entry(s.ts_ms).or_default().push(s);
+    }
+    let history: Vec<arbitrageur_math::QuoteObservation> = groups
+        .iter()
+        .filter_map(|(ts, venues)| {
+            if venues.len() < 2 {
+                return None;
+            }
+            let mut best_edge = f64::NEG_INFINITY;
+            let mut ref_px = 0.0_f64;
+            for buy in venues.iter() {
+                for sell in venues.iter() {
+                    if buy.venue_id.eq_ignore_ascii_case(&sell.venue_id) {
+                        continue;
+                    }
+                    if !(buy.best_ask.is_finite()
+                        && buy.best_ask > 0.0
+                        && sell.best_bid.is_finite()
+                        && sell.best_bid > 0.0)
+                    {
+                        continue;
+                    }
+                    let edge = sell.best_bid - buy.best_ask;
+                    if edge > best_edge {
+                        best_edge = edge;
+                        ref_px = buy.best_ask;
+                    }
+                }
+            }
+            if !best_edge.is_finite() || ref_px <= 0.0 {
+                return None;
+            }
+            Some(arbitrageur_math::QuoteObservation::new(
+                *ts as u64,
+                best_edge / ref_px * 10_000.0,
+                1.0, // depth is not sampled; equal weight keeps VWMA honest
+            ))
+        })
+        .collect();
+
+    if history.len() < 40 {
+        return Err(format!(
+            "WFO needs at least 40 multi-venue spread observations; {sym} has {} \
+             (spread sampling must record the symbol on 2+ venues)",
+            history.len()
+        ));
+    }
+
+    // Friction: sum of the two cheapest admitted venues' effective taker
+    // fees (one per leg) plus a small exit-slippage allowance.
+    let admitted = state.get_venues();
+    let mut fees: Vec<f64> = admitted
+        .iter()
+        .map(|(vid, _, _)| effective_venue_fee_bps(state, vid))
+        .filter(|f| f.is_finite() && *f >= 0.0)
+        .collect();
+    fees.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let friction_bps = match fees.len() {
+        0 => 10.0,
+        1 => fees[0] * 2.0,
+        _ => fees[0] + fees[1],
+    } + 4.0;
+
+    // Target: the configured radar expected-profit floor when the monitor is
+    // up; otherwise break-even.
+    let target_profit_bps = state
+        .monitor
+        .lock()
+        .as_ref()
+        .map(|e| e.config().min_expected_profit_bps)
+        .unwrap_or(0.0)
+        .max(0.0);
+
+    let candidate_windows: &[usize] = &[10, 20, 30, 50, 100, 200];
+    Ok(arbitrageur_math::run_walk_forward_optimization(
+        &history,
+        candidate_windows,
+        target_profit_bps,
+        friction_bps,
+    ))
 }
 
 #[tauri::command]
@@ -17726,11 +17822,31 @@ mod tests {
 
         let res = run_wfo_calibration_impl("BTC-USDC", &state).await;
         let err = res.expect_err("WFO must fail closed without recorded history");
-        assert!(err.contains("unavailable"), "unexpected err: {}", err);
+        assert!(err.contains("40 multi-venue"), "unexpected err: {}", err);
 
         assert_eq!(state.strategy_configs.read().len(), configs_before);
         assert_eq!(state.execution_logs.read().len(), logs_before);
         assert_eq!(*state.total_realized_profit.read(), dec!(0));
+    }
+
+    #[tokio::test]
+    async fn test_wfo_calibration_runs_on_seeded_history() {
+        let state = AppEngineState::new();
+        // Mean-reverting cross-venue edge: venue_b oscillates around venue_a.
+        for i in 0..120i64 {
+            let offset = if i % 20 < 10 { 3.0 } else { -3.0 };
+            seed_samples(
+                &state,
+                "BTC",
+                1_700_000_000_000 + i * 1_000,
+                &[("hyperliquid", 50_000.0), ("lighter", 50_000.0 + offset)],
+            );
+        }
+        let res = run_wfo_calibration_impl("BTC", &state)
+            .await
+            .expect("seeded history must produce a WFO result");
+        assert!(!res.candidate_evaluations.is_empty());
+        assert!(res.optimal_window_size > 0);
     }
 
     #[tokio::test]
