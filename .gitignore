@@ -44,3 +44,4 @@ data/captures/
 # Local desktop launcher shortcuts
 Arbitrageur
 *.desktop
+node_modules/
