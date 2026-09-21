@@ -61,6 +61,14 @@ const closeStatusClass = (status: string) =>
       ? "bg-loss-dim/40 border-loss-border text-slate-900"
       : "bg-amber-500/10 border-amber-500/30 text-slate-900";
 
+/** Epoch ms → `datetime-local` input value in LOCAL wall time
+ *  ("YYYY-MM-DDTHH:MM") — no toISOString timezone arithmetic. */
+const toLocalInputValue = (ms: number) => {
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
 export const ExternalPositionsGadget: React.FC = () => {
   // --- List state ------------------------------------------------------------
   const [data, setData] = useState<ExternalPositionsResponse | null>(null);
@@ -74,11 +82,10 @@ export const ExternalPositionsGadget: React.FC = () => {
   const [recError, setRecError] = useState<string | null>(null);
   const [mode, setMode] = useState<"auto" | "limit" | "market">("limit");
   const [limitPx, setLimitPx] = useState("");
-  const [takerBps, setTakerBps] = useState("5");
   const [closePct, setClosePct] = useState("100");
+  const [scheduleOn, setScheduleOn] = useState(false);
   const [scheduleAt, setScheduleAt] = useState("");
   const [schedules, setSchedules] = useState<ScheduledExitDto[]>([]);
-  const [schedBusy, setSchedBusy] = useState(false);
   const [armed, setArmed] = useState(false);
   const [closing, setClosing] = useState(false);
   const [result, setResult] = useState<CloseResultDto | null>(null);
@@ -135,12 +142,12 @@ export const ExternalPositionsGadget: React.FC = () => {
     return () => window.removeEventListener("keydown", onKey);
   }, [selected, closeDetails]);
 
-  const loadRec = useCallback(async (p: ExternalPositionDto, feeBps: number) => {
+  const loadRec = useCallback(async (p: ExternalPositionDto) => {
     setRecBusy(true);
     setRecError(null);
     setRec(null);
     try {
-      const r = await api.recommendExternalClose(p.venue, p.symbol, feeBps);
+      const r = await api.recommendExternalClose(p.venue, p.symbol);
       setRec(r);
       setMode(r.recommendedMode === "market" ? "market" : "limit");
       setLimitPx(r.recommendedLimitPrice != null ? String(r.recommendedLimitPrice) : "");
@@ -151,7 +158,8 @@ export const ExternalPositionsGadget: React.FC = () => {
     }
   }, []);
 
-  // (Re)quote when the selection or taker-fee assumption changes.
+  // (Re)quote when the selection changes. The taker fee is derived
+  // server-side from venue info — never hand-entered here.
   useEffect(() => {
     setArmed(false);
     setResult(null);
@@ -160,16 +168,25 @@ export const ExternalPositionsGadget: React.FC = () => {
       setRec(null);
       return;
     }
-    const fee = Number(takerBps);
-    void loadRec(selected, Number.isFinite(fee) && fee >= 0 ? fee : 5);
-  }, [selectedKey, takerBps]); // eslint-disable-line react-hooks/exhaustive-deps
+    void loadRec(selected);
+  }, [selectedKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const parsedPct = Number(closePct);
   const pctValid = Number.isFinite(parsedPct) && parsedPct > 0 && parsedPct <= 100;
   const estCloseQty = selected && pctValid ? (selected.externalQty * parsedPct) / 100 : null;
 
+  const scheduleMs = scheduleAt ? new Date(scheduleAt).getTime() : NaN;
+  const scheduleValid = scheduleOn && Number.isFinite(scheduleMs) && scheduleMs > Date.now();
+
+  // One action, one button: schedule enabled → persist a one-shot row that
+  // fires this same mode/pct/limit at the picked time; otherwise submit
+  // the close now. Both paths require Arm + Confirm.
   const doClose = async () => {
     if (!selected || closing) return;
+    if (scheduleOn && !scheduleValid) {
+      setCloseError("Pick a future time for the scheduled exit");
+      return;
+    }
     if (!armed) {
       setArmed(true); // first click arms, second submits
       return;
@@ -177,48 +194,34 @@ export const ExternalPositionsGadget: React.FC = () => {
     setClosing(true);
     setCloseError(null);
     try {
-      const r = await api.closeExternalPosition({
-        venue: selected.venue,
-        symbol: selected.symbol,
-        mode,
-        limitPrice: mode === "limit" ? Number(limitPx) : null,
-        closePct: pctValid ? parsedPct : 100,
-      });
-      setResult(r);
+      if (scheduleOn) {
+        await api.scheduleExternalExit({
+          venue: selected.venue,
+          symbol: selected.symbol,
+          side: selected.side,
+          mode,
+          limitPrice: mode === "limit" ? Number(limitPx) : null,
+          closePct: pctValid ? parsedPct : 100,
+          executeAtMs: scheduleMs,
+        });
+        setScheduleAt("");
+        setScheduleOn(false);
+      } else {
+        const r = await api.closeExternalPosition({
+          venue: selected.venue,
+          symbol: selected.symbol,
+          mode,
+          limitPrice: mode === "limit" ? Number(limitPx) : null,
+          closePct: pctValid ? parsedPct : 100,
+        });
+        setResult(r);
+      }
       setArmed(false);
       void load(); // residual should shrink/disappear on next read
     } catch (e) {
       setCloseError(e instanceof Error ? e.message : String(e));
     } finally {
       setClosing(false);
-    }
-  };
-
-  const doSchedule = async () => {
-    if (!selected || schedBusy) return;
-    const ms = new Date(scheduleAt).getTime();
-    if (!Number.isFinite(ms) || ms <= Date.now()) {
-      setCloseError("Pick a future time for the scheduled exit");
-      return;
-    }
-    setSchedBusy(true);
-    setCloseError(null);
-    try {
-      await api.scheduleExternalExit({
-        venue: selected.venue,
-        symbol: selected.symbol,
-        side: selected.side,
-        mode,
-        limitPrice: mode === "limit" ? Number(limitPx) : null,
-        closePct: pctValid ? parsedPct : 100,
-        executeAtMs: ms,
-      });
-      setScheduleAt("");
-      void load();
-    } catch (e) {
-      setCloseError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSchedBusy(false);
     }
   };
 
@@ -248,7 +251,9 @@ export const ExternalPositionsGadget: React.FC = () => {
         ? "Paper mode — switch to Live Trading to submit real closes"
         : !selected.closeSupported
           ? `${selected.venue} cannot place live orders through the bot`
-          : null;
+          : scheduleOn && !scheduleValid
+            ? "Pick a future time for the scheduled exit"
+            : null;
 
   const tabCls = (on: boolean) =>
     `px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer ${
@@ -461,7 +466,10 @@ export const ExternalPositionsGadget: React.FC = () => {
                 </div>
               )}
 
-              {/* Mode + limit + size + fee controls, then the guarded submit. */}
+              {/* Controls — every slot is always rendered (inputs disable
+                  instead of unmounting) so nothing reflows between modes.
+                  The taker fee is derived server-side from venue info and
+                  shown in the receipt above — not hand-entered. */}
               <div className="flex flex-wrap items-end gap-2">
                 <div className="flex gap-1.5" role="group" aria-label="Exit mode">
                   <button
@@ -479,23 +487,27 @@ export const ExternalPositionsGadget: React.FC = () => {
                     Market
                   </button>
                 </div>
-                {mode === "limit" && (
-                  <label className="space-y-1">
-                    <span className="text-[11px] font-mono font-bold text-slate-500">LIMIT PRICE</span>
-                    <input
-                      value={limitPx}
-                      onChange={(e) => { setLimitPx(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
-                      inputMode="decimal"
-                      className="w-28 px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                  </label>
-                )}
-                {mode === "auto" && (
-                  <span className="text-[10px] font-mono text-slate-400 pb-2 max-w-40 leading-tight">
-                    global policy: pegged limit → reprice on timeout → market fallback
-                  </span>
-                )}
-                <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit time">
+                <label
+                  className="space-y-1"
+                  title={
+                    mode === "limit"
+                      ? "Limit price for the close order"
+                      : mode === "auto"
+                        ? "Auto Limit prices itself from the global policy — pegged limit → reprice on timeout → market fallback"
+                        : "Market mode takes the book — no price needed"
+                  }
+                >
+                  <span className="text-[11px] font-mono font-bold text-slate-500">LIMIT PRICE</span>
+                  <input
+                    value={limitPx}
+                    onChange={(e) => { setLimitPx(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
+                    disabled={mode !== "limit"}
+                    inputMode="decimal"
+                    placeholder={mode === "auto" ? "auto" : mode === "market" ? "mkt" : ""}
+                    className="w-28 px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-40 disabled:cursor-not-allowed"
+                  />
+                </label>
+                <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit (or fire) time">
                   <span className="text-[11px] font-mono font-bold text-slate-500">CLOSE %</span>
                   <input
                     value={closePct}
@@ -504,27 +516,30 @@ export const ExternalPositionsGadget: React.FC = () => {
                     className={`w-20 px-2.5 py-1.5 bg-surface border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent ${pctValid ? "border-surface-border" : "border-loss"}`}
                   />
                 </label>
-                <label className="space-y-1" title="Taker-fee assumption for the friction estimate (verify on the venue fee schedule)">
-                  <span className="text-[11px] font-mono font-bold text-slate-500">TAKER FEE (BPS)</span>
-                  <input
-                    value={takerBps}
-                    onChange={(e) => setTakerBps(e.target.value.replace(/[^0-9.]/g, ""))}
-                    inputMode="decimal"
-                    className="w-20 px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                </label>
                 <button
                   type="button"
                   onClick={() => void doClose()}
                   disabled={closeDisabledReason != null || closing || !pctValid}
-                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed ${
+                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ${
                     armed
                       ? "bg-loss text-white border-loss-border"
                       : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-slate-400 disabled:border-surface-border"
                   }`}
-                  title={closeDisabledReason ?? (armed ? "Click again to submit the live reduce-only order" : "Arm the close, then confirm")}
+                  title={closeDisabledReason ?? (armed
+                    ? scheduleOn
+                      ? "Click again to persist the scheduled exit"
+                      : "Click again to submit the live reduce-only order"
+                    : "Arm, then confirm")}
                 >
-                  {closing ? "Submitting…" : armed ? `Confirm ${mode === "auto" ? "AUTO LIMIT" : mode.toUpperCase()} close` : `Close ${mode === "auto" ? "AUTO LIMIT" : mode.toUpperCase()} via bot`}
+                  {closing
+                    ? "Submitting…"
+                    : armed
+                      ? scheduleOn
+                        ? "Confirm Schedule"
+                        : "Confirm Close"
+                      : scheduleOn
+                        ? "Schedule Close"
+                        : "Close Positions"}
                 </button>
               </div>
               {estCloseQty != null && parsedPct < 100 && (
@@ -532,29 +547,49 @@ export const ExternalPositionsGadget: React.FC = () => {
                   ≈ {num(estCloseQty)} {selected.base} of {num(selected.externalQty)} — remainder stays open
                 </div>
               )}
-              {/* Schedule: fire this exit once at a local time (e.g. just
-                  after a funding timestamp). The order dispatches through the
-                  same path with a fresh account re-read at fire time. */}
-              <div className="flex flex-wrap items-end gap-2 pt-2 border-t border-surface-border/60">
-                <label className="space-y-1" title="One-shot scheduled exit at this local time — e.g. hold through a funding timestamp, then close">
-                  <span className="text-[11px] font-mono font-bold text-slate-500">SCHEDULE AT</span>
-                  <input
-                    type="datetime-local"
-                    value={scheduleAt}
-                    min={new Date(Date.now() + 60_000 - new Date().getTimezoneOffset() * 60_000).toISOString().slice(0, 16)}
-                    onChange={(e) => setScheduleAt(e.target.value)}
-                    className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                </label>
-                <button
-                  type="button"
-                  onClick={() => void doSchedule()}
-                  disabled={closeDisabledReason != null || schedBusy || scheduleAt === "" || !pctValid}
-                  className="px-3 py-2 rounded-lg text-xs font-mono font-bold border transition cursor-pointer bg-surface text-slate-600 border-surface-border hover:text-slate-900 hover:border-slate-300 disabled:cursor-not-allowed disabled:opacity-50"
-                  title="Persist a one-shot scheduled close — fires the selected mode at the picked time (funding-harvest exits: schedule just past the funding timestamp)"
+              {/* Optional schedule: tick the box, pick a local time (or a
+                  preset), and the single Close button persists a one-shot
+                  exit instead of firing now — same mode, same %, fresh
+                  account re-read at fire time. */}
+              <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-surface-border/60">
+                <label
+                  className="flex items-center gap-1.5 cursor-pointer select-none"
+                  title="Defer this exit to a future local time — e.g. hold through a funding timestamp, then close"
                 >
-                  {schedBusy ? "Scheduling…" : `Schedule ${mode === "auto" ? "AUTO" : mode.toUpperCase()} ${parsedPct || 100}%`}
-                </button>
+                  <input
+                    type="checkbox"
+                    checked={scheduleOn}
+                    onChange={(e) => { setScheduleOn(e.target.checked); setArmed(false); }}
+                    className="w-3.5 h-3.5 accent-accent cursor-pointer"
+                  />
+                  <span className="text-[11px] font-mono font-bold text-slate-500">SCHEDULE AT</span>
+                </label>
+                <input
+                  type="datetime-local"
+                  value={scheduleAt}
+                  min={toLocalInputValue(Date.now() + 60_000)}
+                  step={60}
+                  disabled={!scheduleOn}
+                  onChange={(e) => { setScheduleAt(e.target.value); setArmed(false); }}
+                  className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-40 disabled:cursor-not-allowed"
+                />
+                <div className="flex gap-1" title="Quick schedule presets (local time)">
+                  {([
+                    ["+15m", Date.now() + 15 * 60_000],
+                    ["+1h", Date.now() + 3_600_000],
+                    ["next :00", Math.ceil((Date.now() + 60_000) / 3_600_000) * 3_600_000],
+                  ] as [string, number][]).map(([label, ms]) => (
+                    <button
+                      key={label}
+                      type="button"
+                      disabled={!scheduleOn}
+                      onClick={() => { setScheduleAt(toLocalInputValue(ms)); setArmed(false); }}
+                      className="px-2 py-1 rounded-lg text-[10px] font-mono font-bold border bg-surface text-slate-500 border-surface-border hover:text-slate-900 hover:border-slate-300 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 {pendingForSelected.map((s) => (
                   <span key={s.id} className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-accent-dim/50 border border-accent-line/40 text-[10px] font-mono text-slate-700">
                     {s.mode.toUpperCase()} {s.closePct}% @ {new Date(s.executeAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}

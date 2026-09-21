@@ -110,7 +110,6 @@ pub struct CloseExternalPositionInput {
     /// "auto" (passive limit unwind w/ fallback) | "limit" | "market".
     pub mode: String,
     pub limit_price: Option<f64>,
-    pub taker_fee_bps: Option<f64>,
     /// Percentage of the external residual to close; default 100.
     /// The quantity is computed from a fresh account re-read, never the
     /// stale UI figure, and floored to the venue's configured qty step.
@@ -472,7 +471,6 @@ async fn close_book_levels(
 pub async fn recommend_external_close_impl(
     venue: &str,
     symbol: &str,
-    taker_fee_bps: Option<f64>,
     state: &AppEngineState,
 ) -> Result<CloseRecommendationDto, String> {
     let venue_lc = venue.trim().to_lowercase();
@@ -531,10 +529,10 @@ pub async fn recommend_external_close_impl(
     } else {
         0.0
     };
-    let fee_bps = match taker_fee_bps {
-        Some(f) if f.is_finite() && (0.0..=1_000.0).contains(&f) => f,
-        _ => 5.0,
-    };
+    // Taker fee is derived from venue info, never hand-entered: the
+    // static per-venue table plus account-tier adjustments (Lighter/
+    // Robinhood plus) — same source the strategy economics use.
+    let fee_bps = crate::commands::effective_venue_fee_bps(state, &venue_lc);
     let est_friction = slip_bps.max(0.0) + touch_spread_bps / 2.0 + fee_bps;
     let mark = dec_f64(pos.mark_price);
     let drift = if mark > 0.0 && mid > 0.0 {
@@ -1132,7 +1130,6 @@ pub async fn run_due_scheduled_exits(state: &AppEngineState) {
                 symbol: exit.symbol.clone(),
                 mode: exit.mode.clone(),
                 limit_price: exit.limit_price,
-                taker_fee_bps: None,
                 close_pct: Some(exit.close_pct),
             },
             state,
@@ -1181,10 +1178,9 @@ pub async fn get_external_positions(
 pub async fn recommend_external_close(
     venue: String,
     symbol: String,
-    taker_fee_bps: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<CloseRecommendationDto, String> {
-    recommend_external_close_impl(&venue, &symbol, taker_fee_bps, &state).await
+    recommend_external_close_impl(&venue, &symbol, &state).await
 }
 
 #[tauri::command]

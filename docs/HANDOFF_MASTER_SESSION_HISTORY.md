@@ -2026,3 +2026,40 @@ live orderbook". Root cause chain:
   not wait for passive fills. Revisit if a calmer reduce path is wanted.
 - Funding/spot/prediction trims still need position supervisors before
   their settings can be wired — that's the honest gap, not a bug.
+
+## 85. Session Handoff — 2026-09-21 (external-close popup rework: single action button, optional schedule, venue-derived fee)
+
+### What shipped
+
+- **Taker fee no longer manual** — `recommend_external_close` dropped its
+  `taker_fee_bps` param; the friction estimate now uses
+  `effective_venue_fee_bps(state, venue)` (per-venue table + Lighter/
+  Robinhood plus-tier) — same source as strategy economics. The dead
+  `CloseExternalPositionInput.taker_fee_bps` field was removed too.
+- **Fixed layout** — mode switch, LIMIT PRICE, and CLOSE % always render;
+  the limit input disables (with `auto`/`mkt` placeholder + mode-specific
+  tooltip) instead of unmounting, so controls never reflow. The TAKER
+  FEE input is gone (value shows in the friction receipt line).
+- **Optional schedule** — `SCHEDULE AT` checkbox gates the
+  `datetime-local` input + `+15m`/`+1h`/`next :00` presets. New
+  `toLocalInputValue` helper formats local wall time directly (no
+  toISOString offset arithmetic).
+- **Single action button** — `Close Positions` fires immediately when
+  scheduling is off; with scheduling armed it persists the one-shot exit
+  (label flips to `Schedule Close`/`Confirm Schedule`, armed state
+  `Confirm Close`) — same mode, pct, and limit price; Close % applies to
+  scheduled exits (fresh account re-read at fire). The separate Schedule
+  button is gone; Arm+Confirm guards both paths.
+
+### Verification
+
+361/361 desktop tests, 210/210 frontend, tsc/vite/release builds clean,
+clippy+fmt clean, app restarted on the new binary.
+
+### Pickup notes
+
+- The scheduler's `run_due_scheduled_exits` passes `close_pct`/`mode`/
+  `limit_price` straight into `close_external_position` — one dispatch
+  path for immediate and scheduled closes.
+- `datetime-local` on WebKitGTK renders a segmented text field (no popup
+  calendar) — the presets cover the common funding-capture cases.

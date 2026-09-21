@@ -943,8 +943,8 @@ export const api = {
   async getExternalPositions(): Promise<ExternalPositionsResponse> {
     return invokeDesktop<ExternalPositionsResponse>("get_external_positions");
   },
-  async recommendExternalClose(venue: string, symbol: string, takerFeeBps?: number): Promise<CloseRecommendationDto> {
-    return invokeDesktop<CloseRecommendationDto>("recommend_external_close", { venue, symbol, takerFeeBps: takerFeeBps ?? null });
+  async recommendExternalClose(venue: string, symbol: string): Promise<CloseRecommendationDto> {
+    return invokeDesktop<CloseRecommendationDto>("recommend_external_close", { venue, symbol });
   },
   async closeExternalPosition(input: { venue: string; symbol: string; mode: "auto" | "limit" | "market"; limitPrice?: number | null; closePct?: number | null }): Promise<CloseResultDto> {
     return invokeDesktop<CloseResultDto>("close_external_position", { input });
