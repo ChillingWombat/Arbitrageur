@@ -170,6 +170,13 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
                 {recommendation.readiness.min_observations_required} pair obs ·{" "}
                 {(recommendation.readiness.multi_venue_coverage * 100).toFixed(0)}% multi-venue
                 coverage
+                {recommendation.readiness.measured_slippage_bps != null && (
+                  <>
+                    {" · "}slippage{" "}
+                    {recommendation.readiness.measured_slippage_bps >= 0 ? "+" : ""}
+                    {recommendation.readiness.measured_slippage_bps.toFixed(1)}bps measured
+                  </>
+                )}
               </p>
               {recommendation.readiness.blockers.map((b, i) => (
                 <p key={i} className="text-amber-600">· {b}</p>

@@ -573,6 +573,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             },
             symbol: (!l.symbol.is_empty()).then(|| l.symbol.clone()),
             intended_qty: *qty,
+            intended_price: None,
         })
         .collect();
     if let Err(e) = state
@@ -787,6 +788,7 @@ mod tests {
             fee_usd: 0.0,
             venue_order_id: Some("o".into()),
             client_order_id: None,
+            intended_price: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         }
@@ -1100,6 +1102,7 @@ mod tests {
                         side: *side,
                         symbol: Some("BTC-USD".into()),
                         intended_qty: 1.0,
+                        intended_price: None,
                     })
                     .collect(),
             })

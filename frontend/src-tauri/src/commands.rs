@@ -2353,6 +2353,7 @@ fn record_triangle_leg_fill(
                 side,
                 symbol: None,
                 intended_qty: qty_f64,
+                intended_price: None,
             }],
         })
         .map_err(|e| format!("Failed to persist triangle leg record: {e}"))?;
@@ -4525,6 +4526,7 @@ async fn execute_spatial_arbitrage_inner(
                     side: crate::state_store::LegSide::Long,
                     symbol: None,
                     intended_qty: order_qty,
+                    intended_price: buy_ref.to_string().parse::<f64>().ok(),
                 },
                 crate::state_store::NewSignalLeg {
                     account_id: accounts.short,
@@ -4532,6 +4534,7 @@ async fn execute_spatial_arbitrage_inner(
                     side: crate::state_store::LegSide::Short,
                     symbol: None,
                     intended_qty: order_qty,
+                    intended_price: sell_ref.to_string().parse::<f64>().ok(),
                 },
             ],
         })
@@ -5684,6 +5687,7 @@ pub async fn execute_funding_carry_impl(
                     side: LegSide::Long,
                     symbol: Some(long_sym.clone()),
                     intended_qty: qty_f64,
+                    intended_price: Some(long_ask_f),
                 },
                 NewSignalLeg {
                     account_id: account_for(short_canon),
@@ -5691,6 +5695,7 @@ pub async fn execute_funding_carry_impl(
                     side: LegSide::Short,
                     symbol: Some(short_sym.clone()),
                     intended_qty: qty_f64,
+                    intended_price: Some(short_bid_f),
                 },
             ],
         })
@@ -7222,6 +7227,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                     side: t.leg_side,
                     symbol: Some(t.exact_symbol.clone()),
                     intended_qty: intended,
+                    intended_price: None,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -9935,6 +9941,12 @@ pub struct AutotuneReadinessDto {
     pub min_observations_required: usize,
     /// Whether the selected pair clears the floor.
     pub obs_floor_met: bool,
+    /// Measured direction-aware slippage (qty-weighted median bps) summed
+    /// across the selected venues' recent filled legs — the fill-feedback
+    /// component added to the static fee estimate. `None` until at least
+    /// one venue records ≥5 legs carrying both intended and fill prices
+    /// (schema v27+). Signed: negative means fills beat the dispatch quote.
+    pub measured_slippage_bps: Option<f64>,
     /// Human-readable data blockers (empty when nothing blocks).
     pub blockers: Vec<String>,
 }
@@ -10183,7 +10195,7 @@ pub async fn get_autotune_recommendation_impl(
             multi_venue_coverage * 100.0
         ));
     }
-    let readiness = AutotuneReadinessDto {
+    let mut readiness = AutotuneReadinessDto {
         venues_seen,
         history_span_secs,
         multi_venue_coverage,
@@ -10191,6 +10203,7 @@ pub async fn get_autotune_recommendation_impl(
         total_pair_observations: pair_observations,
         min_observations_required: arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
         obs_floor_met: best_pair_n >= arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
+        measured_slippage_bps: None,
         blockers,
     };
 
@@ -10241,6 +10254,27 @@ pub async fn get_autotune_recommendation_impl(
     // Static friction: both taker fees. Funding carry has no measured EMA
     // on this path, so the carry term is 0 and flagged unknown.
     let fee_sum = effective_venue_fee_bps(state, &buy_v) + effective_venue_fee_bps(state, &sell_v);
+
+    // Fill-feedback join: measured direction-aware slippage from this
+    // venue's closed legs augments the static fee estimate once ≥5 fills
+    // exist — signed (negative = fills beat the quote), never fabricated.
+    let measured_slip_bps = |venue: &str| -> Option<f64> {
+        let samples = state
+            .state_store
+            .leg_slippage_samples_bps(venue, 200)
+            .ok()?;
+        if samples.len() < 5 {
+            return None;
+        }
+        arbitrageur_math::binomial::weighted_quantile(&samples, 0.5)
+    };
+    let slip_parts: Vec<f64> = [buy_v.as_str(), sell_v.as_str()]
+        .iter()
+        .filter_map(|v| measured_slip_bps(v))
+        .collect();
+    let measured_slippage_bps = (!slip_parts.is_empty()).then(|| slip_parts.iter().sum::<f64>());
+    readiness.measured_slippage_bps = measured_slippage_bps;
+    let realized_slippage_bps = measured_slippage_bps.unwrap_or(0.0);
 
     // Seasonality Phase 2 coupling: the current session's shrunk τ/σ regime
     // scales the recommender inputs (OU dt and friction). Missing or
@@ -10326,8 +10360,8 @@ pub async fn get_autotune_recommendation_impl(
         validate,
         dt_fit_secs: dt_fit * coupling.tau_scale,
         dt_val_secs: dt_val * coupling.tau_scale,
-        friction_fit_bps: fee_sum * coupling.sigma_scale,
-        friction_val_bps: fee_sum * coupling.sigma_scale,
+        friction_fit_bps: (fee_sum + realized_slippage_bps) * coupling.sigma_scale,
+        friction_val_bps: (fee_sum + realized_slippage_bps) * coupling.sigma_scale,
         carry_known: false,
         fit_optimal_size_usd: fit_optimal,
         fit_breakeven_size_usd: fit_breakeven,
@@ -12602,6 +12636,7 @@ async fn maybe_liq_trim_pair(
                 side: *close_side,
                 symbol: Some(leg.symbol.clone()),
                 intended_qty: qty,
+                intended_price: None,
             })
             .collect();
             if let Err(e) =
@@ -17448,6 +17483,94 @@ mod tests {
         let ready: Vec<_> = rep.rows.iter().filter(|r| r.status == "READY").collect();
         assert!(!ready.is_empty(), "seeded fixture should validate");
         assert_eq!(rep.banner.ready_count, ready.len());
+        // No filled legs exist in this fixture — the feedback join must
+        // report None rather than fabricate a slippage estimate.
+        assert_eq!(rep.readiness.measured_slippage_bps, None);
+    }
+
+    #[tokio::test]
+    async fn test_autotune_measured_slippage_feeds_friction() {
+        // Same seeded history plus ≥5 priced fills per venue: the qty-
+        // weighted median slippage surfaces on the report and feeds the
+        // friction input — never zero, never fabricated when absent.
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let n = 400usize;
+        for i in 0..n {
+            let phase = 2.0 * std::f64::consts::PI * (i % 8) as f64 / 8.0;
+            let mid_a = 100.0 + 0.4 * phase.sin();
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - ((n - i) as i64) * 60_000,
+                &[("hyperliquid", mid_a), ("lighter", 100.4)],
+            );
+        }
+        for i in 0..5 {
+            let id = format!("slip-{i}");
+            state
+                .state_store
+                .record_signal_execution(&crate::state_store::NewSignalExecution {
+                    id: id.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: Some(100.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: Some(100.5),
+                        },
+                    ],
+                })
+                .expect("record signal");
+            // Long pays +0.1 over quote (+10 bps); short fills 0.1 under
+            // quote (+0.1/100.5 ≈ +9.95 bps adverse).
+            state
+                .state_store
+                .apply_leg_fill(
+                    &id,
+                    crate::state_store::LegSide::Long,
+                    1.0,
+                    100.1,
+                    0.0,
+                    None,
+                )
+                .unwrap();
+            state
+                .state_store
+                .apply_leg_fill(
+                    &id,
+                    crate::state_store::LegSide::Short,
+                    1.0,
+                    100.4,
+                    0.0,
+                    None,
+                )
+                .unwrap();
+        }
+        let rep = get_autotune_recommendation_impl("BTC-USDC", &state)
+            .await
+            .expect("recommendation");
+        let expect = 10.0 + (100.5 - 100.4) / 100.5 * 10_000.0;
+        let got = rep
+            .readiness
+            .measured_slippage_bps
+            .expect("≥5 priced fills per venue must produce a measurement");
+        assert!((got - expect).abs() < 1e-9, "got {got}, want {expect}");
     }
 
     #[tokio::test]
@@ -17540,6 +17663,7 @@ mod tests {
                 total_pair_observations: 400,
                 min_observations_required: arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
                 obs_floor_met: true,
+                measured_slippage_bps: None,
                 blockers: Vec::new(),
             },
         }
@@ -18544,6 +18668,7 @@ mod tests {
                         side: crate::state_store::LegSide::Long,
                         symbol: None,
                         intended_qty: 0.1,
+                        intended_price: None,
                     },
                     crate::state_store::NewSignalLeg {
                         account_id: None,
@@ -18551,6 +18676,7 @@ mod tests {
                         side: crate::state_store::LegSide::Short,
                         symbol: None,
                         intended_qty: 0.1,
+                        intended_price: None,
                     },
                 ],
             })
@@ -18744,6 +18870,7 @@ mod tests {
                     side: crate::state_store::LegSide::Long,
                     symbol: None,
                     intended_qty: 0.1,
+                    intended_price: None,
                 }],
             })
             .expect("record in-flight signal");
@@ -18842,6 +18969,7 @@ mod tests {
                     side: crate::state_store::LegSide::Long,
                     symbol: None,
                     intended_qty: 0.1,
+                    intended_price: None,
                 }],
             })
             .expect("record signal");
@@ -19297,6 +19425,7 @@ mod tests {
                     side: LegSide::Long,
                     symbol: None,
                     intended_qty: 1.0,
+                    intended_price: None,
                 },
                 NewSignalLeg {
                     account_id: None,
@@ -19304,6 +19433,7 @@ mod tests {
                     side: LegSide::Short,
                     symbol: None,
                     intended_qty: 1.0,
+                    intended_price: None,
                 },
             ]
         };
@@ -19347,6 +19477,7 @@ mod tests {
                         side: LegSide::Short,
                         symbol: None,
                         intended_qty: 1.0,
+                        intended_price: None,
                     },
                     NewSignalLeg {
                         account_id: None,
@@ -19354,6 +19485,7 @@ mod tests {
                         side: LegSide::Long,
                         symbol: None,
                         intended_qty: 1.0,
+                        intended_price: None,
                     },
                 ],
             })
@@ -19450,6 +19582,7 @@ mod tests {
                     side: crate::state_store::LegSide::Long,
                     symbol: None,
                     intended_qty: 1.0,
+                    intended_price: None,
                 }],
             })
             .expect("empty root records");
@@ -19924,6 +20057,7 @@ mod tests {
                         side: LegSide::Long,
                         symbol: None,
                         intended_qty: 0.1,
+                        intended_price: None,
                     }],
                 })
                 .expect("record root");
@@ -20039,6 +20173,7 @@ mod tests {
                     side: LegSide::Long,
                     symbol: None,
                     intended_qty: 0.1,
+                    intended_price: None,
                 }],
             })
             .expect("record root");
@@ -20901,6 +21036,7 @@ mod tests {
                         side: crate::state_store::LegSide::Long,
                         symbol: None,
                         intended_qty: 0.1,
+                        intended_price: None,
                     },
                     crate::state_store::NewSignalLeg {
                         account_id: None,
@@ -20908,6 +21044,7 @@ mod tests {
                         side: crate::state_store::LegSide::Short,
                         symbol: None,
                         intended_qty: 0.1,
+                        intended_price: None,
                     },
                 ],
             })

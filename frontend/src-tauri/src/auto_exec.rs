@@ -1287,6 +1287,7 @@ mod tests {
                         side: LegSide::Long,
                         symbol: None,
                         intended_qty: 0.01,
+                        intended_price: None,
                     },
                     NewSignalLeg {
                         account_id: None,
@@ -1294,6 +1295,7 @@ mod tests {
                         side: LegSide::Short,
                         symbol: None,
                         intended_qty: 0.01,
+                        intended_price: None,
                     },
                 ],
             })

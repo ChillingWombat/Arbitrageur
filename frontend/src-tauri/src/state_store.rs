@@ -244,6 +244,9 @@ pub struct SignalLeg {
     /// order id so venues keyed on client order index (Lighter) can be
     /// polled by reconciliation after restart.
     pub client_order_id: Option<String>,
+    /// Dispatch-time expected fill price (schema v27). `None` for legs
+    /// recorded before v27 or without book context.
+    pub intended_price: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -287,6 +290,9 @@ pub struct NewSignalLeg {
     /// record time; funding entry/flatten legs pass `Some(exact)`.
     pub symbol: Option<String>,
     pub intended_qty: f64,
+    /// Dispatch-time expected fill price (the quote the order was priced
+    /// against). `None` for legs recorded without book context.
+    pub intended_price: Option<f64>,
 }
 
 pub struct NewSignalExecution {
@@ -1334,6 +1340,15 @@ CREATE INDEX ix_signal_predictions_resolved ON signal_predictions(kind, resolved
 PRAGMA user_version = 26;
 COMMIT;";
 
+/// v27 persists the dispatch-time expected fill price per leg. Realized
+/// slippage (fill vs intended, direction-aware) then becomes measurable
+/// from the ledger instead of being inferred from net-P&L forecast error.
+const MIGRATION_V27_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE signal_legs ADD COLUMN intended_price REAL;
+PRAGMA user_version = 27;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1654,6 +1669,7 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
             .ok()
             .flatten()
             .filter(|s| !s.trim().is_empty()),
+        intended_price: row.get::<_, Option<f64>>(14).ok().flatten(),
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
@@ -1743,7 +1759,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 26 {
+        if version > 27 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1898,6 +1914,12 @@ impl StateStore {
         }
         if version <= 25 {
             if let Err(err) = conn.execute_batch(MIGRATION_V26_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 26 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V27_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -2352,8 +2374,9 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             tx.execute(
                 "INSERT INTO signal_legs
                     (id, signal_id, account_id, venue, side, intended_qty,
-                     filled_qty, fill_price, fee_usd, created_at, updated_at, symbol)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7, ?8)",
+                     filled_qty, fill_price, fee_usd, created_at, updated_at, symbol,
+                     intended_price)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7, ?8, ?9)",
                 params![
                     leg_id,
                     id,
@@ -2362,7 +2385,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                     leg.side.as_str(),
                     leg.intended_qty,
                     now,
-                    leg_symbol
+                    leg_symbol,
+                    leg.intended_price
                 ],
             )?;
         }
@@ -2886,6 +2910,47 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             params![venue, symbol],
             |r| r.get(0),
         )?)
+    }
+
+    /// Realized per-leg slippage samples for a venue, direction-aware bps:
+    /// longs pay `fill − intended`, shorts pay `intended − fill` (positive =
+    /// adverse). Only legs that recorded both prices (schema v27+) qualify.
+    /// Returns `(slippage_bps, filled_qty)` pairs newest-first.
+    pub fn leg_slippage_samples_bps(
+        &self,
+        venue: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<(f64, f64)>> {
+        let venue = normalize_venue(venue)?;
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT side, intended_price, fill_price, filled_qty
+             FROM signal_legs
+             WHERE venue = ?1 AND intended_price IS NOT NULL AND fill_price IS NOT NULL
+               AND intended_price > 0 AND fill_price > 0 AND filled_qty > 0
+             ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![venue, limit as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(side, intended, fill, qty)| {
+                let slip = match side.as_str() {
+                    "long" => fill - intended,
+                    "short" => intended - fill,
+                    _ => return None,
+                };
+                Some((slip / intended * 10_000.0, qty))
+            })
+            .collect())
     }
 
     /// Whether any signal leg references the account — recorded position
@@ -4789,7 +4854,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
                     filled_qty, fill_price, fee_usd, venue_order_id,
-                    created_at, updated_at, symbol, client_order_id
+                    created_at, updated_at, symbol, client_order_id, intended_price
              FROM signal_legs WHERE signal_id = ?1
              ORDER BY CASE side WHEN 'long' THEN 0 ELSE 1 END",
         )?;
@@ -4847,7 +4912,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 26);
+            assert_eq!(version, 27);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -5375,6 +5440,7 @@ mod tests {
                     side: LegSide::Long,
                     symbol: None,
                     intended_qty: 1.0,
+                    intended_price: None,
                 },
                 NewSignalLeg {
                     account_id: acct_b.map(|s| s.to_string()),
@@ -5382,6 +5448,7 @@ mod tests {
                     side: LegSide::Short,
                     symbol: None,
                     intended_qty: 1.0,
+                    intended_price: None,
                 },
             ],
         }
@@ -5395,7 +5462,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 26);
+        assert_eq!(version, 27);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5411,6 +5478,7 @@ mod tests {
                         side: LegSide::Long,
                         symbol: Some("BTC-SPOT".to_string()),
                         intended_qty: 0.5,
+                        intended_price: None,
                     },
                     NewSignalLeg {
                         account_id: None,
@@ -5418,6 +5486,7 @@ mod tests {
                         side: LegSide::Short,
                         symbol: None,
                         intended_qty: 0.5,
+                        intended_price: None,
                     },
                 ],
             })
@@ -5638,6 +5707,134 @@ mod tests {
         assert!(store
             .record_leg_order_id("s-ack", LegSide::Short, "", None)
             .is_err());
+    }
+
+    #[test]
+    fn test_v27_intended_price_roundtrip() {
+        // Dispatch-time quotes persist on the leg and read back verbatim.
+        let store = StateStore::open_in_memory().unwrap();
+        let mut sig = two_leg_signal("s-intended", "BTC-USDC", None, None);
+        sig.legs[0].intended_price = Some(100.0);
+        sig.legs[1].intended_price = Some(100.5);
+        store.record_signal_execution(&sig).unwrap();
+        let got = store.get_signal("s-intended").unwrap().unwrap();
+        let long = got.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
+        let short = got.legs.iter().find(|l| l.side == LegSide::Short).unwrap();
+        assert_eq!(long.intended_price, Some(100.0));
+        assert_eq!(short.intended_price, Some(100.5));
+    }
+
+    #[test]
+    fn test_v27_slippage_direction_aware_and_missing_data() {
+        let store = StateStore::open_in_memory().unwrap();
+
+        // Long paying above quote is adverse (+10 bps); short filling above
+        // quote is favorable (negative bps).
+        let mut sig = two_leg_signal("s-slip", "BTC-USDC", None, None);
+        sig.legs[0].intended_price = Some(100.0);
+        sig.legs[1].intended_price = Some(100.5);
+        store.record_signal_execution(&sig).unwrap();
+        store
+            .apply_leg_fill("s-slip", LegSide::Long, 1.0, 100.1, 0.0, None)
+            .unwrap();
+        store
+            .apply_leg_fill("s-slip", LegSide::Short, 1.0, 100.6, 0.0, None)
+            .unwrap();
+        let hl = store.leg_slippage_samples_bps("hyperliquid", 10).unwrap();
+        assert_eq!(hl.len(), 1);
+        assert!((hl[0].0 - 10.0).abs() < 1e-9);
+        assert_eq!(hl[0].1, 1.0);
+        let li = store.leg_slippage_samples_bps("lighter", 10).unwrap();
+        assert_eq!(li.len(), 1);
+        assert!((li[0].0 - (100.5 - 100.6) / 100.5 * 10_000.0).abs() < 1e-9);
+
+        // No dispatch quote → excluded even after a fill lands.
+        store
+            .record_signal_execution(&two_leg_signal("s-none", "BTC-USDC", None, None))
+            .unwrap();
+        store
+            .apply_leg_fill("s-none", LegSide::Long, 1.0, 100.0, 0.0, None)
+            .unwrap();
+        // Intended price without any fill → excluded.
+        let mut pending = two_leg_signal("s-pending", "BTC-USDC", None, None);
+        pending.legs[0].intended_price = Some(100.0);
+        store.record_signal_execution(&pending).unwrap();
+
+        let hl = store.leg_slippage_samples_bps("hyperliquid", 10).unwrap();
+        assert_eq!(hl.len(), 1, "only the fully-priced fill may sample");
+        assert!((hl[0].0 - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_migration_v27_intended_price_defaults_null() {
+        // Replay to v26, seed a signal + filled leg under the pre-v27
+        // schema, then migrate: the leg survives with intended_price NULL —
+        // excluded from slippage samples rather than backfilled from the
+        // fill price.
+        let conn = Connection::open_in_memory().unwrap();
+        for batch in [
+            MIGRATION_V1_SQL,
+            MIGRATION_V2_SQL,
+            MIGRATION_V3_SQL,
+            MIGRATION_V4_SQL,
+            MIGRATION_V5_SQL,
+            MIGRATION_V6_SQL,
+            MIGRATION_V7_SQL,
+            MIGRATION_V8_SQL,
+            MIGRATION_V9_SQL,
+            MIGRATION_V10_SQL,
+            MIGRATION_V11_SQL,
+            MIGRATION_V12_SQL,
+            MIGRATION_V13_SQL,
+            MIGRATION_V14_SQL,
+            MIGRATION_V15_SQL,
+            MIGRATION_V16_SQL,
+            MIGRATION_V17_SQL,
+            MIGRATION_V18_SQL,
+            MIGRATION_V19_SQL,
+            MIGRATION_V20_SQL,
+            MIGRATION_V21_SQL,
+            MIGRATION_V22_SQL,
+            MIGRATION_V23_SQL,
+            MIGRATION_V24_SQL,
+            MIGRATION_V25_SQL,
+            MIGRATION_V26_SQL,
+        ] {
+            conn.execute_batch(batch).unwrap();
+        }
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 26);
+        conn.execute(
+            "INSERT INTO signal_executions
+                (id, strategy_id, symbol, status, created_at, updated_at)
+             VALUES ('sig-pre', 'futures', 'BTC-USDC', 'closed', 't0', 't0')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO signal_legs
+                (id, signal_id, venue, side, intended_qty, filled_qty,
+                 fill_price, created_at, updated_at)
+             VALUES ('leg-pre', 'sig-pre', 'hyperliquid', 'long', 1.0, 1.0,
+                     100.0, 't0', 't0')",
+            [],
+        )
+        .unwrap();
+        StateStore::migrate(&conn).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 27);
+        let ip: Option<f64> = conn
+            .query_row(
+                "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ip, None);
     }
 
     #[test]
@@ -6005,7 +6202,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 26);
+            assert_eq!(version, 27);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -6376,7 +6573,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 26);
+        assert_eq!(v, 27);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -6496,7 +6693,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 26);
+        assert_eq!(v10, 27);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -7330,7 +7527,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 26);
+        assert_eq!(v, 27);
         let kept: String = conn
             .query_row(
                 "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
@@ -7384,6 +7581,7 @@ mod tests {
                 side: LegSide::Short,
                 symbol: Some("BTC-USD".into()),
                 intended_qty: 0.5,
+                intended_price: None,
             }],
         };
         store.record_signal_execution(&sig).unwrap();
@@ -7410,6 +7608,7 @@ mod tests {
                         side: LegSide::Long,
                         symbol: Some("BTC-USD".into()),
                         intended_qty: 1.0,
+                        intended_price: None,
                     }],
                 })
                 .unwrap_or_else(|e| panic!("strategy id {sid} failed CHECK: {e}"));
