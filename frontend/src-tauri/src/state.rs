@@ -1089,6 +1089,15 @@ pub struct AppEngineState {
     pub test_adapters: std::sync::RwLock<
         std::collections::HashMap<String, Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>>,
     >,
+    /// Test-only simulated-venue registry: concrete `SimulatedExchange`
+    /// handles for venues whose hub-seeded books must stay reachable through
+    /// the adapter layer once their freshness window lapses. `get_venues`
+    /// prefers these over the live adapter fields under cfg(test), so scans
+    /// and dispatch paths never touch the network in tests.
+    #[cfg(test)]
+    pub test_sims: std::sync::RwLock<
+        std::collections::HashMap<String, Arc<arbitrageur_exchanges::simulated::SimulatedExchange>>,
+    >,
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
@@ -1569,6 +1578,8 @@ impl AppEngineState {
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             test_adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            test_sims: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
             sample_prune_at: Mutex::new(0),
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
@@ -1906,6 +1917,28 @@ impl AppEngineState {
         if s.decibel_enabled || account_enabled("decibel") {
             list.push(("decibel", "Decibel", self.live_decibel.clone()));
         }
+        // Tests may inject simulated/scripted adapters per venue — route
+        // every consumer (scans, dispatch, monitors) through them so seeded
+        // books never resolve to real venue feeds once their freshness
+        // window lapses. test_adapters (scripted mocks) win over test_sims.
+        #[cfg(test)]
+        for entry in &mut list {
+            if let Some(a) = self
+                .test_adapters
+                .read()
+                .ok()
+                .and_then(|m| m.get(entry.0).cloned())
+            {
+                entry.2 = a;
+            } else if let Some(sim) = self
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get(entry.0).cloned())
+            {
+                entry.2 = sim;
+            }
+        }
         list
     }
 
@@ -1919,18 +1952,53 @@ impl AppEngineState {
     ) -> Option<Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>> {
         let canonical = canonical_venue_id(venue_id)?;
         #[cfg(test)]
-        if let Some(a) = self
-            .test_adapters
-            .read()
-            .ok()
-            .and_then(|m| m.get(canonical).cloned())
         {
-            return Some(a);
+            if let Some(a) = self
+                .test_adapters
+                .read()
+                .ok()
+                .and_then(|m| m.get(canonical).cloned())
+            {
+                return Some(a);
+            }
+            if let Some(sim) = self
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get(canonical).cloned())
+            {
+                return Some(sim);
+            }
         }
         self.get_venues()
             .into_iter()
             .find(|(vid, _, _)| *vid == canonical)
             .map(|(_, _, adapter)| adapter)
+    }
+
+    /// Install a zero-latency `SimulatedExchange` as a venue's adapter for
+    /// tests. Registers the concrete handle in `test_sims` so book-seeding
+    /// helpers can mirror hub writes into it, keeping every book-resolution
+    /// path deterministic regardless of wall-clock freshness windows.
+    /// Returns the concrete sim so tests can also script orders/fills.
+    #[cfg(test)]
+    pub fn install_test_sim(
+        &self,
+        venue_id: &str,
+    ) -> Option<Arc<arbitrageur_exchanges::simulated::SimulatedExchange>> {
+        let canonical = canonical_venue_id(venue_id)?;
+        let sim = Arc::new(arbitrageur_exchanges::simulated::SimulatedExchange::new(
+            canonical,
+            canonical,
+            0,
+            rust_decimal::Decimal::ZERO,
+            rust_decimal::Decimal::new(100_000, 0),
+        ));
+        self.test_sims
+            .write()
+            .ok()?
+            .insert(canonical.to_string(), sim.clone());
+        Some(sim)
     }
 
     /// Resolves the paper execution exchange for a venue. A simulator is

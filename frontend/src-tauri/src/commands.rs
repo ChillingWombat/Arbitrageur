@@ -2096,23 +2096,28 @@ async fn resolve_triangle_books(
     adapter: &Arc<dyn ExchangeAdapter>,
     vid: &VenueId,
     symbols: &[String; 3],
+    rest_fallback: bool,
 ) -> Option<[OrderBook; 3]> {
     let mut out: Vec<OrderBook> = Vec::with_capacity(3);
     for sym in symbols {
         // Hub keys normalize spellings, so a WS-fed bare-base book hits a
-        // canonical-symbol lookup — only a cold hub spends a REST call.
+        // canonical-symbol lookup. Scans pass rest_fallback = false — the
+        // REST fallback exists for dispatch-time resolution only; probing
+        // every candidate pair over REST would turn each scan into a
+        // per-venue request storm.
         let book = match state.market_data_hub.get_valid_orderbook(
             vid,
             sym,
             Some(std::time::Duration::from_secs(2)),
         ) {
             Some(b) => b,
-            None => {
+            None if rest_fallback => {
                 let b = adapter.fetch_orderbook(sym).await.ok()?;
                 validate_adapter_book(&b, vid, sym).ok()?;
                 state.market_data_hub.update_orderbook(b.clone());
                 b
             }
+            None => return None,
         };
         if validate_adapter_book(&book, vid, sym).is_err() {
             return None;
@@ -2180,6 +2185,7 @@ pub async fn scan_triangular_opportunities_impl(
                     adapter,
                     &venue_id,
                     &plan.leg_symbols,
+                    false,
                 )
                 .await
                 {
@@ -2386,7 +2392,7 @@ pub async fn execute_triangle_arbitrage_impl(
     if *state.is_live_mode.read() {
         return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
-    let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols)
+    let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols, true)
         .await
         .ok_or_else(|| "triangle legs went stale before dispatch".to_string())?;
     let fee = effective_venue_fee_bps(state, vid.as_str());
@@ -12562,6 +12568,9 @@ mod tests {
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
         }
+        for v in ["hyperliquid", "lighter", "vanta", "robinhood", "arcus"] {
+            state.install_test_sim(v);
+        }
         state
     }
 
@@ -12591,6 +12600,16 @@ mod tests {
         book.asks
             .push(arbitrageur_core::quote::BookLevel::new(ask, dec!(10.0)));
         book.timestamp = Utc::now();
+        // Mirror into the venue's installed test sim so adapter-level book
+        // resolution returns the same data after the hub freshness window.
+        if let Some(sim) = state
+            .test_sims
+            .read()
+            .ok()
+            .and_then(|m| m.get(venue_id).cloned())
+        {
+            let _ = sim.replace_orderbook(book.clone());
+        }
         state.market_data_hub.update_orderbook(book);
     }
 
@@ -15532,6 +15551,9 @@ mod tests {
             let mut s = state.settings.write();
             s.hyperliquid_enabled = true;
             s.lighter_enabled = true;
+        }
+        for v in ["hyperliquid", "lighter"] {
+            state.install_test_sim(v);
         }
         state
     }
@@ -19142,6 +19164,14 @@ mod tests {
         book.asks
             .push(arbitrageur_core::quote::BookLevel::new(ask, ask_qty));
         book.timestamp = Utc::now();
+        if let Some(sim) = state
+            .test_sims
+            .read()
+            .ok()
+            .and_then(|m| m.get(venue_id).cloned())
+        {
+            let _ = sim.replace_orderbook(book.clone());
+        }
         state.market_data_hub.update_orderbook(book);
     }
 
@@ -19825,6 +19855,7 @@ mod tests {
     fn lighter_only_state() -> AppEngineState {
         let state = AppEngineState::new();
         state.settings.write().lighter_enabled = true;
+        state.install_test_sim("lighter");
         state
     }
 
@@ -19967,6 +19998,7 @@ mod tests {
                 "ZZZ-QQQ".to_string(),
                 "ETH-USDC".to_string(),
             ],
+            false,
         )
         .await;
         assert!(missing.is_none());
