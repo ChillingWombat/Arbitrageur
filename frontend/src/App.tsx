@@ -313,13 +313,22 @@ export const App: React.FC = () => {
   // auto-pick a ticker. A stale selection is cleared once real alternatives
   // exist; when nothing is available, keep it (the remaining venue's book is
   // still real data).
+  // Keep a live selection so the per-ticker data loop (orderbooks, venue
+  // deviation samples, opportunity scan — all keyed on selectedSymbol) runs
+  // continuously from boot instead of idling until a manual click. Prefer
+  // BTC-USDC (densest cross-venue coverage); fall back to the first listing.
   useEffect(() => {
-    if (selectedSymbol !== null && availableTickers.length > 0) {
-      const isAvailable = availableTickers.some((t: PerpTicker) => t.symbol === selectedSymbol);
-      if (!isAvailable) {
-        setSelectedSymbol(null);
-      }
+    if (availableTickers.length === 0) return;
+    if (
+      selectedSymbol !== null &&
+      availableTickers.some((t: PerpTicker) => t.symbol === selectedSymbol)
+    ) {
+      return;
     }
+    const fallback =
+      availableTickers.find((t: PerpTicker) => t.symbol === "BTC-USDC") ??
+      availableTickers[0];
+    setSelectedSymbol(fallback.symbol);
   }, [availableTickers, selectedSymbol]);
 
   // Per-ticker gating was removed with the explorer toggle: every available
