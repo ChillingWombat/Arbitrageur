@@ -130,7 +130,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
         onKeyDown={handleKeyDown}
         className={`w-full px-2.5 py-2 rounded-lg border text-left transition relative group cursor-pointer flex items-center justify-between ${
           hasIssue
-            ? "bg-loss-dim/90 border-loss-border text-loss shadow-2xs hover:bg-loss-dim"
+            ? "bg-loss-dim border-loss-border text-loss shadow-2xs hover:bg-red-100/70"
             : isSelected
             ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
             : !isEnabled
