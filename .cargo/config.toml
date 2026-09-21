@@ -1,2 +1,7 @@
 [env]
-PKG_CONFIG_PATH = "/mnt/Data/Projects/Arbitrageur/.sysroot/usr/lib/x86_64-linux-gnu/pkgconfig"
+# Local dev machines keep a vendored pkg-config sysroot at <repo>/.sysroot
+# (gitignored) for GTK/WebKit deps not installed system-wide. `relative = true`
+# resolves this against the directory containing .cargo/ (the repo root), so it points at
+# <repo>/.sysroot on any machine — and is inert where the directory doesn't
+# exist (e.g. CI runners), since pkg-config still searches its default paths.
+PKG_CONFIG_PATH = { value = ".sysroot/usr/lib/x86_64-linux-gnu/pkgconfig", relative = true }

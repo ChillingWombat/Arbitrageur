@@ -29,6 +29,11 @@ jobs:
           rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
           rustup default 1.96.0
 
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev
+
       - name: Check patch whitespace
         run: git diff --check
 
