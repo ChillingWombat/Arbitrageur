@@ -1965,3 +1965,64 @@ live orderbook". Root cause chain:
   fires immediately on next boot (execute_at <= now ⇒ due).
 - The scheduler dispatches even while the vault later locks → row lands
   `failed` with the close-path error; user re-arms by scheduling again.
+
+## 84. Session Handoff — 2026-09-21 (configurator consistency & modularity audit; liquidation trim wired live for futures)
+
+### What shipped
+
+- **Shared symbol module** — `arbitrageur_core::symbol` now owns
+  `canonical_base` + `canonical_index_alias` (was duplicated between
+  `state_store.rs` and the hub's `normalize_symbol_key`). Hub delegates;
+  state_store re-exports so `crate::state_store::canonical_base` call
+  sites (~25) are unchanged.
+- **Shared numeric module** — `crate::num` (`dec_opt_f64`, `dec_f64`,
+  `f64_dec`) replaces per-module copies in monitor/external_positions.
+  ~90 `Decimal::to_string().parse::<f64>()` call sites remain as a
+  follow-up sweep (identical semantics, mechanical but noisy diff).
+- **Shared resolvers** — `strategy_slippage_bps` is now the single
+  per-strategy slippage read; `execution_mode_is_two_way` normalizes both
+  persisted vocabularies (`SINGLE_WAY`/`DOUBLE_WAY`, `one_way`/`two_way`)
+  and monitor's exit-costing routes through it.
+- **UI vocabulary** — all min-edge settings read `Min Net Profit` /
+  `Min Net Spread` / `Min APR Hurdle` with explicit units; strategy
+  sections share `Execution`/`Risk`/`Unwind`; strategy-bar chips read
+  `Single-Way`/`Two-Way`.
+- **Liquidation-Distance Trim — now enforced (futures)**: the four
+  `*_liq_trim_pct` settings were collected/validated/persisted but had
+  ZERO production consumers — dead controls implying protection that did
+  not exist. The futures convergence supervisor (5s tick) now evaluates
+  every Hold tick:
+  - `liq_trim_decision_for_positions` (pure): min leg liquidation
+    distance (fraction→percent, ×100) + min leg qty + venue step →
+    `evaluate_liq_trim`; side mismatches/missing liq price/zero qty all
+    fail closed.
+  - `maybe_liq_trim_pair` (dispatch): live positions resolve ONLY from
+    `last_good_accounts` ≤120s fresh (risk-overview poll keeps it warm —
+    zero added REST); `TrimBoth` dispatches a symmetric reduce-only
+    `emergency_market` partial flatten through `flatten_leg` with normal
+    child-signal (`flat-*`) + `record_leg_order_id` + `apply_leg_fill`
+    bookkeeping; `CloseBoth` routes `flatten_ticker_positions_impl`.
+  - 60s **per-symbol** cooldown (`state.liq_trim_at`) — positions are
+    symbol-level, so two signals on one symbol can't double-trim the
+    same cached read.
+  - UI trim block is now strategy-aware: futures reads "Enforced live",
+    funding/spot/prediction read "NOT YET ENFORCED" (no live position
+    supervisor exists for them — honest, not hidden).
+
+### Verification
+
+- 361/361 desktop tests (4 new `liq_trim_decision_for_positions`: healthy
+  hold, one-leg-near trim bounded by smaller leg, sub-step remainder →
+  CloseBoth, fail-closed on missing liq/side-mismatch/zero-qty);
+  155 exchange + 45 strategy + 52 execution + 16 core green; clippy+fmt
+  clean; 210/210 frontend tests + vite build green.
+
+### Pickup notes
+
+- Paper-mode positions never carry `liquidation_price` (sim has no
+  liquidation model) so the trim is live-only in effect — correct, since
+  paper liquidation doesn't exist.
+- Trim orders dispatch `emergency_market` — liquidation protection must
+  not wait for passive fills. Revisit if a calmer reduce path is wanted.
+- Funding/spot/prediction trims still need position supervisors before
+  their settings can be wired — that's the honest gap, not a bug.

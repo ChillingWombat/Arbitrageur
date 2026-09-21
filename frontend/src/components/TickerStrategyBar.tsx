@@ -81,7 +81,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
             className="bg-surface-raised text-slate-700 px-2.5 py-1 rounded-lg border border-surface-border"
             title="Execution Mode"
           >
-            {config.executionMode === "DOUBLE_WAY" ? "Divergence & Convergence" : "Single-Way (Divergence)"}
+            {config.executionMode === "DOUBLE_WAY" ? "Two-Way" : "Single-Way"}
           </span>
 
           <span

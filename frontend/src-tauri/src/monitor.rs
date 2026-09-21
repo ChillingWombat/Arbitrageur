@@ -720,14 +720,7 @@ pub(crate) fn trade_win_probability(
 /* Two-way exit walk (depth-dependent, mirrors route economics)            */
 /* ------------------------------------------------------------------------ */
 
-fn dec_opt_f64(v: Decimal) -> Option<f64> {
-    let f: f64 = v.to_string().parse().ok()?;
-    if f.is_finite() {
-        Some(f)
-    } else {
-        None
-    }
-}
+use crate::num::dec_opt_f64;
 
 /// Configured close quantity for the two-way exit walk, in base units: the
 /// smallest positive capacity tier (USD) divided by the buy-side ask. The
@@ -816,7 +809,7 @@ pub(crate) fn exit_estimate_for_mode(
     tiers_usd: &[f64],
     exit_fee_bps: f64,
 ) -> Option<f64> {
-    if execution_mode != "two_way" {
+    if !crate::commands::execution_mode_is_two_way(execution_mode) {
         return Some(0.0);
     }
     let (bk, sk) = buy_book.as_ref().zip(sell_book.as_ref())?;

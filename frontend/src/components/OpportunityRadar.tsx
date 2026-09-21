@@ -162,7 +162,7 @@ const MONITOR_SECTIONS: { id: string; label: string; tooltip: string; icon: Sect
   { id: "monitor", label: "Monitor", tooltip: "Master enable switch plus background refresh cadences for the watchlist and history.", icon: Activity },
   { id: "qualification", label: "Qualification window", tooltip: "Configure how much spread history qualifies a pair: auto from mean-reversion half-life or an explicit manual window.", icon: Clock },
   { id: "signal", label: "Signal thresholds", tooltip: "Engine gates for qualification (edge, capacity, win-probability, persistence, coverage) plus bot entry hurdles. Table display filters live on the gadget strip, not here.", icon: TrendingUp },
-  { id: "execution", label: "Execution", tooltip: "Configure Single Way versus Two Way execution, auto-entry arming, and the transaction reserve haircut.", icon: Layers },
+  { id: "execution", label: "Execution", tooltip: "Configure Single-Way versus Two-Way execution, auto-entry arming, and the transaction reserve haircut.", icon: Layers },
   { id: "risk", label: "Risk & Limits", tooltip: "Position caps, per-venue and per-symbol notional limits, cooldowns, and stop/unwind guardrails shared by auto and manual entries.", icon: ShieldCheck },
 ];
 
@@ -561,7 +561,7 @@ const ConfigPanel: React.FC<{
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Execution
-                      <InfoTooltip text="Single Way opens the spread only; Two Way also prices the closing leg into expected profit." />
+                      <InfoTooltip text="Single-Way opens the spread only; Two-Way also prices the closing leg into expected profit." />
                     </span>
                   </label>
                   <select
@@ -569,8 +569,8 @@ const ConfigPanel: React.FC<{
                     value={draft.executionMode}
                     onChange={(e) => set("executionMode", e.target.value as "one_way" | "two_way")}
                   >
-                    <option value="one_way">Single Way (open)</option>
-                    <option value="two_way">Two Way (+close)</option>
+                    <option value="one_way">Single-Way (entry only)</option>
+                    <option value="two_way">Two-Way (+ close)</option>
                   </select>
                 </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
@@ -1278,7 +1278,7 @@ const OpportunityRadarInner: React.FC = () => {
           >
             <span className="text-slate-400">Execution</span>
             <span className="font-bold text-slate-900">
-              {cfg ? (cfg.executionMode === "two_way" ? "Two Way" : "Single Way") : "—"}
+              {cfg ? (cfg.executionMode === "two_way" ? "Two-Way" : "Single-Way") : "—"}
             </span>
           </div>
         </div>

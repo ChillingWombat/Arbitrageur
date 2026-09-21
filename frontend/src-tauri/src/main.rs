@@ -7,6 +7,7 @@ mod equity_attribution;
 mod external_positions;
 mod feed;
 mod monitor;
+mod num;
 mod reconciliation;
 mod seasonality;
 mod state;

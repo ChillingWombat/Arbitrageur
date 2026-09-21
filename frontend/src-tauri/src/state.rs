@@ -1092,6 +1092,9 @@ pub struct AppEngineState {
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
+    /// Last liquidation-trim dispatch per signal id — cooldown so the 5s
+    /// supervisor does not bleed a pair step-by-step within one minute.
+    pub liq_trim_at: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Last margin-snapshot write per venue (epoch ms). Bounds the snapshot
     /// cadence: fills and heartbeats record at most one row per venue per
     /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`.
@@ -1568,6 +1571,7 @@ impl AppEngineState {
             test_adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
             sample_prune_at: Mutex::new(0),
+            liq_trim_at: Mutex::new(std::collections::HashMap::new()),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),

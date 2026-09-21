@@ -25,7 +25,6 @@ use arbitrageur_core::order::{OrderRequest, OrderResponse};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::str::FromStr;
 use std::sync::Arc;
 use tauri::State;
 
@@ -207,16 +206,7 @@ pub fn vwap_for_size(levels: &[(f64, f64)], qty: f64) -> Option<(f64, f64)> {
     Some((cost / filled, filled))
 }
 
-fn dec_f64(d: Decimal) -> f64 {
-    d.to_string().parse::<f64>().unwrap_or(0.0)
-}
-
-fn f64_dec(v: f64) -> Option<Decimal> {
-    if !v.is_finite() || v <= 0.0 {
-        return None;
-    }
-    Decimal::from_str(&v.to_string()).ok()
-}
+use crate::num::{dec_f64, f64_dec};
 
 /// Percent-of-residual close quantity: `pct`% of `ext`, floored down to the
 /// venue qty step when the raw target exceeds one step (a sub-step target

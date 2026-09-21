@@ -611,14 +611,7 @@ fn funding_round_trip_fee_bps(long_eff_bps: f64, short_eff_bps: f64) -> Option<D
     long_dec.checked_add(short_dec)?.checked_mul(dec!(2))
 }
 
-fn dec_opt_f64(v: Decimal) -> Option<f64> {
-    let f: f64 = v.to_string().parse().ok()?;
-    if f.is_finite() {
-        Some(f)
-    } else {
-        None
-    }
-}
+use crate::num::dec_opt_f64;
 
 #[derive(Debug, Clone, Copy)]
 struct RouteEconomics {
@@ -719,18 +712,44 @@ fn compute_route_economics(
     })
 }
 
-/// Per-strategy slippage gate value (bps) for the futures/spread path.
-/// Reads the futures strategy record; a missing record falls back to
-/// defaults. Callers convert to Decimal and fail closed on invalid values.
-/// There is intentionally no global slippage setting.
-fn futures_slippage_setting(state: &AppEngineState) -> f64 {
-    state
-        .strategy_params
-        .read()
-        .get("futures")
-        .cloned()
-        .unwrap_or_else(|| StrategyParamsDto::defaults_for("futures"))
-        .futures_max_slippage_bps
+/// Per-strategy slippage gate value (bps) — the single resolver every
+/// execution path uses. Maps the strategy id to its `*_max_slippage_bps`
+/// field; a missing record falls back to that strategy's defaults. Callers
+/// convert to Decimal and fail closed on invalid values. There is
+/// intentionally no global slippage setting.
+fn strategy_slippage_bps(state: &AppEngineState, strategy_id: &str) -> f64 {
+    let default = StrategyParamsDto::defaults_for(strategy_id);
+    let params = state.strategy_params.read();
+    let p = params.get(strategy_id).unwrap_or(&default);
+    let v = match strategy_id {
+        "funding" => p.funding_max_slippage_bps,
+        "spot" => p.spot_max_slippage_bps,
+        "triangle" => p.triangle_max_slippage_bps,
+        "prediction" => p.prediction_max_slippage_bps,
+        _ => p.futures_max_slippage_bps,
+    };
+    let dv = match strategy_id {
+        "funding" => default.funding_max_slippage_bps,
+        "spot" => default.spot_max_slippage_bps,
+        "triangle" => default.triangle_max_slippage_bps,
+        "prediction" => default.prediction_max_slippage_bps,
+        _ => default.futures_max_slippage_bps,
+    };
+    // A corrupt record must not widen the gate — fall back to the default.
+    if v.is_finite() && v >= 0.0 {
+        v
+    } else {
+        dv
+    }
+}
+
+/// Whether the strategy/monitor execution mode includes a close leg.
+/// Both serializations exist in persisted state — "SINGLE_WAY"/"DOUBLE_WAY"
+/// (strategy params, per-ticker configs) and "one_way"/"two_way" (monitor
+/// config) — so match on the normalized form, never the raw string.
+pub(crate) fn execution_mode_is_two_way(mode: &str) -> bool {
+    let m = mode.trim().to_ascii_lowercase().replace('-', "_");
+    matches!(m.as_str(), "two_way" | "double_way")
 }
 
 fn route_execution_gates(
@@ -1759,7 +1778,7 @@ pub async fn scan_spatial_opportunities_impl(
 
     let target_qty_dec = Decimal::from_f64_retain(order_qty)
         .ok_or_else(|| "order_qty is outside supported decimal range".to_string())?;
-    let max_slippage_bps = futures_slippage_setting(state);
+    let max_slippage_bps = strategy_slippage_bps(state, "futures");
     let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
@@ -4034,7 +4053,7 @@ async fn execute_spatial_arbitrage_inner(
         .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "Invalid order quantity".to_string())?;
-    let max_slippage_bps = futures_slippage_setting(state);
+    let max_slippage_bps = strategy_slippage_bps(state, "futures");
     let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
@@ -5306,13 +5325,7 @@ pub async fn execute_funding_carry_impl(
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "funding carry quantity is not positive".to_string())?;
 
-    let max_slippage_bps = state
-        .strategy_params
-        .read()
-        .get("funding")
-        .map(|p| p.funding_max_slippage_bps)
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(15.0);
+    let max_slippage_bps = strategy_slippage_bps(state, "funding");
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid funding max slippage setting".to_string())?;
     arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
@@ -11982,6 +11995,248 @@ async fn live_spatial_edge(
 /// the same symbol. Multi-pair safety would additionally require per-pair
 /// position keys in the ledger, symbol+pair-scoped flatten, and per-pair
 /// margin isolation in the paper exchanges.
+/// Liquidation-distance trim for one held spatial pair. When either leg's
+/// live/paper liquidation distance drops under the per-strategy threshold
+/// (`futures_liq_trim_pct`), both legs reduce by the same qty to stay
+/// delta-neutral; a remainder below one venue step closes the pair via the
+/// normal flatten path. Trims dispatch as `emergency_market` — liquidation
+/// protection does not wait for passive fills.
+///
+/// Fail-closed on telemetry: live legs evaluate only against
+/// `last_good_accounts` fresher than 120s (the risk-overview poll keeps it
+/// warm); a missing position, missing liquidation price, or stale read
+/// skips the check rather than trimming blind. 60s cooldown per signal so
+/// the 5s supervisor cannot bleed a pair step-by-step.
+/// Pure trim evaluation over a pair of resolved positions: the smaller
+/// liquidation distance (fraction → percent) and the smaller leg quantity
+/// feed the shared `evaluate_liq_trim`. Missing liquidation prices,
+/// nonpositive quantities, or a leg-side mismatch all fail closed (None).
+fn liq_trim_decision_for_positions(
+    long_pos: &arbitrageur_core::position::Position,
+    short_pos: &arbitrageur_core::position::Position,
+    step: Decimal,
+    threshold_pct: f64,
+) -> Option<(arbitrageur_strategy::pair_trim::PairTrimDecision, f64)> {
+    use arbitrageur_strategy::pair_trim::evaluate_liq_trim;
+    if long_pos.side != Side::Buy || short_pos.side != Side::Sell {
+        return None;
+    }
+    let dist_pct = |p: &arbitrageur_core::position::Position| -> Option<f64> {
+        let d = dec_opt_f64(p.liquidation_distance_pct()?)? * 100.0;
+        d.is_finite().then_some(d)
+    };
+    let qty =
+        |p: &arbitrageur_core::position::Position| dec_opt_f64(p.quantity).filter(|q| *q > 0.0);
+    let min_dist = dist_pct(long_pos)?.min(dist_pct(short_pos)?);
+    let min_qty = qty(long_pos)?.min(qty(short_pos)?);
+    let step_f = dec_opt_f64(step).filter(|s| *s > 0.0)?;
+    Some((
+        evaluate_liq_trim(min_dist, min_qty, step_f, Some(threshold_pct)),
+        min_dist,
+    ))
+}
+
+async fn maybe_liq_trim_pair(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    buy: &crate::state_store::SignalLeg,
+    sell: &crate::state_store::SignalLeg,
+    threshold_pct: f64,
+    is_live: bool,
+) -> Option<(&'static str, &'static str, String, bool)> {
+    use arbitrageur_strategy::pair_trim::PairTrimDecision;
+
+    // Cooldown — positions are symbol-level, so the 60s dispatch cooldown
+    // keys on the symbol: two open signals on the same pair must not
+    // double-trim against the same cached account read.
+    {
+        let last = state.liq_trim_at.lock();
+        if let Some(t) = last.get(&sig.symbol) {
+            if t.elapsed() < std::time::Duration::from_secs(60) {
+                return None;
+            }
+        }
+    }
+
+    // Resolve each leg's live/paper position (side-checked).
+    let resolve_pos = async |leg: &crate::state_store::SignalLeg| {
+        let canonical = crate::state::canonical_venue_id(&leg.venue)?;
+        let acc = if is_live {
+            // Fresh cache only — never fetch here (REST pressure), never
+            // trim on stale telemetry.
+            let (acc, ts) = state.last_good_accounts.lock().get(canonical)?.clone();
+            if Utc::now().timestamp_millis().saturating_sub(ts) > 120_000 {
+                return None;
+            }
+            acc
+        } else {
+            state
+                .get_paper_exchange(canonical)?
+                .fetch_account()
+                .await
+                .ok()?
+        };
+        if is_live {
+            let adapter = state.get_adapter(canonical)?;
+            adapter.account_position_for(&acc, &leg.symbol).ok()?
+        } else {
+            acc.get_position(&leg.symbol).cloned()
+        }
+    };
+    let (Some(long_pos), Some(short_pos)) = (resolve_pos(buy).await, resolve_pos(sell).await)
+    else {
+        return None;
+    };
+
+    let step = flatten_step_qty(state, &sig.symbol);
+    let (decision, min_dist_pct) =
+        liq_trim_decision_for_positions(&long_pos, &short_pos, step, threshold_pct)?;
+    match decision {
+        PairTrimDecision::Hold => None,
+        PairTrimDecision::TrimBoth { qty } => {
+            state
+                .liq_trim_at
+                .lock()
+                .insert(sig.symbol.clone(), std::time::Instant::now());
+            let trim_dec = Decimal::from_f64_retain(qty)?;
+            let mut note = format!(
+                "liq trim: leg within {min_dist_pct:.1}% of liquidation — reducing both legs by {qty}"
+            );
+            let close_id = format!("flat-{}-{:04x}", sig.id, rand::random::<u16>());
+            let child_legs: Vec<crate::state_store::NewSignalLeg> = [
+                (buy, crate::state_store::LegSide::Short),
+                (sell, crate::state_store::LegSide::Long),
+            ]
+            .iter()
+            .map(|(leg, close_side)| crate::state_store::NewSignalLeg {
+                account_id: leg.account_id.clone(),
+                venue: leg.venue.clone(),
+                side: *close_side,
+                symbol: Some(leg.symbol.clone()),
+                intended_qty: qty,
+            })
+            .collect();
+            if let Err(e) =
+                state
+                    .state_store
+                    .record_signal_execution(&crate::state_store::NewSignalExecution {
+                        id: close_id.clone(),
+                        strategy_id: sig.strategy_id.clone(),
+                        symbol: sig.symbol.clone(),
+                        route_id: sig.route_id.clone(),
+                        expected_net_usd: None,
+                        note: Some(format!("liq trim of {}", sig.id)),
+                        legs: child_legs,
+                    })
+            {
+                return Some((
+                    "hold",
+                    "liq_trim",
+                    format!("liq trim record failed: {e}"),
+                    false,
+                ));
+            }
+            let mut notes = Vec::new();
+            for (leg, pos_side) in [(buy, Side::Buy), (sell, Side::Sell)] {
+                let order_side = match pos_side {
+                    Side::Buy => Side::Sell,
+                    Side::Sell => Side::Buy,
+                };
+                let close_side = match leg.side {
+                    crate::state_store::LegSide::Long => crate::state_store::LegSide::Short,
+                    crate::state_store::LegSide::Short => crate::state_store::LegSide::Long,
+                };
+                match flatten_leg(
+                    FlattenLegArgs {
+                        state,
+                        venue: &leg.venue,
+                        symbol: &leg.symbol,
+                        side: order_side,
+                        qty: trim_dec,
+                        strategy_id: &sig.strategy_id,
+                        sig_id: &sig.id,
+                        notes: &mut notes,
+                        execution_type: Some("emergency_market"),
+                    },
+                    is_live,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        if is_live {
+                            if let Some(oid) = outcome.order_id.as_deref() {
+                                if let Err(e) = state.state_store.record_leg_order_id(
+                                    &close_id,
+                                    close_side,
+                                    oid,
+                                    outcome.client_order_id.as_deref(),
+                                ) {
+                                    note.push_str(&format!("; {oid} id persistence failed: {e}"));
+                                }
+                            }
+                        }
+                        match outcome.fill {
+                            Some((q, p, f)) => {
+                                match (
+                                    dec_to_f64(q, "trim qty"),
+                                    dec_to_f64(p, "trim price"),
+                                    dec_to_f64(f, "trim fee"),
+                                ) {
+                                    (Ok(qf), Ok(pf), Ok(ff)) => {
+                                        if let Err(e) = state.state_store.apply_leg_fill(
+                                            &close_id,
+                                            close_side,
+                                            qf,
+                                            pf,
+                                            ff,
+                                            outcome.order_id.as_deref(),
+                                        ) {
+                                            note.push_str(&format!(
+                                                "; {} fill record failed: {e}",
+                                                leg.venue
+                                            ));
+                                        }
+                                    }
+                                    _ => note.push_str(&format!(
+                                        "; {} fill conversion failed",
+                                        leg.venue
+                                    )),
+                                }
+                            }
+                            None => {
+                                note.push_str(&format!("; {} trim order still working", leg.venue))
+                            }
+                        }
+                    }
+                    Err(e) => note.push_str(&format!("; {} leg trim failed: {e}", leg.venue)),
+                }
+            }
+            for n in notes {
+                note.push_str(&format!("; {n}"));
+            }
+            Some(("trim", "liq_trim", note, false))
+        }
+        PairTrimDecision::CloseBoth => {
+            state
+                .liq_trim_at
+                .lock()
+                .insert(sig.symbol.clone(), std::time::Instant::now());
+            let reason = match flatten_ticker_positions_impl(Some(&sig.symbol), "futures", state)
+                .await
+            {
+                Ok(r) => format!(
+                    "liq trim: leg within {min_dist_pct:.1}% of liquidation and remainder below one step — closed pair ({} signals)",
+                    r.signals_closed
+                ),
+                Err(e) => format!(
+                    "liq trim: leg within {min_dist_pct:.1}% of liquidation — close failed: {e}"
+                ),
+            };
+            Some(("exit", "liq_trim", reason, true))
+        }
+    }
+}
+
 pub async fn check_spatial_convergence_impl(
     symbol: Option<&str>,
     strategy_id: &str,
@@ -12074,13 +12329,32 @@ pub async fn check_spatial_convergence_impl(
             };
         match evaluate_spatial_exit(entry_net, live, entry_ts, now_ms, &cfg) {
             SpatialExitVerdict::Hold => {
-                out.push(verdict_of(
-                    "hold",
-                    None,
-                    "edge inside band".to_string(),
-                    live,
-                    false,
-                ));
+                // Liquidation-distance trim rides the same 5s supervisor:
+                // while the edge is inside the band, still protect the
+                // pair against a leg approaching liquidation.
+                let is_live = *state.is_live_mode.read();
+                let trim_threshold = state
+                    .strategy_params
+                    .read()
+                    .get("futures")
+                    .and_then(|p| p.futures_liq_trim_pct)
+                    .filter(|t| t.is_finite() && *t > 0.0 && *t <= 100.0);
+                let trim = match trim_threshold {
+                    Some(t) => maybe_liq_trim_pair(state, sig, buy, sell, t, is_live).await,
+                    None => None,
+                };
+                match trim {
+                    Some((v, trig, reason, unwound)) => {
+                        out.push(verdict_of(v, Some(trig.to_string()), reason, live, unwound))
+                    }
+                    None => out.push(verdict_of(
+                        "hold",
+                        None,
+                        "edge inside band".to_string(),
+                        live,
+                        false,
+                    )),
+                }
             }
             SpatialExitVerdict::Unwatched { reason } => {
                 out.push(verdict_of("unwatched", None, reason, live, false));
@@ -12332,6 +12606,83 @@ mod tests {
                 next_funding_time: Utc::now(),
                 timestamp: Utc::now(),
             });
+    }
+
+    fn trim_test_position(
+        side: Side,
+        qty: Decimal,
+        mark: Decimal,
+        liq: Option<Decimal>,
+    ) -> arbitrageur_core::position::Position {
+        arbitrageur_core::position::Position {
+            venue: VenueId::new("kraken"),
+            symbol: "BTC-USD".to_string(),
+            side,
+            quantity: qty,
+            entry_price: mark,
+            mark_price: mark,
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: liq,
+            leverage: dec!(5),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn liq_trim_decision_holds_when_healthy() {
+        use arbitrageur_strategy::pair_trim::PairTrimDecision;
+        // mark 100, liq 90 → 10% distance; threshold 5% → Hold.
+        let long = trim_test_position(Side::Buy, dec!(1.0), dec!(100), Some(dec!(90)));
+        let short = trim_test_position(Side::Sell, dec!(1.0), dec!(100), Some(dec!(110)));
+        match liq_trim_decision_for_positions(&long, &short, dec!(0.01), 5.0) {
+            Some((PairTrimDecision::Hold, d)) => assert!((d - 10.0).abs() < 0.01),
+            other => panic!("expected Hold at 10% distance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn liq_trim_decision_trims_when_either_leg_near_liq() {
+        use arbitrageur_strategy::pair_trim::PairTrimDecision;
+        // Long leg healthy (10%), short leg at 2% — the smaller distance arms it.
+        let long = trim_test_position(Side::Buy, dec!(1.0), dec!(100), Some(dec!(90)));
+        let short = trim_test_position(Side::Sell, dec!(0.5), dec!(100), Some(dec!(102)));
+        match liq_trim_decision_for_positions(&long, &short, dec!(0.01), 5.0) {
+            Some((PairTrimDecision::TrimBoth { qty }, d)) => {
+                assert!((d - 2.0).abs() < 0.01);
+                // Trim qty is step-rounded against the SMALLER leg (0.5).
+                assert!(qty > 0.0 && qty <= 0.5);
+            }
+            other => panic!("expected TrimBoth at 2% distance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn liq_trim_decision_closes_when_remainder_below_step() {
+        use arbitrageur_strategy::pair_trim::PairTrimDecision;
+        // Position smaller than one step → any trim would leave dust → CloseBoth.
+        let long = trim_test_position(Side::Buy, dec!(0.005), dec!(100), Some(dec!(97)));
+        let short = trim_test_position(Side::Sell, dec!(0.005), dec!(100), Some(dec!(103)));
+        match liq_trim_decision_for_positions(&long, &short, dec!(0.01), 5.0) {
+            Some((PairTrimDecision::CloseBoth, _)) => {}
+            other => panic!("expected CloseBoth for sub-step remainder, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn liq_trim_decision_fails_closed_on_missing_telemetry() {
+        // No liquidation price → no distance → None (never trim blind).
+        let long = trim_test_position(Side::Buy, dec!(1.0), dec!(100), None);
+        let short = trim_test_position(Side::Sell, dec!(1.0), dec!(100), Some(dec!(102)));
+        assert!(liq_trim_decision_for_positions(&long, &short, dec!(0.01), 5.0).is_none());
+        // Side mismatch (position contradicts the signal's leg) → None.
+        let wrong = trim_test_position(Side::Sell, dec!(1.0), dec!(100), Some(dec!(102)));
+        assert!(liq_trim_decision_for_positions(&wrong, &short, dec!(0.01), 5.0).is_none());
+        // Zero quantity → None.
+        let flat = trim_test_position(Side::Buy, dec!(0), dec!(100), Some(dec!(97)));
+        assert!(liq_trim_decision_for_positions(&flat, &short, dec!(0.01), 5.0).is_none());
     }
 
     #[tokio::test]

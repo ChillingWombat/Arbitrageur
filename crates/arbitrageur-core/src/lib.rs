@@ -4,6 +4,7 @@ pub mod market;
 pub mod order;
 pub mod position;
 pub mod quote;
+pub mod symbol;
 pub mod types;
 
 pub use exchange::*;
@@ -12,6 +13,7 @@ pub use market::*;
 pub use order::*;
 pub use position::*;
 pub use quote::*;
+pub use symbol::*;
 pub use types::*;
 
 #[cfg(test)]

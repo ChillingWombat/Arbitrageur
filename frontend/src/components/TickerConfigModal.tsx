@@ -103,7 +103,8 @@ const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "p
   ],
   spot: [
     { id: "spatial", label: "Spatial Parameters", tooltip: "Configure spot trade size, minimum net spread, and orderbook slippage tolerance limit.", icon: Layers },
-    { id: "risk", label: "Risk & Unwind", tooltip: "Configure liquidation-distance trim protection and passive limit unwind execution.", icon: ShieldCheck },
+    { id: "risk", label: "Risk & Safety", tooltip: "Configure liquidation-distance trim protection.", icon: ShieldCheck },
+    { id: "unwind", label: "Passive Unwind", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
@@ -609,11 +610,21 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     return Number.isFinite(v) && v > 0 ? v : null;
   };
 
-  /** Shared Liquidation-Distance Trim block */
-  const renderTrimBlock = (value: string, setValue: (v: string) => void) => (
+  /** Shared Liquidation-Distance Trim block — `enforced` distinguishes
+   *  strategies whose live supervisor consumes the threshold (futures)
+   *  from those still waiting on a position loop (funding/spot). */
+  const renderTrimBlock = (
+    value: string,
+    setValue: (v: string) => void,
+    enforced: boolean,
+  ) => (
     <SettingRow
       label="Liquidation-Distance Trim"
-      description="Shared trim block · trims both legs neutral, else closes both · empty = off"
+      description={
+        enforced
+          ? "Enforced live — checked every 5s on fresh position reads. When either leg comes within this percent of liquidation, both legs trim by the same qty; if the remainder drops below one step, both close. Empty = off."
+          : "Saved but NOT YET ENFORCED — this strategy has no live position supervisor to consume the threshold yet. Planned behavior: when either leg comes within this percent of liquidation, both legs trim equally; below one step, both close. Empty = off."
+      }
       tooltip="When EITHER leg comes within this percent of liquidation, BOTH legs trim by the same qty to stay neutral; if the remainder would drop below one step, both close instead. Empty = off."
     >
       <NumberInput
@@ -893,7 +904,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       </div>
 
       <SettingRow
-        label="Target Profit"
+        label="Min Net Profit"
         description="Net profit cushion locked in per round-trip after taker fees and closing spread"
         tooltip="Net profit cushion locked in per round-trip after deducting taker fees and closing spread."
       >
@@ -983,7 +994,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-2 shadow-2xs transition hover:border-slate-300">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold font-sans text-slate-800">Execution Mode</span>
-          <InfoTooltip text="Choose whether to unwind automatically on convergence to zero (Divergence & Convergence) or maintain inventory until manual rebalancing (Single-Way)." />
+          <InfoTooltip text="Two-Way: enter on divergence and auto-unwind when the spread converges to zero. Single-Way: entry only — inventory held until manual exit." />
         </div>
         <div className="grid grid-cols-2 gap-2 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
           <button
@@ -996,7 +1007,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             }`}
             title="Single-Way: Enter on wide divergence only"
           >
-            Single-Way (Divergence)
+            Single-Way
           </button>
           <button
             type="button"
@@ -1006,9 +1017,9 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 ? "bg-accent text-white shadow-2xs"
                 : "text-slate-600 hover:text-slate-900"
             }`}
-            title="Divergence & Convergence: Enter on divergence and automatically unwind when spread converges to 0"
+            title="Two-Way: enter on divergence and automatically unwind when the spread converges to zero"
           >
-            Divergence & Convergence
+            Two-Way
           </button>
         </div>
       </div>
@@ -1107,7 +1118,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         </div>
       </div>
 
-      {renderTrimBlock(futuresLiqTrimPct, setFuturesLiqTrimPct)}
+      {renderTrimBlock(futuresLiqTrimPct, setFuturesLiqTrimPct, true)}
     </div>
   );
 
@@ -1239,7 +1250,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         <p className="text-[11px] font-sans text-slate-400 mt-0.5">Drift rebalancing, rotation thresholds, and margin trim protection</p>
       </div>
 
-      {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct)}
+      {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct, false)}
 
       <SettingRow
         label="Auto-Rebalance to Neutral"
@@ -1324,17 +1335,15 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </div>
   );
 
-  /** Spot Risk & Unwind Section */
+  /** Spot Risk & Safety Section */
   const renderSpotRiskSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Execution Safety</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Liquidation trim protections and passive limit unwind execution</p>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Safety</h3>
+        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Liquidation-distance trim protection</p>
       </div>
 
-      {renderTrimBlock(spotLiqTrimPct, setSpotLiqTrimPct)}
-
-      {renderPassiveBlock(spotPassive, setSpotPassive, spotPassiveMode, setSpotPassiveMode)}
+      {renderTrimBlock(spotLiqTrimPct, setSpotLiqTrimPct, false)}
     </div>
   );
 
@@ -1343,7 +1352,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="flex items-center justify-between pb-1 border-b border-surface-border/60">
         <div>
-          <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Parity Thresholds</h3>
+          <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Parity Parameters</h3>
           <p className="text-[11px] font-sans text-slate-400 mt-0.5">Minimum net profit and disabled scaffold gates</p>
         </div>
       </div>
@@ -1371,7 +1380,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       </div>
 
       <SettingRow
-        label="Cycle Trade Size"
+        label="Trade Size"
         description="Standard capital allocated per 3-step triangular cycle"
         tooltip="Initial capital deployed across the first leg of the synthetic triangular cycle."
       >
@@ -1385,7 +1394,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       </SettingRow>
 
       <SettingRow
-        label="Min Cycle Profit"
+        label="Min Net Profit"
         description="Minimum net edge required after deducting trading fees across all 3 legs"
         tooltip="Refuse triangular arbitrage cycles whose combined net edge after 3-leg taker fees and bid/ask spreads is below this hurdle."
       >

@@ -60,41 +60,7 @@ struct CachedFunding {
 /// universe is already deduplicated per (venue, base), so one slot per
 /// base per venue matches the system's granularity.
 fn normalize_symbol_key(symbol: &str) -> String {
-    let up = symbol.trim().to_uppercase();
-    let mut stripped = up.as_str();
-    let mut cut = false;
-    loop {
-        let mut again = false;
-        for suf in [
-            "-USDC", "-USDT", "-USD1", "-USD", "-PERP", "-SWAP", "-U", "/USDC", "/USDT", "/USD",
-        ] {
-            if stripped.len() > suf.len() && stripped.ends_with(suf) {
-                stripped = &stripped[..stripped.len() - suf.len()];
-                cut = true;
-                again = true;
-                break;
-            }
-        }
-        if !again {
-            break;
-        }
-    }
-    if !cut {
-        for suf in ["USDC", "USDT", "USD"] {
-            if up.ends_with(suf) && up.len() - suf.len() >= 3 {
-                stripped = &up[..up.len() - suf.len()];
-                break;
-            }
-        }
-    }
-    match stripped {
-        "US100" | "TECH100" | "NAS100" | "USTEC" | "USTEC100" | "NQ100" | "NQ" => {
-            "NAS100".to_string()
-        }
-        "US500" | "SPX500" | "SP500" | "SPX" => "SPX500".to_string(),
-        "US30" | "DJ30" | "WS30" | "DJI" | "DJIA" => "US30".to_string(),
-        _ => stripped.to_string(),
-    }
+    crate::symbol::canonical_base(symbol)
 }
 
 /// Centralized Market Data Hub (Ticker Plant).
