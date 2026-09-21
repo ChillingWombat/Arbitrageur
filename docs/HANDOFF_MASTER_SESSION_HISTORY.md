@@ -2188,3 +2188,23 @@ clippy+fmt clean, app restarted on the new binary.
 - Stage 2 candidates per crosscheck 4.16 (domain-first): vault/account commands (~1.7k lines, non-contiguous — impls ~9905–10600 + IPC ~11336–11410 + shared credential helpers used by settings save), spatial execution, funding/basis, portfolio/risk, calibration/seasonality, capabilities/live-mode policy.
 - Vault extraction caveat: `ensure_credential_migration` and credential-scrub helpers are shared with non-vault settings paths — extract together or keep helpers `pub(crate)` in commands.rs.
 - Keep stages small and separately committed — the crosscheck explicitly warns against a behavior-neutral mega-refactor.
+
+## Tauri module refactor — stages 2–5: strategy_config, accounts, performance, monitor_ipc
+
+### What shipped
+
+- `frontend/src-tauri/src/strategy_config.rs` (305 lines): per-ticker `TickerStrategyConfigDto` get/set/list impls + IPC, universal `StrategyParamsDto` get/save/list impls + IPC, `canonical_sliding_window` (moved here — it validates the params field).
+- `frontend/src-tauri/src/accounts.rs` (~1200 lines): vault lifecycle (status/init/unlock/lock/delete-credentials), account profile CRUD + DTOs (`AccountDto`, `AccountUpsertInput`, `StrategyRouteUpsertInput`), credential migration/default-profile helpers (`pub(crate)` — shared with settings paths in commands.rs), strategy-route CRUD + eligibility, `get_venue_balances_impl` incl. paper-exchange balances.
+- `frontend/src-tauri/src/performance.rs` (427 lines): `get_strategy_performance`, `get_calibration_report` (forecast-calibration over the durable prediction log), `get_strategy_fill_pnl`, `get_utilisation_history`, `run_wfo_calibration` — impls + IPC.
+- `frontend/src-tauri/src/monitor_ipc.rs` (252 lines): `monitor_engine` accessor, snapshot/config IPC, signal events, ticker exemptions, `execute_monitor_opportunity` — the radar → spatial-execution entry path.
+- `commands.rs` 20695 → 18555 lines. New `pub(crate)` surfaces: `live_account_or_cached`, `margin_monitor_from_settings`, `stale_grace_ms`, `execute_spatial_arbitrage_inner`. Dead imports removed; test-only imports (`TickerStrategyConfigDto`, `ExchangeCredentials`) moved into the test module.
+
+### Verification
+
+- 371 desktop tests pass after every stage; clippy --all-targets clean; fmt clean.
+
+### Pickup notes
+
+- Remaining domains per 4.16: spatial execution (`execute_spatial_arbitrage_inner` + helpers, ~1k lines entangled), funding scan+carry (~1.8k lines across four non-contiguous regions), triangle execution, capabilities/live-mode policy, equity snapshots, seasonality/session IPC.
+- Funding extraction caveat: `execute_funding_carry_impl` shares `resolve_signal_accounts`/`record_signal_execution` with the spatial path — extract spatial first or keep those helpers `pub(crate)` in commands.rs.
+- Each stage kept `commands::<name>` resolvable via `pub(crate) use` glob re-exports — IPC registration and tests needed zero changes.
