@@ -2704,11 +2704,25 @@ fn book_sample(book: &OrderBook, venue: &str) -> Option<VenueSampleEntry> {
     let bid = book.bids.first()?.price.to_string().parse::<f64>().ok()?;
     let ask = book.asks.first()?.price.to_string().parse::<f64>().ok()?;
     let mid = (bid + ask) / 2.0;
+    let bid_depth: f64 = book
+        .bids
+        .iter()
+        .take(5)
+        .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+        .sum();
+    let ask_depth: f64 = book
+        .asks
+        .iter()
+        .take(5)
+        .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+        .sum();
     (mid.is_finite() && mid > 0.0).then_some(VenueSampleEntry {
         venue_id: venue.to_string(),
         mid,
         best_bid: bid,
         best_ask: ask,
+        bid_depth: (bid_depth > 0.0).then_some(bid_depth),
+        ask_depth: (ask_depth > 0.0).then_some(ask_depth),
     })
 }
 
@@ -3313,12 +3327,16 @@ mod tests {
                             mid: 100.0,
                             best_bid: 99.9,
                             best_ask: 100.1,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                         crate::state_store::VenueSampleEntry {
                             venue_id: "vanta".into(),
                             mid: 100.0 * (1.0 + spread_bps / 10_000.0),
                             best_bid: 99.9,
                             best_ask: 100.1,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                     ],
                 )
@@ -3384,12 +3402,16 @@ mod tests {
                             mid: 100.0,
                             best_bid: 99.9,
                             best_ask: 100.1,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                         VenueSampleEntry {
                             venue_id: "lighter".into(),
                             mid: 100.0 + wiggle / 100.0,
                             best_bid: 99.9,
                             best_ask: 100.1,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                     ],
                 )

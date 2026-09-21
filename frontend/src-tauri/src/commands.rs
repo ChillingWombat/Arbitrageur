@@ -1629,6 +1629,8 @@ pub async fn fetch_orderbooks_impl(
                 mid,
                 best_bid,
                 best_ask,
+                bid_depth: (total_bid_depth > 0.0).then_some(total_bid_depth),
+                ask_depth: (total_ask_depth > 0.0).then_some(total_ask_depth),
             });
         }
     }
@@ -12176,6 +12178,7 @@ pub async fn run_wfo_calibration_impl(
             }
             let mut best_edge = f64::NEG_INFINITY;
             let mut ref_px = 0.0_f64;
+            let mut best_depth = 1.0_f64;
             for buy in venues.iter() {
                 for sell in venues.iter() {
                     if buy.venue_id.eq_ignore_ascii_case(&sell.venue_id) {
@@ -12192,6 +12195,16 @@ pub async fn run_wfo_calibration_impl(
                     if edge > best_edge {
                         best_edge = edge;
                         ref_px = buy.best_ask;
+                        // Binding constraint: thinner of the two sides the
+                        // trade would actually take — buy venue's ask depth,
+                        // sell venue's bid depth. Missing depth (pre-v28
+                        // rows) falls back to neutral 1.0.
+                        best_depth = match (buy.ask_depth, sell.bid_depth) {
+                            (Some(a), Some(b)) => a.min(b),
+                            (Some(a), None) => a,
+                            (None, Some(b)) => b,
+                            (None, None) => 1.0,
+                        };
                     }
                 }
             }
@@ -12201,7 +12214,7 @@ pub async fn run_wfo_calibration_impl(
             Some(arbitrageur_math::QuoteObservation::new(
                 *ts as u64,
                 best_edge / ref_px * 10_000.0,
-                1.0, // depth is not sampled; equal weight keeps VWMA honest
+                best_depth,
             ))
         })
         .collect();
@@ -13817,12 +13830,16 @@ mod tests {
                         mid: 100.0,
                         best_bid: 99.9,
                         best_ask: 100.1,
+                        bid_depth: None,
+                        ask_depth: None,
                     },
                     VenueSampleEntry {
                         venue_id: "vanta".into(),
                         mid: 100.5,
                         best_bid: 100.4,
                         best_ask: 100.6,
+                        bid_depth: None,
+                        ask_depth: None,
                     },
                 ],
             )
@@ -19518,6 +19535,8 @@ mod tests {
                 mid: *mid,
                 best_bid: mid - 0.5,
                 best_ask: mid + 0.5,
+                bid_depth: None,
+                ask_depth: None,
             })
             .collect();
         state
@@ -20606,6 +20625,8 @@ mod tests {
             mid,
             best_bid: mid - 0.5,
             best_ask: mid + 0.5,
+            bid_depth: None,
+            ask_depth: None,
         }
     }
 
@@ -20801,12 +20822,16 @@ mod tests {
                             mid: 100.0,
                             best_bid: 99.5,
                             best_ask: 100.5,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                         crate::state_store::VenueSampleEntry {
                             venue_id: "bbb".into(),
                             mid: 100.05,
                             best_bid: 99.55,
                             best_ask: 100.55,
+                            bid_depth: None,
+                            ask_depth: None,
                         },
                     ],
                 )

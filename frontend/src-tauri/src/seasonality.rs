@@ -362,6 +362,8 @@ mod tests {
             mid,
             best_bid: mid - 0.1,
             best_ask: mid + 0.1,
+            bid_depth: None,
+            ask_depth: None,
         }
     }
 
