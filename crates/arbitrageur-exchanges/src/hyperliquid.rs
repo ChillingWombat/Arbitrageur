@@ -152,9 +152,7 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
         .map_err(|_| anyhow::anyhow!("Failed to convert key bytes"))?;
     let signing_key = k256::ecdsa::SigningKey::from_bytes((&key_arr).into())
         .map_err(|e| anyhow::anyhow!("Failed to instantiate secp256k1 signing key: {e}"))?;
-    let (sig, recid) = signing_key
-        .sign_prehash_recoverable(&digest)
-        .map_err(|e| anyhow::anyhow!("ECDSA signing failed: {e}"))?;
+    let (sig, recid) = signing_key.sign_prehash_recoverable(&digest);
 
     let r_hex = format!("0x{}", hex::encode(sig.r().to_bytes()));
     let s_hex = format!("0x{}", hex::encode(sig.s().to_bytes()));
@@ -1149,7 +1147,7 @@ mod tests {
         use k256::ecdsa::SigningKey;
         let key_bytes = [1u8; 32];
         let signing_key = SigningKey::from_bytes((&key_bytes).into()).unwrap();
-        let (sig, recid) = signing_key.sign_prehash_recoverable(&[0u8; 32]).unwrap();
+        let (sig, recid) = signing_key.sign_prehash_recoverable(&[0u8; 32]);
         let _r = sig.r();
         let _s = sig.s();
         let v = recid.to_byte() + 27;

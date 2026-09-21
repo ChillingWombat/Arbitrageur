@@ -165,7 +165,7 @@ impl KrakenAdapter {
         post_data: &str,
     ) -> anyhow::Result<String> {
         use base64::Engine;
-        use hmac::{Hmac, Mac};
+        use hmac::{digest::KeyInit, Hmac, Mac};
         use sha2::{Digest, Sha256, Sha512};
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(secret.trim().as_bytes())
