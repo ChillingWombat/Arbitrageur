@@ -17,6 +17,13 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Human readable name.
     fn name(&self) -> &str;
 
+    /// Account identifier for venues whose public market-data WS stream is
+    /// account-scoped (Orderly brokers such as Vanta). Default `None` —
+    /// most venues' public streams are anonymous.
+    fn ws_account_id(&self) -> Option<String> {
+        None
+    }
+
     /// List available markets and instrument metadata.
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>>;
 

@@ -447,6 +447,14 @@ impl VantaAdapter {
             .replace('_', "-")
     }
 
+    /// Registered Orderly account id for the account-scoped public WS
+    /// stream. Empty/whitespace resolves to `None` (lane stays disabled).
+    pub fn ws_account_id(&self) -> Option<String> {
+        let acc = self.account_id.read().clone().unwrap_or_default();
+        let clean = acc.trim().trim_matches('"').trim_matches('\'').trim();
+        (!clean.is_empty()).then(|| clean.to_string())
+    }
+
     fn clean_account_id(&self) -> anyhow::Result<String> {
         let acc = self.account_id.read().clone().unwrap_or_default();
         let clean = acc.trim().trim_matches('"').trim_matches('\'').trim();
@@ -680,6 +688,10 @@ impl ExchangeAdapter for VantaAdapter {
 
     fn name(&self) -> &str {
         "Vanta.exchange"
+    }
+
+    fn ws_account_id(&self) -> Option<String> {
+        VantaAdapter::ws_account_id(self)
     }
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
