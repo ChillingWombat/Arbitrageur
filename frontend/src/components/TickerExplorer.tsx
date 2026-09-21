@@ -140,11 +140,6 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
       >
         {/* Left: Symbol & Status */}
         <div className="flex items-center space-x-2 min-w-0 pr-1">
-          {hasIssue ? (
-            <span title={issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
-              <AlertTriangle className="w-3.5 h-3.5 text-loss animate-pulse" />
-            </span>
-          ) : null}
           <div className="flex items-center space-x-1.5">
             <span className={`font-bold text-xs font-sans tracking-tight ${hasIssue ? "text-loss font-black" : "text-slate-900"}`}>
               {base}
@@ -153,11 +148,11 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
               Perp
             </span>
           </div>
-          {hasIssue && (
-            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded-full bg-loss-dim text-loss border border-loss-border">
-              Issue
+          {hasIssue ? (
+            <span title={issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
+              <AlertTriangle className="w-3.5 h-3.5 text-loss animate-pulse" />
             </span>
-          )}
+          ) : null}
         </div>
 
         {/* Right: Net PnL (USD + BPS) & Actions */}
