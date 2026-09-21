@@ -515,19 +515,40 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 label="Backtest win"
                 value={
                   opp.backtest_win_rate != null
-                    ? `${(opp.backtest_win_rate * 100).toFixed(0)}%${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
+                    ? `${(opp.backtest_win_rate * 100).toFixed(0)}%${opp.backtest_episodes != null ? ` (n~${opp.backtest_episodes})` : opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
                     : "—"
                 }
-                title="Measured fraction of trailing-history entries covering costs. Unmeasurable below 20 scoreable entries."
+                title={`Measured fraction of trailing-history entries covering costs. Unmeasurable below 20 scoreable entries.${
+                  opp.backtest_win_rate_lower != null && opp.backtest_win_rate_upper != null
+                    ? ` 90% CI [${(opp.backtest_win_rate_lower * 100).toFixed(0)}% – ${(opp.backtest_win_rate_upper * 100).toFixed(0)}%] on ~${opp.backtest_episodes ?? "?"} effective episode-blocks (consecutive prints overlap — raw n overstates evidence).`
+                    : ""
+                }${
+                  opp.weekday_win_rate != null && opp.weekend_win_rate != null
+                    ? ` Weekday ${(opp.weekday_win_rate * 100).toFixed(0)}% / weekend ${(opp.weekend_win_rate * 100).toFixed(0)}%.`
+                    : ""
+                }`}
+              />
+              <CarryDetailField
+                label="Gap persistence"
+                value={
+                  opp.persistence_probability != null
+                    ? `${(opp.persistence_probability * 100).toFixed(0)}%`
+                    : "—"
+                }
+                title={`Measured survival probability: P(funding gap stays above the min-APR threshold through the modelled breakeven horizon).${
+                  opp.persistence_probability_lower != null
+                    ? ` Wilson lower bound ${(opp.persistence_probability_lower * 100).toFixed(0)}%.`
+                    : ""
+                } Unlike the Breakeven (model) heuristic this is estimated from actual gap lifetimes.`}
               />
               <CarryDetailField
                 label="Backtest expected"
                 value={
                   opp.backtest_expected_usd != null
-                    ? `${opp.backtest_expected_usd >= 0 ? "+" : "-"}$${Math.abs(opp.backtest_expected_usd).toFixed(2)}${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
+                    ? `${opp.backtest_expected_usd >= 0 ? "+" : "-"}$${Math.abs(opp.backtest_expected_usd).toFixed(2)}${opp.backtest_expected_usd_se != null ? ` ±${opp.backtest_expected_usd_se.toFixed(2)}` : ""}${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
                     : "—"
                 }
-                title="Measured mean net per trailing-history entry. Unmeasurable below 20 scoreable entries."
+                title="Measured mean net per trailing-history entry ± 1 standard error across trials. Unmeasurable below 20 scoreable entries."
               />
               <div
                 className="space-y-0.5"
@@ -1085,11 +1106,22 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         <span className="text-slate-500">Win:</span>
                         <span
                           className={`font-semibold tabular-nums ${opp.backtest_win_rate != null && opp.backtest_win_rate < 0.5 ? "text-loss" : "text-slate-900"}`}
-                          title={opp.backtest_trials != null ? `Measured over ${opp.backtest_trials} trailing-history backtest entries (informational only — never gates entries)` : "Win rate unmeasurable — fewer than 20 scoreable history entries"}
+                          title={opp.backtest_trials != null ? `Measured over ${opp.backtest_trials} trailing-history backtest entries${opp.backtest_win_rate_lower != null && opp.backtest_win_rate_upper != null ? ` — 90% CI [${(opp.backtest_win_rate_lower * 100).toFixed(0)}–${(opp.backtest_win_rate_upper * 100).toFixed(0)}%] on ~${opp.backtest_episodes ?? "?"} effective episode-blocks` : ""} (informational only — never gates entries)` : "Win rate unmeasurable — fewer than 20 scoreable history entries"}
                         >
                           {opp.backtest_win_rate != null ? `${(opp.backtest_win_rate * 100).toFixed(0)}%` : "—"}
                         </span>
                       </div>
+                      {opp.persistence_probability != null && (
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="text-slate-500">Persist:</span>
+                          <span
+                            className="font-semibold tabular-nums text-slate-900"
+                            title={`Measured P(funding gap survives above min-APR through the breakeven horizon)${opp.persistence_probability_lower != null ? ` — lower bound ${(opp.persistence_probability_lower * 100).toFixed(0)}%` : ""}`}
+                          >
+                            {(opp.persistence_probability * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-2 gap-1.5 font-sans text-[10px]">

@@ -180,6 +180,7 @@ fn main() {
             commands::get_venue_balances,
             commands::get_strategy_performance,
             commands::get_strategy_fill_pnl,
+            commands::get_calibration_report,
             commands::get_utilisation_history,
             commands::run_wfo_calibration,
             commands::get_monitor_snapshot,

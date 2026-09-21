@@ -1,5 +1,6 @@
 use arbitrageur_core::quote::FundingRate;
 use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
+use chrono::Datelike;
 
 /// Detailed breakdown of a cross-exchange funding rate carry opportunity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,10 +547,31 @@ pub struct GapBacktest {
     pub trials: u32,
     /// Trials with net > 0.
     pub wins: u32,
-    /// `wins / trials`.
+    /// `wins / trials` — raw point estimate, display only. Gate on
+    /// `win_rate_lower` instead: trials on the same gap episode are
+    /// correlated, so the honest uncertainty is wider than `trials`
+    /// suggests.
     pub win_rate: f64,
+    /// Wilson lower/upper bound on `win_rate` computed at `n_effective`
+    /// (distinct above-threshold episodes), z = 1.645 (~95% one-sided).
+    /// `None` when `episodes == 0`.
+    pub win_rate_lower: Option<f64>,
+    pub win_rate_upper: Option<f64>,
+    /// Distinct contiguous above-threshold runs the trials entered in —
+    /// the effective sample size. Trials inside one episode share the
+    /// same forward path, so independence ≈ episodes, not prints.
+    pub episodes: u32,
+    /// Win rate over trials entered Mon–Fri UTC. `None` below 8 trials —
+    /// funding behaves differently on weekends, so an undifferentiated
+    /// mean hides regime risk.
+    pub weekday_win_rate: Option<f64>,
+    /// Win rate over trials entered Sat–Sun UTC. `None` below 8 trials.
+    pub weekend_win_rate: Option<f64>,
     /// Mean net USD per trial (signed).
     pub expected_usd: f64,
+    /// Standard error of `expected_usd` at the effective sample size —
+    /// `sd(nets)/√n_eff`. `None` when fewer than 2 effective episodes.
+    pub expected_usd_se: Option<f64>,
     /// Mean realized hold in hours.
     pub mean_hold_hours: f64,
     /// Ascending net-USD deciles (P0=min … P100=max, 11 points) enabling
@@ -592,6 +614,23 @@ pub fn backtest_gap_carry(
     let mut sum_net = 0.0;
     let mut sum_hold = 0.0;
     let mut nets: Vec<f64> = Vec::new();
+    // Per-trial bookkeeping for honest uncertainty: the contiguous
+    // above-threshold episode each entry belongs to (same episode →
+    // overlapping forward path → correlated, one effective sample), and
+    // the weekday/weekend regime of the entry print.
+    let mut trial_blocks: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut weekend_nets: Vec<f64> = Vec::new();
+    let mut weekday_nets: Vec<f64> = Vec::new();
+    // Block id = number of qualifying-run starts at or before index i:
+    // a run opens where the gap crosses threshold from below.
+    let mut run_starts = 0u32;
+    let mut block_id = Vec::with_capacity(pts.len());
+    for (k, &(_, g)) in pts.iter().enumerate() {
+        if g > threshold_8h && (k == 0 || pts[k - 1].1 <= threshold_8h) {
+            run_starts += 1;
+        }
+        block_id.push(run_starts);
+    }
     let t_end = pts.last().map(|(t, _)| *t).unwrap_or(0.0);
     let mut i = 0usize;
     while i < pts.len() {
@@ -633,6 +672,15 @@ pub fn backtest_gap_carry(
         sum_net += net;
         sum_hold += hold_h;
         nets.push(net);
+        trial_blocks.insert(block_id[i]);
+        let is_weekend = chrono::DateTime::from_timestamp_millis((t0 * 3_600_000.0) as i64)
+            .map(|dt| matches!(dt.weekday(), chrono::Weekday::Sat | chrono::Weekday::Sun))
+            .unwrap_or(false);
+        if is_weekend {
+            weekend_nets.push(net);
+        } else {
+            weekday_nets.push(net);
+        }
         if net > 0.0 {
             wins += 1;
         }
@@ -645,14 +693,111 @@ pub fn backtest_gap_carry(
     let deciles_usd = (0..=10)
         .map(|k| nets[(k * (nets.len() - 1)) / 10])
         .collect();
+    let episodes = trial_blocks.len() as u32;
+    let n_eff = episodes as f64;
+    let (win_rate_lower, win_rate_upper) =
+        crate::binomial::wilson_interval(wins as f64, trials as f64, n_eff, 1.645)
+            .map(|(l, u)| (Some(l), Some(u)))
+            .unwrap_or((None, None));
+    let regime_rate = |v: &Vec<f64>| -> Option<f64> {
+        const MIN_REGIME_TRIALS: usize = 8;
+        if v.len() < MIN_REGIME_TRIALS {
+            return None;
+        }
+        Some(v.iter().filter(|n| **n > 0.0).count() as f64 / v.len() as f64)
+    };
+    let expected_usd_se = if n_eff >= 2.0 && nets.len() > 1 {
+        let mean = sum_net / nets.len() as f64;
+        let var = nets.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (nets.len() - 1) as f64;
+        let se = (var / n_eff).sqrt();
+        if se.is_finite() {
+            Some(se)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Some(GapBacktest {
         trials,
         wins,
         win_rate: (wins as f64) / (trials as f64),
+        win_rate_lower,
+        win_rate_upper,
+        episodes,
+        weekday_win_rate: regime_rate(&weekday_nets),
+        weekend_win_rate: regime_rate(&weekend_nets),
         expected_usd: sum_net / (trials as f64),
+        expected_usd_se,
         mean_hold_hours: sum_hold / (trials as f64),
         deciles_usd,
     })
+}
+
+/// Measured persistence probability: of the prints where the net funding
+/// gap sat at/above `threshold_8h`, the fraction whose gap **stayed**
+/// above it for the next `duration_hours` continuously — i.e. the edge
+/// survived long enough to cover costs at the fee+spread breakeven
+/// horizon. This is the empirical replacement for the closed-form
+/// `coverage/(1+coverage)` heuristic in [`funding_win_probability`]:
+/// same question ("does the edge persist past breakeven?"), but answered
+/// from observed path survival instead of an assumed shape.
+///
+/// Prints without `duration_hours` of remaining history are skipped as
+/// censored rather than counted as failures. Returns `None` below
+/// `min_trials` scoreable prints — fail closed.
+pub fn gap_persistence_probability(
+    history: &[(i64, f64)],
+    threshold_8h: f64,
+    duration_hours: f64,
+    min_trials: u32,
+) -> Option<crate::binomial::BinomialEstimate> {
+    if !(threshold_8h.is_finite() && duration_hours.is_finite())
+        || duration_hours <= 0.0
+        || threshold_8h < 0.0
+    {
+        return None;
+    }
+    let pts: Vec<(f64, f64)> = history
+        .iter()
+        .filter(|(_, r)| r.is_finite())
+        .map(|(t, r)| (*t as f64 / 3_600_000.0, *r))
+        .collect();
+    if pts.len() < 2 {
+        return None;
+    }
+    let t_end = pts.last()?.0;
+    let mut trials = 0u32;
+    let mut wins = 0u32;
+    for (i, &(t0, g0)) in pts.iter().enumerate() {
+        if g0 < threshold_8h || t_end - t0 < duration_hours {
+            continue;
+        }
+        trials += 1;
+        let mut survived = true;
+        for &(tj, gj) in &pts[i..] {
+            if tj - t0 > duration_hours {
+                break;
+            }
+            if gj < threshold_8h {
+                survived = false;
+                break;
+            }
+        }
+        if survived {
+            wins += 1;
+        }
+    }
+    if trials < min_trials.max(1) {
+        return None;
+    }
+    Some(crate::binomial::binomial_estimate(
+        wins as f64,
+        trials as f64,
+        trials as f64,
+        1.645,
+        2.0,
+    ))
 }
 
 /// Empirical P(net >= `target_usd`) by linear interpolation over ascending

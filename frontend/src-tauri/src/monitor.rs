@@ -27,8 +27,8 @@ use arbitrageur_core::types::{dec, Decimal};
 use arbitrageur_math::ou_process::OuModelParams;
 use arbitrageur_math::pair_monitor::{
     above_threshold_ratio, build_pair_series, build_pwin_curve, capacity_ladder,
-    effective_coverage, funding_carry_bps, p_win_at_deviation, reversion_stats, PairObservation,
-    PAIR_BUCKET_MS,
+    effective_coverage, entry_outcome_stats, funding_carry_bps, p_win_est_at_deviation,
+    reversion_stats, simulate_entry_outcomes, PairObservation, PAIR_BUCKET_MS,
 };
 use arbitrageur_math::session::{
     apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_ondo_venue,
@@ -118,6 +118,19 @@ pub struct MonitorConfigDto {
     /// 0.0 disables the gate.
     #[serde(default = "d_min_coverage")]
     pub min_coverage: f64,
+    /// Episode recency half-life for win-rate evidence, seconds (default
+    /// 3d). Episodes older than this decay exponentially
+    /// (`0.5^(age/half_life)`) so stale regimes fade instead of counting
+    /// equally with fresh ones. 0 disables weighting.
+    #[serde(default = "d_episode_hl")]
+    pub episode_half_life_secs: f64,
+    /// Confidence floor on the win probability's Wilson lower bound
+    /// (z=1.645): a row is not executable when its lower bound falls
+    /// below this even if the shrunken point estimate passes
+    /// `min_win_probability` (default 0.5 — must beat coin-flip with
+    /// confidence; raise toward 0.8 for stricter). 0 disables.
+    #[serde(default = "d_min_win_lb")]
+    pub min_win_lower_bound: f64,
 }
 
 fn d_true() -> bool {
@@ -174,6 +187,12 @@ fn d_min_coverage() -> f64 {
 fn d_min_interval() -> u64 {
     5
 }
+fn d_episode_hl() -> f64 {
+    3.0 * 86_400.0
+}
+fn d_min_win_lb() -> f64 {
+    0.5
+}
 
 impl Default for MonitorConfigDto {
     fn default() -> Self {
@@ -197,6 +216,8 @@ impl Default for MonitorConfigDto {
             min_expected_profit_bps: 0.0,
             min_threshold_ratio: d_min_ratio(),
             min_coverage: d_min_coverage(),
+            episode_half_life_secs: d_episode_hl(),
+            min_win_lower_bound: d_min_win_lb(),
         }
     }
 }
@@ -244,6 +265,48 @@ pub struct MonitorRowDto {
     /// only when uncomputable (thin history / missing books). This is the
     /// table's "Win %" column.
     pub win_probability: Option<f64>,
+    /// Wilson lower bound of `win_probability` at z=1.645 on the bucket's
+    /// effective episode count — the confidence-aware floor the
+    /// executable gate checks against `min_win_lower_bound`.
+    pub win_probability_lower: Option<f64>,
+    /// Wilson upper bound of `win_probability` — interval width shows how
+    /// much the bucket's episode evidence actually constrains the rate.
+    pub win_probability_upper: Option<f64>,
+    /// Kish-effective episode count behind the win estimate (shrinks under
+    /// recency weighting). 0.0 when the OU fallback produced the estimate.
+    pub p_win_n_effective: Option<f64>,
+    /// Still-open (censored) episodes inside the win bucket — a high share
+    /// means the rate is understated, not confirmed.
+    pub p_win_censored: Option<u32>,
+    /// True when the win estimate came from the OU first-passage fallback
+    /// rather than empirical episode evidence.
+    pub p_win_from_model: Option<bool>,
+    /// Empirical P(net > 0) for a fresh entry at the current deviation:
+    /// every historical excursion replayed through the exit policy and
+    /// scored on real net bps (`sign(e0)·(e0 − dev_exit) − friction`),
+    /// Beta-shrunken. `None` below `min_episodes` resolved trials.
+    /// THIS is the P&L-defined win rate — `reversion_probability`/`p_win`
+    /// answer "does the spread normalize", this answers "does the trade
+    /// make money".
+    pub net_win_probability: Option<f64>,
+    /// Wilson lower bound of `net_win_probability` counting censored
+    /// episodes as non-wins — the fail-closed reading.
+    pub net_win_lower: Option<f64>,
+    /// Recency-weighted mean net bps per simulated entry at the current
+    /// deviation (censored episodes marked at last observation).
+    pub net_expected_bps: Option<f64>,
+    /// Ascending weighted net-bps deciles (P0…P100, 11 points) of
+    /// simulated entries at this deviation — enables P(net >= any bps
+    /// target) client-side, same contract as the funding monitor's
+    /// `backtest_deciles_usd`.
+    pub net_deciles_bps: Option<Vec<f64>>,
+    /// Simulated entry trials / still-open share at this deviation.
+    pub outcome_trials: Option<u32>,
+    pub outcome_censored: Option<u32>,
+    /// Weighted median entry→exit seconds across simulated episodes, and
+    /// among profitable ones — capital-turnover context.
+    pub median_hold_secs: Option<f64>,
+    pub median_win_secs: Option<f64>,
     /// Signed probability-weighted PnL expectation, bps. Negative means an
     /// expected loss — never floored to 0. `exp_bps` from the ladder is
     /// already probability-weighted, so it is used directly; the fallback
@@ -614,12 +677,43 @@ fn ou_fallback_p_win(
 /// `current_spread_bps` is the executable edge for the ordered direction
 /// (sell bid vs buy ask); the baseline `μ` is the series mean, exactly as
 /// `evaluate_pair` derives it. Informational only — never gates execution.
-pub(crate) fn pair_win_probability(
+/// Z for one-sided confidence bounds used by gating — 1.645 ≈ 95%
+/// one-sided (90% two-sided Wilson interval).
+pub(crate) const WIN_GATE_Z: f64 = 1.645;
+/// Beta-prior pseudo-count mass for win-rate shrinkage: one win + one
+/// loss of prior evidence, pulling thin samples toward 0.5.
+pub(crate) const WIN_PRIOR_STRENGTH: f64 = 2.0;
+
+/// Win-rate estimate with honest uncertainty: the shrunken point estimate
+/// (`p`), a Wilson lower bound on the bucket's effective trial count
+/// (`lower` — the gateable quantity), the raw upper bound, the Kish
+/// effective sample size, the censored-episode share, and whether `p`
+/// came from the OU first-passage model rather than episode evidence.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PairWinEstimate {
+    pub p: f64,
+    pub lower: f64,
+    pub upper: f64,
+    pub n_effective: f64,
+    pub censored: usize,
+    /// True when `p` is the OU model fallback — model uncertainty is
+    /// carried by its R² gate, so `lower == p` rather than a count bound.
+    pub from_model: bool,
+}
+
+/// Uncertainty-aware form of [`pair_win_probability`]: same episode curve
+/// and OU fallback, but returns [`PairWinEstimate`] with a shrunken point
+/// estimate and Wilson bounds. `half_life_secs` recency-weights episodes
+/// (`0.5^(age/half_life)` on resolution time); `None`/`0` disables.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pair_win_probability_ex(
     series: &[PairObservation],
     current_spread_bps: f64,
     friction_bps: f64,
     min_episodes: usize,
-) -> Option<f64> {
+    half_life_secs: Option<f64>,
+    now_ms: i64,
+) -> Option<PairWinEstimate> {
     if !current_spread_bps.is_finite() || !friction_bps.is_finite() {
         return None;
     }
@@ -647,16 +741,67 @@ pub(crate) fn pair_win_probability(
     if !band_bps.is_finite() || band_bps <= 0.0 {
         return None;
     }
-    let curve = build_pwin_curve(series, mu, sigma, band_bps, PAIR_STOP_MULT);
+    let curve = build_pwin_curve(
+        series,
+        mu,
+        sigma,
+        band_bps,
+        PAIR_STOP_MULT,
+        half_life_secs,
+        now_ms,
+    );
     if curve.episodes >= min_episodes {
-        return match p_win_at_deviation(&curve, (current_spread_bps - mu).abs()) {
-            Some(p) if p.is_finite() && (0.0..=1.0).contains(&p) => Some(p),
-            // Ready episode count but no historical evidence at this
-            // magnitude — fail closed rather than extrapolating.
-            _ => None,
-        };
+        let dev_abs = (current_spread_bps - mu).abs();
+        // Ready episode count but no historical evidence at this
+        // magnitude — fail closed rather than extrapolating.
+        let est = p_win_est_at_deviation(&curve, dev_abs, WIN_GATE_Z, WIN_PRIOR_STRENGTH)?;
+        let p = est.rate?;
+        if !(0.0..=1.0).contains(&p) {
+            return None;
+        }
+        let censored = curve
+            .points
+            .iter()
+            .position(|(d, _)| *d >= dev_abs - 1e-12)
+            .and_then(|i| curve.point_censored.get(i).copied())
+            .unwrap_or(0);
+        return Some(PairWinEstimate {
+            p,
+            lower: est.lower.unwrap_or(p),
+            upper: est.upper.unwrap_or(p),
+            n_effective: est.n_effective,
+            censored,
+            from_model: false,
+        });
     }
-    ou_fallback_p_win(&vals, series, mu, current_spread_bps, band_bps)
+    ou_fallback_p_win(&vals, series, mu, current_spread_bps, band_bps).map(|p| PairWinEstimate {
+        p,
+        lower: p,
+        upper: p,
+        n_effective: 0.0,
+        censored: 0,
+        from_model: true,
+    })
+}
+
+/// Thin wrapper retained for tests — production paths use
+/// `pair_win_probability_ex` directly for the uncertainty fields.
+#[cfg(test)]
+pub(crate) fn pair_win_probability(
+    series: &[PairObservation],
+    current_spread_bps: f64,
+    friction_bps: f64,
+    min_episodes: usize,
+) -> Option<f64> {
+    pair_win_probability_ex(
+        series,
+        current_spread_bps,
+        friction_bps,
+        min_episodes,
+        None,
+        0,
+    )
+    .map(|e| e.p)
 }
 
 /// Directional trade win probability: reversion gated by every execution
@@ -1167,6 +1312,16 @@ impl SpreadMonitorEngine {
             cfg.min_coverage.clamp(0.0, 1.0)
         } else {
             d_min_coverage()
+        };
+        cfg.episode_half_life_secs = if cfg.episode_half_life_secs.is_finite() {
+            cfg.episode_half_life_secs.clamp(0.0, 30.0 * 86_400.0)
+        } else {
+            d_episode_hl()
+        };
+        cfg.min_win_lower_bound = if cfg.min_win_lower_bound.is_finite() {
+            cfg.min_win_lower_bound.clamp(0.0, 0.999)
+        } else {
+            d_min_win_lb()
         };
         cfg.capacity_tiers_usd = cfg
             .capacity_tiers_usd
@@ -2026,20 +2181,36 @@ impl SpreadMonitorEngine {
 
         // --- win probability + capacity ---------------------------------
         let band_bps = friction_bps.max(2.0);
+        let episode_hl = (cfg.episode_half_life_secs > 0.0).then_some(cfg.episode_half_life_secs);
         let pwin_curve = if let (Some(m), Some(s)) = (mu, sigma) {
-            build_pwin_curve(&series, m, s, band_bps, PAIR_STOP_MULT)
+            build_pwin_curve(&series, m, s, band_bps, PAIR_STOP_MULT, episode_hl, now_ms)
         } else {
             arbitrageur_math::pair_monitor::PWinCurve {
                 points: Vec::new(),
                 episodes: 0,
+                point_wins: Vec::new(),
+                point_trials: Vec::new(),
+                point_censored: Vec::new(),
+                point_sum_w2: Vec::new(),
             }
         };
         let episodes = pwin_curve.episodes;
         // Single statistical standard shared with the scan path: empirical
         // hit-rate behind the min-episodes gate, OU first-passage fallback
-        // behind the R² gate, else fail-closed None.
-        let p_win =
-            edge_bps.and_then(|e| pair_win_probability(&series, e, friction_bps, cfg.min_episodes));
+        // behind the R² gate, else fail-closed None. The estimate carries
+        // a shrunken point rate plus a Wilson lower bound — the gateable
+        // quantity on thin evidence.
+        let p_est = edge_bps.and_then(|e| {
+            pair_win_probability_ex(
+                &series,
+                e,
+                friction_bps,
+                cfg.min_episodes,
+                episode_hl,
+                now_ms,
+            )
+        });
+        let p_win = p_est.map(|e| e.p);
 
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
@@ -2086,6 +2257,12 @@ impl SpreadMonitorEngine {
                     &tiers,
                     &pwin_curve,
                     cfg.min_win_probability,
+                    // Marginal tier gate on the shrunken rate (thin
+                    // buckets pull toward 0.5) — sizing already scales
+                    // by p, so the row-level lower bound stays the
+                    // strict gate.
+                    None,
+                    WIN_PRIOR_STRENGTH,
                 );
                 let ladder: Vec<CapacityTierDto> = rep
                     .tiers
@@ -2115,6 +2292,35 @@ impl SpreadMonitorEngine {
         };
 
         let dev_abs_bps = dev_bps.map(|d| d.abs());
+        // Net-P&L outcome distribution for a fresh entry at the current
+        // deviation: every historical excursion that crossed this depth,
+        // replayed to its real exit (reversion band, stop, or censored),
+        // scored as sign(e0)·(e0 − dev_exit) − friction. Gives P(net>0)
+        // with a Wilson bound plus net-bps deciles — the same honest
+        // semantics the funding monitor's gap backtest uses, so the two
+        // radars now share one "win" definition: net profit > 0.
+        let outcome_stats = match (mu, sigma, dev_abs_bps) {
+            (Some(m), Some(s), Some(d)) if d > band_bps => {
+                let stop_bps = (s * PAIR_STOP_MULT).max(band_bps * 2.0);
+                let outcomes = simulate_entry_outcomes(
+                    &series,
+                    m,
+                    d,
+                    band_bps,
+                    stop_bps,
+                    friction_bps,
+                    episode_hl,
+                    now_ms,
+                );
+                Some(entry_outcome_stats(
+                    &outcomes,
+                    cfg.min_episodes,
+                    WIN_GATE_Z,
+                    WIN_PRIOR_STRENGTH,
+                ))
+            }
+            _ => None,
+        };
         let mut ewma = self.fast_vol.lock().remove(&key).unwrap_or_default();
         if let Some(dev) = dev_abs_bps {
             ewma.update(dev);
@@ -2345,10 +2551,45 @@ impl SpreadMonitorEngine {
             session_conf_ok,
             session_block.is_some(),
         );
+        // Same directional gating applied to the estimate's Wilson lower
+        // bound — executability requires the confident floor, not just a
+        // lucky point estimate, to clear `min_win_lower_bound`.
+        let p_win_lower = p_est.map(|e| e.lower);
+        let win_probability_lower = trade_win_probability(
+            p_win_lower,
+            dev_bps,
+            entry_thresh,
+            books_ok,
+            window_met,
+            funding_unknown,
+            exit_uncostable,
+            optimal,
+            variation_ok,
+            ratio_ok,
+            coverage_ok,
+            session_conf_ok,
+            session_block.is_some(),
+        );
+        let win_probability_upper = trade_win_probability(
+            p_est.map(|e| e.upper),
+            dev_bps,
+            entry_thresh,
+            books_ok,
+            window_met,
+            funding_unknown,
+            exit_uncostable,
+            optimal,
+            variation_ok,
+            ratio_ok,
+            coverage_ok,
+            session_conf_ok,
+            session_block.is_some(),
+        );
         // --- executability ------------------------------------------------
         // Gate on the directional trade win probability (falls back to
         // reversion only when the directional value is uncomputable).
         let gate_p = win_probability.or(p_win);
+        let gate_p_lower = win_probability_lower.or(p_win_lower);
         let (executable, mut block_reason) = execution_gate(
             status,
             books_ok,
@@ -2356,6 +2597,8 @@ impl SpreadMonitorEngine {
             signal_active,
             gate_p,
             cfg.min_win_probability,
+            gate_p_lower,
+            cfg.min_win_lower_bound,
             funding_unknown,
             exit_uncostable,
             optimal,
@@ -2386,6 +2629,23 @@ impl SpreadMonitorEngine {
             p_win,
             reversion_probability: p_win,
             win_probability,
+            win_probability_lower,
+            win_probability_upper,
+            p_win_n_effective: p_est.map(|e| e.n_effective),
+            p_win_censored: p_est.map(|e| e.censored as u32),
+            p_win_from_model: p_est.map(|e| e.from_model),
+            net_win_probability: outcome_stats
+                .as_ref()
+                .and_then(|s| s.p_net_pos.and_then(|b| b.rate)),
+            net_win_lower: outcome_stats
+                .as_ref()
+                .and_then(|s| s.p_net_pos.and_then(|b| b.lower)),
+            net_expected_bps: outcome_stats.as_ref().and_then(|s| s.expected_net_bps),
+            net_deciles_bps: outcome_stats.as_ref().and_then(|s| s.deciles_bps.clone()),
+            outcome_trials: outcome_stats.as_ref().map(|s| s.trials as u32),
+            outcome_censored: outcome_stats.as_ref().map(|s| s.censored as u32),
+            median_hold_secs: outcome_stats.as_ref().and_then(|s| s.median_hold_secs),
+            median_win_secs: outcome_stats.as_ref().and_then(|s| s.median_win_secs),
             expected_profit_bps: exp_bps
                 .or_else(|| dev_bps.zip(p_win).map(|(d, p)| (d - friction_bps) * p)),
             expected_profit_usd: exp_usd,
@@ -2501,6 +2761,8 @@ fn execution_gate(
     signal_active: bool,
     p_win: Option<f64>,
     p_min: f64,
+    p_lower: Option<f64>,
+    lower_min: f64,
     funding_unknown: bool,
     exit_uncostable: bool,
     optimal: Option<f64>,
@@ -2534,6 +2796,23 @@ fn execution_gate(
             )
         }
         None => return (false, Some("win probability unknown".into())),
+    }
+    // Confidence floor: the Wilson lower bound must still beat
+    // `lower_min`. A shrunken estimate can clear `p_min` while its
+    // evidence is too thin to trust — this is the honest-uncertainty gate.
+    if lower_min > 0.0 {
+        match p_lower {
+            Some(lb) if lb >= lower_min => {}
+            Some(lb) => {
+                return (
+                    false,
+                    Some(format!(
+                    "win-rate confidence bound {lb:.2} below {lower_min:.2} floor (thin evidence)"
+                )),
+                )
+            }
+            None => return (false, Some("win-rate confidence bound unknown".into())),
+        }
     }
     if funding_unknown {
         return (false, Some("funding adjustment unknown".into()));
@@ -2797,6 +3076,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             false,
             false,
             Some(1000.0),
@@ -2813,6 +3094,8 @@ mod tests {
             true,
             Some(0.5),
             0.9,
+            None,
+            0.0,
             false,
             false,
             Some(1000.0),
@@ -2829,6 +3112,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             true,
             false,
             Some(1000.0),
@@ -2844,6 +3129,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             false,
             false,
             Some(1000.0),
@@ -2865,6 +3152,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             false,
             true,
             Some(1000.0),
@@ -2881,6 +3170,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             false,
             false,
             Some(1000.0),
@@ -2900,6 +3191,8 @@ mod tests {
             true,
             Some(0.95),
             0.9,
+            None,
+            0.0,
             false,
             false,
             Some(1000.0),
@@ -3155,7 +3448,10 @@ mod tests {
         spreads.extend_from_slice(&[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let series = win_series(&spreads, 1_000);
         let p = pair_win_probability(&series, 12.0, 5.0, 5);
-        assert_eq!(p, Some(1.0));
+        // Beta(1,1)-shrunken: 6 wins / 6 episodes -> (6+1)/(6+2) = 0.875.
+        // The shrunken point estimate is intentional — raw hit rates
+        // overclaim confidence on thin samples.
+        assert_eq!(p, Some(0.875));
     }
 
     #[test]

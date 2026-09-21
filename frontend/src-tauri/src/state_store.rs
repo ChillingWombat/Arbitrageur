@@ -299,6 +299,39 @@ pub struct NewSignalExecution {
     pub legs: Vec<NewSignalLeg>,
 }
 
+/// One persisted forecast attached to a signal execution
+/// (signal_predictions table, v26). `kind` fixes the event definition the
+/// probability describes; only kinds whose event is realized net P&L are
+/// scored by the calibration report once `realized_net_bps` lands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignalPredictionRow {
+    pub signal_id: String,
+    /// Event semantics: 'net_win' = P(realized net bps > 0),
+    /// 'reversion' = spread reverts inside the friction band,
+    /// 'funding_persist' = funding gap survives the breakeven horizon,
+    /// 'heuristic' = closed-form EV transform (not outcome-estimated).
+    pub kind: String,
+    pub predicted_p: f64,
+    /// Expected net bps attached to the same forecast, when the strategy
+    /// produced one alongside the probability.
+    pub expected_net_bps: Option<f64>,
+    pub strategy_id: String,
+    pub symbol: String,
+    /// Canonical "venueA/venueB" pair key for per-route calibration cuts.
+    pub venue_pair: String,
+    pub is_live: bool,
+    pub created_at: String,
+    /// Realized net P&L bps once the signal's position family closed with
+    /// reconciled fills; `NULL` while unresolved.
+    pub realized_net_bps: Option<f64>,
+    pub resolved_at: Option<String>,
+}
+
+/// Kinds whose event is "realized net P&L > 0" — the only definitions a
+/// net-bps outcome can honestly score.
+pub const NET_PNL_PREDICTION_KINDS: &[&str] = &["net_win"];
+
 /// One venue's orderbook top-of-book observation for a symbol at `ts_ms`
 /// (epoch milliseconds). Raw mids are stored so baseline choice stays a
 /// query-time projection.
@@ -1274,6 +1307,33 @@ CREATE INDEX ix_scheduled_exits_status_due ON scheduled_exits(status, execute_at
 PRAGMA user_version = 25;
 COMMIT;";
 
+/// v26 adds the durable prediction log feeding the calibration report.
+/// Every execution that carried a forecast probability records it here at
+/// dispatch, keyed to the signal that owns it; when the position family
+/// closes with a reconciled realized P&L the row resolves and becomes
+/// scorable. `kind` preserves the event definition — only kinds whose
+/// event is defined on net P&L score against realized net bps, so a
+/// reversion forecast can never masquerade as a profit forecast.
+const MIGRATION_V26_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE signal_predictions (
+    signal_id TEXT NOT NULL REFERENCES signal_executions(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK(kind IN ('net_win', 'reversion', 'funding_persist', 'heuristic')),
+    predicted_p REAL NOT NULL CHECK(predicted_p >= 0.0 AND predicted_p <= 1.0),
+    expected_net_bps REAL,
+    strategy_id TEXT NOT NULL COLLATE NOCASE,
+    symbol TEXT NOT NULL COLLATE NOCASE,
+    venue_pair TEXT NOT NULL DEFAULT '',
+    is_live INTEGER NOT NULL DEFAULT 0 CHECK(is_live IN (0, 1)),
+    created_at TEXT NOT NULL,
+    realized_net_bps REAL,
+    resolved_at TEXT,
+    PRIMARY KEY (signal_id, kind)
+);
+CREATE INDEX ix_signal_predictions_resolved ON signal_predictions(kind, resolved_at);
+PRAGMA user_version = 26;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1683,7 +1743,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 25 {
+        if version > 26 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1832,6 +1892,12 @@ impl StateStore {
         }
         if version <= 24 {
             if let Err(err) = conn.execute_batch(MIGRATION_V25_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 25 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V26_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -2337,6 +2403,140 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
             anyhow::bail!("signal execution {signal_id} does not exist");
         }
         Ok(())
+    }
+
+    /// Persist a forecast probability against a freshly-recorded signal.
+    /// Called at dispatch time so the prediction exists before any fill —
+    /// the row predates the outcome it will be scored against by design.
+    /// `kind` must match the v26 CHECK list; `predicted_p` must be a real
+    /// probability in [0, 1]. Upserts per (signal, kind) so a re-dispatch
+    /// refreshes the forecast rather than duplicating it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_signal_prediction(
+        &self,
+        signal_id: &str,
+        kind: &str,
+        predicted_p: f64,
+        expected_net_bps: Option<f64>,
+        strategy_id: &str,
+        symbol: &str,
+        venue_pair: &str,
+        is_live: bool,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        if !(predicted_p.is_finite() && (0.0..=1.0).contains(&predicted_p)) {
+            anyhow::bail!("predicted_p must be a finite probability in [0, 1]");
+        }
+        if let Some(v) = expected_net_bps {
+            if !v.is_finite() {
+                anyhow::bail!("expected_net_bps must be finite");
+            }
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO signal_predictions
+                (signal_id, kind, predicted_p, expected_net_bps, strategy_id,
+                 symbol, venue_pair, is_live, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(signal_id, kind) DO UPDATE SET
+                predicted_p = excluded.predicted_p,
+                expected_net_bps = excluded.expected_net_bps,
+                venue_pair = excluded.venue_pair,
+                is_live = excluded.is_live,
+                created_at = excluded.created_at,
+                realized_net_bps = NULL,
+                resolved_at = NULL",
+            params![
+                signal_id,
+                kind,
+                predicted_p,
+                expected_net_bps,
+                strategy_id,
+                symbol,
+                venue_pair,
+                is_live as i64,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Resolve every prediction on a signal with its reconciled realized
+    /// net P&L (bps). Rows already resolved keep their first outcome — a
+    /// re-close must never rewrite a scored observation.
+    pub fn resolve_signal_predictions(
+        &self,
+        signal_id: &str,
+        realized_net_bps: f64,
+    ) -> anyhow::Result<usize> {
+        let signal_id = normalize_id(signal_id)?;
+        if !realized_net_bps.is_finite() {
+            anyhow::bail!("realized_net_bps must be finite");
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE signal_predictions
+             SET realized_net_bps = ?2, resolved_at = ?3
+             WHERE signal_id = ?1 AND resolved_at IS NULL",
+            params![signal_id, realized_net_bps, now],
+        )?;
+        Ok(n)
+    }
+
+    /// List prediction rows, optionally filtered. `resolved_only` keeps
+    /// just the scored subset (realized outcome present).
+    pub fn list_signal_predictions(
+        &self,
+        kind: Option<&str>,
+        strategy_id: Option<&str>,
+        is_live: Option<bool>,
+        resolved_only: bool,
+    ) -> anyhow::Result<Vec<SignalPredictionRow>> {
+        let conn = self.conn.lock();
+        let mut sql = String::from(
+            "SELECT signal_id, kind, predicted_p, expected_net_bps, strategy_id,
+                    symbol, venue_pair, is_live, created_at, realized_net_bps, resolved_at
+             FROM signal_predictions WHERE 1=1",
+        );
+        let mut args: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(k) = kind {
+            sql.push_str(" AND kind = ?");
+            args.push(Box::new(k.to_string()));
+        }
+        if let Some(s) = strategy_id {
+            sql.push_str(" AND strategy_id = ?");
+            args.push(Box::new(s.to_string()));
+        }
+        if let Some(l) = is_live {
+            sql.push_str(" AND is_live = ?");
+            args.push(Box::new(l as i64));
+        }
+        if resolved_only {
+            sql.push_str(" AND resolved_at IS NOT NULL");
+        }
+        sql.push_str(" ORDER BY created_at DESC");
+        let params: Vec<&dyn rusqlite::types::ToSql> = args.iter().map(|a| a.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params.as_slice(), |r| {
+                Ok(SignalPredictionRow {
+                    signal_id: r.get(0)?,
+                    kind: r.get(1)?,
+                    predicted_p: r.get(2)?,
+                    expected_net_bps: r.get(3)?,
+                    strategy_id: r.get(4)?,
+                    symbol: r.get(5)?,
+                    venue_pair: r.get(6)?,
+                    is_live: r.get::<_, i64>(7)? != 0,
+                    created_at: r.get(8)?,
+                    realized_net_bps: r.get(9)?,
+                    resolved_at: r.get(10)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Test-only: backdate a signal's created_at so reconciliation tests
@@ -4647,7 +4847,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 25);
+            assert_eq!(version, 26);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -5195,7 +5395,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 25);
+        assert_eq!(version, 26);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5320,6 +5520,101 @@ mod tests {
         let recorded = store.get_signal("s1").unwrap().unwrap();
         assert_eq!(recorded.status, SignalStatus::Balanced);
         assert!((recorded.fees_usd - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_signal_predictions_record_resolve_list() {
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_signal_execution(&two_leg_signal("s-pred", "BTC-USDC", None, None))
+            .unwrap();
+
+        // Two kinds can attach to one signal (composite PK).
+        store
+            .record_signal_prediction(
+                "s-pred",
+                "net_win",
+                0.72,
+                Some(4.5),
+                "futures",
+                "BTC-USDC",
+                "hyperliquid/lighter",
+                false,
+            )
+            .unwrap();
+        store
+            .record_signal_prediction(
+                "s-pred",
+                "reversion",
+                0.91,
+                None,
+                "futures",
+                "BTC-USDC",
+                "hyperliquid/lighter",
+                false,
+            )
+            .unwrap();
+        // Out-of-range probability fails closed.
+        assert!(store
+            .record_signal_prediction(
+                "s-pred", "net_win", 1.5, None, "futures", "BTC-USDC", "x/y", false,
+            )
+            .is_err());
+
+        let rows = store
+            .list_signal_predictions(None, None, None, false)
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.realized_net_bps.is_none()));
+
+        // Unresolved-only listing is empty until the outcome lands.
+        assert!(store
+            .list_signal_predictions(None, None, None, true)
+            .unwrap()
+            .is_empty());
+
+        // Resolution stamps realized net bps on every kind of the signal.
+        let resolved = store.resolve_signal_predictions("s-pred", 6.25).unwrap();
+        assert_eq!(resolved, 2);
+        let scored = store
+            .list_signal_predictions(None, None, None, true)
+            .unwrap();
+        assert_eq!(scored.len(), 2);
+        assert!(scored.iter().all(|r| r.realized_net_bps == Some(6.25)));
+
+        // First outcome wins: re-resolution must not rewrite history.
+        let again = store.resolve_signal_predictions("s-pred", -99.0).unwrap();
+        assert_eq!(again, 0);
+        let still = store
+            .list_signal_predictions(None, None, None, true)
+            .unwrap();
+        assert!(still.iter().all(|r| r.realized_net_bps == Some(6.25)));
+
+        // Filters work.
+        assert_eq!(
+            store
+                .list_signal_predictions(Some("net_win"), None, None, false)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .list_signal_predictions(None, Some("futures"), Some(false), false)
+                .unwrap()
+                .len(),
+            2
+        );
+        // Cascade: deleting the parent signal removes its predictions.
+        store
+            .conn
+            .lock()
+            .execute("DELETE FROM signal_executions WHERE id = 's-pred'", [])
+            .unwrap();
+        assert!(store
+            .list_signal_predictions(None, None, None, false)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -5710,7 +6005,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 25);
+            assert_eq!(version, 26);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -6081,7 +6376,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 25);
+        assert_eq!(v, 26);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -6201,7 +6496,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 25);
+        assert_eq!(v10, 26);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -7035,7 +7330,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 25);
+        assert_eq!(v, 26);
         let kept: String = conn
             .query_row(
                 "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
