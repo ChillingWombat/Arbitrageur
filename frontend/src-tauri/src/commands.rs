@@ -9917,6 +9917,28 @@ pub struct AutotuneBannerDto {
     pub total: usize,
 }
 
+/// Structured evidence inventory behind a recommendation — why rows are
+/// READY or HELD at the data level, not just per-param rationales.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct AutotuneReadinessDto {
+    /// Venues that contributed at least one sample in the window.
+    pub venues_seen: Vec<String>,
+    /// Earliest→latest sample span, seconds.
+    pub history_span_secs: f64,
+    /// Fraction of sampled timestamps observed on ≥2 distinct venues.
+    pub multi_venue_coverage: f64,
+    /// Aligned observations on the selected (densest) venue pair.
+    pub pair_observations: usize,
+    /// Summed aligned observations across every ordered venue pair.
+    pub total_pair_observations: usize,
+    /// Sample floor below which every row stays HELD.
+    pub min_observations_required: usize,
+    /// Whether the selected pair clears the floor.
+    pub obs_floor_met: bool,
+    /// Human-readable data blockers (empty when nothing blocks).
+    pub blockers: Vec<String>,
+}
+
 /// Recommend-only preview for one symbol's Single Spread futures params.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AutotuneRecommendationDto {
@@ -9928,6 +9950,7 @@ pub struct AutotuneRecommendationDto {
     pub banner: AutotuneBannerDto,
     pub session_tau_scale: f64,
     pub session_sigma_scale: f64,
+    pub readiness: AutotuneReadinessDto,
 }
 
 fn tune_params_from_dto(p: &StrategyParamsDto) -> TuneParams {
@@ -9949,6 +9972,7 @@ fn map_autotune_report(
     pair_observations: usize,
     coupling: arbitrageur_math::seasonality::SessionCoupling,
     rep: arbitrageur_math::autotune::AutotuneReport,
+    readiness: AutotuneReadinessDto,
 ) -> AutotuneRecommendationDto {
     AutotuneRecommendationDto {
         symbol: symbol.to_string(),
@@ -9985,6 +10009,7 @@ fn map_autotune_report(
         },
         session_tau_scale: coupling.tau_scale,
         session_sigma_scale: coupling.sigma_scale,
+        readiness,
     }
 }
 
@@ -10034,14 +10059,18 @@ pub async fn get_autotune_recommendation_impl(
     let since_ms = now_ms - BASELINE_RETENTION_MS;
     let store = state.state_store.clone();
     let sym_owned = symbol.to_string();
-    let (best_pair, pair_observations): (
-        Option<(
+    struct Evidence {
+        best_pair: Option<(
             String,
             String,
             Vec<arbitrageur_math::pair_monitor::PairObservation>,
         )>,
-        usize,
-    ) = tokio::task::spawn_blocking(move || {
+        total_pair_obs: usize,
+        venues_seen: Vec<String>,
+        history_span_secs: f64,
+        multi_venue_coverage: f64,
+    }
+    let evidence = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
             if let Ok(mut rows) = store.spread_samples(k, since_ms, now_ms) {
@@ -10061,6 +10090,26 @@ pub async fn get_autotune_recommendation_impl(
         }
         let mut venues: Vec<String> = mids_by_venue.keys().cloned().collect();
         venues.sort();
+
+        // Evidence stats: sample span and the share of timestamp buckets that
+        // actually observed ≥2 distinct venues (coverage of the cross-venue
+        // edge series, not just raw row count).
+        let span_secs = match (all.first(), all.last()) {
+            (Some(f), Some(l)) => (l.ts_ms - f.ts_ms) as f64 / 1000.0,
+            _ => 0.0,
+        };
+        let mut buckets: HashMap<i64, std::collections::HashSet<&str>> = HashMap::new();
+        for s in &all {
+            buckets
+                .entry(s.ts_ms)
+                .or_default()
+                .insert(s.venue_id.as_str());
+        }
+        let coverage = if buckets.is_empty() {
+            0.0
+        } else {
+            buckets.values().filter(|set| set.len() >= 2).count() as f64 / buckets.len() as f64
+        };
         let mut best: Option<(
             String,
             String,
@@ -10086,11 +10135,64 @@ pub async fn get_autotune_recommendation_impl(
             }
         }
         let _ = sym_owned;
-        Ok::<_, anyhow::Error>((best, total))
+        Ok::<_, anyhow::Error>(Evidence {
+            best_pair: best,
+            total_pair_obs: total,
+            venues_seen: venues,
+            history_span_secs: span_secs,
+            multi_venue_coverage: coverage,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
     .map_err(|e| e.to_string())?;
+
+    let Evidence {
+        best_pair,
+        total_pair_obs: pair_observations,
+        venues_seen,
+        history_span_secs,
+        multi_venue_coverage,
+    } = evidence;
+
+    // Structured data-readiness: which evidence gates are met and which
+    // still block tuning — surfaced instead of only row-level HELD text.
+    let best_pair_n = best_pair.as_ref().map(|(_, _, s)| s.len()).unwrap_or(0);
+    let mut blockers: Vec<String> = Vec::new();
+    if venues_seen.len() < 2 {
+        blockers.push(format!(
+            "only {} venue(s) reported samples — cross-venue pairs need ≥2",
+            venues_seen.len()
+        ));
+    }
+    if best_pair_n < arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS {
+        blockers.push(format!(
+            "densest venue pair has {best_pair_n} aligned observations — need ≥{}",
+            arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS
+        ));
+    }
+    if history_span_secs < 3600.0 {
+        blockers.push(format!(
+            "history spans {:.0}m — thin regime coverage",
+            history_span_secs / 60.0
+        ));
+    }
+    if multi_venue_coverage < 0.5 {
+        blockers.push(format!(
+            "{:.0}% of timestamps observed on ≥2 venues — edge series is mostly single-venue",
+            multi_venue_coverage * 100.0
+        ));
+    }
+    let readiness = AutotuneReadinessDto {
+        venues_seen,
+        history_span_secs,
+        multi_venue_coverage,
+        pair_observations: best_pair_n,
+        total_pair_observations: pair_observations,
+        min_observations_required: arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
+        obs_floor_met: best_pair_n >= arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
+        blockers,
+    };
 
     let Some((buy_v, sell_v, series)) = best_pair else {
         // No paired history — honest all-HELD report, never fabricated.
@@ -10111,7 +10213,9 @@ pub async fn get_autotune_recommendation_impl(
             tau_scale: 1.0,
             sigma_scale: 1.0,
         };
-        return Ok(map_autotune_report(symbol, None, None, 0, neutral, rep));
+        return Ok(map_autotune_report(
+            symbol, None, None, 0, neutral, rep, readiness,
+        ));
     };
 
     // 70/30 chronological walk-forward split.
@@ -10237,6 +10341,7 @@ pub async fn get_autotune_recommendation_impl(
         pair_observations,
         coupling,
         rep,
+        readiness,
     ))
 }
 
@@ -17427,6 +17532,16 @@ mod tests {
             },
             session_tau_scale: 1.0,
             session_sigma_scale: 1.0,
+            readiness: AutotuneReadinessDto {
+                venues_seen: vec!["hyperliquid".to_string(), "lighter".to_string()],
+                history_span_secs: 86_400.0,
+                multi_venue_coverage: 1.0,
+                pair_observations: 400,
+                total_pair_observations: 400,
+                min_observations_required: arbitrageur_math::autotune::AUTOTUNE_MIN_PAIR_OBS,
+                obs_floor_met: true,
+                blockers: Vec::new(),
+            },
         }
     }
 
@@ -17564,6 +17679,7 @@ mod tests {
                 },
                 session_tau_scale: 1.0,
                 session_sigma_scale: 1.0,
+                readiness: report.readiness.clone(),
             };
             let sel = selected.clone();
             handles.push(tokio::spawn(async move {

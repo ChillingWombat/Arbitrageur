@@ -50,6 +50,16 @@ const rec: AutotuneRecommendationDto = {
   },
   session_tau_scale: 1.0,
   session_sigma_scale: 1.0,
+  readiness: {
+    venues_seen: ["hyperliquid", "lighter"],
+    history_span_secs: 86_400,
+    multi_venue_coverage: 1.0,
+    pair_observations: 400,
+    total_pair_observations: 400,
+    min_observations_required: 120,
+    obs_floor_met: true,
+    blockers: [],
+  },
 };
 
 test("preview renders banner, rows, and Copy values + Close only", () => {

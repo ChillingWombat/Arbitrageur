@@ -357,6 +357,17 @@ export interface AutotuneBannerDto {
   total: number;
 }
 
+export interface AutotuneReadinessDto {
+  venues_seen: string[];
+  history_span_secs: number;
+  multi_venue_coverage: number;
+  pair_observations: number;
+  total_pair_observations: number;
+  min_observations_required: number;
+  obs_floor_met: boolean;
+  blockers: string[];
+}
+
 export interface AutotuneRecommendationDto {
   symbol: string;
   buy_venue: string | null;
@@ -366,6 +377,7 @@ export interface AutotuneRecommendationDto {
   banner: AutotuneBannerDto;
   session_tau_scale: number;
   session_sigma_scale: number;
+  readiness: AutotuneReadinessDto;
 }
 
 /** One-click apply result: only READY rows are ever written; HELD rows are
