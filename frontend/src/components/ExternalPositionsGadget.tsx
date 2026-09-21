@@ -91,6 +91,12 @@ export const ExternalPositionsGadget: React.FC = () => {
   const [result, setResult] = useState<CloseResultDto | null>(null);
   const [closeError, setCloseError] = useState<string | null>(null);
 
+  // --- Quick Close (per-row): first click arms that row, second fires a
+  //     market close for the full residual — no popup, still guarded. ---
+  const [quickArm, setQuickArm] = useState<string | null>(null);
+  const [quickBusy, setQuickBusy] = useState<string | null>(null);
+  const [quickNote, setQuickNote] = useState<{ key: string; text: string; ok: boolean } | null>(null);
+
   const load = useCallback(async () => {
     try {
       const res = await api.getExternalPositions();
@@ -222,6 +228,31 @@ export const ExternalPositionsGadget: React.FC = () => {
       setCloseError(e instanceof Error ? e.message : String(e));
     } finally {
       setClosing(false);
+    }
+  };
+
+  const quickClose = async (p: ExternalPositionDto) => {
+    if (quickBusy) return;
+    if (quickArm !== p.key) {
+      setQuickArm(p.key); // first click arms this row — second fires
+      return;
+    }
+    setQuickBusy(p.key);
+    setQuickNote(null);
+    try {
+      const r = await api.closeExternalPosition({
+        venue: p.venue,
+        symbol: p.symbol,
+        mode: "market",
+        closePct: 100,
+      });
+      setQuickNote({ key: p.key, text: closeStatusLabel(r.status), ok: r.status === "filled" });
+    } catch (e) {
+      setQuickNote({ key: p.key, text: e instanceof Error ? e.message : String(e), ok: false });
+    } finally {
+      setQuickBusy(null);
+      setQuickArm(null);
+      void load();
     }
   };
 
@@ -366,16 +397,34 @@ export const ExternalPositionsGadget: React.FC = () => {
                         {" · "}
                         <span className={`font-bold ${p.unrealizedPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>{usd(p.unrealizedPnlUsd)}</span>
                       </span>
+                      {quickNote?.key === p.key && (
+                        <span className={`text-[10px] font-bold ${quickNote.ok ? "text-profit" : "text-loss"}`} title={quickNote.text}>
+                          {quickNote.ok ? quickNote.text : "Failed"}
+                        </span>
+                      )}
                       <button
                         type="button"
+                        disabled={!p.closeSupported || !data?.liveMode || quickBusy === p.key}
                         onClick={(e) => {
                           e.stopPropagation();
-                          openDetails(p);
+                          void quickClose(p);
                         }}
-                        className="px-2 py-1 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-surface text-slate-600 border-surface-border hover:text-slate-900 hover:border-slate-300"
-                        title={p.closeSupported ? `Close ${p.symbol} on ${p.venue} via bot — opens details popup` : `${p.venue} cannot place live orders through the bot`}
+                        className={`px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
+                          quickArm === p.key
+                            ? "bg-loss text-white border-loss-border"
+                            : "bg-loss-dim/40 text-loss border-loss-border/60 hover:bg-loss-dim/70"
+                        }`}
+                        title={
+                          !p.closeSupported
+                            ? `${p.venue} cannot place live orders through the bot`
+                            : !data?.liveMode
+                              ? "Paper mode — switch to Live Trading to submit real closes"
+                              : quickArm === p.key
+                                ? "Click again to fire a reduce-only MARKET close of the full residual"
+                                : `Quick Close ${p.symbol} on ${p.venue} — click once to arm, again to fire a market close of the full residual`
+                        }
                       >
-                        Details
+                        {quickBusy === p.key ? "Closing…" : quickArm === p.key ? "Confirm?" : "Quick Close"}
                       </button>
                       <button
                         type="button"
@@ -384,10 +433,10 @@ export const ExternalPositionsGadget: React.FC = () => {
                           e.stopPropagation();
                           openDetails(p);
                         }}
-                        className="px-2 py-1 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
-                        title={p.closeSupported ? `Close ${p.symbol} on ${p.venue} via bot — opens details popup, nothing closes until Confirm` : `${p.venue} cannot place live orders through the bot`}
+                        className="px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
+                        title={p.closeSupported ? `Advanced Close ${p.symbol} on ${p.venue} — mode, portion, schedule in the popup; nothing closes until Confirm` : `${p.venue} cannot place live orders through the bot`}
                       >
-                        Close…
+                        Advanced Close
                       </button>
                     </span>
                   </div>
