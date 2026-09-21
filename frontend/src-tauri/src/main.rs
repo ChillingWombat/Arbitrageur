@@ -6,6 +6,7 @@ mod auto_exec;
 mod autotune;
 mod commands;
 mod equity_attribution;
+mod execution;
 mod external_positions;
 mod feed;
 mod funding;

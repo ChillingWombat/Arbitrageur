@@ -2226,3 +2226,21 @@ clippy+fmt clean, app restarted on the new binary.
 - Seam discipline: two off-by-one slips during funding extraction (a `}` left behind, a `use` + `RouteEconomics` swept up) were caught by `cargo check` immediately — always compile right after each cut.
 - `funding.rs` depends on `reconcile_signal_legs`/`resolve_effective_leverage`/`record_execution_*` staying `pub(crate)` in commands.rs — when the spatial core extracts, retarget these imports to the execution module.
 - Remaining: spatial execution core (~3.5k lines across resolve_signal_accounts/reconcile/inner/candidates/killswitch/flatten/convergence), spot+prediction+stat-arb+OU analytics scans (~700), system-status/feed IPC (~800), equity/filters (~700). `mod tests` (~8k lines) stays in commands.rs unless commands becomes a directory module.
+
+## Tauri module refactor — stage 8: execution.rs (final stage)
+
+### What shipped
+
+- `frontend/src-tauri/src/execution.rs` (3,573 lines): `SignalAccounts` + `resolve_signal_accounts` (`pub(crate)`), `execute_spatial_arbitrage_impl`/`_inner`, candidate arbitration, cross-ticker + prediction dispatch, circuit-breaker (`cb_reanchor_to_paper`), killswitch, `flatten_ticker_positions*` impls (live + paper + passive unwind), liquidation-trim (`liq_trim_decision_for_positions`, `maybe_liq_trim_pair`), spatial convergence (`live_spatial_edge`, `check_spatial_convergence_impl`), and all related IPC wrappers.
+- `commands.rs` 15720 → 12181 (-44% from the 21625 starting point). `main.rs` gained `mod execution;`; `commands.rs` re-exports it via `pub(crate) use` so `commands::<name>` IPC paths and tests resolve unchanged.
+- `pub(crate)` promotions in commands.rs: `RouteEconomics` + `expected_net_bps`/`estimated_profit_usd` fields. In execution.rs: `resolve_signal_accounts`, `cb_reanchor_to_paper`, `liq_trim_decision_for_positions` (test-visible).
+- Dead imports pruned on both sides; function-local `use` statements inside the extracted regions were preserved (they shadow file-level imports — trimming them first broke the build; do it the other way around).
+
+### Verification
+
+- `cargo check` clean, 371 desktop tests pass, clippy --all-targets clean, fmt clean, 210 frontend tests pass, release build green.
+
+### Pickup notes
+
+- commands.rs retains: scan/quotes, risk overview, capabilities/live-mode policy, equity snapshots, seasonality/session IPC, shared execution helpers, and the ~8k-line `mod tests`.
+- Refactor finding 4.16 closed in the crosscheck doc. `state_store.rs` decomposition left as optional follow-up.
