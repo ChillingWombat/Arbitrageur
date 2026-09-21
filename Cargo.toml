@@ -43,7 +43,7 @@ sha2 = "0.10"
 sha3 = "0.10"
 k256 = { version = "0.13", features = ["ecdsa", "arithmetic"] }
 hex = "0.4"
-hmac = "0.12"
+hmac = "0.13"
 config = "0.14"
 crossterm = "0.27"
 ratatui = "0.27"
