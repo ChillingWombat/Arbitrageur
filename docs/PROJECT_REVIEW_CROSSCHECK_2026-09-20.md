@@ -468,7 +468,7 @@ This independently confirms DeepSeek finding 5.8.
 This is a maintainability finding, not a justification for a risky behavior-neutral mega-refactor in the same safety patch.
 
 **Initial status:** OPEN / staged refactor recommended\
-**Remediation status:** STILL OPEN by design. Safety, persistence, capability, and deployment fixes landed without a behavior-neutral mega-refactor. Domain-first extraction should be scheduled after the current diff is merged and deployed.
+**Remediation status:** IN PROGRESS — stage 1 landed (AutoTune domain extracted to `frontend/src-tauri/src/autotune.rs`, ~950 lines; `commands.rs` 21625 → 20695; IPC paths preserved via `pub(crate) use` re-export; 371 desktop tests green). Remaining stages — vault/account, spatial execution, funding/basis, portfolio/risk, calibration/seasonality, capabilities — continue incrementally per this finding's own caution against a behavior-neutral mega-refactor.
 
 ---
 
