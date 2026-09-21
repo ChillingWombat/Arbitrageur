@@ -7,6 +7,7 @@ import type {
   MatrixBaselineSnapshotDto,
   AutotuneRecommendationDto,
   AutotuneReadinessDto,
+  TickerAutotuneModeDto,
   AutotuneApplyResultDto,
   SeasonalityRunSummaryDto,
   SpatialOpportunityDto,
@@ -836,6 +837,41 @@ export const api = {
       applied,
       skipped_held: skipped,
       audit_id: Number.isFinite(Number(res?.audit_id)) ? Number(res.audit_id) : null,
+    };
+  },
+
+  async getTickerAutotuneMode(symbol: string): Promise<TickerAutotuneModeDto> {
+    const res = await invokeDesktop<any>("get_ticker_autotune_mode", { symbol });
+    const mode = res?.mode === "periodic" || res?.mode === "continuous" ? res.mode : "manual";
+    const num = (v: unknown, fb: number): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fb;
+    };
+    return {
+      symbol: typeof res?.symbol === "string" ? res.symbol : symbol,
+      mode,
+      last_run_ms: Number.isFinite(Number(res?.last_run_ms)) ? Number(res.last_run_ms) : null,
+      period_secs: num(res?.period_secs, 21600),
+      continuous_min_secs: num(res?.continuous_min_secs, 900),
+    };
+  },
+
+  async setTickerAutotuneMode(
+    symbol: string,
+    mode: "manual" | "periodic" | "continuous",
+  ): Promise<TickerAutotuneModeDto> {
+    const res = await invokeDesktop<any>("set_ticker_autotune_mode", { symbol, mode });
+    const num = (v: unknown, fb: number): number => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fb;
+    };
+    const m = res?.mode === "periodic" || res?.mode === "continuous" ? res.mode : "manual";
+    return {
+      symbol: typeof res?.symbol === "string" ? res.symbol : symbol,
+      mode: m,
+      last_run_ms: Number.isFinite(Number(res?.last_run_ms)) ? Number(res.last_run_ms) : null,
+      period_secs: num(res?.period_secs, 21600),
+      continuous_min_secs: num(res?.continuous_min_secs, 900),
     };
   },
 

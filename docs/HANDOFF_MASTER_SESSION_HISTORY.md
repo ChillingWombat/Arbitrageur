@@ -2134,3 +2134,22 @@ clippy+fmt clean, app restarted on the new binary.
 - Slippage samples are per-venue (not per-pair): a pair whose second venue has <5 fills contributes only the measured side — strictly additive information over the prior zero-slippage assumption.
 - Median is used (robust to outlier fills); a mean would overreact to wicks.
 - Signed value: negative measured slippage (fills beating quote) reduces friction below fee-sum — real price improvement is allowed to help the tune.
+
+## Per-ticker AutoTune modes + scheduler
+
+### What shipped
+
+- `autotune.mode.{SYMBOL}` KV: `manual` (default) | `periodic` | `continuous`. Periodic cadence = `autotune.period_secs` (default 6h), continuous floor = `autotune.continuous_min_secs` (default 15m) — both overridable via KV.
+- `spawn_autotune_scheduler` (main.rs): 60s tick enumerates `autotune.mode.*` keys via `kv_keys_with_prefix` (no venue scan — cheap); due symbols run `get_autotune_recommendation_impl` and auto-apply ALL READY∩applyable rows through `apply_autotune_rows_inner` (same lock, audit, rollback as manual apply). `detail_json.source` records `"periodic"`/`"continuous"` vs `"manual"`.
+- Last-run stamp (`autotune.last_run_ms.{SYMBOL}`) written BEFORE the pass: slow runs can't double-fire, errors back off a full interval.
+- IPC: `get_ticker_autotune_mode` / `set_ticker_autotune_mode` (validated; `manual` deletes the key). Preview modal footer has a mode selector with cadence labels + last-run timestamp.
+
+### Verification
+
+- 776 workspace tests incl. mode validation, periodic apply+audit+backoff, no-mode no-op; 210 frontend, tsc/clippy/fmt clean.
+
+### Pickup notes
+
+- Auto-apply is real parameter mutation of the live futures params — modes are per-ticker opt-in for exactly that reason. `manual` is and stays the default.
+- The scheduler enumerates KV keys, not the venue universe — a ticker can be periodic-tuned even when it isn't currently monitored.
+- `continuous` is a cadence floor, not per-tick: the 15m minimum keeps WFO recompute cost bounded.

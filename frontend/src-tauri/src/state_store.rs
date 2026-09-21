@@ -3745,6 +3745,23 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         Ok(())
     }
 
+    /// All keys under a prefix (e.g. `autotune.mode.`), ascending. Lets the
+    /// scheduler enumerate configured per-ticker entries without a schema
+    /// column or a live venue scan.
+    pub fn kv_keys_with_prefix(&self, prefix: &str) -> anyhow::Result<Vec<String>> {
+        let conn = self.conn.lock();
+        let mut stmt =
+            conn.prepare("SELECT k FROM kv WHERE k LIKE ?1 || '%' ESCAPE '\\' ORDER BY k")?;
+        let esc = prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let rows = stmt
+            .query_map([esc], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Persist one execution-log row (the Log Monitor source). Successes,
     /// partials, and — since v21 — *failures* alike: a blocked click must
     /// leave the same trace as a fill. Callers treat store errors as
