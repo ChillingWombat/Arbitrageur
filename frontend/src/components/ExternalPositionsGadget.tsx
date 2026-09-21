@@ -470,7 +470,12 @@ export const ExternalPositionsGadget: React.FC = () => {
                   instead of unmounting) so nothing reflows between modes.
                   The taker fee is derived server-side from venue info and
                   shown in the receipt above — not hand-entered. */}
-              <div className="flex flex-wrap items-end gap-2">
+              {/* Row 1 — exit mode. Row 2 — price + size. Row 3 — schedule
+                  + action. Fixed rows: nothing reflows between modes (the
+                  limit input disables instead of unmounting), and the
+                  taker fee is venue-derived server-side (receipt above),
+                  not hand-entered. */}
+              <div className="flex flex-wrap items-center gap-2">
                 <div className="flex gap-1.5" role="group" aria-label="Exit mode">
                   <button
                     type="button"
@@ -487,6 +492,8 @@ export const ExternalPositionsGadget: React.FC = () => {
                     Market
                   </button>
                 </div>
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
                 <label
                   className="space-y-1"
                   title={
@@ -508,49 +515,27 @@ export const ExternalPositionsGadget: React.FC = () => {
                   />
                 </label>
                 <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit (or fire) time">
-                  <span className="text-[11px] font-mono font-bold text-slate-500">CLOSE %</span>
-                  <input
-                    value={closePct}
-                    onChange={(e) => { setClosePct(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
-                    inputMode="decimal"
-                    className={`w-20 px-2.5 py-1.5 bg-surface border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent ${pctValid ? "border-surface-border" : "border-loss"}`}
-                  />
+                  <span className="text-[11px] font-mono font-bold text-slate-500">CLOSE</span>
+                  <span className="relative block w-24">
+                    <input
+                      value={closePct}
+                      onChange={(e) => { setClosePct(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
+                      inputMode="decimal"
+                      className={`w-full px-2.5 py-1.5 pr-6 bg-surface border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent ${pctValid ? "border-surface-border" : "border-loss"}`}
+                    />
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-mono font-bold text-slate-400 pointer-events-none">%</span>
+                  </span>
                 </label>
-                <button
-                  type="button"
-                  onClick={() => void doClose()}
-                  disabled={closeDisabledReason != null || closing || !pctValid}
-                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ${
-                    armed
-                      ? "bg-loss text-white border-loss-border"
-                      : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-slate-400 disabled:border-surface-border"
-                  }`}
-                  title={closeDisabledReason ?? (armed
-                    ? scheduleOn
-                      ? "Click again to persist the scheduled exit"
-                      : "Click again to submit the live reduce-only order"
-                    : "Arm, then confirm")}
-                >
-                  {closing
-                    ? "Submitting…"
-                    : armed
-                      ? scheduleOn
-                        ? "Confirm Schedule"
-                        : "Confirm Close"
-                      : scheduleOn
-                        ? "Schedule Close"
-                        : "Close Positions"}
-                </button>
               </div>
               {estCloseQty != null && parsedPct < 100 && (
                 <div className="text-[11px] font-mono text-slate-500">
                   ≈ {num(estCloseQty)} {selected.base} of {num(selected.externalQty)} — remainder stays open
                 </div>
               )}
-              {/* Optional schedule: tick the box, pick a local time (or a
-                  preset), and the single Close button persists a one-shot
-                  exit instead of firing now — same mode, same %, fresh
-                  account re-read at fire time. */}
+              {/* Row 3 — optional schedule + the single action button. Tick
+                  SCHEDULE AT to persist a one-shot exit at a local time
+                  (same mode, same %, fresh account re-read at fire); leave
+                  it off to close now. */}
               <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-surface-border/60">
                 <label
                   className="flex items-center gap-1.5 cursor-pointer select-none"
@@ -603,6 +588,31 @@ export const ExternalPositionsGadget: React.FC = () => {
                     </button>
                   </span>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => void doClose()}
+                  disabled={closeDisabledReason != null || closing || !pctValid}
+                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ml-auto ${
+                    armed
+                      ? "bg-loss text-white border-loss-border"
+                      : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-slate-400 disabled:border-surface-border"
+                  }`}
+                  title={closeDisabledReason ?? (armed
+                    ? scheduleOn
+                      ? "Click again to persist the scheduled exit"
+                      : "Click again to submit the live reduce-only order"
+                    : "Arm, then confirm")}
+                >
+                  {closing
+                    ? "Submitting…"
+                    : armed
+                      ? scheduleOn
+                        ? "Confirm Schedule"
+                        : "Confirm Close"
+                      : scheduleOn
+                        ? "Schedule Close"
+                        : "Close Positions"}
+                </button>
               </div>
               {closeDisabledReason && (
                 <div className="text-[11px] font-mono text-slate-500">{closeDisabledReason}</div>
@@ -613,9 +623,13 @@ export const ExternalPositionsGadget: React.FC = () => {
                 </div>
               )}
               {result && (
-                <div className={`px-3 py-2 rounded-lg border text-xs font-mono ${closeStatusClass(result.status)}`}>
+                <div className={`px-3 py-2 rounded-lg border text-xs font-mono break-words ${closeStatusClass(result.status)}`}>
                   {closeStatusLabel(result.status)}: {result.note}
-                  {result.orderId && <span className="text-slate-500"> · order {result.orderId}</span>}
+                  {result.orderId && (
+                    <span className="text-slate-500" title={result.orderId}>
+                      {" "}· order {result.orderId.length > 14 ? `${result.orderId.slice(0, 12)}…` : result.orderId}
+                    </span>
+                  )}
                 </div>
               )}
               <div className="flex items-center justify-between gap-2 pt-1">
