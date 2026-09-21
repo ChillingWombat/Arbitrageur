@@ -1734,3 +1734,116 @@ overhaul pass committed as `23d4aed`).
   `frontend/src/{components/EngineSettings.tsx,services/api.ts,types/index.ts}`,
   `docs/{CAPABILITIES.md,RUNBOOK.md,PROJECT_REVIEW_CROSSCHECK_2026-09-20.md}`,
   `SPEC.md`.
+
+## 81. Session Handoff — 2026-09-21 (first live canary: order-identity fix, WS/monitor live-mode restoration, Lighter REST reduction, endpoint wiring)
+
+### What was attempted
+
+User drove the UI for the first real live canary: `ETH-USDC`, qty `0.005`
+(~$13.5/leg), buy `lighter` / sell `hyperliquid`, accepted loss 25 bps,
+`live_entry_enabled` + cap 25 + auto-resolve on. Existing positions (esp.
+ZEC) explicitly off-limits — entry path already refuses symbols with open
+positions on either venue.
+
+### What the canary exposed (4 real findings)
+
+1. **Hyperliquid credential wrong shape** — vault entry holds a 20-byte
+   wallet *address*; HL signing needs the 32-byte private key (API/agent
+   wallet key). Order failed before dispatch — nothing reached HL.
+   **Operator action required.**
+2. **Orphaned order identity (bug, fixed)** — the Lighter leg returned
+   `status=New, filled=0`; the coordinator folded it into a `BothFailed`
+   error string and dropped `venue_order_id`. Worse: Lighter's
+   `place_order` reports `New/0` unconditionally after `sendTx` accept
+   (submit returns only a tx hash), and the order had actually **filled on
+   venue** — a real 0.005 ETH long sat untracked. Fixed:
+   `UnresolvedExposure` now carries any non-final leg's full
+   `OrderResponse`; order ids persist; reconciler polls to terminal
+   (`fetch_order` discovers the true fill → imbalanced → opt-in
+   auto-flatten). Operator `acknowledge_signal` control added for manual
+   venue-verified resolution. Commit `f9b1bf6`.
+3. **WS feeds suspended in live mode (architectural bug, fixed)** —
+   `feed.rs::supervise` skipped all WS lanes while `is_live_mode` (since
+   the original WS commit, undocumented). Live mode therefore forced every
+   read onto REST polling → Lighter's AWS WAF served a CAPTCHA challenge →
+   30-min cooldown → "No fresh lighter orderbook". WS code was never
+   deleted — the user's memory was correct; it was deliberately suspended.
+   Feeds now stay alive in live mode (pause still suspends); execution
+   keeps its 2s freshness + identity validation on hub data. Commit
+   `13be813`.
+4. **Monitor suspended in live mode (same pattern, fixed)** — the monitor
+   is the hub's REST feeder for non-WS venues and the only funding
+   refresher; its suspension darkened the radar and starved the hub for no
+   safety benefit (execution is gated downstream). Now runs in live mode;
+   monitor execution stays paper-only. Uncommitted at handoff time.
+
+### Additional fixes landed this session
+
+- **`canary_max_loss_bps` plumbing** (`e84f0ad`) — the parameter was lost
+  by a filesystem-divergence partial commit; re-spliced.
+- **Lighter REST pressure halved** — `orderBookDetails` (static market
+  metadata) was refetched inside every book poll, order submit, cancel,
+  and status poll. `market_params_for` memoizes
+  (market_id, price_dec, size_dec) per symbol for 5 min;
+  `market_symbol_map` memoizes the id→symbol map. Uncommitted at handoff.
+- **Endpoint overrides actually wired** — Engine Settings → Network & VPS
+  URL fields round-tripped the UI but never reached constructors. Now
+  persist under `endpoints.*` kv keys (only non-default values — UI
+  display-prefills differ from adapter base paths), restore at boot, feed
+  adapter construction. Adapters build once at startup: an edited endpoint
+  applies on the NEXT start. `robinhood_rpc_url` deliberately unwired —
+  it's a chain RPC endpoint, not the Lighter-protocol REST base the
+  Robinhood adapter uses.
+- **Reconciler terminal-state race (fixed)** — `reconcile_pending_orders`
+  iterates a HashMap of outcomes; a `flat-{parent}-*` child resolving
+  Closed closed the parent via `resolve_flattened_parent`, then the
+  parent's own stale derive in the SAME pass overwrote it back to
+  Imbalanced (order-dependent — surfaced as a flaky test). The apply path
+  now never reopens Closed/Failed signals. Uncommitted at handoff.
+- **UI:** ticker-selector issue rows — ⚠ icon moved into the old "Issue"
+  tag position, tag text removed (`183fa57`, `e8f57a7`).
+
+### Audit findings recorded (not yet fixed)
+
+- ~14 registered Tauri commands have no frontend caller — dead/parked
+  surface (spot/prediction scans, seasonality promotion, OU fit,
+  stat-arb step, signal series, monitor events, ticker volumes, funding
+  trend).
+- Inert settings fields: `fast_warmup_enabled`, `robinhood_rpc_url`
+  (by design, above), `bind_address`, plus referral/sponsor/version
+  metadata — round-tripped through the UI, never read. Candidates for
+  wiring or honest "unsupported" labeling.
+- All adapters correctly claim `live_order_submission_implemented=true`
+  and `order_status_polling_implemented=true` — flags verified honest.
+- SPEC.md stale claims corrected this session: reconciliation-flag
+  paragraph, "2 REST calls per Lighter poll", "execution stays disabled",
+  monitor-suspension note; CAPABILITIES venue matrix flipped to
+  "Canary-gated".
+
+### Current runtime state
+
+- App running the rebuilt release binary (`target/release/arbitrageur-desktop`);
+  app log `/tmp/app.log`; state DB `state.sqlite3*` (+ `vault.enc`) at repo
+  root.
+- Lighter WAF cooldown cleared; live account reads confirmed flowing in
+  the new process.
+- **Residual position:** the first canary's Lighter leg filled 0.005 ETH
+  long on venue while reporting `New/0` — orphaned because the order id
+  was dropped pre-fix. Close via the External Positions gadget (sends a
+  tracked reduce-only `external` signal through the reconciler — also
+  exercises the fixed poll loop) or manually on Lighter.
+
+### Next steps for the picking-up agent
+
+1. Commit + push the uncommitted fix set (lighter memoization extension,
+   monitor unsuspension, endpoint wiring, reconciler terminal guard,
+   SPEC/CAPABILITIES updates) — run `cargo test -p arbitrageur-exchanges
+   -p arbitrageur-desktop`, `cargo clippy`, frontend build first.
+2. Operator must replace the Hyperliquid vault credential with the 32-byte
+   private key, then re-run the same canary (ETH-USDC 0.005, lighter→
+   hyperliquid, 25 bps) — watch `/tmp/app.log` for `UnresolvedExposure`
+   handling and reconciler polls.
+3. Decide fate of the ~14 dead commands and inert settings (wire or
+   honestly label).
+4. Do NOT touch ZEC or any existing position; do not weaken fail-closed
+   checks to silence warnings; keep the 30-min WAF cooldown as-is.

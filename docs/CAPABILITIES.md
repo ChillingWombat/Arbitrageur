@@ -36,18 +36,20 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 “Unit” means deterministic parser/signing tests. “Public” means live public-read evidence recorded in the handoff. “Sandbox order” and “mainnet order” require credentialed evidence and are not implied by source code.
 
 | Venue | Markets / books | Funding | Account read | Sign + submit | Cancel | Leverage update | Terminal/restart reconciliation | Verification ceiling in repo | Strategy live entry |
+
+*"Strategy live entry" = the `live_entry_enabled` spatial canary path only (per-leg notional cap required); triangle/funding/spot entries remain refused regardless.*
 |---|---|---|---|---|---|---|---|---|---|
-| Hyperliquid | Perpetual; spot suffix refused | Yes | Yes | Yes | Yes | No | Order-status poll + restart supervisor | Unit + public reads | **No** |
-| Lighter | Perpetual and exact `-SPOT` resolution | Yes | Yes | Yes, vendored signer | Yes | No | `accountOrders` poll by client order index + restart supervisor | Unit + public reads | **No** |
-| Robinhood Lighter | Lighter deployment | Yes | Yes | Yes, same signer family | Yes | No | Delegates to Lighter polling | Unit + public reads | **No** |
-| Vanta / Orderly | Perpetual | Yes | Yes | Yes | Yes | No explicit implementation | `GET /v1/order/{id}` poll + restart supervisor | Unit + public reads | **No** |
-| Aster | Perpetual | Yes | Yes | Yes | Yes | Yes | `GET /fapi/v3/order` poll + restart supervisor | Unit + public reads | **No** |
-| PopDEX | Perpetual | Yes | Yes | Yes, agent-signed on-chain tx | Yes | Yes | Open + `history/orders` poll + restart supervisor | Unit + public reads; no documented sandbox order proof | **No** |
-| Binance | USDT-M perpetual | Yes | Yes | Yes | Yes | Yes | `GET /fapi/v1/order` poll + restart supervisor | Unit + public reads | **No** |
-| OKX | Perpetual swaps | Yes | Yes | Yes | Yes | Yes | `GET /api/v5/trade/order` poll + restart supervisor | Unit + public reads | **No** |
-| Coinbase | Spot | No perpetual funding | Yes | Yes | Yes | N/A; reduce-only unsupported | `GET /orders/{id}` poll + restart supervisor | Unit + public reads | **No** |
-| Kraken | Linear futures in current adapter | Yes | Yes | Yes | Yes | No explicit implementation | `openorders` + `/fills` aggregation poll + restart supervisor | Unit + public reads | **No** |
-| Decibel | Markets/prices; REST depth unavailable upstream | Yes through prices endpoint | Yes | Yes, Aptos transaction | Yes | No explicit implementation | Commit-event decode + tx-hash poll + post-commit subaccount-tx scan (last 50 txs, identity-matched OrderEvent/TradeEvent; anonymous fills unattributed, window truncation fails closed) | Unit + selected public reads | **No** |
+| Hyperliquid | Perpetual; spot suffix refused | Yes | Yes | Yes | Yes | No | Order-status poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Lighter | Perpetual and exact `-SPOT` resolution | Yes | Yes | Yes, vendored signer | Yes | No | `accountOrders` poll by client order index + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Robinhood Lighter | Lighter deployment | Yes | Yes | Yes, same signer family | Yes | No | Delegates to Lighter polling | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Vanta / Orderly | Perpetual | Yes | Yes | Yes | Yes | No explicit implementation | `GET /v1/order/{id}` poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Aster | Perpetual | Yes | Yes | Yes | Yes | Yes | `GET /fapi/v3/order` poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| PopDEX | Perpetual | Yes | Yes | Yes, agent-signed on-chain tx | Yes | Yes | Open + `history/orders` poll + restart supervisor | Unit + public reads; no documented sandbox order proof | **Canary-gated** (`live_entry_enabled` + cap) |
+| Binance | USDT-M perpetual | Yes | Yes | Yes | Yes | Yes | `GET /fapi/v1/order` poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| OKX | Perpetual swaps | Yes | Yes | Yes | Yes | Yes | `GET /api/v5/trade/order` poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Coinbase | Spot | No perpetual funding | Yes | Yes | Yes | N/A; reduce-only unsupported | `GET /orders/{id}` poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Kraken | Linear futures in current adapter | Yes | Yes | Yes | Yes | No explicit implementation | `openorders` + `/fills` aggregation poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
+| Decibel | Markets/prices; REST depth unavailable upstream | Yes through prices endpoint | Yes | Yes, Aptos transaction | Yes | No explicit implementation | Commit-event decode + tx-hash poll + post-commit subaccount-tx scan (last 50 txs, identity-matched OrderEvent/TradeEvent; anonymous fills unattributed, window truncation fails closed) | Unit + selected public reads | **Canary-gated** (`live_entry_enabled` + cap) |
 | Arcus | Adapter scaffold, not admitted | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable | None | Scaffold only | **No** |
 | Polymarket | Separate prediction research adapter | N/A | Not an admitted portfolio venue | No integrated execution | No integrated execution | N/A | None | Research parser | **No** |
 | Kalshi | Separate prediction research adapter | N/A | Not an admitted portfolio venue | No integrated execution | No integrated execution | N/A | None | Research parser | **No** |
@@ -60,7 +62,8 @@ Live mode currently means:
 2. Authenticated venue account reads can be shown.
 3. Explicit risk-reducing close submissions can be requested where an adapter supports them.
 4. Live position reads are matched through adapter-owned account-position normalization (for example `BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, and Lighter market IDs). Unknown or ambiguous mappings leave the position unresolved rather than treated as flat. Quantities and prices are kept in venue-native contract units (e.g. `1000PEPE-USDT` positions stay denominated in `1000PEPE` units with per-unit prices — no ×1000 rescaling in either direction).
-5. **New strategy entries remain blocked.**
+5. **New strategy entries are gated, not blanket-blocked** — the spatial two-leg path dispatches live orders when the operator enables `live_entry_enabled` AND sets `live_entry_max_notional_usd` (per-leg refusal, never clamped). All other strategy paths (triangle, funding carry, spot/monitor) refuse live dispatch. Every accepted non-final leg lands in `unresolved`/`imbalanced` reconciliation with its venue order id persisted; an operator acknowledge control resolves escalated signals after manual venue review.
+6. **Market data stays websocket-primary in live mode** — the feed supervisor no longer suspends WS lanes when live; orderbooks flow via WS into `MarketDataHub` and REST is fallback-only (2s freshness bound enforced at execution). The monitor keeps running as the hub's REST feeder for venues without a WS lane and as the funding refresher; its own execution stays paper-only. Engine pause still suspends both.
 
 Before enabling Live mode:
 

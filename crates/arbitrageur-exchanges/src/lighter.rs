@@ -28,12 +28,20 @@ pub struct LighterAdapter {
     /// might misread the rejection as a fill problem).
     order_lock: tokio::sync::Mutex<()>,
     /// `orderBookDetails` is static listing metadata — memoize resolved
-    /// market ids so per-symbol book polling costs one REST call, not two.
-    /// Only successful resolutions are cached; a miss refetches so new
-    /// listings appear without a restart.
-    market_id_cache:
-        parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, u64)>>,
+    /// (market_id, price_dec, size_dec) per symbol and the id->symbol map so
+    /// book polling / place / cancel / fetch_order don't each re-fetch the
+    /// same payload. Only successful resolutions are cached; a miss
+    /// refetches so new listings appear without a restart.
+    market_params_cache:
+        parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, u64, u32, u32)>>,
+    market_map_cache: parking_lot::Mutex<Option<CachedSymbolMap>>,
 }
+
+/// Memoized `market_id -> engine symbol` map with its fetch timestamp.
+type CachedSymbolMap = (
+    std::time::Instant,
+    std::sync::Arc<std::collections::HashMap<u64, String>>,
+);
 
 impl LighterAdapter {
     pub fn new(
@@ -76,7 +84,8 @@ impl LighterAdapter {
             api_key_index: parking_lot::RwLock::new(None),
             api_key_private_key: parking_lot::RwLock::new(api_key_private_key.map(Zeroizing::new)),
             order_lock: tokio::sync::Mutex::new(()),
-            market_id_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            market_params_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            market_map_cache: parking_lot::Mutex::new(None),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
@@ -222,7 +231,13 @@ impl LighterAdapter {
     /// market_id → canonical engine symbol map, built from the public
     /// `orderBookDetails` metadata (spot rows become `BASE-SPOT`, perps
     /// `BASE-USDC`). Used by account and order-resolution paths.
-    async fn market_symbol_map(&self) -> anyhow::Result<HashMap<u64, String>> {
+    async fn market_symbol_map(&self) -> anyhow::Result<std::sync::Arc<HashMap<u64, String>>> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        if let Some((at, map)) = &*self.market_map_cache.lock() {
+            if at.elapsed() < TTL {
+                return Ok(map.clone());
+            }
+        }
         let details = self.get_json("/api/v1/orderBookDetails").await?;
         let mut map = HashMap::new();
         for item in details
@@ -251,26 +266,30 @@ impl LighterAdapter {
                 },
             );
         }
+        let map = std::sync::Arc::new(map);
+        *self.market_map_cache.lock() = Some((std::time::Instant::now(), map.clone()));
         Ok(map)
     }
 
-    /// Resolve a symbol to its Lighter market id, memoized for 5 minutes —
-    /// the details payload is static listing metadata and refetching it on
-    /// every book poll doubles this venue's REST pressure for no benefit.
-    async fn market_id_for(&self, symbol: &str) -> anyhow::Result<u64> {
+    /// Resolve (market_id, price_dec, size_dec) for a symbol, memoized for
+    /// 5 minutes — the details payload is static listing metadata and
+    /// refetching it inside every book poll, order submit, cancel, and
+    /// order poll multiplies this venue's REST pressure for no benefit.
+    async fn market_params_for(&self, symbol: &str) -> anyhow::Result<(u64, u32, u32)> {
         const TTL: std::time::Duration = std::time::Duration::from_secs(300);
         let key = symbol.trim().to_uppercase();
-        if let Some((at, id)) = self.market_id_cache.lock().get(&key) {
+        if let Some((at, id, pd, sd)) = self.market_params_cache.lock().get(&key) {
             if at.elapsed() < TTL {
-                return Ok(*id);
+                return Ok((*id, *pd, *sd));
             }
         }
         let details = self.get_json("/api/v1/orderBookDetails").await?;
-        let id = resolve_market_id(&details, symbol)?;
-        self.market_id_cache
-            .lock()
-            .insert(key, (std::time::Instant::now(), id));
-        Ok(id)
+        let params = resolve_market_order_params(&details, symbol)?;
+        self.market_params_cache.lock().insert(
+            key,
+            (std::time::Instant::now(), params.0, params.1, params.2),
+        );
+        Ok(params)
     }
 }
 
@@ -401,7 +420,7 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let market_id = self.market_id_for(symbol).await?;
+        let (market_id, _, _) = self.market_params_for(symbol).await?;
 
         let res = self
             .get_json(&format!(
@@ -571,7 +590,7 @@ impl ExchangeAdapter for LighterAdapter {
             .and_then(|p| p.as_array())
             .cloned()
             .unwrap_or_default();
-        let mut market_symbols = HashMap::new();
+        let mut market_symbols = std::sync::Arc::new(HashMap::new());
         if !pos_list.is_empty() {
             market_symbols = self.market_symbol_map().await?;
         }
@@ -724,9 +743,7 @@ impl ExchangeAdapter for LighterAdapter {
         // Market id + fixed-point scales come from the same payload so a
         // mid-update market list cannot mix an id with another market's
         // decimals (which would silently move the price ~10x per digit).
-        let details = self.get_json("/api/v1/orderBookDetails").await?;
-        let (market_id, price_dec, size_dec) =
-            resolve_market_order_params(&details, &order.symbol)?;
+        let (market_id, price_dec, size_dec) = self.market_params_for(&order.symbol).await?;
 
         let base_amount = scale_lighter_amount(order.quantity, size_dec, &order.symbol)?;
         let (l2_type, tif, expiry_ms, limit_px) = match order.order_type {
@@ -817,8 +834,7 @@ impl ExchangeAdapter for LighterAdapter {
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         let _guard = self.order_lock.lock().await;
         let (account, api_key_index, api_key) = self.signing_identity()?;
-        let details = self.get_json("/api/v1/orderBookDetails").await?;
-        let market_id = resolve_market_id(&details, &req.symbol)?;
+        let (market_id, _, _) = self.market_params_for(&req.symbol).await?;
         // The venue cancels by numeric index: a live order id from this
         // adapter is a tx_hash (hex, not an index), so cancellation keys off
         // the client order index — recomputed deterministically from the

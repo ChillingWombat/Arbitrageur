@@ -249,9 +249,17 @@ pub struct TickerStrategyConfigDto {
 9. **Live Submission Rollout (2026-09-20, bounded)**:
    - Binance USDT-M: place/cancel/leverage over signed `/fapi` (HMAC-SHA256, venue-native contract units incl. scaled `1000PEPE` symbols, 5 BPS taker accounting) + HMAC/sign/parse unit tests. OKX swaps: place/cancel/leverage over signed `/api/v5` (base64 HMAC preimage, contract-size conversion via `ctVal`, fill polling) + sign/contracts/parse tests. Vault credential plumbing for both already existed. 2026-09-20 update: Lighter live submission is IMPLEMENTED (vendored `liblighter_signer.so` Go signer, nextNonce → Sign → sendTx, `live_order_submission_implemented()=true` incl. Robinhood deployment; vault `api_key_index` plumbed through `state.rs`). Remaining: Arcus (no public API exists — stays fail-closed by design); then the reconciled two-leg live dispatcher. Decibel live submission IMPLEMENTED 2026-09-20 (aptos-sdk entry-function tx, mainnet vectors verified); Decibel reads (balances/positions/funding) rebuilt same day on official /api/v1 paths (book WS-only upstream). Later 2026-09-20: execution failures recorded to a persisted (v21) Log Monitor feed on all six execute commands; funding scanner gained a Venue/Min-Exp/Min-Win strip (defaults mirror bot thresholds) + decay-aware Expected $ replacing flat Daily; Win% hold-aligned with Expected; US100==TECH100 merged to NAS100; Risk Control tab (subcategories, equal tabs, global max leverage 10x ceiling).
    - Current boundary: adapter submission exists and every live-submission venue implements `fetch_order` order-status polling reconciled by the startup+5s supervisor, and automated residual-leg resolution plus bounded cancel retry exist behind an opt-in flag. Live mode defaults to authenticated account reads and explicit risk-reducing closes; spatial two-leg entries are admitted only when the operator enables `live_entry_enabled` with a per-leg notional cap — the canary surface for venue evidence. `docs/CAPABILITIES.md` is the authoritative venue/strategy matrix.
+10. **Live-Canary Hardening (2026-09-21)** — first real canary (Lighter↔Hyperliquid ETH-USDC 0.005) exposed four gaps, all fixed:
+   - **Orphaned order identity**: a leg accepted as `status=New`/`PartiallyFilled` was folded into a `BothFailed` error string, dropping its `venue_order_id` — a resting order would have been permanently untracked. `coordinator.rs` now returns `UnresolvedExposure` carrying the full `OrderResponse` for any non-final leg; `commands.rs` persists venue+client order ids and the reconciler polls them to terminal state. Operator `acknowledge_signal` (unresolved→failed / imbalanced→closed) added for manual venue-verified resolution; the radar attention strip exposes it.
+   - **Reconciler terminal-state race**: `reconcile_pending_orders` iterates a HashMap of per-signal outcomes; a `flat-{parent}-*` child resolving Closed could close the parent via `resolve_flattened_parent`, then the parent's own stale derive in the SAME pass overwrote it back to Imbalanced. The apply path now skips signals already Closed/Failed — terminal is terminal.
+   - **WS feeds suspended in live mode**: `feed.rs::supervise` skipped every WS lane while `is_live_mode` — forcing all reads onto REST polling, which tripped Lighter's edge WAF (30-min challenge cooldown) and produced "No fresh lighter orderbook" during the canary. Feeds now run in live mode (pause still suspends); execution freshness/identity checks are unchanged.
+   - **Monitor suspended in live mode**: `monitor.rs` had the same vestigial suspension — starving the hub for non-WS venues and all funding data. Monitor now runs in live mode; its execution path remains paper-only.
+   - **Lighter REST pressure halved**: `fetch_orderbook` refetched `orderBookDetails` (static listing metadata) on every poll; `place_order`, `cancel_order`, `fetch_order`, and position reads each refetched it too. Now `market_params_for` memoizes (market_id, price_dec, size_dec) per symbol for 5 min and `market_symbol_map` memoizes the id→symbol map — order Book polls cost 1 REST call, order paths reuse the cache.
+   - **Endpoint overrides wired**: Engine Settings → Network & VPS URL fields were round-tripped through the UI but never reached adapter constructors. They now persist under `endpoints.*` kv keys (only non-default values — UI display-prefills differ from adapter base paths, so persisting unconditionally would silently rewrite every endpoint on any unrelated Save), restore at boot, and feed `HyperliquidAdapter`/`LighterAdapter`/`VantaAdapter`/`ArcusAdapter`/`KrakenAdapter`/`PolymarketAdapter`/`KalshiAdapter`/`PopDexAdapter` construction. Adapters build once at startup — an edited endpoint applies on the NEXT app start. `robinhood_rpc_url` is intentionally unwired: it is a chain RPC endpoint (`rpc.robinhood.network`), not the Lighter-protocol REST base the Robinhood adapter consumes, and no code path reads a chain RPC today.
+   - **Lighter submit truthfulness**: `LighterAdapter::place_order` returns `status=New, filled_qty=0` unconditionally after `sendTx` accept — Lighter's submit response carries only a tx hash, so a fill that lands at commit reports zero-fill. This is why the first canary's filled leg was recorded empty (the real 0.005 ETH long orphaned on venue until closed externally). Mitigated by the `UnresolvedExposure` path above: every `New` response now enters order-id-persisted polling where `fetch_order` discovers the true fill.
 8. **Live-Mode Honesty (2026-09-20)**:
    - `ExchangeAdapter::live_order_submission_implemented` (default false) is true for adapters whose `place_order` genuinely submits: Hyperliquid, Lighter, Robinhood-Lighter, Vanta, Aster, PopDEX, Binance, OKX, Coinbase, Kraken, and Decibel. The old `supports_live_execution` flag is aspirational and must not gate promises.
-   - `ExchangeAdapter::live_order_reconciliation_implemented` (default false) remains unimplemented across admitted venues, so `live_ready` / `strategy_entry_ready` are false even when `submission_ready` is true. Live-mode strategy dispatch refuses with the reconciliation caveat; Paper Starting Balance input is disabled/greyed in Live Trading mode.
+   - `ExchangeAdapter::live_order_reconciliation_implemented` derives from `order_status_polling_implemented` and is now true for all eleven live-submission venues, so `live_ready` / `strategy_entry_ready` are true once the vault is unlocked with credentials — the remaining entry gate is the operator opt-in (`live_entry_enabled` + per-leg notional cap), not missing machinery. Non-spatial strategies still refuse live dispatch (`LIVE_ENTRY_SPATIAL_ONLY`); Paper Starting Balance input is disabled/greyed in Live Trading mode.
    - `ExchangeAdapter::order_status_polling_implemented` (default false) is true for every live-submission venue (Binance, Aster, OKX, Kraken, Vanta, Coinbase, Hyperliquid, Lighter, Robinhood, Decibel, PopDEX) and surfaces as `orderPollingReady` on the capability DTO — it means an authoritative `fetch_order` exists, not that entries are permitted.
 7. **Paper Funding Carry Execution (2026-09-20)**:
    - `execute_funding_carry_impl` is no longer a stub: paper-only dispatch (live mode refused) mirroring the triangle executor — rescan + match the pair, min-APR hurdle, execution lock, dispatch-time books for both legs, blocking-signal + existing-position guards, per-venue margin checks, full-fill-or-bust paper legs, equity accounting, and ONE two-legged `funding` signal so the Funding dock aggregates a single open carry position. Below-hurdle and stale pairs refuse with reasons instead of executing.
@@ -844,8 +852,13 @@ unrankable.
   numbers as live.
 - Fees always from `venue_fee_bps`; volumes from `cached_venue_volumes`;
   books only via `market_data_hub` validity.
-- Live mode: monitor is research-visible but all rows are non-executable
-  (execution stays disabled, consistent with the rest of the app).
+- Live mode: the monitor keeps running — it is the hub's REST feeder for
+  venues/symbols without a supervised WS lane and the only funding-rate
+  refresher. Its own execution path stays paper-only (`live mode: monitor
+  execution is paper-only` refusal in `monitor.rs`), so live visibility
+  never implies live dispatch. (2026-09-21: the monitor was previously
+  suspended outright in live mode, which starved the hub for non-WS
+  venues and all funding data for no safety benefit.)
 
 ---
 
@@ -1041,9 +1054,13 @@ lanes + `fetch_orderbooks_impl` 350 ms cache-first fallback, hub TTL
 trait-level stub; implementation now lives in the desktop feed supervisor.
 Consequences of the old baseline:
 
-- Lighter-family books burn 2 REST slots each against a 60/min standard IP
-  budget (45 usable after the 25% tx reserve) — the watchlist cadence
-  degrades to 5–300 s/symbol as symbols grow.
+- Lighter-family books originally burned 2 REST slots each against a
+  60/min standard IP budget (45 usable after the 25% tx reserve) —
+  `orderBookDetails` + `orderBookOrders` per poll. 2026-09-21: the static
+  metadata leg is now memoized 5 min (`market_params_for` /
+  `market_symbol_map` caches in `lighter.rs`), so a REST book poll costs
+  1 call and order submit/cancel/status paths reuse the same cache. The
+  cadence problem below described the pre-memoization baseline.
 - Quotes go stale between polls; `spread_samples` has gaps exactly where
   the newest venues should be.
 - Retention is hardcoded (30 days, 4 M rows, hourly prune in
@@ -1112,8 +1129,15 @@ store failures never break ingestion. No new schema for samples.
   resubscribe/backoff; pairs go `stale`, never interpolated.
 - Unknown-fee/unknown-funding rows keep current fail-closed behavior.
 - Prune failures are best-effort and logged, never break ingestion.
-- Live mode: feeds may run for research visibility; execution stays
-  disabled per existing gates.
+- Live mode: WS feeds KEEP RUNNING — a pushed WS book is fresher than any
+  REST poll and execution reads already enforce a 2s freshness bound plus
+  venue/symbol validation on hub data. (2026-09-21 fix: the feed
+  supervisor previously suspended all WS lanes in live mode, which forced
+  every read onto REST polling and tripped Lighter's edge WAF into a
+  30-min challenge cooldown.) Engine pause still suspends feeds. Live
+  order dispatch is gated separately: spatial entries require
+  `live_entry_enabled` + per-leg notional cap; all other strategy paths
+  refuse live dispatch.
 
 ### Testing Decisions
 

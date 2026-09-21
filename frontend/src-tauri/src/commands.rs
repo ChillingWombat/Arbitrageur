@@ -7719,6 +7719,68 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
+    // Venue endpoint overrides: persist only values that differ from the
+    // built-in defaults — the UI prefills display defaults (e.g.
+    // "https://api.kraken.com") that differ from adapter base URLs
+    // ("https://api.kraken.com/0/public"), so persisting unconditionally
+    // would silently rewrite every endpoint on an unrelated Save.
+    {
+        let defaults = crate::state::EngineSettingsDto::default();
+        for (key, val, dflt) in [
+            (
+                "endpoints.hyperliquid_url",
+                sanitized.hyperliquid_url.as_str(),
+                defaults.hyperliquid_url.as_str(),
+            ),
+            (
+                "endpoints.lighter_url",
+                sanitized.lighter_url.as_str(),
+                defaults.lighter_url.as_str(),
+            ),
+            (
+                "endpoints.vanta_url",
+                sanitized.vanta_url.as_str(),
+                defaults.vanta_url.as_str(),
+            ),
+            (
+                "endpoints.kraken_spot_url",
+                sanitized.kraken_spot_url.as_str(),
+                defaults.kraken_spot_url.as_str(),
+            ),
+            (
+                "endpoints.kraken_futures_url",
+                sanitized.kraken_futures_url.as_str(),
+                defaults.kraken_futures_url.as_str(),
+            ),
+            (
+                "endpoints.arcus_url",
+                sanitized.arcus_url.as_str(),
+                defaults.arcus_url.as_str(),
+            ),
+            (
+                "endpoints.popdex_network",
+                sanitized.popdex_network.as_str(),
+                defaults.popdex_network.as_str(),
+            ),
+            (
+                "endpoints.polymarket_url",
+                sanitized.polymarket_url.as_str(),
+                defaults.polymarket_url.as_str(),
+            ),
+            (
+                "endpoints.kalshi_url",
+                sanitized.kalshi_url.as_str(),
+                defaults.kalshi_url.as_str(),
+            ),
+        ] {
+            let v = val.trim();
+            if v.is_empty() || v == dflt {
+                let _ = state.state_store.kv_delete(key);
+            } else {
+                let _ = state.state_store.kv_set(key, v);
+            }
+        }
+    }
     // Live-apply: breaker limits update in place (no restart), delta guard
     // re-limits, margin thresholds feed the next snapshot automatically.
     {

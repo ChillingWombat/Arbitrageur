@@ -1262,29 +1262,6 @@ impl AppEngineState {
         // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
         // from live venue APIs once API credentials are configured by the user.
 
-        let live_hl = Arc::new(HyperliquidAdapter::new(None, None, None));
-        let live_lighter = Arc::new(LighterAdapter::new(None, None, None));
-        let live_vanta = Arc::new(VantaAdapter::new(None, None, None, None));
-        // Robinhood Chain serves the Lighter protocol at a different base
-        // URL — reuse the Lighter adapter under the robinhood venue id.
-        let live_robinhood = Arc::new(LighterAdapter::new_with_venue(
-            Some("https://api.rh.lighter.xyz".to_string()),
-            None,
-            None,
-            "robinhood",
-        ));
-        let live_arcus = Arc::new(ArcusAdapter::new(None, None, None));
-        let live_aster = Arc::new(AsterAdapter::new(None, None, None));
-        let live_popdex = Arc::new(PopDexAdapter::new(None));
-        let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
-        let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
-        let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
-        let live_kraken = Arc::new(KrakenAdapter::new(None, None, None, None));
-        let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
-        let live_polymarket = Arc::new(PolymarketAdapter::new(None, None));
-        let live_kalshi = Arc::new(KalshiAdapter::new(None, None));
-        let market_data_hub = MarketDataHub::new(1024, 400);
-
         let mut initial_settings = EngineSettingsDto::default();
         if let Ok(Some(mode)) = state_store.kv_get("engine.trading_mode") {
             if mode == "real" || mode == "paper" {
@@ -1372,6 +1349,39 @@ impl AppEngineState {
                     initial_settings.max_leverage = v;
                 }
             }
+            for (key, slot) in [
+                (
+                    "endpoints.hyperliquid_url",
+                    &mut initial_settings.hyperliquid_url,
+                ),
+                ("endpoints.lighter_url", &mut initial_settings.lighter_url),
+                ("endpoints.vanta_url", &mut initial_settings.vanta_url),
+                (
+                    "endpoints.kraken_spot_url",
+                    &mut initial_settings.kraken_spot_url,
+                ),
+                (
+                    "endpoints.kraken_futures_url",
+                    &mut initial_settings.kraken_futures_url,
+                ),
+                ("endpoints.arcus_url", &mut initial_settings.arcus_url),
+                (
+                    "endpoints.popdex_network",
+                    &mut initial_settings.popdex_network,
+                ),
+                (
+                    "endpoints.polymarket_url",
+                    &mut initial_settings.polymarket_url,
+                ),
+                ("endpoints.kalshi_url", &mut initial_settings.kalshi_url),
+            ] {
+                if let Ok(Some(v)) = state_store.kv_get(key) {
+                    let v = v.trim().to_string();
+                    if !v.is_empty() {
+                        *slot = v;
+                    }
+                }
+            }
             if initial_settings.margin_warning_usage_pct
                 >= initial_settings.margin_critical_usage_pct
             {
@@ -1379,6 +1389,67 @@ impl AppEngineState {
                 initial_settings.margin_critical_usage_pct = 85.0;
             }
         }
+        // Venue endpoint overrides come from Engine Settings (Network & VPS)
+        // and persist under `endpoints.*` kv keys — blank falls back to each
+        // adapter's built-in default. NOTE: adapters are constructed once
+        // here, so an edited endpoint applies on the NEXT app start.
+        let endpoint = |s: &str| {
+            let t = s.trim();
+            (!t.is_empty()).then(|| t.to_string())
+        };
+        let live_hl = Arc::new(HyperliquidAdapter::new(
+            endpoint(&initial_settings.hyperliquid_url),
+            None,
+            None,
+        ));
+        let live_lighter = Arc::new(LighterAdapter::new(
+            endpoint(&initial_settings.lighter_url),
+            None,
+            None,
+        ));
+        let live_vanta = Arc::new(VantaAdapter::new(
+            endpoint(&initial_settings.vanta_url),
+            None,
+            None,
+            None,
+        ));
+        // Robinhood Chain serves the Lighter protocol at a different base
+        // URL — reuse the Lighter adapter under the robinhood venue id.
+        let live_robinhood = Arc::new(LighterAdapter::new_with_venue(
+            Some("https://api.rh.lighter.xyz".to_string()),
+            None,
+            None,
+            "robinhood",
+        ));
+        let live_arcus = Arc::new(ArcusAdapter::new(
+            endpoint(&initial_settings.arcus_url),
+            None,
+            None,
+        ));
+        let live_aster = Arc::new(AsterAdapter::new(None, None, None));
+        let live_popdex = Arc::new(PopDexAdapter::new(endpoint(
+            &initial_settings.popdex_network,
+        )));
+        let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
+        let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
+        let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
+        let live_kraken = Arc::new(KrakenAdapter::new(
+            endpoint(&initial_settings.kraken_futures_url),
+            endpoint(&initial_settings.kraken_spot_url),
+            None,
+            None,
+        ));
+        let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
+        let live_polymarket = Arc::new(PolymarketAdapter::new(
+            endpoint(&initial_settings.polymarket_url),
+            None,
+        ));
+        let live_kalshi = Arc::new(KalshiAdapter::new(
+            endpoint(&initial_settings.kalshi_url),
+            None,
+        ));
+        let market_data_hub = MarketDataHub::new(1024, 400);
+
         let cb_config = CircuitBreakerConfig {
             max_daily_drawdown_usd: Decimal::from_f64_retain(
                 initial_settings.cb_max_daily_drawdown_usd,

@@ -1256,7 +1256,13 @@ impl SpreadMonitorEngine {
             if *self.shutdown.lock() {
                 return;
             }
-            if *state.is_live_mode.read() || *state.is_paused.read() || !self.cfg.lock().enabled {
+            // Live mode keeps the monitor running: it is the hub's REST
+            // feeder for venues/symbols the WS lanes don't cover and the
+            // only funding-rate refresher. Its execution path is paper-only
+            // and gated downstream (live-mode refusal at the executor plus
+            // the explicit live-entry gate), so suspending here bought no
+            // safety — it only darkened the radar and starved the hub.
+            if *state.is_paused.read() || !self.cfg.lock().enabled {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             }

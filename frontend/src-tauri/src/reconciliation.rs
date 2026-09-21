@@ -362,6 +362,20 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             cancel_notes.get(signal_id),
         );
         if let Some(status) = new_status {
+            // Terminal is terminal: this same pass may have just resolved a
+            // `flat-{id}-*` child and closed the parent above — a stale leg
+            // poll must never reopen Closed/Failed (HashMap outcome order is
+            // arbitrary). Unresolved/imbalanced stay revisable by design.
+            let already_terminal = state
+                .state_store
+                .get_signal(signal_id)
+                .ok()
+                .flatten()
+                .map(|s| matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
+                .unwrap_or(false);
+            if already_terminal {
+                continue;
+            }
             if state
                 .state_store
                 .update_signal_status(signal_id, status, note.as_deref())
