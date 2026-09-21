@@ -504,7 +504,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                         : "Market mode takes the book — no price needed"
                   }
                 >
-                  <span className="text-[11px] font-mono font-bold text-slate-500">LIMIT PRICE</span>
+                  <span className="block text-[11px] font-mono font-bold text-slate-500">LIMIT PRICE</span>
                   <input
                     value={limitPx}
                     onChange={(e) => { setLimitPx(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
@@ -515,7 +515,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                   />
                 </label>
                 <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit (or fire) time">
-                  <span className="text-[11px] font-mono font-bold text-slate-500">CLOSE</span>
+                  <span className="block text-[11px] font-mono font-bold text-slate-500">CLOSE</span>
                   <span className="relative block w-24">
                     <input
                       value={closePct}
@@ -588,11 +588,20 @@ export const ExternalPositionsGadget: React.FC = () => {
                     </button>
                   </span>
                 ))}
-                <button
+                <div className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => closeDetails()}
+                    className="px-3 py-2 rounded-lg text-xs font-mono font-bold border bg-surface text-slate-600 border-surface-border hover:text-slate-900 cursor-pointer"
+                    title="Close this popup without doing anything"
+                  >
+                    Cancel
+                  </button>
+                  <button
                   type="button"
                   onClick={() => void doClose()}
                   disabled={closeDisabledReason != null || closing || !pctValid}
-                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ml-auto ${
+                  className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ${
                     armed
                       ? "bg-loss text-white border-loss-border"
                       : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-slate-400 disabled:border-surface-border"
@@ -612,7 +621,8 @@ export const ExternalPositionsGadget: React.FC = () => {
                       : scheduleOn
                         ? "Schedule Close"
                         : "Close Positions"}
-                </button>
+                  </button>
+                </div>
               </div>
               {closeDisabledReason && (
                 <div className="text-[11px] font-mono text-slate-500">{closeDisabledReason}</div>
@@ -632,21 +642,6 @@ export const ExternalPositionsGadget: React.FC = () => {
                   )}
                 </div>
               )}
-              <div className="flex items-center justify-between gap-2 pt-1">
-                <span className="text-[11px] font-mono text-slate-500">
-                  {selected.closeSupported
-                    ? "Per-ticker / per-venue close — this popup only."
-                    : `${selected.venue} cannot place live orders through the bot.`}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => closeDetails()}
-                  className="px-3 py-1.5 rounded-lg text-xs font-mono font-bold border bg-surface text-slate-600 border-surface-border hover:text-slate-900 cursor-pointer"
-                  title="Close popup"
-                >
-                  Done
-                </button>
-              </div>
             </div>
           )}
             </div>
