@@ -2,6 +2,7 @@
 
 mod attribution;
 mod auto_exec;
+mod autotune;
 mod commands;
 mod equity_attribution;
 mod external_positions;

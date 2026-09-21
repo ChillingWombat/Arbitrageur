@@ -2169,3 +2169,22 @@ clippy+fmt clean, app restarted on the new binary.
 
 - Depth is a *relative* weight for VWMA — base-qty units are consistent across venues for the same symbol; USD conversion would add price noise, not accuracy.
 - Retention: depth columns ride the existing `spread_samples` retention pass; no new pruning needed.
+
+## Tauri module refactor — stage 1: AutoTune extracted to `autotune.rs`
+
+### What shipped
+
+- `frontend/src-tauri/src/autotune.rs` (new, ~950 lines): the entire AutoTune domain — `AutotuneRowDto`/`BannerDto`/`ReadinessDto`/`RecommendationDto`/`ApplyResultDto`, `tune_params_from_dto`, `map_autotune_report`, `autotune_tiers_with_cap`, `get_autotune_recommendation_impl` + IPC, apply path (`apply_ready_to_strategy`/`_ticker`, `apply_autotune_rows_inner`, `apply_autotune_selected_impl` + IPC), mode machinery (KV keys, `TickerAutotuneModeDto`, mode get/set impls + IPC), `run_scheduled_autotune`, `spawn_autotune_scheduler`.
+- `commands.rs` shrank ~935 lines (21625 → 20695). Cross-module deps promoted `pub(crate)`: `validate_market_symbol`, `canonical_sliding_window`, `BASELINE_RETENTION_MS`. `PAIR_ALIGN_GAP_MS` reused from `crate::monitor` (canonical duplicate existed).
+- `pub(crate) use crate::autotune::*;` re-export in commands.rs keeps every `commands::<name>` path working — IPC registration in `main.rs`, in-file tests, zero call-site churn.
+- `mod autotune;` declared in main.rs.
+
+### Verification
+
+- 371 desktop tests pass (incl. all 8 autotune tests through the re-export), clippy clean, fmt clean.
+
+### Pickup notes
+
+- Stage 2 candidates per crosscheck 4.16 (domain-first): vault/account commands (~1.7k lines, non-contiguous — impls ~9905–10600 + IPC ~11336–11410 + shared credential helpers used by settings save), spatial execution, funding/basis, portfolio/risk, calibration/seasonality, capabilities/live-mode policy.
+- Vault extraction caveat: `ensure_credential_migration` and credential-scrub helpers are shared with non-vault settings paths — extract together or keep helpers `pub(crate)` in commands.rs.
+- Keep stages small and separately committed — the crosscheck explicitly warns against a behavior-neutral mega-refactor.
