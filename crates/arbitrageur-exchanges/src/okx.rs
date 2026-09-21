@@ -168,7 +168,7 @@ impl OkxAdapter {
     /// HMAC-SHA256, base64. Pure for unit testing.
     fn sign_request(secret: &Zeroizing<String>, preimage: &str) -> anyhow::Result<String> {
         use base64::Engine;
-        use hmac::{Hmac, Mac};
+        use hmac::{digest::KeyInit, Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes())

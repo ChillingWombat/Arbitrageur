@@ -215,7 +215,7 @@ impl BinanceAdapter {
     /// Sign request parameters with HMAC-SHA256 (Binance USDT-M standard).
     /// Returns the raw query string with `&signature=` appended.
     fn sign_query(secret: &Zeroizing<String>, query: &str) -> anyhow::Result<String> {
-        use hmac::{Hmac, Mac};
+        use hmac::{digest::KeyInit, Hmac, Mac};
         use sha2::Sha256;
         type HmacSha256 = Hmac<Sha256>;
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes())

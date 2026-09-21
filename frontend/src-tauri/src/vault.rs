@@ -221,8 +221,8 @@ impl SecureVault {
     fn derive_legacy_key(password: &str, salt: &[u8]) -> Zeroizing<[u8; 32]> {
         let mut key = Zeroizing::new([0u8; 32]);
         let hmac_signer = |data: &[u8]| -> Zeroizing<[u8; 32]> {
-            use hmac::Mac;
-            let mut mac = <HmacSha256 as Mac>::new_from_slice(password.as_bytes())
+            use hmac::{digest::KeyInit, Mac};
+            let mut mac = <HmacSha256 as KeyInit>::new_from_slice(password.as_bytes())
                 .expect("HMAC can take key of any size");
             mac.update(data);
             let result = mac.finalize();

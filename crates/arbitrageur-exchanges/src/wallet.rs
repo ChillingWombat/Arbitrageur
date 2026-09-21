@@ -81,7 +81,7 @@ impl EvmWalletSigner {
         let secret = parse_secret_hex(hex_key)?;
         let key = SigningKey::from_bytes((&*secret).into())
             .map_err(|e| anyhow::anyhow!("EVM private key is not a valid secp256k1 scalar: {e}"))?;
-        let uncompressed = key.verifying_key().to_encoded_point(false);
+        let uncompressed = key.verifying_key().to_sec1_point(false);
         let mut raw = [0u8; 64];
         raw.copy_from_slice(&uncompressed.as_bytes()[1..65]);
         let address = eth_address_from_pubkey_uncompressed(&raw);
@@ -107,9 +107,8 @@ impl EvmWalletSigner {
     /// with `v` in `{27, 28}` (Ethereum convention).
     pub fn sign_digest(&self, digest: &[u8; 32]) -> anyhow::Result<[u8; 65]> {
         let key = self.signing_key()?;
-        let (sig, recid): (k256::ecdsa::Signature, RecoveryId) = key
-            .sign_prehash_recoverable(digest)
-            .map_err(|e| anyhow::anyhow!("secp256k1 signing failed: {e}"))?;
+        let (sig, recid): (k256::ecdsa::Signature, RecoveryId) =
+            key.sign_prehash_recoverable(digest);
         let mut out = [0u8; 65];
         out[..32].copy_from_slice(&sig.r().to_bytes());
         out[32..64].copy_from_slice(&sig.s().to_bytes());
@@ -202,7 +201,7 @@ mod tests {
             recid,
         )
         .unwrap();
-        let pt = recovered.to_encoded_point(false);
+        let pt = recovered.to_sec1_point(false);
         let mut raw = [0u8; 64];
         raw.copy_from_slice(&pt.as_bytes()[1..65]);
         assert_eq!(
