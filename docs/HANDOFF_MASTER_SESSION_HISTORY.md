@@ -2208,3 +2208,21 @@ clippy+fmt clean, app restarted on the new binary.
 - Remaining domains per 4.16: spatial execution (`execute_spatial_arbitrage_inner` + helpers, ~1k lines entangled), funding scan+carry (~1.8k lines across four non-contiguous regions), triangle execution, capabilities/live-mode policy, equity snapshots, seasonality/session IPC.
 - Funding extraction caveat: `execute_funding_carry_impl` shares `resolve_signal_accounts`/`record_signal_execution` with the spatial path — extract spatial first or keep those helpers `pub(crate)` in commands.rs.
 - Each stage kept `commands::<name>` resolvable via `pub(crate) use` glob re-exports — IPC registration and tests needed zero changes.
+
+## Tauri module refactor — stages 6–7: triangle.rs + funding.rs
+
+### What shipped
+
+- `frontend/src-tauri/src/triangle.rs` (834 lines): triangle DTOs, `triangle_dust_qty`/`sweep_flatten_qty`/`flatten_step_qty` (`pub(crate)` — shared with flatten paths), `triangle_plan`, `evaluate_triangle_books`, `resolve_triangle_books` (`pub(crate)` — test-visible), scan + execute impls + IPC.
+- `frontend/src-tauri/src/funding.rs` (~2,030 lines): `FundingOpportunityDto` + helpers (`carry_gap_history`, `funding_min_apr`, `funding_round_trip_fee_bps`), `PerpBooks`, `scan_leg_rate_8h_pct`/`downsample_series`/`trend_bare_venue` (`pub(crate)` — test-visible), the per-symbol scanner, trend impl, batch/scan impls + IPC, `funding_leg_live_issue`, `execute_funding_carry_impl` + IPC.
+- `commands.rs` 18555 → 15720. New `pub(crate)` surfaces: `LIVE_ENTRY_SPATIAL_ONLY`, `validate_adapter_book`, `dec_to_f64`, `refresh_equity_expectations_after_fills`, `record_execution_failure`, `reconcile_signal_legs`, `strategy_slippage_bps`, `backtest_stats`. Dead imports pruned (`funding_carry::*`, `triangular::*`, `entry_gradient`, `StrategyMetrics`, `WfoOptimizationResult`).
+
+### Verification
+
+- 371 desktop tests pass per stage; clippy --all-targets clean; fmt clean.
+
+### Pickup notes
+
+- Seam discipline: two off-by-one slips during funding extraction (a `}` left behind, a `use` + `RouteEconomics` swept up) were caught by `cargo check` immediately — always compile right after each cut.
+- `funding.rs` depends on `reconcile_signal_legs`/`resolve_effective_leverage`/`record_execution_*` staying `pub(crate)` in commands.rs — when the spatial core extracts, retarget these imports to the execution module.
+- Remaining: spatial execution core (~3.5k lines across resolve_signal_accounts/reconcile/inner/candidates/killswitch/flatten/convergence), spot+prediction+stat-arb+OU analytics scans (~700), system-status/feed IPC (~800), equity/filters (~700). `mod tests` (~8k lines) stays in commands.rs unless commands becomes a directory module.

@@ -8,6 +8,7 @@ mod commands;
 mod equity_attribution;
 mod external_positions;
 mod feed;
+mod funding;
 mod monitor;
 mod monitor_ipc;
 mod num;
@@ -18,6 +19,7 @@ mod state;
 mod state_store;
 mod strategy_config;
 mod strategy_filters;
+mod triangle;
 mod vault;
 mod ws_primary;
 
