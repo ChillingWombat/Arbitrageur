@@ -27,6 +27,12 @@ pub struct LighterAdapter {
     /// reuse a server nonce (a reused nonce is rejected; worse, a caller
     /// might misread the rejection as a fill problem).
     order_lock: tokio::sync::Mutex<()>,
+    /// `orderBookDetails` is static listing metadata — memoize resolved
+    /// market ids so per-symbol book polling costs one REST call, not two.
+    /// Only successful resolutions are cached; a miss refetches so new
+    /// listings appear without a restart.
+    market_id_cache:
+        parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, u64)>>,
 }
 
 impl LighterAdapter {
@@ -70,6 +76,7 @@ impl LighterAdapter {
             api_key_index: parking_lot::RwLock::new(None),
             api_key_private_key: parking_lot::RwLock::new(api_key_private_key.map(Zeroizing::new)),
             order_lock: tokio::sync::Mutex::new(()),
+            market_id_cache: parking_lot::Mutex::new(std::collections::HashMap::new()),
             rate_limiter: AccountRequestCoordinator::new(venue_id, 200, 3000, 500, 15000),
         }
     }
@@ -246,6 +253,25 @@ impl LighterAdapter {
         }
         Ok(map)
     }
+
+    /// Resolve a symbol to its Lighter market id, memoized for 5 minutes —
+    /// the details payload is static listing metadata and refetching it on
+    /// every book poll doubles this venue's REST pressure for no benefit.
+    async fn market_id_for(&self, symbol: &str) -> anyhow::Result<u64> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        let key = symbol.trim().to_uppercase();
+        if let Some((at, id)) = self.market_id_cache.lock().get(&key) {
+            if at.elapsed() < TTL {
+                return Ok(*id);
+            }
+        }
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let id = resolve_market_id(&details, symbol)?;
+        self.market_id_cache
+            .lock()
+            .insert(key, (std::time::Instant::now(), id));
+        Ok(id)
+    }
 }
 
 #[async_trait]
@@ -375,8 +401,7 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let details = self.get_json("/api/v1/orderBookDetails").await?;
-        let market_id = resolve_market_id(&details, symbol)?;
+        let market_id = self.market_id_for(symbol).await?;
 
         let res = self
             .get_json(&format!(

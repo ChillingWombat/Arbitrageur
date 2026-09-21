@@ -61,7 +61,15 @@ fn venue_ws_enabled(state: &AppEngineState, venue: &str) -> bool {
 async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
     let mut fail_streak: u32 = 0;
     loop {
-        if *state.is_live_mode.read() || *state.is_paused.read() {
+        // Keep WS feeds alive in live mode: a real-time pushed book is
+        // fresher than any REST poll, and every WS-fed read is one less REST
+        // call against the venue's edge quota. Execution still enforces its
+        // own freshness bound + identity validation on whatever the hub
+        // serves, and falls back to a single REST fetch when the hub is
+        // stale — suspending the feed here would force ALL reads (monitor,
+        // radar, balances, execution) onto REST and has already tripped
+        // Lighter's WAF once. Engine pause still suspends feeds.
+        if *state.is_paused.read() {
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
