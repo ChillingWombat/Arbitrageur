@@ -6,6 +6,7 @@ import type {
   SignalSeriesDto,
   MatrixBaselineSnapshotDto,
   AutotuneRecommendationDto,
+  AutotuneReadinessDto,
   AutotuneApplyResultDto,
   SeasonalityRunSummaryDto,
   SpatialOpportunityDto,
@@ -460,6 +461,30 @@ export function normalizeAutotuneRecommendation(r: any, symbol: string): Autotun
     },
     session_tau_scale: scale(r?.session_tau_scale ?? r?.sessionTauScale),
     session_sigma_scale: scale(r?.session_sigma_scale ?? r?.sessionSigmaScale),
+    readiness: normalizeAutotuneReadiness(r?.readiness),
+  };
+}
+
+/** Structured evidence inventory; missing/partial payloads degrade to an
+ *  honest "no evidence" object rather than fabricated readiness. */
+function normalizeAutotuneReadiness(r: any): AutotuneReadinessDto {
+  const venues = Array.isArray(r?.venues_seen)
+    ? r.venues_seen.filter((v: any) => typeof v === "string")
+    : [];
+  const blockers = Array.isArray(r?.blockers)
+    ? r.blockers.filter((b: any) => typeof b === "string")
+    : [];
+  const pairObs = Math.max(0, Math.floor(Number(r?.pair_observations) || 0));
+  const minReq = Math.max(0, Math.floor(Number(r?.min_observations_required) || 0));
+  return {
+    venues_seen: venues,
+    history_span_secs: Math.max(0, Number(r?.history_span_secs) || 0),
+    multi_venue_coverage: Math.min(1, Math.max(0, Number(r?.multi_venue_coverage) || 0)),
+    pair_observations: pairObs,
+    total_pair_observations: Math.max(0, Math.floor(Number(r?.total_pair_observations) || 0)),
+    min_observations_required: minReq,
+    obs_floor_met: r?.obs_floor_met === true,
+    blockers,
   };
 }
 

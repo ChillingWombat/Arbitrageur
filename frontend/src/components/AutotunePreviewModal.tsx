@@ -159,6 +159,23 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
           {couplingLine != null && (
             <p className="text-[11px] font-mono text-slate-500">{couplingLine}</p>
           )}
+          {recommendation?.readiness && (
+            <div className="mt-1.5 text-[11px] font-mono">
+              <p className="text-slate-500">
+                evidence: {recommendation.readiness.venues_seen.length} venue
+                {recommendation.readiness.venues_seen.length === 1 ? "" : "s"} (
+                {recommendation.readiness.venues_seen.join(", ") || "none"}) ·{" "}
+                {(recommendation.readiness.history_span_secs / 3600).toFixed(1)}h span ·{" "}
+                {recommendation.readiness.pair_observations}/
+                {recommendation.readiness.min_observations_required} pair obs ·{" "}
+                {(recommendation.readiness.multi_venue_coverage * 100).toFixed(0)}% multi-venue
+                coverage
+              </p>
+              {recommendation.readiness.blockers.map((b, i) => (
+                <p key={i} className="text-amber-600">· {b}</p>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 font-mono">
