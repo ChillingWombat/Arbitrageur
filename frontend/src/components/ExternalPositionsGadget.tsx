@@ -493,9 +493,9 @@ export const ExternalPositionsGadget: React.FC = () => {
                   </button>
                 </div>
               </div>
-              <div className="flex flex-wrap items-end gap-2">
+              <div className="flex items-center gap-3">
                 <label
-                  className="space-y-1"
+                  className="flex-1 flex items-center gap-2 min-w-0"
                   title={
                     mode === "limit"
                       ? "Limit price for the close order"
@@ -504,19 +504,19 @@ export const ExternalPositionsGadget: React.FC = () => {
                         : "Market mode takes the book — no price needed"
                   }
                 >
-                  <span className="block text-[11px] font-mono font-bold text-slate-500">LIMIT PRICE</span>
+                  <span className="text-[11px] font-mono font-bold text-slate-500 whitespace-nowrap">LIMIT PRICE</span>
                   <input
                     value={limitPx}
                     onChange={(e) => { setLimitPx(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
                     disabled={mode !== "limit"}
                     inputMode="decimal"
                     placeholder={mode === "auto" ? "auto" : mode === "market" ? "mkt" : ""}
-                    className="w-28 px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="flex-1 min-w-0 px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-40 disabled:cursor-not-allowed"
                   />
                 </label>
-                <label className="space-y-1" title="Percentage of the external residual to close — computed from a fresh account read at submit (or fire) time">
-                  <span className="block text-[11px] font-mono font-bold text-slate-500">CLOSE</span>
-                  <span className="relative block w-24">
+                <label className="flex-1 flex items-center gap-2 min-w-0" title="Portion of the external residual to close — computed from a fresh account read at submit (or fire) time">
+                  <span className="text-[11px] font-mono font-bold text-slate-500 whitespace-nowrap">POSITION PORTION</span>
+                  <span className="relative flex-1 min-w-0">
                     <input
                       value={closePct}
                       onChange={(e) => { setClosePct(e.target.value.replace(/[^0-9.]/g, "")); setArmed(false); }}
