@@ -331,7 +331,7 @@ Stale copy still calls AutoTune “recommend-only” and “transcribe manually�
 Update issues/docs/status text to distinguish implemented Phase 2 pieces from genuine remaining scope. Add the preset/manual-guidance layer now; retain paper-feedback and autonomous tuning as explicitly gated research unless backed by enough real history.
 
 **Initial status:** OPEN\
-**Remediation status:** PARTIALLY CLOSED. `docs/PARAMETER_GUIDE.md` now provides practical manual parameter guidance and explicitly explains why named risk presets remain gated without an outcome corpus. AutoTune copy distinguishes READY-row application from HELD/manual authority. Still open: evidence-backed presets, paper-fill/slippage feedback joins, per-ticker tuning modes, a structured readiness object, and a real WFO command.
+**Remediation status:** PARTIALLY CLOSED. `docs/PARAMETER_GUIDE.md` now provides practical manual parameter guidance and explicitly explains why named risk presets remain gated without an outcome corpus. AutoTune copy distinguishes READY-row application from HELD/manual authority. Still open: evidence-backed presets, paper-fill/slippage feedback joins, per-ticker tuning modes, and a structured readiness object. **Update (post-review):** the WFO command is now real — `run_wfo_calibration_impl` rebuilds the executable cross-venue edge series (max bid − min ask across distinct venues) from durable `spread_samples`, prices friction from the two cheapest admitted venues' effective taker fees plus an exit allowance, takes the target from the monitor's configured expected-profit floor, and runs the walk-forward engine over it. It fails closed below 40 multi-venue observations and the fabricated fallback `EstimatorEvaluation` (hardcoded Sharpe/profit/win-rate) was removed — unevaluable or insufficient inputs now return honest empty/zero results with an explanatory note. The Strategy Performance button is enabled and surfaces the error inline.
 
 ---
 
@@ -641,7 +641,7 @@ Independent post-remediation verification produced:
 | Secret scan (gitleaks, 154 commits) | PASS | 0 leaks after fingerprint-scoped allowlist of 7 confirmed test fixtures/dev sentinels in `.gitleaks.toml` |
 | File modes | PASS | Index modes normalized (644 configs/docs, 755 `backup-sqlite.sh`); NTFS working-tree 777 display is filesystem mapping, not committed |
 
-The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are venue sandbox/canary evidence for the opt-in residual-resolution/cancel-retry mechanisms, evidence-backed presets, deeper AutoTune feedback joins/WFO, and the staged Tauri-module refactor.
+The static findings above were independently traced to their actual call paths rather than copied from the compared review. The only intentionally open items are venue sandbox/canary evidence for the opt-in residual-resolution/cancel-retry mechanisms, evidence-backed presets, deeper AutoTune feedback joins, and the staged Tauri-module refactor.
 
 ---
 

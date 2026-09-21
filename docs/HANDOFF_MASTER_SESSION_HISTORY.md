@@ -2096,3 +2096,21 @@ clippy+fmt clean, app restarted on the new binary.
 - Funding positions resolve only when the virtual-ledger lot closes — funding carries that never open lots keep predictions pending; extend `close_flattened_spatial_lot` coverage if funding ever needs scoring.
 - `pair_win_probability` returns the Beta-shrunken point — tests asserting raw hit rates were updated to the shrunken value.
 - Thin-evidence UX: `netWinProbability=None` under min_trials; tooltips always show effective n + censored share.
+
+## WFO calibration made real (post-statistical-layer follow-up)
+
+### What shipped
+
+- `run_wfo_calibration_impl` is a real command now. It rebuilds the executable cross-venue edge series from durable `spread_samples` — for each timestamp bucket it takes `max(best_bid) − min(best_ask)` across **distinct** venues (same-venue crossed ticks are not arb edge), normalized to bps on the buy ask. Fails closed below 40 multi-venue observations with an explicit count.
+- Friction input = sum of the two cheapest **admitted** venues' `effective_venue_fee_bps` (per-leg taker) + 4 bps exit-slippage allowance; target = the monitor's configured `min_expected_profit_bps` floor when the engine is up. Candidate windows 10–200 ticks.
+- Removed the fabricated fallback in `run_walk_forward_optimization`: an empty evaluation set previously returned a hardcoded "Sharpe 1.5, +25 BPS, 80% win" evaluation — now returns an honest empty result with an explanatory note; the <40-tick default keeps the VWMA(50) prior but reports unmeasured (0.0) scores.
+- Strategy Performance → "Run WFO — {symbol}" button is enabled (was hard-disabled "unavailable") and surfaces the backend error inline instead of console-only.
+
+### Verification
+
+- 363/363 desktop tests (new `test_wfo_calibration_runs_on_seeded_history` seeds a mean-reverting two-venue series), 168+42 frontend assertions, tsc/clippy/fmt clean.
+
+### Pickup notes
+
+- `QuoteObservation.top_depth_usd` is fed a constant 1.0 — `spread_samples` does not persist depth, so VWMA degenerates to equal-weighting. If depth weighting ever matters, extend the sample schema.
+- Series granularity = `spread_samples` batch cadence (per poll tick), not fixed-frequency bars; the window sizes are in observations.
