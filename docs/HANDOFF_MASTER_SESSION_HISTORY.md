@@ -2268,3 +2268,9 @@ clippy+fmt clean, app restarted on the new binary.
 
 - HL WS remains venue-blocked for this host's connection pattern; REST feed covers the venue. If HL WS is ever required, options: dedicated egress IP, or reduce conn-per-IP pressure.
 - `FeedOutcome::Disabled` is the fail-closed pattern for config-gated lanes.
+
+## state_store.rs → state_store/ directory split (post-4.16 follow-up)
+
+- `frontend/src-tauri/src/state_store.rs` (7817 lines) renamed to `state_store/mod.rs` (1967 lines: types, table/migration constants V1–V28, lifecycle `open`/`init`/`migrate`).
+- Ten domain modules each hold their own `impl StateStore` block — descendant modules see the parent's private fields/helpers, so no visibility or call-site changes: `accounts.rs` (credential profiles + strategy routes), `signals.rs` (signal lifecycle, legs, durable order identity, predictions, `legs_for`), `config.rs` (KV, strategy params, monitor/radar config JSON, ticker exemptions, venue tiers), `samples.rs` (spread/volume/funding-rate samples + retention), `seasonality.rs` (session profiles/hour bins/HAR anchors/promotion state), `autotune.rs` (apply-event audit), `logs.rs` (execution logs + db size), `equity.rs` (margin snapshots + equity expectations/events), `monitor.rs` (bot positions/decisions, spatial baselines, monitor signal history), `exits.rs` (scheduled-exit queue). Tests moved to `tests.rs` (2897 lines, `#[cfg(test)] mod tests;`).
+- Verified: 371 desktop tests pass, clippy clean, fmt clean, release build green. Pure structural move — zero behavior change.
