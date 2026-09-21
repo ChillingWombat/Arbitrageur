@@ -41,6 +41,22 @@ pub fn spawn_all(state: Arc<AppEngineState>) {
     }
 }
 
+/// Bounded WS connect: `connect_async` has no internal timeout, so a
+/// stalled upgrade (edge holding the socket open on a flagged IP) wedges
+/// the lane forever with zero log output. 10s covers a healthy handshake
+/// with margin; failure surfaces as a normal lane end + backoff retry.
+async fn ws_connect(
+    url: &str,
+) -> anyhow::Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+> {
+    match tokio::time::timeout(Duration::from_secs(10), connect_async(url)).await {
+        Ok(Ok((ws, _))) => Ok(ws),
+        Ok(Err(e)) => Err(anyhow::anyhow!("WS connect failed for {url}: {e}")),
+        Err(_) => Err(anyhow::anyhow!("WS connect timed out for {url}")),
+    }
+}
+
 fn venue_ws_enabled(state: &AppEngineState, venue: &str) -> bool {
     let flag = {
         let s = state.settings.read();
@@ -80,10 +96,10 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
         match run_connection(venue, &state).await {
             Ok(FeedOutcome::Stop) => return,
             Ok(FeedOutcome::Reconnect) => {
-                tracing::debug!("feed: {venue} connection ended; reconnecting");
+                tracing::info!("feed: {venue} connection ended; reconnecting");
             }
             Err(e) => {
-                tracing::debug!("feed: {venue} lane ended: {e}");
+                tracing::info!("feed: {venue} lane ended: {e}");
             }
         }
         fail_streak = (fail_streak + 1).min(8);
@@ -113,7 +129,8 @@ async fn run_connection(
 /// Shared parse -> identity-validate -> hub pipeline. Anything failing
 /// validation is dropped; the lane's books go stale, never fabricated.
 fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, symbol: &str) {
-    if validate_feed_book(book, venue_id, symbol).is_err() {
+    if let Err(e) = validate_feed_book(book, venue_id, symbol) {
+        tracing::debug!("feed: {venue_id} dropped book for {symbol}: {e}");
         return;
     }
     state.market_data_hub.update_orderbook_from_ws(book.clone());
@@ -137,7 +154,10 @@ fn validate_feed_book(
             book.venue, expected_venue
         ));
     }
-    if book.symbol != expected_symbol {
+    // Hub keys normalize spellings — identity holds on canonical base.
+    if crate::state_store::canonical_base(&book.symbol)
+        != crate::state_store::canonical_base(expected_symbol)
+    {
         return Err(format!(
             "order book symbol '{}' does not match requested symbol '{}'",
             book.symbol, expected_symbol
@@ -199,12 +219,16 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     if coin_map.is_empty() {
         anyhow::bail!("hyperliquid lists no subscribable markets");
     }
-    let (ws, _) = connect_async(HYPERLIQUID_WS_URL).await?;
+    let ws = ws_connect(HYPERLIQUID_WS_URL).await?;
     let (mut write, mut read) = ws.split();
     for coin in coin_map.keys() {
         let frame = hyperliquid_subscribe_message(coin).to_string();
         write.send(Message::Text(frame)).await?;
     }
+    tracing::info!(
+        "feed: hyperliquid WS connected; subscribed {} coins",
+        coin_map.len()
+    );
     while let Some(msg) = read.next().await {
         let msg = msg?;
         let Message::Text(text) = msg else {
@@ -291,12 +315,17 @@ async fn run_lighter_protocol(
             lighter_default_market_symbol_map()
         }
     };
-    let (ws, _) = connect_async(&ws_url).await?;
+    let ws = ws_connect(&ws_url).await?;
     let (mut write, mut read) = ws.split();
     for market_id in symbol_map.keys() {
         let frame = lighter_subscribe_message(*market_id).to_string();
         write.send(Message::Text(frame)).await?;
     }
+    tracing::info!(
+        "feed: {venue} WS connected; subscribed {} markets ({})",
+        symbol_map.len(),
+        symbol_map.values().cloned().collect::<Vec<_>>().join(",")
+    );
     let mut lanes: HashMap<u64, LighterLaneBook> = symbol_map
         .iter()
         .map(|(mid, sym)| {
@@ -418,12 +447,16 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     for base in &bases {
         topics.insert(format!("PERP_{base}_USDC@orderbook"), base.clone());
     }
-    let (ws, _) = connect_async(&ws_url).await?;
+    let ws = ws_connect(&ws_url).await?;
     let (mut write, mut read) = ws.split();
     for (sub_id, base) in (1u64..).zip(topics.values()) {
         let frame = vanta_subscribe_message(sub_id, base).to_string();
         write.send(Message::Text(frame)).await?;
     }
+    tracing::info!(
+        "feed: vanta WS connected; subscribed {} topics",
+        topics.len()
+    );
     while let Some(msg) = read.next().await {
         let msg = msg?;
         let Message::Text(text) = msg else {

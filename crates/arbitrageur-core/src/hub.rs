@@ -49,6 +49,54 @@ struct CachedFunding {
     funding: FundingRate,
 }
 
+/// Hub storage key for a symbol: uppercase canonical base with quote and
+/// instrument-class suffixes stripped ("ETH-USDC" -> "ETH", "BTC-SPOT" ->
+/// "BTC-SPOT" — spot and perp stay distinct), plus the economic index
+/// aliases used by the engine's canonical_base ("US100" -> "NAS100").
+///
+/// WS feed lanes publish bare bases while REST/UI callers pass canonical
+/// venue symbols; normalizing the key at the storage layer means a book
+/// fed under any spelling is found under every spelling. The monitor
+/// universe is already deduplicated per (venue, base), so one slot per
+/// base per venue matches the system's granularity.
+fn normalize_symbol_key(symbol: &str) -> String {
+    let up = symbol.trim().to_uppercase();
+    let mut stripped = up.as_str();
+    let mut cut = false;
+    loop {
+        let mut again = false;
+        for suf in [
+            "-USDC", "-USDT", "-USD1", "-USD", "-PERP", "-SWAP", "-U", "/USDC", "/USDT", "/USD",
+        ] {
+            if stripped.len() > suf.len() && stripped.ends_with(suf) {
+                stripped = &stripped[..stripped.len() - suf.len()];
+                cut = true;
+                again = true;
+                break;
+            }
+        }
+        if !again {
+            break;
+        }
+    }
+    if !cut {
+        for suf in ["USDC", "USDT", "USD"] {
+            if up.ends_with(suf) && up.len() - suf.len() >= 3 {
+                stripped = &up[..up.len() - suf.len()];
+                break;
+            }
+        }
+    }
+    match stripped {
+        "US100" | "TECH100" | "NAS100" | "USTEC" | "USTEC100" | "NQ100" | "NQ" => {
+            "NAS100".to_string()
+        }
+        "US500" | "SPX500" | "SP500" | "SPX" => "SPX500".to_string(),
+        "US30" | "DJ30" | "WS30" | "DJI" | "DJIA" => "US30".to_string(),
+        _ => stripped.to_string(),
+    }
+}
+
 /// Centralized Market Data Hub (Ticker Plant).
 ///
 /// Implements the Single Ingestion -> Synchronized In-Memory Cache -> Pub/Sub Broadcast
@@ -124,9 +172,11 @@ impl MarketDataHub {
             funding_rate_8h: None,
         };
 
-        // Write to thread-safe synchronized cache
+        // Write to thread-safe synchronized cache — keyed on the
+        // normalized base so WS ("ETH") and REST ("ETH-USDC") spellings
+        // share one slot.
         {
-            let key = (book.venue.clone(), book.symbol.clone());
+            let key = (book.venue.clone(), normalize_symbol_key(&book.symbol));
             let mut lock = self.orderbooks.write();
             lock.insert(
                 key,
@@ -154,7 +204,7 @@ impl MarketDataHub {
     /// Store a newly ingested funding rate.
     pub fn update_funding(&self, funding: FundingRate) {
         let now = Instant::now();
-        let key = (funding.venue.clone(), funding.symbol.clone());
+        let key = (funding.venue.clone(), normalize_symbol_key(&funding.symbol));
         let mut lock = self.funding_rates.write();
         lock.insert(
             key,
@@ -167,7 +217,7 @@ impl MarketDataHub {
 
     /// Retrieve the latest cached orderbook for a specific venue and symbol.
     pub fn get_orderbook(&self, venue: &VenueId, symbol: &str) -> Option<OrderBook> {
-        let key = (venue.clone(), symbol.to_string());
+        let key = (venue.clone(), normalize_symbol_key(symbol));
         let lock = self.orderbooks.read();
         lock.get(&key).map(|c| c.book.clone())
     }
@@ -180,7 +230,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<OrderBook> {
         let max_age = max_age.unwrap_or(self.default_ttl);
-        let key = (venue.clone(), symbol.to_string());
+        let key = (venue.clone(), normalize_symbol_key(symbol));
         let lock = self.orderbooks.read();
         if let Some(cached) = lock.get(&key) {
             if cached.received_at.elapsed() <= max_age {
@@ -209,7 +259,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<OrderBook> {
         let max_age = max_age.unwrap_or(self.default_ttl);
-        let key = (venue.clone(), symbol.to_string());
+        let key = (venue.clone(), normalize_symbol_key(symbol));
         let lock = self.orderbooks.read();
         if let Some(cached) = lock.get(&key) {
             if cached.source == BookSource::Ws && cached.received_at.elapsed() <= max_age {
@@ -226,11 +276,12 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Vec<(VenueId, OrderBook)> {
         let max_age = max_age.unwrap_or(self.default_ttl);
+        let wanted = normalize_symbol_key(symbol);
         let lock = self.orderbooks.read();
         let mut results = Vec::new();
 
         for ((venue, sym), cached) in lock.iter() {
-            if sym == symbol && cached.received_at.elapsed() <= max_age {
+            if *sym == wanted && cached.received_at.elapsed() <= max_age {
                 results.push((venue.clone(), cached.book.clone()));
             }
         }
@@ -246,7 +297,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<FundingRate> {
         let max_age = max_age.unwrap_or(self.default_ttl * 10);
-        let key = (venue.clone(), symbol.to_string());
+        let key = (venue.clone(), normalize_symbol_key(symbol));
         let lock = self.funding_rates.read();
         if let Some(cached) = lock.get(&key) {
             if cached.received_at.elapsed() <= max_age {
@@ -316,6 +367,38 @@ mod tests {
         assert!(hub
             .get_valid_ws_book(&vid, "ETH", Some(Duration::from_millis(20)))
             .is_none());
+    }
+
+    #[test]
+    fn symbol_spellings_share_one_slot() {
+        let hub = MarketDataHub::new(16, 400);
+        let vid = VenueId::new("lighter");
+        // WS lanes publish bare bases; REST/UI readers ask canonical —
+        // both resolve to the same normalized key.
+        hub.update_orderbook_from_ws(book("lighter", "ETH"));
+        assert!(hub
+            .get_valid_orderbook(&vid, "ETH-USDC", Some(Duration::from_millis(350)))
+            .is_some());
+        hub.update_orderbook(book("lighter", "BTC-USDC"));
+        assert!(hub
+            .get_valid_ws_book(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_none());
+        assert!(hub
+            .get_valid_orderbook(&vid, "BTC", Some(Duration::from_millis(350)))
+            .is_some());
+    }
+
+    #[test]
+    fn spot_and_perp_stay_distinct() {
+        let hub = MarketDataHub::new(16, 400);
+        let vid = VenueId::new("lighter");
+        hub.update_orderbook(book("lighter", "BTC-SPOT"));
+        assert!(hub
+            .get_valid_orderbook(&vid, "BTC-USDC", Some(Duration::from_millis(350)))
+            .is_none());
+        assert!(hub
+            .get_valid_orderbook(&vid, "BTC-SPOT", Some(Duration::from_millis(350)))
+            .is_some());
     }
 
     #[test]

@@ -2434,7 +2434,10 @@ fn validate_monitor_book(
             book.venue, expected_venue
         ));
     }
-    if book.symbol != expected_symbol {
+    // Hub keys normalize spellings — identity holds on canonical base.
+    if crate::state_store::canonical_base(&book.symbol)
+        != crate::state_store::canonical_base(expected_symbol)
+    {
         return Err(format!(
             "order book symbol '{}' does not match requested symbol '{}'",
             book.symbol, expected_symbol

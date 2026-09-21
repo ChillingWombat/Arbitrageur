@@ -825,7 +825,12 @@ fn validate_adapter_book(
             book.venue, expected_venue
         ));
     }
-    if book.symbol != expected_symbol {
+    // Hub keys normalize symbol spellings (WS lanes publish "ETH", REST
+    // callers ask "ETH-USDC"); identity holds when the canonical base
+    // matches — a genuinely different market has a different base.
+    if crate::state_store::canonical_base(&book.symbol)
+        != crate::state_store::canonical_base(expected_symbol)
+    {
         return Err(format!(
             "order book symbol '{}' does not match requested symbol '{}'",
             book.symbol, expected_symbol
@@ -2075,6 +2080,8 @@ async fn resolve_triangle_books(
 ) -> Option<[OrderBook; 3]> {
     let mut out: Vec<OrderBook> = Vec::with_capacity(3);
     for sym in symbols {
+        // Hub keys normalize spellings, so a WS-fed bare-base book hits a
+        // canonical-symbol lookup — only a cold hub spends a REST call.
         let book = match state.market_data_hub.get_valid_orderbook(
             vid,
             sym,

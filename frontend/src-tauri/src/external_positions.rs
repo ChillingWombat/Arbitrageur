@@ -351,17 +351,11 @@ pub async fn get_external_positions_impl(
 /// Orderbook depth (bids, asks) plus the book timestamp.
 type DepthWithTs = (Vec<(f64, f64)>, Vec<(f64, f64)>, i64);
 
-fn hub_book_levels(
-    state: &AppEngineState,
+fn depth_from_book(
+    book: &arbitrageur_core::quote::OrderBook,
     venue: &str,
     symbol: &str,
 ) -> Result<DepthWithTs, String> {
-    let book = state
-        .market_data_hub
-        .get_valid_orderbook(&VenueId::from(venue), symbol, None)
-        .ok_or_else(|| {
-            format!("No live orderbook for {symbol} on {venue} — refresh the venue feed first")
-        })?;
     let bids: Vec<(f64, f64)> = book
         .bids
         .iter()
@@ -383,6 +377,61 @@ fn hub_book_levels(
         .signed_duration_since(book.timestamp)
         .num_milliseconds();
     Ok((bids, asks, age_ms))
+}
+
+/// Resolve a fresh book for a close: hub first (keys are normalized, so
+/// WS bare-base books and REST canonical books share one slot), then a
+/// single adapter REST fetch across spelling variants that seeds the hub.
+/// Fail-closed: when every source is unavailable the error says so; no
+/// price is ever synthesized.
+async fn close_book_levels(
+    state: &AppEngineState,
+    adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+    venue: &str,
+    symbols: &[&str],
+) -> Result<DepthWithTs, String> {
+    let venue_id = VenueId::from(venue);
+    for s in symbols {
+        if let Some(book) = state
+            .market_data_hub
+            .get_valid_orderbook(&venue_id, s, None)
+        {
+            if let Ok(depth) = depth_from_book(&book, venue, s) {
+                return Ok(depth);
+            }
+        }
+    }
+    let mut aliases: Vec<String> = Vec::new();
+    for s in symbols {
+        for alias in crate::state_store::spread_symbol_aliases(s) {
+            if !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+    }
+    let mut rest_err = String::new();
+    for alias in &aliases {
+        match adapter.fetch_orderbook(alias).await {
+            Ok(book) => {
+                state.market_data_hub.update_orderbook(book.clone());
+                if let Ok(depth) = depth_from_book(&book, venue, alias) {
+                    return Ok(depth);
+                }
+            }
+            Err(e) => rest_err = e.to_string(),
+        }
+    }
+    Err(if rest_err.is_empty() {
+        format!(
+            "No live orderbook for {} on {venue} — feed is stale or disconnected",
+            symbols.first().unwrap_or(&"?")
+        )
+    } else {
+        format!(
+            "No live orderbook for {} on {venue} — feed is stale and REST fetch failed: {rest_err}",
+            symbols.first().unwrap_or(&"?")
+        )
+    })
 }
 
 /// Price a friction-aware close: touch vs depth-VWAP, limit-vs-market call,
@@ -418,12 +467,11 @@ pub async fn recommend_external_close_impl(
     let long = pos.signed_quantity() > dec!(0);
     let close_side = if long { "Sell" } else { "Buy" };
 
-    // Hub books key on the engine/canonical spelling; try the normalized
-    // account symbol first, then the caller's spelling.
-    let (bids, asks, age_ms) = match hub_book_levels(state, &venue_lc, &pos.symbol) {
-        Ok(v) => v,
-        Err(_) => hub_book_levels(state, &venue_lc, symbol).map_err(|e| e.to_string())?,
-    };
+    // Hub books key on whichever spelling fed them (WS lanes publish bare
+    // bases, REST polls echo the caller's symbol); aliases cover both, then
+    // a one-shot REST fetch is the cold-start fallback.
+    let (bids, asks, age_ms) =
+        close_book_levels(state, &adapter, &venue_lc, &[&pos.symbol, symbol]).await?;
     // Closing levels: a long sells into bids, a short buys from asks.
     let levels: Vec<(f64, f64)> = if long { bids.clone() } else { asks.clone() };
     let touch = levels[0].0;

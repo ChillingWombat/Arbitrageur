@@ -1831,3 +1831,77 @@ positions on either venue.
    honestly label).
 4. Do NOT touch ZEC or any existing position; do not weaken fail-closed
    checks to silence warnings; keep the 30-min WAF cooldown as-is.
+
+## 82. Session Handoff — 2026-09-21 (ETH close unblock: hub symbol-key normalization + close-path REST fallback + feed observability)
+
+### Symptom → root cause
+
+User could not close the orphaned ~0.005 ETH Lighter residual; UI said "No
+live orderbook". Root cause chain:
+
+1. **Two hub symbol dialects.** WS feed lanes publish books under bare
+   bases (`"ETH"`, from `canonical_base` / the Lighter market map) while
+   the close path and most execution readers ask `"ETH-USDC"`.
+   `MarketDataHub` did exact-string key matching, so every WS-fed book was
+   invisible to canonical-spelling readers — they always fell through to
+   REST. On Lighter that extra REST pressure contributed to tripping the
+   venue's AWS WAF/CAPTCHA edge challenge (~30 min IP cooldown, during
+   which account AND book REST reads fail), which then also stalled the
+   WS handshake attempt.
+2. **Silent lane.** Feed lifecycle logging was `debug!`-only and the
+   subscriber default filter is `info` — zero feed lines ever appeared.
+   The Lighter lane was also slow/wedged pre-timeout (connect_async has
+   no internal timeout).
+3. **DeltaGuard label.** `isNeutral = |net_usd| <= limit` labelled a real
+   -0.005 ETH (-$13) residual "Delta Neutral" (green) — correct vs the
+   $200 tolerance but misleading next to a live open position.
+
+### Fixes landed
+
+- `crates/arbitrageur-core/src/hub.rs`: `normalize_symbol_key` applied at
+  every key boundary (orderbook store + all getters, funding store/get,
+  cross-venue snapshot). Uppercases, strips quote/class suffixes
+  (`-USDC/-USDT/-USD/-PERP/-SWAP/-U`, `/…`, bare `USDC/USDT/USD` tail),
+  keeps `-SPOT` distinct, folds index aliases (US100→NAS100 etc.).
+  One book slot per (venue, base) — matches monitor granularity which
+  already dedups per base. New tests: cross-spelling hit, spot/perp
+  isolation.
+- `commands.rs validate_adapter_book`, `monitor.rs validate_monitor_book`,
+  `feed.rs validate_feed_book`: symbol identity now compares canonical
+  bases instead of exact strings (venue check + shape validation remain
+  exact — still fail-closed on genuinely different markets).
+- `external_positions.rs`: `close_book_levels` replaces `hub_book_levels`
+  — hub lookup across the caller's + normalized spellings, then a
+  one-shot `adapter.fetch_orderbook` over `spread_symbol_aliases`
+  variants that seeds the hub. Fail-closed error now reports the REST
+  failure reason instead of "refresh the venue feed".
+- `feed.rs`: `ws_connect` wraps `connect_async` in a 10s timeout (a
+  stalled upgrade previously wedged a lane silently forever); lane
+  connect/subscribe + end events log at `info`; validation drops log at
+  `debug`.
+- `PortfolioMonitor.tsx`: DeltaGuard status is now three-state —
+  `Delta Neutral` (green, |qty|≤1e-8), `Residual` (amber, nonzero qty
+  within tolerance), `Exposure Skew` (red, over limit).
+
+### Observed live after restart (pid 1322927)
+
+- `feed: lighter WS connected; subscribed 235 markets` — lane alive, no
+  lane-ended since. ETH-USDC close lookups now resolve against the WS book.
+- `feed: robinhood WS connected; subscribed 57 markets` — healthy.
+- `feed: hyperliquid` connects then `Connection reset without closing
+  handshake` ~0.5–5s after subscribing 234 coins — repeating.
+- `feed: vanta` connects then peer-closes instantly — repeating.
+- Lighter REST account reads still challenged at last check; the ETH
+  close now works off the WS-fed hub book regardless (REST fallback
+  remains for cold hub).
+
+### Next steps for the picking-up agent
+
+1. Ask the user to retry the ETH close (External Positions gadget →
+   recommend → close). Market mode needs no book; limit uses the quote.
+   Watch `/tmp/app.log` for `extclose-` client order id + reconciliation.
+2. Investigate HL/Vanta WS resets (visible now via feed logs). Candidate
+   causes: sub-storm pacing (234 frames at once), missing app-level ping,
+   edge policy. Consider capping/chunking subscriptions.
+3. ZEC untouched — do not sweep.
+4. HL vault credential still holds a 20-byte address — needs 32-byte key.

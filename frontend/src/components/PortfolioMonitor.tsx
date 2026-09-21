@@ -526,7 +526,8 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               <tbody className="divide-y divide-surface-border">
                 {riskData && riskData.net_deltas.length > 0 ? (
                   riskData.net_deltas.map((delta) => {
-                    const isNeutral = Math.abs(delta.net_exposure_usd) <= delta.delta_limit_usd;
+                    const overLimit = Math.abs(delta.net_exposure_usd) > delta.delta_limit_usd;
+                    const isFlat = Math.abs(delta.net_quantity) <= 1e-8;
                     return (
                       <tr key={delta.asset} className="hover:bg-surface-raised/40 transition">
                         <td className="py-2.5 px-3 font-bold text-sm text-slate-900">{delta.asset}</td>
@@ -544,13 +545,17 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                         </td>
                         <td className="py-2.5 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString("en-US")} max</td>
                         <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                          {isNeutral ? (
+                          {overLimit ? (
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-loss-dim text-loss border border-loss-border whitespace-nowrap inline-block">
+                              Exposure Skew
+                            </span>
+                          ) : isFlat ? (
                             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-profit-dim text-profit border border-profit-border whitespace-nowrap inline-block">
                               Delta Neutral
                             </span>
                           ) : (
                             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-warn-dim text-warn border border-warn-border whitespace-nowrap inline-block">
-                              Exposure Skew
+                              Residual
                             </span>
                           )}
                         </td>
