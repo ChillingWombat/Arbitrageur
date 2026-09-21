@@ -354,11 +354,6 @@ pub fn vanta_ws_url(account_id: &str) -> anyhow::Result<String> {
     Ok(format!("wss://{VANTA_WS_HOST}/ws/stream/{id}"))
 }
 
-/// Public Orderly EVM WS URL for anonymous orderbook streaming.
-pub fn vanta_public_ws_url() -> String {
-    format!("wss://{VANTA_WS_HOST}/ws/stream/public")
-}
-
 /// `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}`.
 pub fn vanta_subscribe_message(id: u64, base: &str) -> serde_json::Value {
     serde_json::json!({
