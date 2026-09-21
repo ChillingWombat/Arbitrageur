@@ -1367,6 +1367,26 @@ const OpportunityRadarInner: React.FC = () => {
                     {s.note}
                   </span>
                 )}
+                <button
+                  className="ml-auto px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 hover:bg-slate-700/40 transition cursor-pointer"
+                  title="After checking both venues yourself: unresolved → mark failed (nothing executed); imbalanced → mark closed (you flattened the residual manually)"
+                  onClick={async () => {
+                    const resolution = s.status === "imbalanced" ? "closed" : "failed";
+                    const ok = window.confirm(
+                      s.status === "imbalanced"
+                        ? "Mark this imbalanced signal CLOSED? Only do this after verifying the residual exposure has been flattened on the venue."
+                        : "Mark this unresolved signal FAILED? Only do this after verifying no working orders or open exposure remain on either venue.",
+                    );
+                    if (!ok) return;
+                    try {
+                      await api.acknowledgeSignal(s.id, resolution);
+                    } catch (e) {
+                      console.error("Acknowledge signal failed:", e);
+                    }
+                  }}
+                >
+                  acknowledge
+                </button>
               </div>
               {s.legs
                 .filter((l) => l.venueOrderId && l.filledQty < l.intendedQty)

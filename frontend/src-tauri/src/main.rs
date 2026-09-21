@@ -132,6 +132,7 @@ fn main() {
             commands::set_engine_paused,
             commands::reconcile_orders_now,
             commands::cancel_venue_order,
+            commands::acknowledge_signal,
             commands::get_engine_settings,
             commands::save_engine_settings,
             commands::get_ticker_strategy_config,

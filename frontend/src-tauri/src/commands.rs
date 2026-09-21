@@ -4700,7 +4700,9 @@ async fn execute_spatial_arbitrage_inner(
             let _ = state.state_store.update_signal_status(
                 &signal_id,
                 crate::state_store::SignalStatus::Unresolved,
-                Some("unresolved exposure after failed unwind"),
+                Some(&format!(
+                    "unresolved exposure — leg A: {error_a}; leg B: {error_b}"
+                )),
             );
             if !state.circuit_breaker.is_tripped() {
                 state
@@ -5776,7 +5778,9 @@ pub async fn execute_funding_carry_impl(
             let _ = state.state_store.update_signal_status(
                 &signal_id,
                 crate::state_store::SignalStatus::Unresolved,
-                Some("unresolved funding exposure after failed unwind"),
+                Some(&format!(
+                    "unresolved funding exposure — leg A: {error_a}; leg B: {error_b}"
+                )),
             );
             if !state.circuit_breaker.is_tripped() {
                 state
@@ -8615,6 +8619,57 @@ pub async fn cancel_venue_order(
     Ok(format!(
         "Cancel request accepted on {venue} for order {order_id}"
     ))
+}
+
+/// Operator acknowledgement of an escalated signal after manually verifying
+/// both venues. Ledger-only: moves `unresolved` -> `failed` (nothing was
+/// proven open) or `imbalanced` -> `closed` (operator handled the residual
+/// off-app). Refuses any other transition so it can never mask a live state.
+#[tauri::command]
+pub async fn acknowledge_signal(
+    signal_id: String,
+    resolution: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
+    let resolution = resolution.trim().to_lowercase();
+    let target = match resolution.as_str() {
+        "failed" => crate::state_store::SignalStatus::Failed,
+        "closed" => crate::state_store::SignalStatus::Closed,
+        _ => return Err("resolution must be 'failed' or 'closed'".into()),
+    };
+    let sig = state
+        .state_store
+        .get_signal(&signal_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Signal '{signal_id}' not found"))?;
+    let allowed = matches!(
+        (sig.status, target),
+        (
+            crate::state_store::SignalStatus::Unresolved,
+            crate::state_store::SignalStatus::Failed
+        ) | (
+            crate::state_store::SignalStatus::Unresolved,
+            crate::state_store::SignalStatus::Closed
+        ) | (
+            crate::state_store::SignalStatus::Imbalanced,
+            crate::state_store::SignalStatus::Closed
+        )
+    );
+    if !allowed {
+        return Err(format!(
+            "Cannot mark a {:?} signal as {:?} — only unresolved→failed/closed or imbalanced→closed after venue review",
+            sig.status, target
+        ));
+    }
+    let note = format!(
+        "Operator acknowledged after manual venue review ({:?} -> {:?})",
+        sig.status, target
+    );
+    state
+        .state_store
+        .update_signal_status(&sig.id, target, Some(&note))
+        .map_err(|e| e.to_string())?;
+    Ok(format!("Signal {} marked {:?}", sig.id, target))
 }
 
 #[tauri::command]

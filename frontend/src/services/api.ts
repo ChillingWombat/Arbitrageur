@@ -723,6 +723,10 @@ export const api = {
     });
   },
 
+  async acknowledgeSignal(signalId: string, resolution: "failed" | "closed"): Promise<string> {
+    return invokeDesktop<string>("acknowledge_signal", { signalId, resolution });
+  },
+
   async getTickerStrategyConfig(symbol: string): Promise<TickerStrategyConfigDto> {
     const res = await invokeDesktop<TickerStrategyConfigDto>("get_ticker_strategy_config", { symbol });
     return normalizeTickerStrategyConfig(res);

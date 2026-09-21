@@ -473,14 +473,40 @@ impl AtomicArbitrageCoordinator {
                     let error_a = describe_leg(&fill_a, requested_qty_a, ambiguous_a, &unwind_a);
                     let error_b = describe_leg(&fill_b, requested_qty_b, ambiguous_b, &unwind_b);
 
+                    // A leg is "live" if it filled (position exists) or the
+                    // venue accepted a still-working order (New /
+                    // PartiallyFilled). A working order's identity must be
+                    // preserved for the reconciler — never dropped into a
+                    // BothFailed error string, which would orphan it.
+                    let live_a = fill_a.filled_qty > Decimal::ZERO || !fill_a.status.is_final();
+                    let live_b = fill_b.filled_qty > Decimal::ZERO || !fill_b.status.is_final();
+
                     if ambiguous_a || ambiguous_b || unwind_failed {
                         self.circuit_breaker.trip(format!(
                             "Incomplete or unattributable fill: Leg A [{}]; Leg B [{}]",
                             error_a, error_b
                         ));
                         return ArbitrageExecutionResult::UnresolvedExposure {
-                            leg_a_fill: (fill_a.filled_qty > Decimal::ZERO).then_some(fill_a),
-                            leg_b_fill: (fill_b.filled_qty > Decimal::ZERO).then_some(fill_b),
+                            leg_a_fill: live_a.then_some(fill_a),
+                            leg_b_fill: live_b.then_some(fill_b),
+                            error_a,
+                            error_b,
+                        };
+                    }
+
+                    if !fill_a.status.is_final() || !fill_b.status.is_final() {
+                        // Accepted-but-working order(s): attribution is clean,
+                        // nothing filled, no unwind attempted or failed — but
+                        // the pair is NOT safely dead. Surface the working
+                        // order's identity so the reconciler tracks it to a
+                        // terminal state (a late fill escalates to imbalanced
+                        // and residual auto-resolution applies). Terminal legs
+                        // are carried only in the note strings — a filled leg
+                        // that reached here was already unwound, so recording
+                        // it as a fill would invent phantom exposure.
+                        return ArbitrageExecutionResult::UnresolvedExposure {
+                            leg_a_fill: (!fill_a.status.is_final()).then_some(fill_a),
+                            leg_b_fill: (!fill_b.status.is_final()).then_some(fill_b),
                             error_a,
                             error_b,
                         };
@@ -498,6 +524,21 @@ impl AtomicArbitrageCoordinator {
 
                 if fill_a.filled_qty <= Decimal::ZERO {
                     error!("Leg B failed and Leg A reported zero filled quantity; no exposure to unwind: {}", err_str);
+                    if !fill_a.status.is_final() {
+                        // Order accepted but still working on the venue —
+                        // preserve its identity for the reconciler instead of
+                        // orphaning it in a BothFailed string.
+                        let note_a = format!(
+                            "order {} accepted but not terminal (status={:?}); reconciler will track to terminal state",
+                            fill_a.order_id, fill_a.status
+                        );
+                        return ArbitrageExecutionResult::UnresolvedExposure {
+                            leg_a_fill: Some(fill_a),
+                            leg_b_fill: None,
+                            error_a: note_a,
+                            error_b: err_str,
+                        };
+                    }
                     return ArbitrageExecutionResult::BothFailed {
                         error_a: format!(
                             "status={:?} filled_qty={}/{} remaining_qty={}; no unwind required (zero filled quantity)",
@@ -564,6 +605,21 @@ impl AtomicArbitrageCoordinator {
 
                 if fill_b.filled_qty <= Decimal::ZERO {
                     error!("Leg A failed and Leg B reported zero filled quantity; no exposure to unwind: {}", err_str);
+                    if !fill_b.status.is_final() {
+                        // Order accepted but still working on the venue —
+                        // preserve its identity for the reconciler instead of
+                        // orphaning it in a BothFailed string.
+                        let note_b = format!(
+                            "order {} accepted but not terminal (status={:?}); reconciler will track to terminal state",
+                            fill_b.order_id, fill_b.status
+                        );
+                        return ArbitrageExecutionResult::UnresolvedExposure {
+                            leg_a_fill: None,
+                            leg_b_fill: Some(fill_b),
+                            error_a: err_str,
+                            error_b: note_b,
+                        };
+                    }
                     return ArbitrageExecutionResult::BothFailed {
                         error_a: err_str,
                         error_b: format!(
