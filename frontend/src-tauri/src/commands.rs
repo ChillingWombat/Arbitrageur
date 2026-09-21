@@ -3816,6 +3816,11 @@ fn reconcile_signal_legs(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Test-facing wrapper over `execute_spatial_arbitrage_inner` — production
+/// callers (command, candidates batch, radar) reach `inner` directly so the
+/// canary-loss parameter stays off every path except the explicit canary
+/// command.
+#[cfg(test)]
 pub async fn execute_spatial_arbitrage_impl(
     symbol: &str,
     buy_venue: &str,
@@ -3842,6 +3847,7 @@ pub async fn execute_spatial_arbitrage_impl(
         nominal_hurdle_bps,
         None,
         "futures",
+        None,
         state,
     )
     .await
@@ -3861,6 +3867,7 @@ async fn execute_spatial_arbitrage_inner(
     nominal_hurdle_bps: Option<f64>,
     route_id: Option<&str>,
     strategy_id: &str,
+    canary_max_loss_bps: Option<f64>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if !order_qty.is_finite() || order_qty <= 0.0 {
@@ -4148,10 +4155,30 @@ async fn execute_spatial_arbitrage_inner(
             buy_venue, sell_venue
         )
     })?;
-    if econ.expected_net_bps < target_profit_bps {
+    // Canary override: an explicit `canary_max_loss_bps` (<=50 bps, live
+    // entries only) lowers the profit floor to accept the spread+fee cost of
+    // a mechanics test. Bounded so a canary can never burn real money on a
+    // genuinely bad route. All other checks (margin, depth, delta-neutrality,
+    // blocking, cap) still apply.
+    let profit_floor_bps = match (is_live, canary_max_loss_bps) {
+        (true, Some(loss)) => {
+            if !loss.is_finite() || !(0.0..=50.0).contains(&loss) {
+                return Err("canary_max_loss_bps must be finite and within 0-50 bps".into());
+            }
+            -loss
+        }
+        _ => target_profit_bps,
+    };
+    if econ.expected_net_bps < profit_floor_bps {
         return Err(format!(
-            "Expected net spread {} BPS after route friction is below the {} BPS target",
-            econ.expected_net_bps, target_profit_bps
+            "Expected net spread {} BPS after route friction is below the {} BPS {}",
+            econ.expected_net_bps,
+            profit_floor_bps.abs(),
+            if profit_floor_bps < 0.0 {
+                "canary loss limit"
+            } else {
+                "target"
+            }
         ));
     }
     let net_bps_f = econ.expected_net_bps;
@@ -4352,7 +4379,14 @@ async fn execute_spatial_arbitrage_inner(
             symbol: symbol.to_string(),
             route_id: accounts.route_id,
             expected_net_usd: Some(expected_net_usd),
-            note: None,
+            note: if is_live && canary_max_loss_bps.is_some() {
+                Some(format!(
+                    "CANARY entry: profit floor bypassed down to -{:.0} bps to test live mechanics",
+                    canary_max_loss_bps.unwrap_or(0.0)
+                ))
+            } else {
+                None
+            },
             legs: vec![
                 crate::state_store::NewSignalLeg {
                     account_id: accounts.long,
@@ -4909,6 +4943,7 @@ pub async fn execute_spatial_candidates_impl(
             None,
             winner.route_id.as_deref(),
             "futures",
+            None,
             state,
         )
         .await;
@@ -8277,9 +8312,10 @@ pub async fn execute_spatial_arbitrage(
     position_step: Option<u32>,
     max_units: Option<u32>,
     nominal_hurdle_bps: Option<f64>,
+    canary_max_loss_bps: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    match execute_spatial_arbitrage_impl(
+    match execute_spatial_arbitrage_inner(
         &symbol,
         &buy_venue,
         &sell_venue,
@@ -8290,6 +8326,9 @@ pub async fn execute_spatial_arbitrage(
         position_step,
         max_units,
         nominal_hurdle_bps,
+        None,
+        "futures",
+        canary_max_loss_bps,
         &state,
     )
     .await
@@ -11580,6 +11619,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         None,
         None,
         "radar",
+        None,
         state,
     )
     .await?;
@@ -15457,7 +15497,7 @@ mod tests {
         // dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
-            "futures", &state,
+            "futures", None, &state,
         )
         .await;
         assert!(sim_err
@@ -15473,7 +15513,7 @@ mod tests {
         // regardless of which venues the route names.
         let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "decibel", 100.0, None, None, None, None, None, None, None,
-            "futures", &state,
+            "futures", None, &state,
         )
         .await;
         assert!(decibel_err
@@ -16681,6 +16721,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             &state,
         )
         .await
@@ -16701,6 +16742,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             &state,
         )
         .await
@@ -16730,6 +16772,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             &state,
         )
         .await
