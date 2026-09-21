@@ -350,6 +350,11 @@ pub struct SpreadSample {
     pub mid: f64,
     pub best_bid: f64,
     pub best_ask: f64,
+    /// Top-5-level bid/ask quantities (base units) at sample time — the
+    /// WFO/VWMA depth weight (schema v28). `None` for pre-v28 rows and
+    /// record paths without book context.
+    pub bid_depth: Option<f64>,
+    pub ask_depth: Option<f64>,
 }
 
 /// Batch entry accepted by `record_spread_samples`.
@@ -358,6 +363,10 @@ pub struct VenueSampleEntry {
     pub mid: f64,
     pub best_bid: f64,
     pub best_ask: f64,
+    /// Top-of-book depth proxies (top-5 qty sums, base units). `None` when
+    /// the sampler has no book depth — persisted NULL, never fabricated.
+    pub bid_depth: Option<f64>,
+    pub ask_depth: Option<f64>,
 }
 
 /// One shrunk per-session aggregate for a symbol. `med_abs_spread_bps`
@@ -1349,6 +1358,16 @@ ALTER TABLE signal_legs ADD COLUMN intended_price REAL;
 PRAGMA user_version = 27;
 COMMIT;";
 
+/// v28 adds top-of-book depth proxies (top-5 qty sums, base units) to
+/// spread_samples so the WFO edge series can weight observations by real
+/// depth instead of the equal-weight 1.0 stub.
+const MIGRATION_V28_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE spread_samples ADD COLUMN bid_depth REAL;
+ALTER TABLE spread_samples ADD COLUMN ask_depth REAL;
+PRAGMA user_version = 28;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1759,7 +1778,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 27 {
+        if version > 28 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -1920,6 +1939,12 @@ impl StateStore {
         }
         if version <= 26 {
             if let Err(err) = conn.execute_batch(MIGRATION_V27_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 27 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V28_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
@@ -3012,8 +3037,9 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO spread_samples (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO spread_samples
+                    (symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for e in entries {
                 let venue_id = normalize_venue(&e.venue_id)?;
@@ -3021,7 +3047,14 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                     continue;
                 }
                 stmt.execute(params![
-                    symbol, venue_id, ts_ms, e.mid, e.best_bid, e.best_ask
+                    symbol,
+                    venue_id,
+                    ts_ms,
+                    e.mid,
+                    e.best_bid,
+                    e.best_ask,
+                    e.bid_depth.filter(|d| d.is_finite() && *d > 0.0),
+                    e.ask_depth.filter(|d| d.is_finite() && *d > 0.0),
                 ])?;
             }
         }
@@ -3042,7 +3075,7 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         let keys = spread_symbol_aliases(&symbol);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask
+            "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth
              FROM spread_samples
              WHERE symbol IN ({placeholders}) AND ts_ms >= ? AND ts_ms <= ?
              ORDER BY ts_ms ASC, venue_id ASC"
@@ -3061,6 +3094,8 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
                 mid: r.get(3)?,
                 best_bid: r.get(4)?,
                 best_ask: r.get(5)?,
+                bid_depth: r.get(6).ok().flatten(),
+                ask_depth: r.get(7).ok().flatten(),
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -4929,7 +4964,7 @@ mod tests {
             let version: i64 = conn
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 27);
+            assert_eq!(version, 28);
             let mode: String = conn
                 .query_row("PRAGMA journal_mode", [], |r| r.get(0))
                 .unwrap();
@@ -5479,7 +5514,7 @@ mod tests {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 27);
+        assert_eq!(version, 28);
         store
             .record_signal_execution(&NewSignalExecution {
                 id: "fund-1".to_string(),
@@ -5843,7 +5878,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
         let ip: Option<f64> = conn
             .query_row(
                 "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -6045,6 +6080,8 @@ mod tests {
             mid,
             best_bid: mid - 0.5,
             best_ask: mid + 0.5,
+            bid_depth: None,
+            ask_depth: None,
         }
     }
 
@@ -6082,6 +6119,64 @@ mod tests {
             Some(1_000)
         );
         assert_eq!(store.earliest_spread_sample_ts("SOL-USDC").unwrap(), None);
+    }
+
+    #[test]
+    fn test_v28_spread_samples_depth_roundtrip() {
+        // Depth persists per venue and stays NULL when absent — the WFO
+        // weight is real book data or honest nothing, never 0.0-sham.
+        let store = StateStore::open_in_memory().unwrap();
+        store
+            .record_spread_samples(
+                "BTC-USDC",
+                1_000,
+                &[
+                    VenueSampleEntry {
+                        venue_id: "aaa".into(),
+                        mid: 100.0,
+                        best_bid: 99.9,
+                        best_ask: 100.1,
+                        bid_depth: Some(5.0),
+                        ask_depth: Some(7.5),
+                    },
+                    VenueSampleEntry {
+                        venue_id: "bbb".into(),
+                        mid: 100.2,
+                        best_bid: 100.1,
+                        best_ask: 100.3,
+                        bid_depth: None,
+                        ask_depth: None,
+                    },
+                ],
+            )
+            .unwrap();
+        let rows = store.spread_samples("BTC-USDC", 0, 2_000).unwrap();
+        assert_eq!(rows.len(), 2);
+        let aaa = rows.iter().find(|r| r.venue_id == "aaa").unwrap();
+        assert_eq!(aaa.bid_depth, Some(5.0));
+        assert_eq!(aaa.ask_depth, Some(7.5));
+        let bbb = rows.iter().find(|r| r.venue_id == "bbb").unwrap();
+        assert_eq!(bbb.bid_depth, None);
+        assert_eq!(bbb.ask_depth, None);
+        // Nonpositive/NaN depths normalize to NULL at write time.
+        store
+            .record_spread_samples(
+                "BTC-USDC",
+                2_000,
+                &[VenueSampleEntry {
+                    venue_id: "aaa".into(),
+                    mid: 100.0,
+                    best_bid: 99.9,
+                    best_ask: 100.1,
+                    bid_depth: Some(0.0),
+                    ask_depth: Some(f64::NAN),
+                }],
+            )
+            .unwrap();
+        let rows = store.spread_samples("BTC-USDC", 1_500, 2_500).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].bid_depth, None);
+        assert_eq!(rows[0].ask_depth, None);
     }
 
     #[test]
@@ -6219,7 +6314,7 @@ mod tests {
                 .lock()
                 .query_row("PRAGMA user_version", [], |r| r.get(0))
                 .unwrap();
-            assert_eq!(version, 27);
+            assert_eq!(version, 28);
         }
         let _ = fs::remove_dir_all(dir);
     }
@@ -6590,7 +6685,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
 
         let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -6710,7 +6805,7 @@ mod tests {
         let v10: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v10, 27);
+        assert_eq!(v10, 28);
         // v19 remaps the renamed lifecycle statuses on the way through.
         let remapped: String = conn
             .query_row(
@@ -7544,7 +7639,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 27);
+        assert_eq!(v, 28);
         let kept: String = conn
             .query_row(
                 "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",

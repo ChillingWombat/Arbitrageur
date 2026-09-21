@@ -2153,3 +2153,19 @@ clippy+fmt clean, app restarted on the new binary.
 - Auto-apply is real parameter mutation of the live futures params — modes are per-ticker opt-in for exactly that reason. `manual` is and stays the default.
 - The scheduler enumerates KV keys, not the venue universe — a ticker can be periodic-tuned even when it isn't currently monitored.
 - `continuous` is a cadence floor, not per-tick: the 15m minimum keeps WFO recompute cost bounded.
+
+## Spread-sample depth persistence (schema v28) — WFO VWMA de-stubbed
+
+### What shipped
+
+- `spread_samples.bid_depth`/`ask_depth` (v28): top-5-level quantity sums in base units per venue sample. Persisted by all three samplers — REST `fetch_orderbooks` path (`total_bid_depth`/`total_ask_depth`), WS `feed::top_sample`, monitor `book_sample`. Nonpositive/NaN normalize to NULL; pre-v28 rows stay NULL.
+- `run_wfo_calibration_impl` replaces the `top_depth_usd = 1.0` equal-weight stub: per timestamp the argmax edge pair's binding depth = min(buy venue ask_depth, sell venue bid_depth); single-side data uses the known side; fully-missing depth stays neutral 1.0 (pre-v28 rows keep old behavior).
+
+### Verification
+
+- 777 workspace tests incl. `test_v28_spread_samples_depth_roundtrip`; clippy/fmt clean.
+
+### Pickup notes
+
+- Depth is a *relative* weight for VWMA — base-qty units are consistent across venues for the same symbol; USD conversion would add price noise, not accuracy.
+- Retention: depth columns ride the existing `spread_samples` retention pass; no new pruning needed.
