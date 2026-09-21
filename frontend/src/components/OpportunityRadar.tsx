@@ -198,6 +198,8 @@ const DEFAULT_MONITOR_CONFIG: MonitorConfigDto = {
   minSymbolIntervalSecs: 5,
   minExpectedProfitBps: 0,
   minThresholdRatio: 0.2,
+  episodeHalfLifeSecs: 259200,
+  minWinLowerBound: 0.5,
   minCoverage: 0.5,
 };
 
@@ -501,6 +503,39 @@ const ConfigPanel: React.FC<{
                     max={1}
                     value={draft.minWinProbability}
                     onChange={(e) => set("minWinProbability", num(e.target.value, 0.9))}
+                  />
+                </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Min win lower bound
+                      <InfoTooltip text="Confidence floor on the Wilson 90% lower bound of the win estimate — a shrunken point estimate can clear Min Win on thin evidence; this floor refuses it. 0 disables." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.05}
+                    min={0}
+                    max={0.99}
+                    value={draft.minWinLowerBound}
+                    onChange={(e) => set("minWinLowerBound", num(e.target.value, 0.5))}
+                  />
+                </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Episode half-life (s)
+                      <InfoTooltip text="Recency half-life for episode statistics — older excursions weigh exponentially less in win/outcome estimates. 0 disables weighting (all history counts equally)." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={3600}
+                    min={0}
+                    value={draft.episodeHalfLifeSecs}
+                    onChange={(e) => set("episodeHalfLifeSecs", num(e.target.value, 259200))}
                   />
                 </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
@@ -820,7 +855,43 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               <DetailField
                 label="Win probability"
                 value={fmtPct(getWin(r))}
-                title="Directional P(trade is profitable) after edge direction, profitable capacity, funding, exit depth, persistence, coverage, variation and session gates. 0% when this direction has no edge or is hard-blocked."
+                title={`Directional P(trade is profitable) after edge direction, profitable capacity, funding, exit depth, persistence, coverage, variation and session gates. 0% when this direction has no edge or is hard-blocked.${
+                  r.winProbabilityLower != null && r.winProbabilityUpper != null
+                    ? ` 90% CI [${fmtPct(r.winProbabilityLower)} – ${fmtPct(r.winProbabilityUpper)}]` +
+                      (r.pWinNEffective != null ? ` on ~${r.pWinNEffective.toFixed(0)} effective episodes` : "") +
+                      (r.pWinCensored != null && r.pWinCensored > 0 ? `; ${r.pWinCensored} episodes still open (censored)` : "") +
+                      (r.pWinFromModel ? "; OU model estimate, not empirical" : "")
+                    : ""
+                }`}
+              />
+              <DetailField
+                label="Net win probability"
+                value={fmtPct(r.netWinProbability)}
+                title={`Empirical P(net > 0): every historical excursion at this deviation replayed through the exit policy and scored on real net bps.${
+                  r.netWinLower != null ? ` Wilson lower bound ${fmtPct(r.netWinLower)} (censored = losses)` : ""
+                }${r.outcomeTrials != null ? ` · ${r.outcomeTrials} trials` : ""}${
+                  r.outcomeCensored != null && r.outcomeCensored > 0 ? ` · ${r.outcomeCensored} censored` : ""
+                }`}
+              />
+              <DetailField
+                label="Expected net"
+                value={r.netExpectedBps != null ? fmtBpsU(r.netExpectedBps) : "—"}
+                title={
+                  r.netDecilesBps && r.netDecilesBps.length === 11
+                    ? `Net-bps deciles of simulated entries at this deviation: P10 ${fmtBpsU(
+                        r.netDecilesBps[1]
+                      )} · P50 ${fmtBpsU(r.netDecilesBps[5])} · P90 ${fmtBpsU(r.netDecilesBps[9])}`
+                    : "Recency-weighted mean net bps per simulated entry"
+                }
+              />
+              <DetailField
+                label="Median hold"
+                value={r.medianHoldSecs != null ? fmtDur(r.medianHoldSecs) : "—"}
+                title={
+                  r.medianWinSecs != null
+                    ? `Median hold across simulated episodes; ${fmtDur(r.medianWinSecs)} among profitable ones — capital-turnover context`
+                    : "Median hold across simulated episodes"
+                }
               />
               <DetailField
                 label="Reversion probability"
@@ -955,9 +1026,25 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
           </td>
           <td
             className="px-2 py-2 text-right font-mono"
-            title="Directional trade win probability — 0% when this direction has no edge or is blocked. See Reversion Probability in details."
+            title={`Directional trade win probability — 0% when this direction has no edge or is blocked.${
+              r.winProbabilityLower != null && r.winProbabilityUpper != null
+                ? ` 90% CI [${fmtPct(r.winProbabilityLower)} – ${fmtPct(r.winProbabilityUpper)}]` +
+                  (r.pWinNEffective != null ? ` on ~${r.pWinNEffective.toFixed(0)} eff. episodes` : "") +
+                  (r.pWinFromModel ? " (OU model fallback — no empirical episodes)" : "")
+                : ""
+            } See Reversion Probability in details.`}
           >
             {fmtPct(getWin(r))}
+          </td>
+          <td
+            className="px-2 py-2 text-right font-mono"
+            title={`P(net > 0) for entry at the current deviation — excursions replayed through the exit policy.${
+              r.netWinLower != null ? ` Wilson lower ${fmtPct(r.netWinLower)} (censored count as losses)` : ""
+            }${r.outcomeTrials != null ? ` · ${r.outcomeTrials} trials` : ""}${
+              r.outcomeCensored != null && r.outcomeCensored > 0 ? ` · ${r.outcomeCensored} still open` : ""
+            }${r.netExpectedBps != null ? ` · E[net] ${fmtBpsU(r.netExpectedBps)}` : ""}`}
+          >
+            {fmtPct(r.netWinProbability)}
           </td>
           <td className="px-2 py-2 text-right font-mono" title="Fraction of in-window buckets at/above entry (persistence gate)">
             {fmtPct(r.thresholdRatio)}
@@ -1264,7 +1351,7 @@ const OpportunityRadarInner: React.FC = () => {
           </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
-            title="Minimum convergence probability floor — edit via Configurator"
+            title="Engine floor on directional trade win probability — the executable gate also requires the Wilson lower bound to clear a confidence floor. Edit via Configurator."
           >
             <span className="text-slate-400">Min Win</span>
             <span className="font-bold text-slate-900">
@@ -1528,7 +1615,7 @@ const OpportunityRadarInner: React.FC = () => {
           </div>
           <div
             className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-            title="Display filter — minimum win probability"
+            title="Display filter — minimum directional trade win probability (reversion-based, gated). Net % column shows the P&L-defined rate; both render '—' when history is thin."
           >
             <span className="text-slate-400 font-medium">Min Win</span>
             <input
@@ -1572,9 +1659,15 @@ const OpportunityRadarInner: React.FC = () => {
               </th>
               <th
                 className="px-2 py-1.5 text-right"
-                title="Directional trade win probability after all gates (0% when this direction has no edge or is blocked). Reversion Probability lives in the detail card."
+                title="Directional trade win probability after all gates (0% when this direction has no edge or is blocked). Measured on spread reversion, not P&L — Net% is the P&L-defined rate. Reversion Probability lives in the detail card."
               >
                 Win %
+              </th>
+              <th
+                className="px-2 py-1.5 text-right"
+                title="Empirical P(net > 0): historical excursions at this deviation replayed through the exit policy and scored on real net bps. Tooltip shows the Wilson 90% interval and censored share — wide interval = thin evidence."
+              >
+                Net %
               </th>
               <th className="px-2 py-1.5 text-right" title="Share of in-window buckets holding at/above entry (persistence)">
                 Persist
@@ -1604,7 +1697,7 @@ const OpportunityRadarInner: React.FC = () => {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={17}>
+                <td colSpan={18}>
                   {snap == null ? (
                     <EmptyState pulse icon={Activity} title="Monitor Warming Up" hint="Collecting spread samples…" />
                   ) : snap.watchlist.length === 0 ? (

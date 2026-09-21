@@ -590,6 +590,7 @@ export const App: React.FC = () => {
         routeId: null,
         positionStep: o.position_step ?? null,
         maxUnits: o.max_units ?? null,
+        predictedWinProbability: o.win_probability ?? null,
       }));
     // The clicked opportunity may come from the matrix grid rather than the
     // scan snapshot — always include it in its ticker's batch.
@@ -611,6 +612,7 @@ export const App: React.FC = () => {
         routeId: null,
         positionStep: opp.position_step ?? null,
         maxUnits: opp.max_units ?? null,
+        predictedWinProbability: opp.win_probability ?? null,
       });
     }
 

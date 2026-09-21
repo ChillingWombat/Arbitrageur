@@ -1,8 +1,10 @@
 pub mod autotune;
+pub mod binomial;
 pub mod book_gradient;
 pub mod calibration;
 pub mod cointegration;
 pub mod dislocation;
+pub mod forecast_calibration;
 pub mod funding_carry;
 pub mod kalman_filter;
 pub mod optimal_thresholds;
@@ -17,6 +19,7 @@ pub mod spatial_spread;
 pub mod triangular;
 
 pub use autotune::*;
+pub use binomial::*;
 pub use calibration::*;
 pub use cointegration::*;
 pub use dislocation::*;

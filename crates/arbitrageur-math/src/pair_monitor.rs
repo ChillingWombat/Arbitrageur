@@ -206,6 +206,12 @@ pub struct Episode {
     pub entry_ts_ms: i64,
     pub peak_dev_abs: f64,
     pub outcome: EpisodeOutcome,
+    /// Signed deviation (`spread - mu`) at resolution — at the band for a
+    /// Win (sign may have flipped through zero), at the stop for a Stop,
+    /// at the last observation for an Open (censored).
+    pub exit_dev_signed: f64,
+    /// Timestamp of the resolution observation (last obs when Open).
+    pub end_ts_ms: i64,
 }
 
 /// Segment the deviation series into episodes at `entry_dev_abs`:
@@ -246,11 +252,18 @@ pub fn segment_episodes(
             }
             j += 1;
         }
+        let end_idx = if j < series.len() {
+            j
+        } else {
+            series.len() - 1
+        };
         out.push(Episode {
             start_idx: i,
             entry_ts_ms: series[i].ts_ms,
             peak_dev_abs: peak,
             outcome,
+            exit_dev_signed: series[end_idx].spread_bps - mu,
+            end_ts_ms: series[end_idx].ts_ms,
         });
         // Continue after the resolved end (or after the open episode's tail).
         i = match outcome {
@@ -284,17 +297,38 @@ pub struct PWinCurve {
     pub points: Vec<(f64, f64)>,
     /// Total excursions used to build the curve.
     pub episodes: usize,
+    /// Weighted win count behind each point — parallel to `points`.
+    /// Fractional when episodes are recency-weighted.
+    pub point_wins: Vec<f64>,
+    /// Weighted trial count behind each point — parallel to `points`.
+    /// Includes Open (censored) episodes, which score as non-wins.
+    pub point_trials: Vec<f64>,
+    /// Censored (Open) episodes behind each point — parallel to `points`.
+    /// A high censored fraction means the bucket's win rate is
+    /// understated: those excursions never resolved inside the window.
+    pub point_censored: Vec<usize>,
+    /// Sum of squared episode weights (for Kish n_eff at each point).
+    pub point_sum_w2: Vec<f64>,
 }
 
 /// Build the win-rate curve over all excursions above `band_bps`.
 /// Each excursion is scored win/lose from its own entry forward, and each
 /// curve point `d` aggregates all excursions whose peak reached `d`.
+///
+/// `half_life_secs` applies exponential recency weighting
+/// (`w = 0.5^(age/half_life)` on each episode's resolution time) so stale
+/// regimes fade instead of counting equally with fresh evidence;
+/// `None`/`0` disables weighting. Open (censored) episodes count as
+/// non-wins in the point estimate — conservative — but are tracked in
+/// `point_censored` so consumers can see the unresolved share.
 pub fn build_pwin_curve(
     series: &[PairObservation],
     mu: f64,
     sigma: f64,
     band_bps: f64,
     stop_mult: f64,
+    half_life_secs: Option<f64>,
+    now_ms: i64,
 ) -> PWinCurve {
     let entry = band_bps.max(1e-9);
     let stop_bps = (sigma * stop_mult).max(band_bps * 2.0);
@@ -303,30 +337,62 @@ pub fn build_pwin_curve(
         return PWinCurve {
             points: Vec::new(),
             episodes: 0,
+            point_wins: Vec::new(),
+            point_trials: Vec::new(),
+            point_censored: Vec::new(),
+            point_sum_w2: Vec::new(),
         };
     }
+    let hl = half_life_secs.filter(|h| h.is_finite() && *h > 0.0);
+    let weight = |e: &Episode| -> f64 {
+        match hl {
+            Some(h) => {
+                let age_secs = (now_ms - e.end_ts_ms).max(0) as f64 / 1000.0;
+                0.5_f64.powf(age_secs / h)
+            }
+            None => 1.0,
+        }
+    };
     let mut peaks: Vec<f64> = eps.iter().map(|e| e.peak_dev_abs).collect();
     peaks.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     peaks.dedup();
     let mut points = Vec::with_capacity(peaks.len());
+    let mut point_wins = Vec::with_capacity(peaks.len());
+    let mut point_trials = Vec::with_capacity(peaks.len());
+    let mut point_censored = Vec::with_capacity(peaks.len());
+    let mut point_sum_w2 = Vec::with_capacity(peaks.len());
     for &d in &peaks {
-        let mut n = 0usize;
-        let mut w = 0usize;
+        let mut n = 0.0f64;
+        let mut w = 0.0f64;
+        let mut w2 = 0.0f64;
+        let mut censored = 0usize;
         for e in &eps {
             if e.peak_dev_abs >= d - 1e-12 {
-                n += 1;
+                let ew = weight(e);
+                n += ew;
+                w2 += ew * ew;
                 if matches!(e.outcome, EpisodeOutcome::Win { .. }) {
-                    w += 1;
+                    w += ew;
+                } else if matches!(e.outcome, EpisodeOutcome::Open) {
+                    censored += 1;
                 }
             }
         }
-        if n > 0 {
-            points.push((d, w as f64 / n as f64));
+        if n > 0.0 {
+            points.push((d, w / n));
+            point_wins.push(w);
+            point_trials.push(n);
+            point_censored.push(censored);
+            point_sum_w2.push(w2);
         }
     }
     PWinCurve {
         points,
         episodes: eps.len(),
+        point_wins,
+        point_trials,
+        point_censored,
+        point_sum_w2,
     }
 }
 
@@ -343,6 +409,199 @@ pub fn p_win_at_deviation(curve: &PWinCurve, dev_abs: f64) -> Option<f64> {
         }
     }
     None
+}
+
+/// Uncertainty-aware conditional win rate at `dev_abs`: the same bucket
+/// selection as [`p_win_at_deviation`], but returns a
+/// [`crate::binomial::BinomialEstimate`] built from the bucket's weighted
+/// win/trial counts — shrunken point estimate plus a Wilson interval on
+/// the Kish-effective sample size. `lower` is the gateable quantity: on
+/// thin buckets it collapses toward 0 instead of reporting a confident
+/// small-sample rate. `None` when no bucket covers `dev_abs`.
+pub fn p_win_est_at_deviation(
+    curve: &PWinCurve,
+    dev_abs: f64,
+    z: f64,
+    prior_strength: f64,
+) -> Option<crate::binomial::BinomialEstimate> {
+    for (i, &(d, _)) in curve.points.iter().enumerate() {
+        if d >= dev_abs - 1e-12 {
+            return Some(crate::binomial::binomial_estimate(
+                curve.point_wins[i],
+                curve.point_trials[i],
+                curve.point_sum_w2[i],
+                z,
+                prior_strength,
+            ));
+        }
+    }
+    None
+}
+
+/// One simulated entry outcome at a fixed entry depth: replay a historical
+/// excursion forward from the moment |dev| first crossed `entry_dev_abs`
+/// and score the net bps a real reversion exit would have captured.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntryOutcome {
+    /// `sign(entry_dev)·(entry_dev − exit_dev) − friction_bps`. Positive
+    /// on profitable exits; for censored episodes this is the mark at the
+    /// series end — a real "if you exited now" number, not a guess.
+    pub net_bps: f64,
+    /// Seconds from entry crossing to resolution (or series end).
+    pub hold_secs: f64,
+    /// True when the episode never resolved inside the observed window.
+    pub censored: bool,
+    /// Recency weight (1.0 when weighting disabled).
+    pub weight: f64,
+}
+
+/// Simulated-entry outcome statistics for one entry depth — the radar
+/// analog of the funding monitor's [`crate::funding_carry::GapBacktest`]:
+/// the win label is defined on **net P&L > 0**, not on the reversion
+/// event, and the full outcome distribution is exposed via deciles.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntryOutcomeStats {
+    /// Episodes that crossed the entry depth (weighted-trial count is in
+    /// `p_net_pos.trials`).
+    pub trials: usize,
+    /// Episodes still open at the series end (censored).
+    pub censored: usize,
+    /// P(net > 0) over resolved episodes: shrunken `rate`, raw
+    /// `rate_raw`, Wilson `lower`/`upper`. The `lower` bound counts every
+    /// censored episode as a non-win — the fail-closed reading.
+    /// `None` when `trials < min_trials`.
+    pub p_net_pos: Option<crate::binomial::BinomialEstimate>,
+    /// Weighted mean net bps per entry (censored included at their mark).
+    pub expected_net_bps: Option<f64>,
+    /// Ascending weighted net-bps deciles (11 points) — enables
+    /// P(net >= any bps target) client-side, mirroring the funding
+    /// monitor's `deciles_usd`.
+    pub deciles_bps: Option<Vec<f64>>,
+    /// Weighted median seconds from entry to exit (all episodes).
+    pub median_hold_secs: Option<f64>,
+    /// Weighted median seconds to resolution among winning episodes —
+    /// feeds hold-time cost and capital-turnover estimates.
+    pub median_win_secs: Option<f64>,
+}
+
+/// Replay every historical excursion that crossed `entry_dev_abs` and
+/// score it as a real trade: enter at the crossing's signed deviation,
+/// exit when |dev| reverts to `band_bps` (win), widens to `stop_bps`
+/// (stop-out), or the series ends (censored — net marked at the last
+/// observation). `net = sign(e0)·(e0 − dev_exit) − friction_bps`, so a
+/// win at shallow depth can still be a small net loss — the label is
+/// honest P&L, not a price-path event.
+///
+/// `half_life_secs` recency-weights episodes by resolution age
+/// (`0.5^(age/half_life)`); `None`/`0` disables.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_entry_outcomes(
+    series: &[PairObservation],
+    mu: f64,
+    entry_dev_abs: f64,
+    band_bps: f64,
+    stop_bps: f64,
+    friction_bps: f64,
+    half_life_secs: Option<f64>,
+    now_ms: i64,
+) -> Vec<EntryOutcome> {
+    if !(entry_dev_abs.is_finite()
+        && band_bps.is_finite()
+        && stop_bps.is_finite()
+        && friction_bps.is_finite()
+        && mu.is_finite())
+        || entry_dev_abs <= 0.0
+        || band_bps <= 0.0
+        || stop_bps <= 0.0
+    {
+        return Vec::new();
+    }
+    let hl = half_life_secs.filter(|h| h.is_finite() && *h > 0.0);
+    let eps = segment_episodes(series, mu, entry_dev_abs, band_bps, stop_bps);
+    eps.iter()
+        .map(|e| {
+            let e0 = series[e.start_idx].spread_bps - mu;
+            let sign = if e0 >= 0.0 { 1.0 } else { -1.0 };
+            let net = sign * (e0 - e.exit_dev_signed) - friction_bps;
+            let hold_secs = (e.end_ts_ms - e.entry_ts_ms).max(0) as f64 / 1000.0;
+            let weight = hl
+                .map(|h| 0.5_f64.powf(((now_ms - e.end_ts_ms).max(0) as f64 / 1000.0) / h))
+                .unwrap_or(1.0);
+            EntryOutcome {
+                net_bps: net,
+                hold_secs,
+                censored: matches!(e.outcome, EpisodeOutcome::Open),
+                weight,
+            }
+        })
+        .collect()
+}
+
+/// Aggregate [`EntryOutcome`]s into [`EntryOutcomeStats`]. `None`-valued
+/// fields below `min_trials` resolved episodes — fail closed, never
+/// extrapolate.
+pub fn entry_outcome_stats(
+    outcomes: &[EntryOutcome],
+    min_trials: usize,
+    z: f64,
+    prior_strength: f64,
+) -> EntryOutcomeStats {
+    let trials = outcomes.len();
+    let censored = outcomes.iter().filter(|o| o.censored).count();
+    let resolved: Vec<&EntryOutcome> = outcomes.iter().filter(|o| !o.censored).collect();
+    if resolved.len() < min_trials.max(1) {
+        return EntryOutcomeStats {
+            trials,
+            censored,
+            p_net_pos: None,
+            expected_net_bps: None,
+            deciles_bps: None,
+            median_hold_secs: None,
+            median_win_secs: None,
+        };
+    }
+    // Resolved-sample point estimate; censored-as-losses lower bound.
+    let (mut w_win, mut w_res, mut w_res2) = (0.0, 0.0, 0.0);
+    let (mut w_all, mut w_all2) = (0.0, 0.0);
+    for o in outcomes {
+        w_all += o.weight;
+        w_all2 += o.weight * o.weight;
+        if !o.censored {
+            w_res += o.weight;
+            w_res2 += o.weight * o.weight;
+            if o.net_bps > 0.0 {
+                w_win += o.weight;
+            }
+        }
+    }
+    let resolved_est = crate::binomial::binomial_estimate(w_win, w_res, w_res2, z, prior_strength);
+    // Lower bound over ALL trials with censored counted as non-wins —
+    // the conservative reading when some episodes never resolved.
+    let conservative = crate::binomial::binomial_estimate(w_win, w_all, w_all2, z, prior_strength);
+    let p_net_pos = Some(crate::binomial::BinomialEstimate {
+        lower: conservative.lower.or(resolved_est.lower),
+        ..resolved_est
+    });
+    let nets: Vec<(f64, f64)> = outcomes.iter().map(|o| (o.net_bps, o.weight)).collect();
+    let holds: Vec<(f64, f64)> = outcomes.iter().map(|o| (o.hold_secs, o.weight)).collect();
+    let win_holds: Vec<(f64, f64)> = resolved
+        .iter()
+        .filter(|o| o.net_bps > 0.0)
+        .map(|o| (o.hold_secs, o.weight))
+        .collect();
+    EntryOutcomeStats {
+        trials,
+        censored,
+        p_net_pos,
+        expected_net_bps: crate::binomial::weighted_mean(&nets),
+        deciles_bps: Some(
+            (0..=10)
+                .filter_map(|k| crate::binomial::weighted_quantile(&nets, k as f64 / 10.0))
+                .collect(),
+        ),
+        median_hold_secs: crate::binomial::weighted_quantile(&holds, 0.5),
+        median_win_secs: crate::binomial::weighted_quantile(&win_holds, 0.5),
+    }
 }
 
 /// Empirical reversion stats conditioned on the current deviation level.
@@ -426,6 +685,7 @@ pub struct CapacityReport {
 /// `dev_L = (b_L - a_L)/a_L * 1e4 - baseline_bps`.
 /// Per-level expected contribution `P_win(|dev_L|) * max(0, dev_L) - friction`
 /// weighted by the level's notional.
+#[allow(clippy::too_many_arguments)]
 pub fn capacity_ladder(
     buy_asks: &[(f64, f64)],
     sell_bids: &[(f64, f64)],
@@ -434,11 +694,14 @@ pub fn capacity_ladder(
     tiers_usd: &[f64],
     pwin: &PWinCurve,
     p_min: f64,
+    z_gate: Option<f64>,
+    prior_strength: f64,
 ) -> CapacityReport {
     struct Chunk {
-        notional: f64,      // qty * ask price (buy-side notional)
-        dev_bps: f64,       // marginal deviation at this level pair
-        p_win: Option<f64>, // conditional win rate at |dev|
+        notional: f64,       // qty * ask price (buy-side notional)
+        dev_bps: f64,        // marginal deviation at this level pair
+        p_win: Option<f64>,  // shrunken conditional win rate at |dev|
+        p_gate: Option<f64>, // Wilson lower bound at z_gate, else shrunken rate
     }
     let mut chunks: Vec<Chunk> = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
@@ -463,10 +726,20 @@ pub fn capacity_ladder(
         let b = sell_bids[j].0;
         if a.is_finite() && a > 0.0 && b.is_finite() && b > 0.0 && q.is_finite() && q > 0.0 {
             let dev = (b - a) / a * 10_000.0 - baseline_bps;
+            let est =
+                p_win_est_at_deviation(pwin, dev.abs(), z_gate.unwrap_or(1.645), prior_strength);
             chunks.push(Chunk {
                 notional: q * a,
                 dev_bps: dev,
-                p_win: p_win_at_deviation(pwin, dev.abs()),
+                p_win: est
+                    .and_then(|e| e.rate)
+                    .or_else(|| p_win_at_deviation(pwin, dev.abs())),
+                p_gate: match z_gate {
+                    Some(_) => est.and_then(|e| e.lower),
+                    None => est
+                        .and_then(|e| e.rate)
+                        .or_else(|| p_win_at_deviation(pwin, dev.abs())),
+                },
             });
         }
         rem_a -= q;
@@ -492,6 +765,7 @@ pub fn capacity_ladder(
         let mut sum_exp = 0.0; // probability-weighted integral
         let mut any_p = false;
         let mut marginal_p: Option<f64> = None;
+        let mut marginal_gate: Option<f64> = None;
         for c in &chunks {
             if filled >= tier {
                 break;
@@ -507,6 +781,7 @@ pub fn capacity_ladder(
                 sum_exp += (p * c.dev_bps.max(0.0) - friction_bps) * take;
             }
             marginal_p = c.p_win;
+            marginal_gate = c.p_gate;
         }
         if filled <= 0.0 {
             break; // book exhausted — deeper tiers unfillable
@@ -518,7 +793,7 @@ pub fn capacity_ladder(
             if exp_usd > 0.0 && optimal.map(|(_, v)| exp_usd > v).unwrap_or(true) {
                 optimal = Some((filled, exp_usd));
             }
-            let p_ok = marginal_p.map(|p| p >= p_min).unwrap_or(false);
+            let p_ok = marginal_gate.map(|p| p >= p_min).unwrap_or(false);
             if exp_usd > 0.0 && p_ok {
                 breakeven = Some(filled);
             }
@@ -642,7 +917,7 @@ mod tests {
             obs(7, 0.0),
         ];
         // mu=0 sigma=5 stop=15 band=2
-        let curve = build_pwin_curve(&series, 0.0, 5.0, 2.0, 3.0);
+        let curve = build_pwin_curve(&series, 0.0, 5.0, 2.0, 3.0, None, 0);
         assert_eq!(curve.episodes, 3);
         let p5 = p_win_at_deviation(&curve, 5.0).unwrap();
         assert!((p5 - 2.0 / 3.0).abs() < 1e-9); // 2 of 3 excursions won
@@ -673,8 +948,22 @@ mod tests {
         let pwin = PWinCurve {
             points: vec![(0.0, 1.0), (200.0, 1.0), (300.0, 0.5)],
             episodes: 10,
+            point_wins: vec![10.0, 10.0, 5.0],
+            point_trials: vec![10.0, 10.0, 10.0],
+            point_censored: vec![0, 0, 0],
+            point_sum_w2: vec![10.0, 10.0, 10.0],
         };
-        let rep = capacity_ladder(&asks, &bids, 0.0, 10.0, &[100.0, 201.0], &pwin, 0.9);
+        let rep = capacity_ladder(
+            &asks,
+            &bids,
+            0.0,
+            10.0,
+            &[100.0, 201.0],
+            &pwin,
+            0.9,
+            None,
+            0.0,
+        );
         assert_eq!(rep.tiers.len(), 2);
         let t0 = &rep.tiers[0];
         assert!((t0.net_bps.unwrap() - 190.0).abs() < 1e-6); // 200 - 10 friction
@@ -699,8 +988,22 @@ mod tests {
         let pwin = PWinCurve {
             points: vec![(100.0, 0.5), (200.0, 0.95)],
             episodes: 20,
+            point_wins: vec![10.0, 19.0],
+            point_trials: vec![20.0, 20.0],
+            point_censored: vec![0, 0],
+            point_sum_w2: vec![20.0, 20.0],
         };
-        let rep = capacity_ladder(&asks, &bids, 0.0, 5.0, &[100.0, 300.0], &pwin, 0.9);
+        let rep = capacity_ladder(
+            &asks,
+            &bids,
+            0.0,
+            5.0,
+            &[100.0, 300.0],
+            &pwin,
+            0.9,
+            None,
+            0.0,
+        );
         // Tier2 marginal level has dev≈49.5 -> p=0.5 < 0.9 -> not breakeven.
         assert_eq!(rep.breakeven_size_usd, Some(rep.tiers[0].filled_usd));
     }
@@ -718,8 +1021,14 @@ mod tests {
             &PWinCurve {
                 points: vec![],
                 episodes: 0,
+                point_wins: vec![],
+                point_trials: vec![],
+                point_censored: vec![],
+                point_sum_w2: vec![],
             },
             0.9,
+            None,
+            0.0,
         );
         assert_eq!(rep.tiers.len(), 1);
         assert!(rep.tiers[0].expected_net_bps.is_none());

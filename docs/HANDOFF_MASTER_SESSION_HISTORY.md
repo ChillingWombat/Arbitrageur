@@ -2063,3 +2063,36 @@ clippy+fmt clean, app restarted on the new binary.
   path for immediate and scheduled closes.
 - `datetime-local` on WebKitGTK renders a segmented text field (no popup
   calendar) — the presets cover the common funding-capture cases.
+
+## 86. Session Handoff — 2026-09-22 (probability-semantics upgrade: net-P&L outcomes, Wilson/Beta uncertainty, recency weighting, durable calibration loop)
+
+### What shipped
+
+- **Shared statistics crate layer** — `arbitrageur-math/src/binomial.rs`: Wilson score intervals (z=1.645) on Kish-effective sample sizes, Beta(1,1) shrinkage, weighted means/deciles. `forecast_calibration.rs`: Brier + 10-bin reliability + OLS slope/intercept over scored (prediction, outcome) pairs.
+- **Radar outcome redefinition** — `pair_monitor::simulate_entry_outcomes` replays every excursion crossing the current deviation through the exit policy and scores real net bps (`sign(e0)·(e0 − dev_exit) − friction`) — `net_win_probability`/`net_win_lower`/`net_expected_bps`/`net_deciles_bps`/median-hold fields on `MonitorRowDto`. Censored (still-open) episodes count as non-wins in the lower bound. `episode_half_life_secs` (default 3d) recency-weights all episode statistics.
+- **Confidence-aware gating** — `execution_gate` now requires point estimate ≥ `min_win_probability` AND Wilson lower bound ≥ `min_win_lower_bound` (new config, default 0.5); `capacity_ladder` marginal tiers use shrunken per-depth estimates. `MonitorConfigDto` gains `episodeHalfLifeSecs` + `minWinLowerBound` (Configurator exposes both).
+- **Funding backtest upgrade** — `GapBacktest` adds `episodes` (episode-block effective n — raw trials overlap), Wilson `win_rate_lower`/`upper`, `expected_usd_se`, weekday/weekend regime splits. New `gap_persistence_probability`: measured survival of the gap above min-APR through the breakeven horizon (replaces nothing — the `c/(1+c)` heuristic stays labelled "model estimate"). All fields on `FundingOpportunityDto` for carry AND basis.
+- **Spatial scan propagation** — `SpatialOpportunityDto.win_probability` now carries `win_probability_lower`/`_upper` via `pair_win_probability_ex`.
+- **Calibration loop (schema v26)** — `signal_predictions` table persists each dispatched entry's forecast before the fill; `close_flattened_spatial_lot` resolves rows with reconciled realized net bps (first outcome wins, never rewritten). `get_calibration_report` IPC scores only net-P&L kinds; Strategy Performance page shows the reliability diagram, Brier, slope/intercept, per-strategy cuts, pending/audit counts.
+- **UI honesty** — Radar table adds a "Net %" column (P&L win rate) next to "Win %" (gated reversion trade prob); both tooltips carry Wilson intervals, effective episode counts, censored shares, OU-fallback flags. Detail card gains net-win/CI/expected-net/deciles/median-hold fields. Funding cards show CI + effective n + persistence + regime split.
+
+### Semantics contract (what each number means)
+
+- `reversion_probability`/`p_win` — P(|dev| reverts inside friction band before stop). Price-path event, informational.
+- `win_probability` (radar) — same estimate hard-zeroed when the direction/gates block. Table "Win %".
+- `net_win_probability` — empirical P(net > 0) replayed through exits. THE P&L win rate; `netWinLower` is the fail-closed reading.
+- Funding `win_probability` — closed-form coverage transform (sign-tied to EV; consistency check, not a measurement).
+- Funding `backtest_win_rate` — empirical P(net > 0) over simulated entries, with CI at effective n.
+- Funding `persistence_probability` — measured gap survival through breakeven horizon.
+- Calibration scoring: only `kind='net_win'` rows score against realized net bps; `reversion`/`funding_persist`/`heuristic` persist audit-only.
+
+### Verification
+
+- 116/116 math tests (incl. new binomial/calibration suites), 362/362 desktop (new signal-prediction roundtrip/resolve/cascade test), 210/210 frontend, tsc + clippy + fmt clean.
+
+### Pickup notes
+
+- Calibration accumulates only while the app runs; predictions written at dispatch, resolved at flatten/close. Signals closed by venue-side means stay unresolved (honest — no fabricated outcome).
+- Funding positions resolve only when the virtual-ledger lot closes — funding carries that never open lots keep predictions pending; extend `close_flattened_spatial_lot` coverage if funding ever needs scoring.
+- `pair_win_probability` returns the Beta-shrunken point — tests asserting raw hit rates were updated to the shrunken value.
+- Thin-evidence UX: `netWinProbability=None` under min_trials; tooltips always show effective n + censored share.

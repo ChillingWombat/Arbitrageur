@@ -115,6 +115,12 @@ export interface SpatialOpportunityDto {
    *  history, scored to the monitor's standard. Null when history is thin
    *  — the Ranked Opportunities Win % column renders "—" until then. */
   win_probability?: number | null;
+  /** Wilson 90% lower bound of win_probability on the episode bucket's
+   *  effective count — how much confidence the evidence supports. */
+  win_probability_lower?: number | null;
+  /** Wilson 90% upper bound of win_probability — interval width shows how
+   *  thin the episode evidence is. */
+  win_probability_upper?: number | null;
   position_step?: number;
   max_units?: number;
   nominal_hurdle_bps?: number;
@@ -434,8 +440,29 @@ export interface FundingOpportunityDto {
   hold_confidence?: number;
   /** Empirical backtest win rate (fraction of simulated trailing-history entries covering costs). Absent below 20 trials. */
   backtest_win_rate?: number;
+  /** Wilson 90% lower bound of backtest_win_rate on the effective
+   *  (episode-block) trial count — consecutive prints overlap, so this is
+   *  far below the raw trial count's implied confidence. */
+  backtest_win_rate_lower?: number;
+  /** Wilson 90% upper bound of backtest_win_rate. */
+  backtest_win_rate_upper?: number;
+  /** Effective trial count: contiguous above-threshold episode blocks in
+   *  the backtest window — the statistically honest sample size. */
+  backtest_episodes?: number;
+  /** Win rate restricted to weekday trials (UTC), absent below 5 trials. */
+  weekday_win_rate?: number;
+  /** Win rate restricted to weekend trials (UTC), absent below 5 trials. */
+  weekend_win_rate?: number;
+  /** Empirical P(funding gap persists above the min-APR threshold through
+   *  the modelled breakeven horizon) — a measured survival probability,
+   *  unlike the heuristic win_probability. */
+  persistence_probability?: number;
+  /** Wilson 90% lower bound of persistence_probability. */
+  persistence_probability_lower?: number;
   /** Empirical backtest mean net USD per entry. Absent below 20 trials. */
   backtest_expected_usd?: number;
+  /** Standard error of backtest_expected_usd across trials. */
+  backtest_expected_usd_se?: number;
   /** Backtest entry trials behind the two figures above. */
   backtest_trials?: number;
   /** Ascending net-USD deciles (P0…P100, 11 points) for P(net >= any target). Absent below 20 trials. */
@@ -1019,6 +1046,9 @@ export interface SpatialCandidateInput {
   /** Grid-cap context for the backend execution gate. */
   positionStep?: number | null;
   maxUnits?: number | null;
+  /** Scan-time reversion probability — persisted to the backend
+   * calibration log when the candidate dispatches (kind "reversion"). */
+  predictedWinProbability?: number | null;
 }
 
 export interface CandidateOutcomeDto {
@@ -1202,6 +1232,40 @@ export interface MonitorRowDto {
   reversionProbability?: number | null;
   /** Directional trade win probability after all gates. Table "Win %" column. */
   winProbability?: number | null;
+  /** Wilson 90% lower bound of winProbability — the confidence-aware
+   * floor the executable gate checks against minWinLowerBound. */
+  winProbabilityLower?: number | null;
+  /** Wilson 90% upper bound of winProbability — width shows evidence depth. */
+  winProbabilityUpper?: number | null;
+  /** Kish-effective episode count behind the win estimate (shrinks under
+   * recency weighting). 0 when the OU fallback produced the estimate. */
+  pWinNEffective?: number | null;
+  /** Still-open (censored) episodes inside the win bucket — high share
+   * means the rate is understated, not confirmed. */
+  pWinCensored?: number | null;
+  /** True when the win estimate came from the OU first-passage fallback
+   * rather than empirical episode evidence. */
+  pWinFromModel?: boolean | null;
+  /** Empirical P(net > 0) for a fresh entry at the current deviation —
+   * historical excursions replayed through the exit policy and scored on
+   * real net bps. THE P&L-defined win rate (reversionProbability only
+   * answers "does the spread normalize"). */
+  netWinProbability?: number | null;
+  /** Wilson lower bound of netWinProbability counting censored episodes
+   * as non-wins — the fail-closed reading. */
+  netWinLower?: number | null;
+  /** Recency-weighted mean net bps per simulated entry at this deviation. */
+  netExpectedBps?: number | null;
+  /** Ascending weighted net-bps deciles (P0…P100, 11 points) of simulated
+   * entries — enables P(net >= any bps target) client-side. */
+  netDecilesBps?: number[] | null;
+  /** Simulated entry trials / still-open share at this deviation. */
+  outcomeTrials?: number | null;
+  outcomeCensored?: number | null;
+  /** Weighted median entry→exit seconds across simulated episodes, and
+   * among profitable ones — capital-turnover context. */
+  medianHoldSecs?: number | null;
+  medianWinSecs?: number | null;
   expectedProfitBps: number | null;
   expectedProfitUsd: number | null;
   optimalSizeUsd: number | null;
@@ -1294,6 +1358,13 @@ export interface MonitorConfigDto {
   minExpectedProfitBps: number;
   minThresholdRatio: number;
   minCoverage: number;
+  /** Episode recency half-life in seconds — older episodes weigh
+   * exponentially less in win/outcome estimates. 0 disables weighting. */
+  episodeHalfLifeSecs: number;
+  /** Confidence floor on the win probability's Wilson lower bound
+   * (z=1.645): a row is not executable when its lower bound falls below
+   * this even if the point estimate passes minWinProbability. 0 disables. */
+  minWinLowerBound: number;
 }
 
 /** One shrunk per-session aggregate (get_session_profile row). Provisional
@@ -1431,6 +1502,47 @@ export interface RadarBotStatusDto {
   auditErrors: number;
   monitorRunning: boolean;
   snapshotPresent: boolean;
+}
+
+/** One reliability-diagram bucket from the forecast calibration report. */
+export interface CalibrationBin {
+  lo: number;
+  hi: number;
+  n: number;
+  meanPred: number;
+  observed: number;
+}
+
+/** Aggregate calibration stats for one scored forecast stream. */
+export interface CalibrationReport {
+  scored: number;
+  /** Brier score (mean squared forecast error); 0.25 = always-0.5 baseline. */
+  brier: number | null;
+  /** OLS calibration intercept — >0 with slope<1 is the overconfidence
+   * signature. Null under 3 scored pairs or zero prediction variance. */
+  intercept: number | null;
+  slope: number | null;
+  bins: CalibrationBin[];
+}
+
+/** Per (strategy, kind) calibration cut. */
+export interface CalibrationCutDto {
+  strategyId: string;
+  kind: string;
+  report: CalibrationReport;
+}
+
+/** Forecast-calibration report over the durable prediction log. */
+export interface CalibrationReportDto {
+  /** Predictions scored against a reconciled realized outcome. */
+  scored: number;
+  /** Predictions waiting on a reconciled close. */
+  unresolved: number;
+  /** Aggregate calibration over every scored net-P&L prediction. */
+  overall: CalibrationReport;
+  cuts: CalibrationCutDto[];
+  /** Logged-but-not-P&L-scored predictions (reversion/persist/heuristic). */
+  auditOnly: number;
 }
 
 export * from "./tickers.ts";

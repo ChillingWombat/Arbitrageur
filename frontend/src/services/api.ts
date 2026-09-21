@@ -51,6 +51,7 @@ import type {
   OpenPositionDto,
   TickerPositionState,
   FlattenResultDto,
+  CalibrationReportDto,
   MonitorSnapshotDto,
   MonitorConfigDto,
   RadarBotConfigDto,
@@ -938,6 +939,19 @@ export const api = {
 
   async getStrategyFillPnl(strategyId: string): Promise<StrategyFillPnl> {
     return invokeDesktop<StrategyFillPnl>("get_strategy_fill_pnl", { strategyId });
+  },
+
+  /** Forecast-calibration report over the durable prediction log: Brier
+   * score, reliability bins, and OLS calibration slope/intercept for every
+   * prediction scored against a reconciled realized net-P&L outcome. */
+  async getCalibrationReport(
+    strategyId?: string,
+    liveOnly = false
+  ): Promise<CalibrationReportDto> {
+    return invokeDesktop<CalibrationReportDto>("get_calibration_report", {
+      strategyId,
+      liveOnly,
+    });
   },
 
   async getExternalPositions(): Promise<ExternalPositionsResponse> {

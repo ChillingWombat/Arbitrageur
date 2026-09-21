@@ -15,7 +15,7 @@ import {
 import { SpreadGapIcon } from "./icons";
 import { formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
-import type { StrategyMetrics, WfoOptimizationResult } from "../types";
+import type { CalibrationReportDto, StrategyMetrics, WfoOptimizationResult } from "../types";
 
 interface StrategyPerformanceProps {
   activeSymbol: string;
@@ -26,12 +26,17 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
   const [loading, setLoading] = useState(true);
   const [calibrating, setCalibrating] = useState(false);
   const [wfoResult, setWfoResult] = useState<WfoOptimizationResult | null>(null);
+  const [forecastCal, setForecastCal] = useState<CalibrationReportDto | null>(null);
 
   const loadMetrics = async () => {
     setLoading(true);
     try {
-      const data = await api.getStrategyPerformance();
+      const [data, cal] = await Promise.all([
+        api.getStrategyPerformance(),
+        api.getCalibrationReport().catch(() => null),
+      ]);
       setMetrics(data);
+      setForecastCal(cal);
     } catch (err) {
       console.error("Failed to load strategy performance:", err);
     } finally {
@@ -365,6 +370,117 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
           </div>
         )}
       </div>
+
+      {/* Forecast calibration — are emitted probabilities honest? */}
+      {forecastCal != null && (forecastCal.scored > 0 || forecastCal.unresolved > 0 || forecastCal.auditOnly > 0) && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-3 border-b border-surface-border pb-2.5">
+            <div className="flex items-center space-x-2.5">
+              <div className="p-2 rounded-lg bg-surface-raised border border-surface-border text-slate-600">
+                <Target className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
+                  Forecast Calibration
+                </h3>
+                <p className="text-xs text-slate-500 font-mono mt-0.5">
+                  Predicted probabilities vs reconciled outcomes — a probability never scored is a guess
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center space-x-4 text-xs font-mono tabular-nums">
+              <div className="text-right">
+                <span className="text-[10px] text-slate-400 block">Scored</span>
+                <span className="font-bold text-slate-900">{forecastCal.scored}</span>
+              </div>
+              <div className="text-right" title="Predictions waiting on a reconciled close">
+                <span className="text-[10px] text-slate-400 block">Pending</span>
+                <span className="font-bold text-slate-900">{forecastCal.unresolved}</span>
+              </div>
+              <div className="text-right" title="Brier score: mean squared forecast error. 0.25 = always-50% baseline; lower is better.">
+                <span className="text-[10px] text-slate-400 block">Brier</span>
+                <span className="font-bold text-slate-900">
+                  {forecastCal.overall.brier != null ? forecastCal.overall.brier.toFixed(3) : "—"}
+                </span>
+              </div>
+              <div className="text-right" title="OLS calibration slope/intercept: ideal = 1.0 / 0.0. Slope < 1 with intercept > 0 = overconfident tails.">
+                <span className="text-[10px] text-slate-400 block">Cal. slope / int.</span>
+                <span className="font-bold text-slate-900">
+                  {forecastCal.overall.slope != null ? forecastCal.overall.slope.toFixed(2) : "—"}
+                  {" / "}
+                  {forecastCal.overall.intercept != null ? forecastCal.overall.intercept.toFixed(2) : "—"}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {forecastCal.overall.bins.length > 0 && (
+            <div className="border border-surface-border rounded-xl overflow-hidden shadow-2xs">
+              <div className="bg-surface-raised px-4 py-2 border-b border-surface-border">
+                <span className="text-xs font-bold font-mono text-slate-800">
+                  Reliability — predicted vs observed win frequency (net-P&L forecasts)
+                </span>
+              </div>
+              <div className="px-4 py-3 flex items-end gap-1.5 h-24">
+                {forecastCal.overall.bins.map((b) => (
+                  <div
+                    key={b.lo}
+                    className="flex-1 flex flex-col items-center gap-0.5"
+                    title={`p ∈ [${b.lo.toFixed(1)}, ${b.hi.toFixed(1)}): predicted ${(b.meanPred * 100).toFixed(0)}%, observed ${(b.observed * 100).toFixed(0)}% (n=${b.n})`}
+                  >
+                    <div className="w-full flex flex-col justify-end h-16 relative">
+                      <div
+                        className="w-full bg-accent/70 rounded-t"
+                        style={{ height: `${Math.max(2, b.observed * 100)}%` }}
+                      />
+                      <div
+                        className="absolute w-full border-t-2 border-slate-800/60"
+                        style={{ bottom: `${b.meanPred * 100}%` }}
+                      />
+                    </div>
+                    <span className="text-[9px] font-mono text-slate-400 tabular-nums">
+                      {b.meanPred.toFixed(1)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              <div className="px-4 pb-2 text-[10px] font-mono text-slate-400">
+                Bars = observed win frequency; tick marks = mean predicted probability. Bar below the tick = overconfident.
+                {forecastCal.auditOnly > 0 && ` · ${forecastCal.auditOnly} audit-only predictions (reversion/persistence) not scored against P&L.`}
+              </div>
+            </div>
+          )}
+
+          {forecastCal.cuts.length > 1 && (
+            <div className="border border-surface-border rounded-xl overflow-hidden shadow-2xs">
+              <table className="w-full text-xs font-mono tabular-nums text-left">
+                <thead className="bg-surface-raised/60 text-xs text-slate-500 tracking-wider border-b border-surface-border">
+                  <tr>
+                    <th className="px-4 py-2 font-semibold">Strategy</th>
+                    <th className="px-3 py-2 font-semibold">Kind</th>
+                    <th className="px-3 py-2 font-semibold">Scored</th>
+                    <th className="px-3 py-2 font-semibold">Brier</th>
+                    <th className="px-3 py-2 font-semibold">Slope</th>
+                    <th className="px-3 py-2 font-semibold">Intercept</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-border">
+                  {forecastCal.cuts.map((c) => (
+                    <tr key={`${c.strategyId}-${c.kind}`}>
+                      <td className="px-4 py-2">{formatStrategyName(c.strategyId)}</td>
+                      <td className="px-3 py-2 text-slate-500">{c.kind}</td>
+                      <td className="px-3 py-2">{c.report.scored}</td>
+                      <td className="px-3 py-2">{c.report.brier != null ? c.report.brier.toFixed(3) : "—"}</td>
+                      <td className="px-3 py-2">{c.report.slope != null ? c.report.slope.toFixed(2) : "—"}</td>
+                      <td className="px-3 py-2">{c.report.intercept != null ? c.report.intercept.toFixed(2) : "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

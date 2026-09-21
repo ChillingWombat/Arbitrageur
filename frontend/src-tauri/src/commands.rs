@@ -193,6 +193,15 @@ pub struct SpatialOpportunityDto {
     /// `None` renders as "—" (insufficient data).
     #[serde(default)]
     pub win_probability: Option<f64>,
+    /// Wilson lower bound of `win_probability` (z=1.645) on the episode
+    /// bucket's effective count — how much confidence the evidence
+    /// actually supports. `None` when unavailable or model-derived.
+    #[serde(default)]
+    pub win_probability_lower: Option<f64>,
+    /// Wilson upper bound of `win_probability` — the interval width shows
+    /// how thin the episode evidence is.
+    #[serde(default)]
+    pub win_probability_upper: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -271,11 +280,44 @@ pub struct FundingOpportunityDto {
     pub expected_return_usd: Option<f64>,
     /// Empirical backtest win rate over trailing gap history (fraction of
     /// simulated entries covering costs). `None` below 20 trials.
+    /// Display only — gate on `backtest_win_rate_lower`.
     #[serde(default)]
     pub backtest_win_rate: Option<f64>,
+    /// Wilson lower/upper bounds of the backtest win rate at z=1.645 on
+    /// `backtest_episodes` (distinct gap episodes — the effective sample
+    /// size; overlapping forward paths from one episode are correlated).
+    #[serde(default)]
+    pub backtest_win_rate_lower: Option<f64>,
+    #[serde(default)]
+    pub backtest_win_rate_upper: Option<f64>,
+    /// Distinct contiguous above-threshold episodes the trials entered
+    /// in — the honest sample size behind the win rate.
+    #[serde(default)]
+    pub backtest_episodes: Option<u32>,
+    /// Regime split of the backtest win rate: entries made Mon–Fri vs
+    /// Sat–Sun UTC (`None` below 8 trials per regime). Funding behaviour
+    /// differs materially on weekends.
+    #[serde(default)]
+    pub weekday_win_rate: Option<f64>,
+    #[serde(default)]
+    pub weekend_win_rate: Option<f64>,
+    /// Measured persistence probability: of historical prints above the
+    /// entry threshold, the fraction whose gap stayed above it for the
+    /// full fee+spread breakeven horizon — a real estimated "edge
+    /// survives to breakeven" probability, unlike the `win_probability`
+    /// coverage heuristic. `None` below 20 scoreable prints.
+    #[serde(default)]
+    pub persistence_probability: Option<f64>,
+    /// Wilson lower bound of `persistence_probability`.
+    #[serde(default)]
+    pub persistence_probability_lower: Option<f64>,
     /// Empirical backtest mean net USD per entry. `None` below 20 trials.
     #[serde(default)]
     pub backtest_expected_usd: Option<f64>,
+    /// Standard error of `backtest_expected_usd` at the effective
+    /// (episode-level) sample size.
+    #[serde(default)]
+    pub backtest_expected_usd_se: Option<f64>,
     /// Backtest entry trials behind the two figures above.
     #[serde(default)]
     pub backtest_trials: Option<u32>,
@@ -1851,8 +1893,10 @@ pub async fn scan_spatial_opportunities_impl(
                 let is_executable = econ.expected_net_bps >= min_bps && slippage_ok && depth_ok;
 
                 // Informational win probability on the shared monitor
-                // standard. Never feeds ordering or `is_executable`.
-                let win_probability = match (
+                // standard — now with a Wilson interval so thin episode
+                // evidence shows its width instead of a confident point.
+                // Never feeds ordering or `is_executable`.
+                let (win_probability, win_probability_lower, win_probability_upper) = match (
                     scan_mids_by_venue.get(buy_id),
                     scan_mids_by_venue.get(sell_id),
                 ) {
@@ -1864,14 +1908,18 @@ pub async fn scan_spatial_opportunities_impl(
                             sell_mids,
                             crate::monitor::PAIR_ALIGN_GAP_MS,
                         );
-                        crate::monitor::pair_win_probability(
+                        crate::monitor::pair_win_probability_ex(
                             &series,
                             econ.top_gross_bps,
                             econ.expected_friction_bps,
                             scan_min_episodes,
+                            None,
+                            chrono::Utc::now().timestamp_millis(),
                         )
+                        .map(|e| (Some(e.p), Some(e.lower), Some(e.upper)))
+                        .unwrap_or((None, None, None))
                     }
-                    _ => None,
+                    _ => (None, None, None),
                 };
 
                 opps.push(SpatialOpportunityDto {
@@ -1901,6 +1949,8 @@ pub async fn scan_spatial_opportunities_impl(
                     slippage_ok,
                     depth_ok,
                     win_probability,
+                    win_probability_lower,
+                    win_probability_upper,
                 });
             }
         }
@@ -2934,13 +2984,24 @@ async fn scan_funding_opportunities_for_symbol(
                 // Per-leg prints for the detail popup (before `opp` moves).
                 let long_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.long_venue);
                 let short_leg_rate = scan_leg_rate_8h_pct(&rates, &opp.short_venue);
-                let (bt_win, bt_exp, bt_n, bt_dec) = backtest_stats(
+                let bt = backtest_stats(
                     &hist,
                     funding_min_apr(state),
                     fee_bps_f,
                     spread_cost_f,
                     trade_size_usd,
                 );
+                // Measured persistence: of historical prints above the
+                // entry threshold, the share whose gap stayed above it
+                // for the full fee+spread breakeven horizon.
+                let persistence = hold_estimate.as_ref().and_then(|h| {
+                    arbitrageur_math::funding_carry::gap_persistence_probability(
+                        &hist,
+                        funding_min_apr(state).max(0.0) / 100.0 / 365.0 / 3.0,
+                        h.breakeven_hours,
+                        20,
+                    )
+                });
                 // Canonical leg identity: display strings never serve as
                 // adapter keys downstream; resolve both legs to venue IDs.
                 let vid_for = |name: &str| -> Option<&str> {
@@ -3054,10 +3115,18 @@ async fn scan_funding_opportunities_for_symbol(
                         Some(funding_min_apr(state)),
                         trade_size_usd,
                     ),
-                    backtest_win_rate: bt_win,
-                    backtest_expected_usd: bt_exp,
-                    backtest_trials: bt_n,
-                    backtest_deciles_usd: bt_dec,
+                    backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
+                    backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
+                    backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),
+                    backtest_episodes: bt.as_ref().map(|b| b.episodes),
+                    weekday_win_rate: bt.as_ref().and_then(|b| b.weekday_win_rate),
+                    weekend_win_rate: bt.as_ref().and_then(|b| b.weekend_win_rate),
+                    persistence_probability: persistence.and_then(|p| p.rate),
+                    persistence_probability_lower: persistence.and_then(|p| p.lower),
+                    backtest_expected_usd: bt.as_ref().map(|b| b.expected_usd),
+                    backtest_expected_usd_se: bt.as_ref().and_then(|b| b.expected_usd_se),
+                    backtest_trials: bt.as_ref().map(|b| b.trials),
+                    backtest_deciles_usd: bt.as_ref().map(|b| b.deciles_usd.clone()),
                 });
             }
         }
@@ -3254,13 +3323,21 @@ async fn scan_funding_opportunities_for_symbol(
                             slope,
                         )
                     };
-                    let (bt_win, bt_exp, bt_n, bt_dec) = backtest_stats(
+                    let bt = backtest_stats(
                         &hist_basis,
                         funding_min_apr(state),
                         fee_bps_f,
                         spread_cost_f,
                         trade_size_usd,
                     );
+                    let persistence = basis_hold.as_ref().and_then(|h| {
+                        arbitrageur_math::funding_carry::gap_persistence_probability(
+                            &hist_basis,
+                            funding_min_apr(state).max(0.0) / 100.0 / 365.0 / 3.0,
+                            h.breakeven_hours,
+                            20,
+                        )
+                    });
                     let Some(spot_exact) = spot_key_used.clone() else {
                         continue;
                     };
@@ -3359,10 +3436,18 @@ async fn scan_funding_opportunities_for_symbol(
                         expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
                         hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),
                         hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
-                        backtest_win_rate: bt_win,
-                        backtest_expected_usd: bt_exp,
-                        backtest_trials: bt_n,
-                        backtest_deciles_usd: bt_dec,
+                        backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
+                        backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
+                        backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),
+                        backtest_episodes: bt.as_ref().map(|b| b.episodes),
+                        weekday_win_rate: bt.as_ref().and_then(|b| b.weekday_win_rate),
+                        weekend_win_rate: bt.as_ref().and_then(|b| b.weekend_win_rate),
+                        persistence_probability: persistence.and_then(|p| p.rate),
+                        persistence_probability_lower: persistence.and_then(|p| p.lower),
+                        backtest_expected_usd: bt.as_ref().map(|b| b.expected_usd),
+                        backtest_expected_usd_se: bt.as_ref().and_then(|b| b.expected_usd_se),
+                        backtest_trials: bt.as_ref().map(|b| b.trials),
+                        backtest_deciles_usd: bt.as_ref().map(|b| b.deciles_usd.clone()),
                         expected_return_usd: expected_carry_return_usd(
                             net_8h_f,
                             fee_bps_f,
@@ -3880,9 +3965,22 @@ pub async fn execute_spatial_arbitrage_impl(
         None,
         "futures",
         None,
+        None,
         state,
     )
     .await
+}
+
+/// Forecast attached to an entry for the durable calibration log.
+/// `kind` fixes which event `win_probability` describes — only "net_win"
+/// rows score against realized net P&L at close; "reversion" rows persist
+/// for audit but are never scored against P&L (different event).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct EntryPrediction {
+    pub kind: &'static str,
+    pub win_probability: f64,
+    /// Expected net bps under the same forecast, when produced.
+    pub expected_net_bps: Option<f64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3900,6 +3998,7 @@ async fn execute_spatial_arbitrage_inner(
     route_id: Option<&str>,
     strategy_id: &str,
     canary_max_loss_bps: Option<f64>,
+    prediction: Option<EntryPrediction>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if !order_qty.is_finite() || order_qty <= 0.0 {
@@ -4438,6 +4537,24 @@ async fn execute_spatial_arbitrage_inner(
         })
         .map_err(|e| format!("Failed to persist in-flight signal record: {e}"))?;
 
+    // Calibration log: persist the forecast BEFORE dispatch so the row
+    // provably predates the outcome it will be scored against. A failed
+    // write is non-fatal — calibration is diagnostic, not gating.
+    if let Some(pred) = prediction {
+        if let Err(e) = state.state_store.record_signal_prediction(
+            &signal_id,
+            pred.kind,
+            pred.win_probability,
+            pred.expected_net_bps,
+            strategy_id,
+            symbol,
+            &format!("{buy_vid}/{sell_vid}"),
+            is_live,
+        ) {
+            tracing::warn!("persist signal prediction failed for {signal_id}: {e}");
+        }
+    }
+
     let started = std::time::Instant::now();
     let res = state
         .coordinator
@@ -4863,6 +4980,11 @@ pub struct SpatialCandidateInput {
     pub position_step: Option<u32>,
     #[serde(default)]
     pub max_units: Option<u32>,
+    /// Scan-time reversion probability for this candidate — persisted to
+    /// the calibration log when the candidate dispatches. Scan computes
+    /// reversion semantics only, so the recorded kind is "reversion".
+    #[serde(default)]
+    pub predicted_win_probability: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4978,6 +5100,11 @@ pub async fn execute_spatial_candidates_impl(
             winner.route_id.as_deref(),
             "futures",
             None,
+            winner.predicted_win_probability.map(|p| EntryPrediction {
+                kind: "reversion",
+                win_probability: p,
+                expected_net_bps: None,
+            }),
             state,
         )
         .await;
@@ -5568,6 +5695,35 @@ pub async fn execute_funding_carry_impl(
             ],
         })
         .map_err(|e| format!("Failed to persist funding signal record: {e}"))?;
+
+    // Calibration log: the funding card carries three forecast numbers,
+    // each a different event — persist each under its own kind so scoring
+    // never mixes semantics. `net_win` (backtest P(net>0)) scores against
+    // realized net bps; `funding_persist` and the EV-transform heuristic
+    // persist for audit. Non-fatal on failure. Live mode is hard-gated
+    // above, so is_live reads false here — read it anyway rather than
+    // hardcoding so a future live path stays correct.
+    for (kind, p) in [
+        ("net_win", opp.backtest_win_rate),
+        ("funding_persist", opp.persistence_probability),
+        ("heuristic", opp.win_probability),
+    ]
+    .into_iter()
+    .filter_map(|(k, v)| v.map(|p| (k, p)))
+    {
+        if let Err(e) = state.state_store.record_signal_prediction(
+            &signal_id,
+            kind,
+            p,
+            None,
+            FUNDING_STRATEGY_ID,
+            &root_symbol,
+            &format!("{long_canon}/{short_canon}"),
+            *state.is_live_mode.read(),
+        ) {
+            tracing::warn!("persist funding prediction {kind} failed for {signal_id}: {e}");
+        }
+    }
 
     let mut equity_before = dec!(0);
     let mut equity_before_by_venue = HashMap::new();
@@ -6714,7 +6870,7 @@ fn close_flattened_spatial_lot(
             .map(|l| l.id.clone())
     };
     if let Some(id) = lot_id {
-        state
+        let realized = state
             .virtual_ledger
             .write()
             .close_cycle(
@@ -6727,7 +6883,16 @@ fn close_flattened_spatial_lot(
             .and_then(|l| match (l.realized_pnl_usd, l.realized_pnl_bps) {
                 (Some(usd), Some(bps)) => Some((usd, bps)),
                 _ => None,
-            })
+            });
+        // Calibration resolution: the ledger's realized net bps is the
+        // authoritative outcome the entry forecast gets scored against.
+        // Non-fatal — a prediction left unresolved is uncounted, not wrong.
+        if let Some((_, bps)) = realized {
+            if let Err(e) = state.state_store.resolve_signal_predictions(&sig.id, bps) {
+                tracing::warn!("resolve signal predictions failed for {}: {e}", sig.id);
+            }
+        }
+        realized
     } else {
         None
     }
@@ -7439,21 +7604,13 @@ fn backtest_stats(
     fee_bps: f64,
     spread_bps: Option<f64>,
     trade_size_usd: f64,
-) -> (Option<f64>, Option<f64>, Option<u32>, Option<Vec<f64>>) {
+) -> Option<arbitrageur_math::funding_carry::GapBacktest> {
     let threshold_8h = min_apr_pct.max(0.0) / 100.0 / 365.0 / 3.0;
     let spread = spread_bps
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(0.0);
     let cost_ratio = (fee_bps.max(0.0) + spread) / 10_000.0;
-    match backtest_gap_carry(hist, threshold_8h, cost_ratio, trade_size_usd, 168.0, 20) {
-        Some(b) => (
-            Some(b.win_rate),
-            Some(b.expected_usd),
-            Some(b.trials),
-            Some(b.deciles_usd),
-        ),
-        None => (None, None, None, None),
-    }
+    backtest_gap_carry(hist, threshold_8h, cost_ratio, trade_size_usd, 168.0, 20)
 }
 
 pub fn get_execution_logs_by_mode_impl(
@@ -8519,6 +8676,7 @@ pub async fn execute_spatial_arbitrage(
     max_units: Option<u32>,
     nominal_hurdle_bps: Option<f64>,
     canary_max_loss_bps: Option<f64>,
+    predicted_win_probability: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
     match execute_spatial_arbitrage_inner(
@@ -8535,6 +8693,11 @@ pub async fn execute_spatial_arbitrage(
         None,
         "futures",
         canary_max_loss_bps,
+        predicted_win_probability.map(|p| EntryPrediction {
+            kind: "reversion",
+            win_probability: p,
+            expected_net_bps: None,
+        }),
         &state,
     )
     .await
@@ -10041,9 +10204,11 @@ pub async fn get_autotune_recommendation_impl(
                         sig_f,
                         fee_sum.max(2.0),
                         3.0,
+                        None,
+                        chrono::Utc::now().timestamp_millis(),
                     );
                     let rep = arbitrageur_math::pair_monitor::capacity_ladder(
-                        &asks, &bids, mu_f, fee_sum, &tiers, &curve, 0.9,
+                        &asks, &bids, mu_f, fee_sum, &tiers, &curve, 0.9, None, 2.0,
                     );
                     (rep.optimal_size_usd, rep.breakeven_size_usd)
                 }
@@ -11384,6 +11549,94 @@ pub fn get_strategy_performance_impl(
     Ok(metrics)
 }
 
+/// One scored cut of the prediction log: a (strategy, kind) slice's
+/// calibration statistics. `kind` preserves event semantics — only
+/// net-P&L kinds are scored, so a reversion forecast can never inflate a
+/// profit-probability report.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationCutDto {
+    pub strategy_id: String,
+    pub kind: String,
+    pub report: arbitrageur_math::forecast_calibration::CalibrationReport,
+}
+
+/// Forecast-calibration report over the durable prediction log.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationReportDto {
+    /// Predictions scored against a reconciled realized outcome.
+    pub scored: usize,
+    /// Predictions still waiting on a reconciled close (open or
+    /// unrealized positions) — shown so thin evidence is visible.
+    pub unresolved: usize,
+    /// Aggregate calibration over every scored net-P&L prediction.
+    pub overall: arbitrageur_math::forecast_calibration::CalibrationReport,
+    /// Per (strategy, kind) cuts for net-P&L-scored predictions.
+    pub cuts: Vec<CalibrationCutDto>,
+    /// Count of logged-but-never-P&L-scored kinds (reversion, persist,
+    /// heuristic) — surfaced so the audit trail is visible.
+    pub audit_only: usize,
+}
+
+/// Score the durable prediction log. `kind`/`strategy_id`/`live_only`
+/// filter the rows; only kinds whose event is realized net P&L are
+/// scored — the rest count toward `audit_only`.
+pub fn get_calibration_report_impl(
+    strategy_id: Option<String>,
+    live_only: bool,
+    state: &AppEngineState,
+) -> Result<CalibrationReportDto, String> {
+    let rows = state
+        .state_store
+        .list_signal_predictions(
+            None,
+            strategy_id.as_deref(),
+            live_only.then_some(true),
+            false,
+        )
+        .map_err(|e| e.to_string())?;
+
+    let mut scored_pairs: Vec<(f64, bool)> = Vec::new();
+    let mut unresolved = 0usize;
+    let mut audit_only = 0usize;
+    let mut by_cut: std::collections::BTreeMap<(String, String), Vec<(f64, bool)>> =
+        std::collections::BTreeMap::new();
+
+    for r in &rows {
+        let scorable = crate::state_store::NET_PNL_PREDICTION_KINDS.contains(&r.kind.as_str());
+        match (scorable, r.realized_net_bps) {
+            (true, Some(net_bps)) => {
+                let pair = (r.predicted_p, net_bps > 0.0);
+                scored_pairs.push(pair);
+                by_cut
+                    .entry((r.strategy_id.clone(), r.kind.clone()))
+                    .or_default()
+                    .push(pair);
+            }
+            (true, None) => unresolved += 1,
+            (false, _) => audit_only += 1,
+        }
+    }
+
+    let cuts = by_cut
+        .into_iter()
+        .map(|((strategy_id, kind), pairs)| CalibrationCutDto {
+            strategy_id,
+            kind,
+            report: arbitrageur_math::forecast_calibration::calibration_report(&pairs),
+        })
+        .collect();
+
+    Ok(CalibrationReportDto {
+        scored: scored_pairs.len(),
+        unresolved,
+        overall: arbitrageur_math::forecast_calibration::calibration_report(&scored_pairs),
+        cuts,
+        audit_only,
+    })
+}
+
 /// Attributed realized PnL for one strategy, derived from durable signal-leg
 /// fills (fees included). Closed root families owned by `strategy_id` sum
 /// their root + `flat-*` child fills via side-signed cash flows; families
@@ -11681,6 +11934,15 @@ pub async fn get_strategy_fill_pnl(
 }
 
 #[tauri::command]
+pub async fn get_calibration_report(
+    strategy_id: Option<String>,
+    live_only: bool,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<CalibrationReportDto, String> {
+    get_calibration_report_impl(strategy_id, live_only, &state)
+}
+
+#[tauri::command]
 pub async fn get_utilisation_history(
     venue: String,
     window_hours: Option<u64>,
@@ -11877,6 +12139,24 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         .filter(|p| *p > 0.0)
         .ok_or_else(|| "no ask on buy-side book".to_string())?;
     let qty = size_usd / ask;
+    // Calibration forecast for this entry: prefer the net-P&L win
+    // probability (scored against realized net bps at close); fall back to
+    // the reversion probability, which is logged for audit but never
+    // scored against P&L — the events differ.
+    let prediction = row
+        .net_win_probability
+        .map(|p| EntryPrediction {
+            kind: "net_win",
+            win_probability: p,
+            expected_net_bps: row.net_expected_bps.or(row.net_capture_bps),
+        })
+        .or_else(|| {
+            row.win_probability.or(row.p_win).map(|p| EntryPrediction {
+                kind: "reversion",
+                win_probability: p,
+                expected_net_bps: None,
+            })
+        });
     // Radar-dispatched fills persist under the "radar" strategy so the
     // Spread Radar page scopes positions separately from Single Spread.
     let res = execute_spatial_arbitrage_inner(
@@ -11893,6 +12173,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         None,
         "radar",
         None,
+        prediction,
         state,
     )
     .await?;
@@ -16124,7 +16405,7 @@ mod tests {
         // dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
-            "futures", None, &state,
+            "futures", None, None, &state,
         )
         .await;
         assert!(sim_err
@@ -16140,7 +16421,7 @@ mod tests {
         // regardless of which venues the route names.
         let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "decibel", 100.0, None, None, None, None, None, None, None,
-            "futures", None, &state,
+            "futures", None, None, &state,
         )
         .await;
         assert!(decibel_err
@@ -17349,6 +17630,7 @@ mod tests {
             None,
             "futures",
             None,
+            None,
             &state,
         )
         .await
@@ -17369,6 +17651,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             None,
             &state,
         )
@@ -17399,6 +17682,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             None,
             &state,
         )
@@ -18127,6 +18411,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
                 SpatialCandidateInput {
                     symbol: "BTC-USDC".into(),
@@ -18138,6 +18423,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
                 SpatialCandidateInput {
                     symbol: "ETH-USDC".into(),
@@ -18149,6 +18435,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
             ],
             &state,
@@ -18241,6 +18528,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
                 SpatialCandidateInput {
                     symbol: "BTC-USDC".into(),
@@ -18252,6 +18540,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
                 SpatialCandidateInput {
                     symbol: "ETH-USDC".into(),
@@ -18263,6 +18552,7 @@ mod tests {
                     direction: None,
                     position_step: None,
                     max_units: None,
+                    predicted_win_probability: None,
                 },
             ],
             &state,
