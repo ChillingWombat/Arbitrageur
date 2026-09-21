@@ -109,6 +109,8 @@ jobs:
 
       - name: Scan for committed secrets
         uses: gitleaks/gitleaks-action@v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   deployment:
     name: Headless deployment template validation
