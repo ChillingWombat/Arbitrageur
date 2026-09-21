@@ -486,14 +486,22 @@ where
 }
 
 async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
-    let account_id = state.settings.read().vanta_account_id.clone();
+    // The Orderly account_id provisioned into the adapter from vault
+    // credentials is authoritative; the settings field is a legacy override.
+    let account_id: Option<String> = state
+        .get_adapter("vanta")
+        .and_then(|a| a.ws_account_id())
+        .or_else(|| {
+            let s = state.settings.read().vanta_account_id.trim().to_string();
+            (!s.is_empty()).then_some(s)
+        });
     // Orderly closes `/ws/stream/public` and unregistered account ids with a
     // 1000 right after upgrade — no account_id means this lane cannot run
     // (REST polling still covers the venue).
-    let ws_url = match vanta_ws_url(&account_id) {
-        Ok(url) => url,
-        Err(e) => {
-            tracing::info!("feed: vanta WS disabled: {e}");
+    let ws_url = match account_id.and_then(|id| vanta_ws_url(&id).ok()) {
+        Some(url) => url,
+        None => {
+            tracing::info!("feed: vanta WS disabled: no registered Orderly account_id configured");
             return Ok(FeedOutcome::Disabled);
         }
     };
