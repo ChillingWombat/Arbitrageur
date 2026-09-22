@@ -196,14 +196,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
             <VenueLogo venueId={(opp.sell_venue_id ?? opp.sell_venue ?? "").toLowerCase()} name={opp.sell_venue} size={16} />
             <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
           </span>
-          {isLive ? (
-            <span
-              className="ml-1.5 px-1.5 py-0.5 rounded-md border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
-              title="Both venues support live API execution"
-            >
-              LIVE
-            </span>
-          ) : (
+          {!isLive && (
             <span
               className="ml-1.5 px-1.5 py-0.5 rounded-md border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
               title="Route contains read-only venue(s) — paper execution only"
