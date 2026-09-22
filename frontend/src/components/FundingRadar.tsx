@@ -9,6 +9,7 @@ import { TickerLogMonitor } from "./TickerLogMonitor";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface FundingRadarProps {
@@ -687,6 +688,23 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 )}
               </div>
             </div>
+
+          <div>
+            <div
+              className="text-[11px] font-sans text-slate-400 font-medium mb-1.5"
+              title="Carry profit vs position size walked through both leg orderbooks. Carry income is depth-invariant (net rate × modelled hold) — the curve degrades only through the entry cross. Expected = income scaled by the Breakeven (model) probability; Net = raw. Dashed marker: depth-supported size."
+            >
+              Capacity curve — profit vs position size (both leg orderbooks)
+            </div>
+            {(opp.depth_curve?.length ?? 0) >= 2 ? (
+              <CapacityChart
+                points={opp.depth_curve ?? []}
+                optimalSizeUsd={opp.optimal_size_usd}
+              />
+            ) : (
+              <span className="text-slate-400 text-xs">no depth data</span>
+            )}
+          </div>
 
           <div>
             <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5">

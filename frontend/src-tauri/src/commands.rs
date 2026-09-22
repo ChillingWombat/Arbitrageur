@@ -19,7 +19,7 @@ use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidS
 use arbitrageur_math::funding_carry::backtest_gap_carry;
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
-use arbitrageur_math::pair_monitor::build_pair_series;
+use arbitrageur_math::pair_monitor::{build_pair_series, capacity_ladder};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -194,6 +194,24 @@ pub struct SpatialOpportunityDto {
     /// how thin the episode evidence is.
     #[serde(default)]
     pub win_probability_upper: Option<f64>,
+    /// Depth-supported size maximizing expected USD (monitor's lockstep
+    /// capacity walk). `None` when no win-rate curve exists.
+    #[serde(default)]
+    pub optimal_size_usd: Option<f64>,
+    /// Largest fillable size whose marginal level clears the win floor
+    /// with positive expected net. `None` when unmeasurable.
+    #[serde(default)]
+    pub breakeven_size_usd: Option<f64>,
+    /// Probability-weighted fillable notional over levels with positive
+    /// marginal expected net. `None` when no win-rate curve exists.
+    #[serde(default)]
+    pub expected_capacity_usd: Option<f64>,
+    /// Fillable notional at each marginal expected-net floor.
+    #[serde(default)]
+    pub bps_capacity_ladder: Vec<crate::monitor::BpsCapacityTierDto>,
+    /// Per-chunk capacity curve for the detail-modal chart.
+    #[serde(default)]
+    pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -213,6 +231,10 @@ pub struct SpotOpportunityDto {
     pub available_depth_usd: f64,
     pub estimated_latency_ms: u64,
     pub is_executable: bool,
+    /// Per-chunk capacity curve for the detail-modal chart. Empty until
+    /// the spot scan resolves real books (the impl is currently stubbed).
+    #[serde(default)]
+    pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -254,6 +276,10 @@ pub struct PredictionOpportunityDto {
     pub net_profit_cents: f64,
     pub roi_pct: f64,
     pub has_arbitrage: bool,
+    /// Per-chunk capacity curve for the detail-modal chart. Empty until
+    /// the prediction scan resolves real books (the impl is stubbed).
+    #[serde(default)]
+    pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1626,35 +1652,83 @@ pub async fn scan_spatial_opportunities_impl(
                 );
                 let is_executable = econ.expected_net_bps >= min_bps && slippage_ok && depth_ok;
 
-                // Informational win probability on the shared monitor
-                // standard — now with a Wilson interval so thin episode
-                // evidence shows its width instead of a confident point.
-                // Never feeds ordering or `is_executable`.
-                let (win_probability, win_probability_lower, win_probability_upper) = match (
+                // Pair spread series shared by the win estimate and the
+                // capacity walk — same source, same alignment gap.
+                let series = match (
                     scan_mids_by_venue.get(buy_id),
                     scan_mids_by_venue.get(sell_id),
                 ) {
                     (Some(buy_mids), Some(sell_mids))
                         if !buy_mids.is_empty() && !sell_mids.is_empty() =>
                     {
-                        let series = build_pair_series(
-                            buy_mids,
-                            sell_mids,
-                            crate::monitor::PAIR_ALIGN_GAP_MS,
-                        );
-                        crate::monitor::pair_win_probability_ex(
-                            &series,
-                            econ.top_gross_bps,
-                            econ.expected_friction_bps,
-                            scan_min_episodes,
-                            None,
-                            chrono::Utc::now().timestamp_millis(),
-                        )
-                        .map(|e| (Some(e.p), Some(e.lower), Some(e.upper)))
-                        .unwrap_or((None, None, None))
+                        build_pair_series(buy_mids, sell_mids, crate::monitor::PAIR_ALIGN_GAP_MS)
                     }
-                    _ => (None, None, None),
+                    _ => Vec::new(),
                 };
+
+                // Informational win probability on the shared monitor
+                // standard — now with a Wilson interval so thin episode
+                // evidence shows its width instead of a confident point.
+                // Never feeds ordering or `is_executable`.
+                let (win_probability, win_probability_lower, win_probability_upper) =
+                    crate::monitor::pair_win_probability_ex(
+                        &series,
+                        econ.top_gross_bps,
+                        econ.expected_friction_bps,
+                        scan_min_episodes,
+                        None,
+                        now_ms,
+                    )
+                    .map(|e| (Some(e.p), Some(e.lower), Some(e.upper)))
+                    .unwrap_or((None, None, None));
+
+                // Capacity report over both leg books — the same lockstep
+                // walk + win-rate model the Simple Spread monitor uses.
+                // No episode series → empty curve: the raw net view still
+                // renders, expected fields stay None (never fabricated).
+                let to_pairs = |levels: &[arbitrageur_core::quote::BookLevel]| -> Vec<(f64, f64)> {
+                    levels
+                        .iter()
+                        .filter_map(|l| {
+                            let p = l.price.to_string().parse::<f64>().ok()?;
+                            let q = l.size.to_string().parse::<f64>().ok()?;
+                            (p.is_finite() && p > 0.0 && q.is_finite() && q > 0.0).then_some((p, q))
+                        })
+                        .collect()
+                };
+                let asks = to_pairs(&book_buy.asks);
+                let bids = to_pairs(&book_sell.bids);
+                let (pwin_curve, baseline_bps) = match crate::monitor::pair_pwin_curve(
+                    &series,
+                    econ.expected_friction_bps,
+                    None,
+                    now_ms,
+                ) {
+                    Some((curve, mu, _)) => (curve, mu),
+                    None => (
+                        arbitrageur_math::pair_monitor::PWinCurve {
+                            points: Vec::new(),
+                            episodes: 0,
+                            point_wins: Vec::new(),
+                            point_trials: Vec::new(),
+                            point_censored: Vec::new(),
+                            point_sum_w2: Vec::new(),
+                        },
+                        // Raw-spread economics: dev = gross − 0.
+                        0.0,
+                    ),
+                };
+                let cap_rep = capacity_ladder(
+                    &asks,
+                    &bids,
+                    baseline_bps,
+                    econ.expected_friction_bps,
+                    &monitor_cfg.capacity_tiers_usd,
+                    &pwin_curve,
+                    monitor_cfg.min_win_probability,
+                    None,
+                    crate::monitor::WIN_PRIOR_STRENGTH,
+                );
 
                 opps.push(SpatialOpportunityDto {
                     id: format!("{}-{}-{}", symbol, buy_id, sell_id),
@@ -1685,6 +1759,22 @@ pub async fn scan_spatial_opportunities_impl(
                     win_probability,
                     win_probability_lower,
                     win_probability_upper,
+                    optimal_size_usd: cap_rep.optimal_size_usd,
+                    breakeven_size_usd: cap_rep.breakeven_size_usd,
+                    expected_capacity_usd: cap_rep.expected_capacity_usd,
+                    bps_capacity_ladder: cap_rep
+                        .bps_capacity_ladder
+                        .iter()
+                        .map(|t| crate::monitor::BpsCapacityTierDto {
+                            min_net_bps: t.min_net_bps,
+                            capacity_usd: t.capacity_usd,
+                        })
+                        .collect(),
+                    depth_curve: cap_rep
+                        .depth_curve
+                        .iter()
+                        .map(crate::monitor::DepthCurvePointDto::from)
+                        .collect(),
                 });
             }
         }

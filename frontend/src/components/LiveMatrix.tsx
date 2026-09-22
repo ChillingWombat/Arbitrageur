@@ -9,6 +9,7 @@ import {
   LayoutGrid,
   Radar,
   Table,
+  X,
 } from "lucide-react";
 import type {
   VenueOrderBookDto,
@@ -45,6 +46,9 @@ import { TickerTelemetryGadget } from "./TickerTelemetryGadget";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
+import { InfoTooltip } from "./InfoTooltip";
+import { DetailField, DetailSection } from "./DetailBits";
 import { SignalTrendGadget } from "./SignalTrendGadget";
 import { TickerConfigModal } from "./TickerConfigModal";
 import { EmptyState } from "./EmptyState";
@@ -148,6 +152,7 @@ interface OpportunityRowViewProps {
   loading: boolean;
   symbolLabel: string | null;
   onExecute: (opp: SpatialOpportunityDto) => void;
+  onSelect: (opp: SpatialOpportunityDto) => void;
 }
 
 const LIVE_CAPABLE_VENUES = new Set([
@@ -165,7 +170,7 @@ const isLiveRoute = (v1: string, v2: string): boolean =>
   LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
 
 const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
-  ({ opp, minBps, blocked, blockingIds, botPhase, loading, symbolLabel, onExecute }) => {
+  ({ opp, minBps, blocked, blockingIds, botPhase, loading, symbolLabel, onExecute, onSelect }) => {
     const isExec = opp.is_executable;
     const entriesOpen = botPhase === "idle" || botPhase === "running";
     const disabled = !isExec || loading || blocked || !entriesOpen;
@@ -176,7 +181,11 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
         : undefined;
     const isLive = isLiveRoute(opp.buy_venue, opp.sell_venue);
     return (
-      <tr className={`hover:bg-surface-raised transition ${isExec ? "bg-accent-dim/30" : ""}`}>
+      <tr
+        className={`hover:bg-surface-raised transition cursor-pointer ${isExec ? "bg-accent-dim/30" : ""}`}
+        onClick={() => onSelect(opp)}
+        title="Click for opportunity details"
+      >
         <td className="py-2.5 px-3 font-medium text-slate-900 flex items-center space-x-1.5">
           <span className="flex items-center gap-1 min-w-0">
             <VenueLogo venueId={(opp.buy_venue_id ?? opp.buy_venue ?? "").toLowerCase()} name={opp.buy_venue} size={16} />
@@ -216,7 +225,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
         <td className={`py-2.5 px-3 font-bold font-mono tabular-nums ${opp.estimated_profit_usd >= 0 ? "text-profit" : "text-loss"}`}>
           {formatCurrencyPnl(opp.estimated_profit_usd)}
         </td>
-        <td className="py-2.5 px-3 text-right">
+        <td className="py-2.5 px-3 text-right" onClick={(e) => e.stopPropagation()}>
           <ExecuteButton
             onClick={() => onExecute(opp)}
             disabled={disabled}
@@ -225,6 +234,210 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
           />
         </td>
       </tr>
+    );
+  },
+);
+
+interface SpatialDetailModalProps {
+  opp: SpatialOpportunityDto;
+  executing: boolean;
+  blocked: boolean;
+  onExecute: (opp: SpatialOpportunityDto) => void;
+  onClose: () => void;
+}
+
+/** Click-through detail for one spatial route: leg prices, friction
+ *  breakdown, win evidence, and the capacity curve over both leg books.
+ *  Read-only over the scanned DTO — never synthesizes. */
+const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
+  ({ opp, executing, blocked, onExecute, onClose }) => {
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onClose();
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [onClose]);
+    const fmtUsd = (v: number | null | undefined): string =>
+      v != null && Number.isFinite(v)
+        ? `$${v.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+        : "—";
+    const gate = (ok: boolean) => (
+      <span className={`font-bold ${ok ? "text-profit" : "text-loss"}`}>{ok ? "PASS" : "FAIL"}</span>
+    );
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="bg-surface border border-surface-border rounded-2xl w-[640px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <VenueLogo venueId={(opp.buy_venue_id ?? opp.buy_venue ?? "").toLowerCase()} name={opp.buy_venue} size={16} />
+              <span className="text-sm font-bold font-sans text-slate-900 truncate">
+                {opp.symbol} — buy {opp.buy_venue} / sell {opp.sell_venue}
+              </span>
+              <VenueLogo venueId={(opp.sell_venue_id ?? opp.sell_venue ?? "").toLowerCase()} name={opp.sell_venue} size={16} />
+              <span
+                className={`px-2 py-0.5 rounded-md text-xs font-sans font-semibold border ${
+                  opp.is_executable
+                    ? "bg-profit-dim text-profit border-profit-border"
+                    : "bg-surface-raised text-slate-400 border-surface-border"
+                }`}
+              >
+                {opp.is_executable ? "EXECUTABLE" : "SUB-HURDLE"}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              title="Close details (ESC)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            <DetailSection title="Route">
+              <DetailField
+                label="Buy price"
+                value={formatCurrencyPrice(opp.buy_price)}
+                tip={`Best ask on ${opp.buy_venue} at scan time.`}
+              />
+              <DetailField
+                label="Sell price"
+                value={formatCurrencyPrice(opp.sell_price)}
+                tip={`Best bid on ${opp.sell_venue} at scan time.`}
+              />
+              <DetailField
+                label="Order qty"
+                value={opp.order_qty.toString()}
+                tip="Base-unit quantity the scan sized this route at."
+              />
+            </DetailSection>
+
+            <DetailSection title="Economics">
+              <DetailField
+                label="Gross spread"
+                value={`+${opp.gross_spread_bps.toFixed(1)} bps`}
+                tip="Top-of-book cross-venue spread before any friction."
+              />
+              <DetailField
+                label="Total fees"
+                value={`-${opp.fee_bps.toFixed(1)} bps`}
+                tip={`Round-trip commission: buy ${opp.buy_fee_bps.toFixed(1)} + sell ${opp.sell_fee_bps.toFixed(1)} bps.`}
+              />
+              <DetailField
+                label="Net spread"
+                value={`${opp.net_spread_bps >= 0 ? "+" : ""}${opp.net_spread_bps.toFixed(2)} bps`}
+                tip="Gross minus ALL expected friction (fees + entry/exit slippage + closing spread)."
+              />
+              <DetailField
+                label="Est. profit"
+                value={formatCurrencyPnl(opp.estimated_profit_usd)}
+                tip={`Net bps applied to the scan order qty of ${opp.order_qty}.`}
+              />
+              <DetailField
+                label="Win %"
+                value={
+                  opp.win_probability != null
+                    ? `${fmtPct(opp.win_probability)}${opp.win_probability_lower != null && opp.win_probability_upper != null ? ` (${(opp.win_probability_lower * 100).toFixed(0)}–${(opp.win_probability_upper * 100).toFixed(0)}%)` : ""}`
+                    : "—"
+                }
+                tip="Empirical convergence probability from the pair's episode history, scored to the monitor's standard (min-episodes gate + OU fallback). Wilson 90% interval in parens. Informational only."
+              />
+              <DetailField
+                label="Required gross"
+                value={`${opp.required_gross_bps.toFixed(1)} bps`}
+                tip="Gross spread needed for the trade to clear every friction component."
+              />
+            </DetailSection>
+
+            <DetailSection title="Friction & Gates">
+              <DetailField
+                label="Entry slippage"
+                value={`${opp.entry_slippage_bps.toFixed(1)} bps`}
+                tip="VWAP-vs-top cost of entering both legs at the order qty."
+              />
+              <DetailField
+                label="Exit slippage"
+                value={`${opp.exit_slippage_bps.toFixed(1)} bps`}
+                tip="Modelled VWAP cost of unwinding both legs."
+              />
+              <DetailField
+                label="Closing spread"
+                value={`${opp.closing_spread_bps.toFixed(1)} bps`}
+                tip="Bid-ask crossing cost paid again on exit."
+              />
+              <DetailField
+                label="Expected friction"
+                value={`${opp.expected_friction_bps.toFixed(1)} bps`}
+                tip="Total per-unit cost model: fees + entry + exit slippage + closing spread."
+              />
+              <DetailField
+                label="Slippage gate"
+                value={gate(opp.slippage_ok)}
+                tip="Entry slippage within the configured max."
+              />
+              <DetailField
+                label="Depth gate"
+                value={gate(opp.depth_ok)}
+                tip="Visible book depth covers the order qty at the required ratio."
+              />
+            </DetailSection>
+
+            <DetailSection title="Capacity">
+              <DetailField
+                label="Expected capacity"
+                value={fmtUsd(opp.expected_capacity_usd)}
+                tip="Probability-weighted fillable notional across book levels with positive marginal expected net (p·dev⁺ − friction). '—' when no win-rate curve exists."
+              />
+              <DetailField
+                label="Optimal size"
+                value={fmtUsd(opp.optimal_size_usd)}
+                tip="Fillable size maximizing expected USD — the sweet spot of the capacity curve."
+              />
+              <DetailField
+                label="Breakeven size"
+                value={fmtUsd(opp.breakeven_size_usd)}
+                tip="Largest fillable size whose marginal level still clears the win-probability floor with positive expected net."
+              />
+            </DetailSection>
+
+            <div className="space-y-2">
+              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
+                Capacity curve
+                <InfoTooltip
+                  text="Profit vs position size walked through both leg orderbooks. Expected = win-probability-weighted; Net = raw capture. Cumulative = total at that size; Marginal = per-unit rate at that depth. X runs to the depth where marginal profit turns non-positive."
+                  position="top"
+                />
+              </div>
+              {(opp.depth_curve?.length ?? 0) >= 2 ? (
+                <CapacityChart
+                  points={opp.depth_curve ?? []}
+                  optimalSizeUsd={opp.optimal_size_usd}
+                  breakevenSizeUsd={opp.breakeven_size_usd}
+                />
+              ) : (
+                <span className="text-slate-400 text-xs">no depth data</span>
+              )}
+            </div>
+          </div>
+
+          <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
+            <ExecuteButton
+              executing={executing}
+              disabled={!opp.is_executable || blocked}
+              onClick={() => onExecute(opp)}
+              title={blocked ? "symbol blocked: awaiting reconciliation" : "execute spatial route"}
+              className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
+            />
+          </div>
+        </div>
+      </div>
     );
   },
 );
@@ -284,6 +497,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   const [orderQty, setOrderQty] = useState(() => getDefaultOrderQty(activeTicker.basePrice));
   const [minBps, setMinBps] = useState(1.0);
   const [selectedPair, setSelectedPair] = useState<{ rowId: string; colId: string } | null>(null);
+  const [detailOpp, setDetailOpp] = useState<SpatialOpportunityDto | null>(null);
   const [executing, setExecuting] = useState(false);
   const [internalConfigModalOpen, setInternalConfigModalOpen] = useState(false);
   const lastAutoExecTimeRef = React.useRef<number>(0);
@@ -1071,6 +1285,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                               loading={loading}
                               symbolLabel={symbol}
                               onExecute={handleExecuteOpp}
+                              onSelect={setDetailOpp}
                             />
                           ))}
                         </tbody>
@@ -1200,6 +1415,20 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           tickerSymbol={sym}
           onSaveConfig={handleSaveStrategyParams}
           initialStrategy="futures"
+        />
+      )}
+
+      {/* Opportunity detail modal — click any ranked row */}
+      {detailOpp && (
+        <SpatialDetailModal
+          opp={detailOpp}
+          executing={executing}
+          blocked={positionState?.blocked ?? false}
+          onExecute={(o) => {
+            setDetailOpp(null);
+            handleExecuteOpp(o);
+          }}
+          onClose={() => setDetailOpp(null)}
         />
       )}
     </div>

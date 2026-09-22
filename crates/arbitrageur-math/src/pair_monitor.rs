@@ -672,6 +672,24 @@ pub struct BpsCapacityTier {
 /// profile — from chunky edges down to barely-positive captures.
 pub const BPS_CAPACITY_LEVELS: &[f64] = &[10.0, 5.0, 2.0, 1.0, 0.5];
 
+/// One point on the capacity depth curve — the state after consuming a
+/// book chunk, for charting cumulative and marginal profit vs size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthCurvePoint {
+    /// Cumulative fillable notional up to and including this chunk, USD.
+    pub cum_usd: f64,
+    /// Cumulative raw (unweighted) net capture per unit notional, bps.
+    pub cum_net_bps: f64,
+    /// Cumulative probability-weighted expected net per unit, bps —
+    /// `None` when no win-rate curve exists (unverifiable expectation).
+    pub cum_exp_bps: Option<f64>,
+    /// Marginal raw net per unit at this depth, bps (`dev − friction`).
+    pub marg_net_bps: f64,
+    /// Marginal expected net per unit at this depth, bps
+    /// (`p·dev⁺ − friction`). `None` when no win-rate curve exists.
+    pub marg_exp_bps: Option<f64>,
+}
+
 /// Aggregated capacity evaluation for a pair direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapacityReport {
@@ -691,6 +709,9 @@ pub struct CapacityReport {
     /// Fillable notional at each `BPS_CAPACITY_LEVELS` marginal expected-net
     /// floor; empty when no win-rate curve exists.
     pub bps_capacity_ladder: Vec<BpsCapacityTier>,
+    /// Per-chunk capacity curve for charting: cumulative and marginal
+    /// net/expected capture at each consumed book depth.
+    pub depth_curve: Vec<DepthCurvePoint>,
 }
 
 /// Walk both orderbooks in lockstep and compute the probability-weighted
@@ -865,6 +886,36 @@ pub fn capacity_ladder(
         Vec::new()
     };
 
+    // Depth curve: running capture per unit at each consumed chunk. The
+    // chart reads cum_*/marg_* directly; USD values derive as bps·cum_usd
+    // in the client.
+    let depth_curve = {
+        let mut cum_usd = 0.0;
+        let mut net_integral = 0.0; // Σ (dev−friction)·notional  (usd·bps)
+        let mut exp_integral = 0.0; // Σ (p·dev⁺−friction)·notional
+        chunks
+            .iter()
+            .map(|c| {
+                cum_usd += c.notional;
+                net_integral += (c.dev_bps - friction_bps) * c.notional;
+                if let Some(e) = marginal_exp(c) {
+                    exp_integral += e * c.notional;
+                }
+                DepthCurvePoint {
+                    cum_usd,
+                    cum_net_bps: net_integral / cum_usd,
+                    cum_exp_bps: if any_p {
+                        Some(exp_integral / cum_usd)
+                    } else {
+                        None
+                    },
+                    marg_net_bps: c.dev_bps - friction_bps,
+                    marg_exp_bps: marginal_exp(c),
+                }
+            })
+            .collect()
+    };
+
     CapacityReport {
         tiers,
         optimal_size_usd: optimal.map(|(s, _)| s),
@@ -872,6 +923,7 @@ pub fn capacity_ladder(
         expected_profit_usd: optimal.map(|(_, v)| v),
         expected_capacity_usd,
         bps_capacity_ladder,
+        depth_curve,
     }
 }
 

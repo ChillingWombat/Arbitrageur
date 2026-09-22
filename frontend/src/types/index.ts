@@ -124,6 +124,19 @@ export interface SpatialOpportunityDto {
   position_step?: number;
   max_units?: number;
   nominal_hurdle_bps?: number;
+  /** Depth-supported size maximizing expected USD (monitor's lockstep
+   *  capacity walk over both leg books). Null when no win-rate curve. */
+  optimal_size_usd?: number | null;
+  /** Largest fillable size whose marginal level clears the win floor
+   *  with positive expected net. Null when unmeasurable. */
+  breakeven_size_usd?: number | null;
+  /** Probability-weighted fillable notional over levels with positive
+   *  marginal expected net. Null when no win-rate curve exists. */
+  expected_capacity_usd?: number | null;
+  /** Fillable notional at each marginal expected-net floor. */
+  bps_capacity_ladder?: BpsCapacityTierDto[];
+  /** Per-chunk capacity curve for the detail-modal chart. */
+  depth_curve?: DepthCurvePointDto[];
 }
 
 export type MatrixMode = "cross-venue" | "cross-ticker";
@@ -505,6 +518,11 @@ export interface FundingOpportunityDto {
   /** Current funding print of the SHORT leg, 8h-normalized percent.
    *  Absent on stale backends. */
   short_rate_8h_pct?: number;
+  /** Depth curve: cumulative/marginal net & expected carry profit per
+   * unit walking both leg books in lockstep. Empty when a book is
+   * missing. Income is depth-invariant; the curve degrades through the
+   * entry cross only. (snake_case field, camelCase point fields.) */
+  depth_curve?: DepthCurvePointDto[];
 }
 
 export interface FundingTrendPointDto {
@@ -539,6 +557,9 @@ export interface PredictionOpportunityDto {
   net_profit_cents: number;
   roi_pct: number;
   has_arbitrage: boolean;
+  /** Per-chunk capacity curve for the detail-modal chart. Empty until
+   *  the prediction scan resolves real books (impl currently stubbed). */
+  depth_curve?: DepthCurvePointDto[];
 }
 
 export interface StatArbStepResultDto {
@@ -1160,6 +1181,9 @@ export interface SpotOpportunityDto {
   available_depth_usd: number;
   estimated_latency_ms: number;
   is_executable: boolean;
+  /** Per-chunk capacity curve for the detail-modal chart. Empty until
+   *  the spot scan resolves real books (impl currently stubbed). */
+  depth_curve?: DepthCurvePointDto[];
 }
 
 export interface SpotExecutionParams {
@@ -1203,6 +1227,9 @@ export interface TriangleOpportunityDto {
   trade_size_usd: number;
   estimated_latency_ms: number;
   is_executable: boolean;
+  /** Per-size capacity curve from the depth-aware cycle evaluation —
+   *  net fields only; atomic cycles carry no win-rate model. */
+  depth_curve?: DepthCurvePointDto[];
 }
 
 export interface TriangleExecutionParams {
@@ -1249,6 +1276,21 @@ export interface CapacityTierDto {
 export interface BpsCapacityTierDto {
   minNetBps: number;
   capacityUsd: number;
+}
+
+/** One capacity-curve sample emitted by the backend book walk. USD values
+ * derive as `bps · cumUsd / 1e4`. */
+export interface DepthCurvePointDto {
+  /** Cumulative fillable notional through this chunk, USD (x-axis). */
+  cumUsd: number;
+  /** Cumulative raw net capture per unit, bps. */
+  cumNetBps: number;
+  /** Cumulative probability-weighted expected net per unit, bps. */
+  cumExpBps: number | null;
+  /** Marginal raw net per unit at this depth, bps. */
+  margNetBps: number;
+  /** Marginal expected net per unit at this depth, bps. */
+  margExpBps: number | null;
 }
 
 export interface MonitorRowDto {
@@ -1310,6 +1352,8 @@ export interface MonitorRowDto {
   expectedCapacityUsd?: number | null;
   /** Depth capacity at each marginal expected-net floor (bps). */
   bpsCapacityLadder?: BpsCapacityTierDto[];
+  /** Per-chunk capacity curve for the detail-modal chart. */
+  depthCurve?: DepthCurvePointDto[];
   fundingCarryBps: number | null;
   fundingUnknown: boolean;
   firstSeenMs: number | null;

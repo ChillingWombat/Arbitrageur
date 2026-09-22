@@ -1064,6 +1064,79 @@ pub fn funding_entry_capacity(
     }
 }
 
+/// Depth curve for a funding-carry direction: walk the long leg's asks
+/// and the short leg's bids in lockstep. Carry income is depth-invariant,
+/// so the marginal net per unit at each chunk is
+/// `income + cross − friction` where `cross = (bid − ask)/ask·1e4 ≤ 0`.
+/// The expected series scales only the income component by the scalar win
+/// probability — costs are certain: `p·income⁺ + cross − friction`.
+///
+/// * `income_bps`: deterministic carry income per unit over the modelled
+///   hold (net rate × hold, or the expected-return back-out upstream).
+/// * `friction_bps`: round-trip fees + any fixed exit costs.
+/// * `p_win`: scalar opportunity win probability; `None` → expected
+///   fields `None`.
+pub fn funding_depth_curve(
+    buy_asks: &[(f64, f64)],
+    sell_bids: &[(f64, f64)],
+    income_bps: f64,
+    friction_bps: f64,
+    p_win: Option<f64>,
+) -> Vec<crate::pair_monitor::DepthCurvePoint> {
+    let mut points = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    let (mut rem_a, mut rem_b) = (0.0, 0.0);
+    let mut cum_usd = 0.0;
+    let mut net_integral = 0.0;
+    let mut exp_integral = 0.0;
+    while i < buy_asks.len() && j < sell_bids.len() {
+        if rem_a <= 0.0 {
+            rem_a = buy_asks[i].1;
+            if rem_a <= 0.0 {
+                i += 1;
+                continue;
+            }
+        }
+        if rem_b <= 0.0 {
+            rem_b = sell_bids[j].1;
+            if rem_b <= 0.0 {
+                j += 1;
+                continue;
+            }
+        }
+        let q = rem_a.min(rem_b);
+        let a = buy_asks[i].0;
+        let b = sell_bids[j].0;
+        if a.is_finite() && a > 0.0 && b.is_finite() && b > 0.0 && q.is_finite() && q > 0.0 {
+            let cross = (b - a) / a * 10_000.0;
+            let notional = q * a;
+            cum_usd += notional;
+            let marg_net = income_bps + cross - friction_bps;
+            let marg_exp = p_win.map(|p| p * income_bps.max(0.0) + cross - friction_bps);
+            net_integral += marg_net * notional;
+            if let Some(e) = marg_exp {
+                exp_integral += e * notional;
+            }
+            points.push(crate::pair_monitor::DepthCurvePoint {
+                cum_usd,
+                cum_net_bps: net_integral / cum_usd,
+                cum_exp_bps: p_win.map(|_| exp_integral / cum_usd),
+                marg_net_bps: marg_net,
+                marg_exp_bps: marg_exp,
+            });
+        }
+        rem_a -= q;
+        rem_b -= q;
+        if rem_a <= 0.0 {
+            i += 1;
+        }
+        if rem_b <= 0.0 {
+            j += 1;
+        }
+    }
+    points
+}
+
 #[cfg(test)]
 mod spot_perp_basis_tests {
     use super::*;
@@ -1496,5 +1569,48 @@ mod funding_capacity_tests {
             expected_carry_return_usd(0.001, 10.0, None, Some(8.0), Some(1_000_000.0), 10_000.0)
                 .expect("value");
         assert!(v.abs() < 1e-6, "{v}");
+    }
+
+    #[test]
+    fn depth_curve_degrades_through_the_cross() {
+        // Two ask levels (100 x1, 101 x10) vs flat bid 99.9 x11:
+        // income 20 bps/unit, friction 10 bps → chunk 1 marg = +10 − ~10 cross
+        // ≈ 0; chunk 2 cross worsens → marginal turns negative.
+        let curve = funding_depth_curve(
+            &[(100.0, 1.0), (101.0, 10.0)],
+            &[(99.9, 11.0)],
+            20.0,
+            10.0,
+            Some(0.8),
+        );
+        assert_eq!(curve.len(), 2);
+        // Chunk 1: cross = (99.9−100)/100 = −10 bps → marg net ≈ 0.
+        assert!(approx(curve[0].cum_usd, 100.0));
+        assert!(
+            (curve[0].marg_net_bps).abs() < 0.01,
+            "{}",
+            curve[0].marg_net_bps
+        );
+        // Chunk 2: cross = (99.9−101)/101 ≈ −10.89 bps → marg net ≈ −0.89.
+        assert!(curve[1].marg_net_bps < 0.0, "{}", curve[1].marg_net_bps);
+        assert!(curve[1].cum_usd > 1000.0);
+        // Expected scales only the income component: p·20 −10.89 −10 ≈ −4.7.
+        let e = curve[1].marg_exp_bps.unwrap();
+        assert!(approx(e, 0.8 * 20.0 + curve[1].marg_net_bps - 20.0));
+        // Cumulative expected is the notional-weighted integral.
+        let want_cum = (curve[0].marg_exp_bps.unwrap() * 100.0 + e * (curve[1].cum_usd - 100.0))
+            / curve[1].cum_usd;
+        assert!(approx(curve[1].cum_exp_bps.unwrap(), want_cum));
+    }
+
+    #[test]
+    fn depth_curve_empty_and_expected_free() {
+        // Empty side → no curve. No win prob → expected fields stay None.
+        assert!(funding_depth_curve(&[], &[(99.9, 1.0)], 20.0, 10.0, Some(0.8)).is_empty());
+        let curve = funding_depth_curve(&[(100.0, 5.0)], &[(99.9, 5.0)], 20.0, 10.0, None);
+        assert_eq!(curve.len(), 1);
+        assert!(curve[0].cum_exp_bps.is_none());
+        assert!(curve[0].marg_exp_bps.is_none());
+        assert!(approx(curve[0].cum_net_bps, curve[0].marg_net_bps));
     }
 }

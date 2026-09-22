@@ -1,11 +1,119 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Filter, SlidersHorizontal } from "lucide-react";
+import { Filter, SlidersHorizontal, X } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
+import { DetailField, DetailSection } from "./DetailBits";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 import { describeCommandError } from "../services/api";
+
+interface PredictionDetailModalProps {
+  opp: PredictionOpportunityDto;
+  executing: boolean;
+  onExecute: (opp: PredictionOpportunityDto) => void;
+  onClose: () => void;
+}
+
+/** Click-through detail for one parity pair: leg prices, payout math, and
+ *  the capacity curve when venue books exist (prediction adapters are
+ *  scaffolds — the curve honestly reports "no depth data" until then). */
+const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
+  ({ opp, executing, onExecute, onClose }) => {
+    useEffect(() => {
+      const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key === "Escape") onClose();
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }, [onClose]);
+    const cents = (v: number) => `$${(v / 100).toFixed(2)}`;
+    return (
+      <div
+        className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none"
+        onClick={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <div className="bg-surface border border-surface-border rounded-2xl w-[600px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="text-sm font-bold font-sans text-slate-900 truncate">{opp.market_title}</span>
+              <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold border bg-accent-dim text-accent border-accent-line">
+                {opp.strategy}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              title="Close details (ESC)"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-5 space-y-5">
+            <DetailSection title="Parity Legs">
+              <DetailField label="Buy YES @"
+                value={`${opp.buy_yes_venue} — ${cents(opp.yes_price_cents)}`}
+                tip="Venue and price for the YES leg of the parity."
+              />
+              <DetailField label="Buy NO @"
+                value={`${opp.buy_no_venue} — ${cents(opp.no_price_cents)}`}
+                tip="Venue and price for the NO leg of the parity."
+              />
+              <DetailField label="Combined cost"
+                value={cents(opp.total_cost_cents)}
+                tip="YES + NO ask cost per hedged contract pair. Below $1.00 is the arbitrage."
+              />
+            </DetailSection>
+
+            <DetailSection title="Economics">
+              <DetailField label="Payout"
+                value={cents(opp.conditional_payout_cents)}
+                tip="Guaranteed $1.00 settlement per hedged pair when the market resolves."
+              />
+              <DetailField label="Net profit"
+                value={`+${cents(opp.net_profit_cents)} / pair`}
+                tip="Payout minus combined cost — locked at resolution regardless of outcome."
+              />
+              <DetailField label="ROI"
+                value={`+${opp.roi_pct.toFixed(2)}%`}
+                tip="Net profit over combined cost. Held to market resolution — not a perp convergence."
+              />
+            </DetailSection>
+
+            <div className="space-y-2">
+              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
+                Capacity curve
+              </div>
+              {(opp.depth_curve?.length ?? 0) >= 2 ? (
+                <CapacityChart points={opp.depth_curve ?? []} />
+              ) : (
+                <span className="text-slate-400 text-xs">
+                  no depth data — prediction venue books are not wired yet
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
+            <ExecuteButton
+              executing={executing}
+              disabled={!opp.has_arbitrage}
+              onClick={() => onExecute(opp)}
+              title="execute parity trade"
+              className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
+            />
+          </div>
+        </div>
+      </div>
+    );
+  },
+);
+
 
 interface PredictionHubProps {
   opportunities: PredictionOpportunityDto[];
@@ -26,6 +134,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   onOpenConfig,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
+  const [detailOpp, setDetailOpp] = useState<PredictionOpportunityDto | null>(null);
   const [executingId, setExecutingId] = useState<string | null>(null);
   const [lastExecuted, setLastExecuted] = useState<string | null>(null);
   const [execError, setExecError] = useState<string | null>(null);
@@ -172,7 +281,9 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           {opportunities.map((opp) => (
             <div
               key={opp.id}
-              className="bg-surface border border-surface-border hover:border-slate-300 rounded-xl p-4 flex flex-col justify-between space-y-3 transition shadow-card"
+              className="bg-surface border border-surface-border hover:border-slate-300 rounded-xl p-4 flex flex-col justify-between space-y-3 transition shadow-card cursor-pointer"
+              onClick={() => setDetailOpp(opp)}
+              title="Click for opportunity details"
             >
               <div>
                 <div className="flex items-center justify-between mb-2">
@@ -245,17 +356,31 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   </span>
                 </div>
 
-                <ExecuteButton
-                  executed={lastExecuted === opp.id}
-                  executing={executingId === opp.id}
-                  onClick={() => handleExecute(opp)}
-                  title="execute parity trade"
-                  className="!px-2 !py-2 !text-xs"
-                />
+                <span onClick={(e) => e.stopPropagation()}>
+                  <ExecuteButton
+                    executed={lastExecuted === opp.id}
+                    executing={executingId === opp.id}
+                    onClick={() => handleExecute(opp)}
+                    title="execute parity trade"
+                    className="!px-2 !py-2 !text-xs"
+                  />
+                </span>
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {detailOpp && (
+        <PredictionDetailModal
+          opp={detailOpp}
+          executing={executingId === detailOpp.id}
+          onExecute={(o) => {
+            setDetailOpp(null);
+            void handleExecute(o);
+          }}
+          onClose={() => setDetailOpp(null)}
+        />
       )}
     </div>
   );

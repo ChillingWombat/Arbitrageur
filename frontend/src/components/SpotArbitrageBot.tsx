@@ -13,6 +13,7 @@ import type { SpotStrategyParams } from "./TickerConfigModal";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface SpotArbitrageBotProps {
@@ -503,6 +504,23 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                       +${((tradeSizeUsd * selectedOpp.net_spread_bps) / 10000).toFixed(2)} USD
                     </span>
                   </div>
+                </div>
+
+                {/* Capacity curve — fills in once the spot scan resolves
+                    real book depth (currently stubbed upstream). */}
+                <div
+                  title="Profit vs position size walked through both leg orderbooks. Empty until the spot scan emits book depth."
+                >
+                  <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 mb-1.5">
+                    Capacity curve
+                  </div>
+                  {(selectedOpp.depth_curve?.length ?? 0) >= 2 ? (
+                    <CapacityChart points={selectedOpp.depth_curve ?? []} />
+                  ) : (
+                    <span className="text-slate-400 text-xs">
+                      no depth data — spot scan is stubbed upstream
+                    </span>
+                  )}
                 </div>
 
                 {/* Bot Progress & Action */}
