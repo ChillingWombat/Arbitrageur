@@ -70,6 +70,7 @@ const formatCompactUsd = (v: number): string => {
 interface TickerRowProps {
   symbol: string;
   base: string;
+  quote: string;
   isSelected: boolean;
   isEnabled: boolean;
   /** Live bot lifecycle for this ticker — "running" gets a tag by the name. */
@@ -89,6 +90,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
   ({
     symbol,
     base,
+    quote,
     isSelected,
     isEnabled,
     botStatus,
@@ -146,6 +148,10 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
           <div className="flex items-center space-x-1.5">
             <span className={`font-bold text-xs font-sans tracking-tight ${hasIssue ? "text-loss font-black" : "text-slate-900"}`}>
               {base}
+              {/* Distinct stablecoin quotes are distinct instruments (XRP-USDC
+                  vs XRP-USDT trade different venue sets) — the quote suffix is
+                  what keeps their rows visually distinguishable. */}
+              <span className="text-slate-400 font-semibold">-{quote}</span>
             </span>
             <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
               Perp
@@ -235,7 +241,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
   const [contextMenu, setContextMenu] = useState<{ symbol: string; base: string; x: number; y: number } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
   // Live bot phases — re-render whenever any mounted bot publishes.
-  const botPhaseVersion = useSyncExternalStore(subscribeBotPhaseRegistry, getBotPhaseRegistryVersion);
+  const botPhaseVersion = useSyncExternalStore(subscribeBotPhaseRegistry, getBotPhaseRegistryVersion, getBotPhaseRegistryVersion);
 
   const handleTickerContextMenu = useCallback((e: React.MouseEvent, symbol: string, base: string) => {
     const MENU_W = 208; // w-52
@@ -324,7 +330,16 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
       statsMap.set(baseKey, cur);
     }
 
-    const baseList = availableTickers ?? PERP_TICKERS;
+    // Dedupe by canonical symbol — upstream sources are already unique
+    // (applyMarketUniverse keys a Map on BASE-QUOTE), but a static-catalog or
+    // future-source duplicate must never render two rows under one React key.
+    const seenSymbols = new Set<string>();
+    const baseList = (availableTickers ?? PERP_TICKERS).filter((t) => {
+      const key = t.symbol.toUpperCase();
+      if (seenSymbols.has(key)) return false;
+      seenSymbols.add(key);
+      return true;
+    });
     return baseList.map((t) => {
       const stat = statsMap.get(t.base.toUpperCase()) || { count: 0, pnl: 0, pnlBps: 0 };
       const netProfit = Math.round(stat.pnl * 100) / 100;
@@ -727,6 +742,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               key={ticker.symbol}
               symbol={ticker.symbol}
               base={ticker.base}
+              quote={ticker.quote}
               isSelected={selectedSymbol === ticker.symbol}
               isEnabled={enabledTickers ? enabledTickers.has(ticker.symbol) : false}
               botStatus={tickerBotStatus(ticker.symbol)}

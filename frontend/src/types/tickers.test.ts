@@ -114,6 +114,15 @@ test("filterAvailableTickers retains only tickers with at least 2 active venues"
   assert.strictEqual(noneAvailable.length, 0);
 });
 
+test("PERP_TICKERS catalog has unique canonical symbols", () => {
+  const seen = new Set<string>();
+  for (const t of PERP_TICKERS) {
+    const key = t.symbol.toUpperCase();
+    assert.ok(!seen.has(key), `duplicate catalog symbol: ${t.symbol}`);
+    seen.add(key);
+  }
+});
+
 test("filterAvailableTickers on full PERP_TICKERS universe returns 0 when unconfigured and 52 when venues configured", () => {
   const unconfiguredCodes = getEnabledConnectedVenueCodes(null);
   assert.strictEqual(filterAvailableTickers(PERP_TICKERS, unconfiguredCodes, 2).length, 0);
