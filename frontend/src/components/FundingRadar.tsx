@@ -358,10 +358,12 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
       </svg>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] font-sans text-slate-500">
         <span className="inline-flex items-center gap-1">
-          <span className="inline-block w-3 h-0.5 bg-teal-600" /> Long · {opp.long_venue}
+          <span className="inline-block w-3 h-0.5 bg-teal-600" /> Long ·
+          <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={12} /> {opp.long_venue}
         </span>
         <span className="inline-flex items-center gap-1">
-          <span className="inline-block w-3 h-0.5 bg-orange-600" /> Short · {opp.short_venue}
+          <span className="inline-block w-3 h-0.5 bg-orange-600" /> Short ·
+          <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={12} /> {opp.short_venue}
         </span>
         {netPts.length > 1 && (
           <span className="inline-flex items-center gap-1">
@@ -473,8 +475,12 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 Rank #{rank}
               </span>
               <span className="text-sm font-bold font-sans text-slate-900">{opp.symbol}</span>
-              <span className="text-xs font-sans text-slate-500">
-                {opp.long_venue} / {opp.short_venue}
+              <span className="inline-flex items-center gap-1 text-xs font-sans text-slate-500">
+                <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={15} />
+                {opp.long_venue}
+                <span className="text-slate-300">/</span>
+                <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={15} />
+                {opp.short_venue}
               </span>
               <span className="text-xs font-sans font-bold text-accent tabular-nums">
                 {opp.net_apy_pct.toFixed(2)}% APY
@@ -494,12 +500,22 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
               <CarryDetailField
                 label="Long leg"
-                value={`${opp.long_venue} · ${opp.long_symbol ?? "?"} (${opp.long_market_type ?? "?"})`}
+                value={
+                  <span className="inline-flex items-center gap-1">
+                    <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={14} />
+                    {`${opp.long_venue} · ${opp.long_symbol ?? "?"} (${opp.long_market_type ?? "?"})`}
+                  </span>
+                }
                 title="Display venue plus the exact execution symbol and market type used for books and orders"
               />
               <CarryDetailField
                 label="Short leg"
-                value={`${opp.short_venue} · ${opp.short_symbol ?? "?"} (${opp.short_market_type ?? "?"})`}
+                value={
+                  <span className="inline-flex items-center gap-1">
+                    <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={14} />
+                    {`${opp.short_venue} · ${opp.short_symbol ?? "?"} (${opp.short_market_type ?? "?"})`}
+                  </span>
+                }
                 title="Display venue plus the exact execution symbol and market type used for books and orders"
               />
               <CarryDetailField
@@ -768,7 +784,20 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
             <CarryDetailField label="Strategy" value={pos.strategyId} />
             <CarryDetailField
               label="Legs"
-              value={pos.venues.map((v) => `${v.venue}:${v.symbol ?? "?"} (${v.netQty >= 0 ? "+" : ""}${v.netQty})`).join(" / ") || "—"}
+              value={
+                pos.venues.length ? (
+                  <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                    {pos.venues.map((v, i) => (
+                      <span key={`${v.venue}-${i}`} className="inline-flex items-center gap-1">
+                        <VenueLogo venueId={v.venue} name={v.venue} size={13} />
+                        {`${v.venue}:${v.symbol ?? "?"} (${v.netQty >= 0 ? "+" : ""}${v.netQty})`}
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  "—"
+                )
+              }
             />
             <CarryDetailField
               label="Notional"
@@ -1208,11 +1237,17 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                     <div className="px-2 py-1.5 bg-surface-raised rounded-lg border border-surface-border font-sans text-[10px] space-y-1">
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Long:</span>
-                        <span className="font-semibold text-slate-900 truncate">{opp.long_venue}</span>
+                        <span className="inline-flex items-center gap-1 font-semibold text-slate-900 min-w-0">
+                          <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={13} />
+                          <span className="truncate">{opp.long_venue}</span>
+                        </span>
                       </div>
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Short:</span>
-                        <span className="font-semibold text-slate-900 truncate">{opp.short_venue}</span>
+                        <span className="inline-flex items-center gap-1 font-semibold text-slate-900 min-w-0">
+                          <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={13} />
+                          <span className="truncate">{opp.short_venue}</span>
+                        </span>
                       </div>
                       <div className="pt-1 border-t border-surface-border flex items-center justify-between text-profit">
                         <span>8h:</span>

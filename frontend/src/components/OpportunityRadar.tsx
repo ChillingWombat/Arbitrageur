@@ -815,8 +815,11 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm font-bold font-sans text-slate-900">{r.symbol}</span>
-              <span className="text-xs font-sans text-slate-500">
-                {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→{VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
+              <span className="inline-flex items-center gap-1 text-xs font-sans text-slate-500">
+                <VenueLogo venueId={r.buyVenue} name={VENUE_NAME[r.buyVenue] ?? r.buyVenue} size={15} />
+                {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
+                <VenueLogo venueId={r.sellVenue} name={VENUE_NAME[r.sellVenue] ?? r.sellVenue} size={15} />
+                {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
               </span>
               {held && (
                 <span
@@ -1038,8 +1041,10 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             )}
           </td>
           <td className="px-2 py-2">
-            <span className="text-slate-700 font-mono text-xs">
+            <span className="inline-flex items-center gap-1 text-slate-700 font-mono text-xs whitespace-nowrap">
+              <VenueLogo venueId={r.buyVenue} name={VENUE_NAME[r.buyVenue] ?? r.buyVenue} size={14} />
               {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
+              <VenueLogo venueId={r.sellVenue} name={VENUE_NAME[r.sellVenue] ?? r.sellVenue} size={14} />
               {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
             </span>
             {!isLiveCapableRoute(r.buyVenue, r.sellVenue) && (
