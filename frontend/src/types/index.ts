@@ -57,6 +57,9 @@ export interface SignalSeriesDto {
   venues: string[];
   /** venue_id -> display name. */
   venue_names: Record<string, string>;
+  /** venue_id -> newest raw-sample ts (epoch ms) in the fetched range —
+   *  lets the legend badge stale REST lanes honestly. */
+  venue_last_ts_ms: Record<string, number>;
   dev_bps: (number | null)[][];
   /** Max/min deviation across present venues per bucket — the dislocation
    * band; their difference is the gross pairwise spread. */

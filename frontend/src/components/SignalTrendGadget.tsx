@@ -392,17 +392,38 @@ function SignalTrendGadgetInner({
             const displayDev: number | null = hoverDevs
               ? (hoverDevs.get(row.vid) ?? null)
               : row.dev;
+            const lastTs = series?.venue_last_ts_ms?.[row.vid];
+            const ageS =
+              lastTs != null && Number.isFinite(lastTs)
+                ? Math.max(0, Math.round((Date.now() - lastTs) / 1000))
+                : null;
+            // Badge the lane once its newest raw sample is older than the
+            // chart's stale bound — sparse REST venues (e.g. popdex ~77s/sym)
+            // otherwise look as live as WS venues.
+            const cold = ageS != null && ageS > 15;
+            const ageLabel =
+              ageS == null
+                ? null
+                : ageS < 90
+                  ? `${ageS}s`
+                  : `${Math.round(ageS / 60)}m`;
             return (
               <span
                 key={row.vid}
                 className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded-md border border-surface-border bg-surface-raised text-xs"
-                title={`${venueName(row.vid)} mid vs baseline`}
+                title={
+                  cold && ageS != null
+                    ? `${venueName(row.vid)} mid vs baseline — last sample ${ageLabel} ago (REST-polled lane; quotes between polls are carried, not live)`
+                    : `${venueName(row.vid)} mid vs baseline`
+                }
               >
                 <span
                   className="w-2 h-2 rounded-full inline-block"
-                  style={{ backgroundColor: venueColor(row.vid) }}
+                  style={{ backgroundColor: venueColor(row.vid), opacity: cold ? 0.45 : 1 }}
                 />
-                <span className="font-semibold text-slate-700">{venueName(row.vid)}</span>
+                <span className={`font-semibold ${cold ? "text-slate-500" : "text-slate-700"}`}>
+                  {venueName(row.vid)}
+                </span>
                 {displayDev === null ? (
                   <span className="tabular-nums font-bold text-slate-400">—</span>
                 ) : (
@@ -413,6 +434,9 @@ function SignalTrendGadgetInner({
                   >
                     {fmtBps(displayDev)}
                   </span>
+                )}
+                {cold && ageLabel && (
+                  <span className="tabular-nums text-slate-400">{ageLabel} ago</span>
                 )}
               </span>
             );
