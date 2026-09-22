@@ -736,6 +736,39 @@ const CapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) =>
   </div>
 ));
 
+/* Depth capacity by marginal expected-net floor: "you can fill $X while
+   every unit still earns ≥ Y bps expected net". Inverse view of the USD
+   ladder — answers "how much can I size if I demand N bps per unit?" */
+const BpsCapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => {
+  const tiers = row.bpsCapacityLadder ?? [];
+  if (tiers.length === 0) {
+    return <span className="text-slate-400">no win-rate curve — floors unmeasurable</span>;
+  }
+  const maxCap = Math.max(...tiers.map((t) => t.capacityUsd), 1);
+  return (
+    <div className="space-y-1">
+      {tiers.map((t) => (
+        <div key={t.minNetBps} className="flex items-center gap-2">
+          <span className="w-16 shrink-0 text-xs text-slate-500 font-mono tabular-nums">
+            ≥{t.minNetBps} bps
+          </span>
+          <div className="flex-1 h-3.5 rounded-md bg-surface-raised border border-surface-border overflow-hidden">
+            <div
+              className={`h-full rounded-md ${t.capacityUsd > 0 ? "bg-accent/60" : "bg-slate-200"}`}
+              style={{ width: `${Math.min(100, (t.capacityUsd / maxCap) * 100)}%` }}
+            />
+          </div>
+          <span
+            className={`w-16 shrink-0 text-right text-xs font-mono font-semibold tabular-nums ${t.capacityUsd > 0 ? "text-slate-800" : "text-slate-400"}`}
+          >
+            {fmtUsd(t.capacityUsd)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+});
+
 const DetailField: React.FC<{
   label: string;
   value: React.ReactNode;
@@ -935,16 +968,10 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 value={fmtBpsU(r.expectedProfitBps)}
                 tip="Signed probability-weighted PnL per unit. Negative = expected loss — never floored to 0."
               />
-              <DetailField label="Exp profit $" value={fmtUsd(r.expectedProfitUsd)} />
               <DetailField
-                label="Optimal size"
-                value={fmtUsd(r.optimalSizeUsd)}
-                tip="Size that maximizes expected net edge given visible book depth on both legs."
-              />
-              <DetailField
-                label="Breakeven size"
-                value={fmtUsd(r.breakevenSizeUsd)}
-                tip="Largest size before expected net bps turns negative — depth ceiling for this route."
+                label="Exp profit $"
+                value={fmtUsd(r.expectedProfitUsd)}
+                tip="Expected USD profit at the optimal capacity size — probability-weighted."
               />
             </DetailSection>
 
@@ -954,11 +981,45 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               </div>
             )}
 
-            <div className="space-y-2">
-              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
-                Capacity ladder
+            <DetailSection title="Capacity">
+              <DetailField
+                label="Expected capacity"
+                value={r.expectedCapacityUsd != null ? fmtUsd(r.expectedCapacityUsd) : "—"}
+                tip="Total probability-weighted fillable depth: Σ over book levels of (notional × P(win)) where the marginal expected net (p·dev − friction) is positive. The honest 'how much can this opportunity absorb' number — unlike optimal size, it prices the whole book. '—' when no win-rate curve exists."
+              />
+              <DetailField
+                label="Optimal size"
+                value={fmtUsd(r.optimalSizeUsd)}
+                tip="Fillable size maximizing expected USD profit — the sweet spot of the capacity curve."
+              />
+              <DetailField
+                label="Breakeven size"
+                value={fmtUsd(r.breakevenSizeUsd)}
+                tip="Largest fillable size where the marginal level still clears the win-probability floor with positive expected net."
+              />
+            </DetailSection>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
+              <div className="space-y-2">
+                <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
+                  Depth → expected net
+                  <InfoTooltip
+                    text="Each bar is a fixed notional tier: height/label = expected net bps if you fill that much of both books. Greyed = negative expectation at that size. 'fill' suffix = book shallower than the tier."
+                    position="top"
+                  />
+                </div>
+                <CapacityLadder row={r} />
               </div>
-              <CapacityLadder row={r} />
+              <div className="space-y-2">
+                <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
+                  Net floor → capacity
+                  <InfoTooltip
+                    text="Inverse view: for each marginal expected-net floor (bps/unit), how much notional both books can fill while every consumed unit still earns at least that much. Floors the whole book fails show $0."
+                    position="top"
+                  />
+                </div>
+                <BpsCapacityLadder row={r} />
+              </div>
             </div>
           </div>
 

@@ -656,6 +656,22 @@ pub struct CapacityTier {
     pub net_bps: Option<f64>,
 }
 
+/// Depth capacity at a marginal expected-net floor: how much notional can
+/// be consumed from both books while each unit still contributes at least
+/// `min_net_bps` of probability-weighted net capture.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BpsCapacityTier {
+    /// Marginal expected-net floor, bps per unit notional.
+    pub min_net_bps: f64,
+    /// Total book notional (USD) fillable while marginal expected net
+    /// stays at/above the floor.
+    pub capacity_usd: f64,
+}
+
+/// Marginal expected-net floors (bps/unit) evaluated for the depth-capacity
+/// profile — from chunky edges down to barely-positive captures.
+pub const BPS_CAPACITY_LEVELS: &[f64] = &[10.0, 5.0, 2.0, 1.0, 0.5];
+
 /// Aggregated capacity evaluation for a pair direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapacityReport {
@@ -668,6 +684,13 @@ pub struct CapacityReport {
     pub breakeven_size_usd: Option<f64>,
     /// Expected USD at the optimal tier.
     pub expected_profit_usd: Option<f64>,
+    /// Probability-weighted fillable notional across every book level whose
+    /// marginal expected net (`p·dev⁺ − friction`) is positive — the
+    /// opportunity's total expected capacity. `None` with no win-rate curve.
+    pub expected_capacity_usd: Option<f64>,
+    /// Fillable notional at each `BPS_CAPACITY_LEVELS` marginal expected-net
+    /// floor; empty when no win-rate curve exists.
+    pub bps_capacity_ladder: Vec<BpsCapacityTier>,
 }
 
 /// Walk both orderbooks in lockstep and compute the probability-weighted
@@ -807,11 +830,48 @@ pub fn capacity_ladder(
         });
     }
 
+    // Depth-capacity profile: per book level, marginal expected net per
+    // unit is `p·dev⁺ − friction`. Expected capacity weights each viable
+    // level's notional by its win probability; the bps ladder reports raw
+    // fillable notional while marginal expected net clears each floor.
+    let marginal_exp = |c: &Chunk| c.p_win.map(|p| p * c.dev_bps.max(0.0) - friction_bps);
+    let any_p = chunks.iter().any(|c| c.p_win.is_some());
+    let expected_capacity_usd = if any_p {
+        let mut sum = 0.0;
+        for c in &chunks {
+            if let (Some(p), Some(e)) = (c.p_win, marginal_exp(c)) {
+                if e > 0.0 {
+                    sum += c.notional * p;
+                }
+            }
+        }
+        Some(sum)
+    } else {
+        None
+    };
+    let bps_capacity_ladder = if any_p {
+        BPS_CAPACITY_LEVELS
+            .iter()
+            .map(|&floor| BpsCapacityTier {
+                min_net_bps: floor,
+                capacity_usd: chunks
+                    .iter()
+                    .filter(|c| marginal_exp(c).map(|e| e >= floor).unwrap_or(false))
+                    .map(|c| c.notional)
+                    .sum(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     CapacityReport {
         tiers,
         optimal_size_usd: optimal.map(|(s, _)| s),
         breakeven_size_usd: breakeven,
         expected_profit_usd: optimal.map(|(_, v)| v),
+        expected_capacity_usd,
+        bps_capacity_ladder,
     }
 }
 
@@ -977,6 +1037,89 @@ mod tests {
             rep.breakeven_size_usd,
             Some(rep.tiers.last().unwrap().filled_usd)
         );
+        // Expected capacity = Σ notional·p over levels with positive
+        // marginal expected net. L1: dev 200 → p=1.0 → exp 190>0 →
+        // $100·1.0. L2: dev ≈ −198 → p(198)=0.5, but dev⁺=0 → exp −10<0
+        // → excluded. Total = $100.
+        let cap = rep.expected_capacity_usd.unwrap();
+        assert!((cap - 100.0).abs() < 1e-6);
+        // Bps ladder: floor 10 → only L1 clears (exp 190 ≥ 10) → $100;
+        // no floor admits L2 (exp < 0). At floor 0.5 still only L1.
+        let l10 = rep
+            .bps_capacity_ladder
+            .iter()
+            .find(|t| t.min_net_bps == 10.0)
+            .unwrap();
+        assert!((l10.capacity_usd - 100.0).abs() < 1e-6);
+        let l05 = rep
+            .bps_capacity_ladder
+            .iter()
+            .find(|t| t.min_net_bps == 0.5)
+            .unwrap();
+        assert!((l05.capacity_usd - 100.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capacity_ladder_bps_profile_sums_deep_levels() {
+        // Both levels profitable: L1 dev 200→p=1.0→exp 190; L2 dev ~49.5→
+        // p=0.95→exp ~42 — every level clears the 10bps floor.
+        let asks = vec![(100.0, 1.0), (101.0, 10.0)];
+        let bids = vec![(102.0, 1.0), (101.5, 10.0)];
+        let pwin = PWinCurve {
+            points: vec![(100.0, 0.95), (200.0, 1.0)],
+            episodes: 20,
+            point_wins: vec![19.0, 20.0],
+            point_trials: vec![20.0, 20.0],
+            point_censored: vec![0, 0],
+            point_sum_w2: vec![20.0, 20.0],
+        };
+        let rep = capacity_ladder(
+            &asks,
+            &bids,
+            0.0,
+            5.0,
+            &[100.0, 1010.0],
+            &pwin,
+            0.5,
+            None,
+            0.0,
+        );
+        // Book notional: L1 1·100 = $100, L2 10·101 = $1010 → total $1110.
+        let l10 = rep
+            .bps_capacity_ladder
+            .iter()
+            .find(|t| t.min_net_bps == 10.0)
+            .unwrap();
+        assert!((l10.capacity_usd - 1110.0).abs() < 1e-6);
+        // Expected capacity = 100·1.0 + 1010·0.95 ≈ $1059.5
+        let cap = rep.expected_capacity_usd.unwrap();
+        assert!((cap - (100.0 + 1010.0 * 0.95)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn capacity_ladder_expected_capacity_none_without_curve() {
+        let asks = vec![(100.0, 1.0)];
+        let bids = vec![(102.0, 1.0)];
+        let rep = capacity_ladder(
+            &asks,
+            &bids,
+            0.0,
+            10.0,
+            &[100.0],
+            &PWinCurve {
+                points: vec![],
+                episodes: 0,
+                point_wins: vec![],
+                point_trials: vec![],
+                point_censored: vec![],
+                point_sum_w2: vec![],
+            },
+            0.9,
+            None,
+            0.0,
+        );
+        assert!(rep.expected_capacity_usd.is_none());
+        assert!(rep.bps_capacity_ladder.is_empty());
     }
 
     #[test]
