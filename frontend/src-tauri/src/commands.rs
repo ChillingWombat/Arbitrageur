@@ -2391,6 +2391,25 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
+    // Execution-policy toggles persist too — an operator who disables the
+    // default-on passive unwind or residual auto-resolution must not have
+    // the choice silently revert on restart.
+    let _ = state.state_store.kv_set(
+        "engine.auto_resolve_residual",
+        if sanitized.auto_resolve_residual_exposure {
+            "true"
+        } else {
+            "false"
+        },
+    );
+    match serde_json::to_string(&sanitized.passive_unwind) {
+        Ok(json) => {
+            let _ = state.state_store.kv_set("engine.passive_unwind", &json);
+        }
+        Err(e) => {
+            tracing::warn!("engine settings: passive_unwind serialize failed: {e}");
+        }
+    }
     // Venue endpoint overrides: persist only values that differ from the
     // built-in defaults — the UI prefills display defaults (e.g.
     // "https://api.kraken.com") that differ from adapter base URLs
@@ -3877,6 +3896,9 @@ mod tests {
             s.vanta_enabled = true;
             s.robinhood_enabled = true;
             s.arcus_enabled = true;
+            // Passive unwind is default-on; zero the attempt wait so the
+            // limit/cancel/fallback sequence runs instantly in tests.
+            s.passive_unwind.timeout_secs = 0;
         }
         for v in ["hyperliquid", "lighter", "vanta", "robinhood", "arcus"] {
             state.install_test_sim(v);
@@ -11408,7 +11430,13 @@ mod tests {
 
     fn lighter_only_state() -> AppEngineState {
         let state = AppEngineState::new();
-        state.settings.write().lighter_enabled = true;
+        {
+            let mut s = state.settings.write();
+            s.lighter_enabled = true;
+            // Passive unwind is default-on; zero the attempt wait so the
+            // limit/cancel/fallback sequence runs instantly in tests.
+            s.passive_unwind.timeout_secs = 0;
+        }
         state.install_test_sim("lighter");
         state
     }

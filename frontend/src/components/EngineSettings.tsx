@@ -133,7 +133,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
-  const [autoResolveResidual, setAutoResolveResidual] = useState(false);
+  const [autoResolveResidual, setAutoResolveResidual] = useState(true);
   const [liveEntryEnabled, setLiveEntryEnabled] = useState(false);
   const [liveEntryMaxNotional, setLiveEntryMaxNotional] = useState(0);
   // Canary run state (Safety → live entries)
@@ -440,7 +440,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginCritPct(s.margin_critical_usage_pct ?? 85);
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
         setMaxLeverage(s.max_leverage ?? 10);
-        setAutoResolveResidual(s.auto_resolve_residual_exposure ?? false);
+        setAutoResolveResidual(s.auto_resolve_residual_exposure ?? true);
         setLiveEntryEnabled(s.live_entry_enabled ?? false);
         setLiveEntryMaxNotional(s.live_entry_max_notional_usd ?? 0);
         setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
@@ -1394,7 +1394,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Passive Limit Unwind (Limit Exits)
                   <InfoTooltip
                     position="bottom"
-                    text={"The shared limit-exit policy. When enabled, reduce-exit paths (strategy flattens, the Portfolio Monitor's Auto Limit mode, scheduled auto exits) first work a pegged limit order: mid-spread by default, re-priced on timeout, with a market fallback so exposure is never left open.\n\nEach strategy chooses in its own configurator: Inherit (this policy), Custom (its own params), or Off (always market). Emergency flattens and kill-switch paths always stay market — this never slows a panic exit."}
+                    text={"The shared limit-exit policy. Enabled by default: reduce-exit paths (strategy flattens, the Portfolio Monitor's Auto Limit mode, scheduled auto exits, residual auto-flattens) first work a pegged limit order — mid-spread by default, re-priced on timeout. The system itself decides limit vs market per attempt: the calm gates (max spread / fast volatility) skip straight to market when the book is too volatile, and the try-count fallback market-closes any remainder, so exposure is never left open.\n\nEach strategy chooses in its own configurator: Inherit (this policy), Custom (its own params), or Off (always market). Kill-switch and explicit emergency flattens always stay market — this never slows a panic exit."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1666,13 +1666,16 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <label htmlFor="auto-resolve-residual" className="text-xs text-slate-700 leading-snug">
                 <span className="font-bold">Auto-flatten residual exposure.</span>{" "}
                 When a live entry ends imbalanced (one leg filled, the other
-                terminal-empty), automatically submit a reduce-only market
-                order to flatten the residual leg — persisted as a flat-*
-                signal the reconciliation supervisor then tracks to terminal
-                state. Off by default: imbalances are always detected and
-                block the ticker; this only controls whether the engine also
-                acts on them. Takes effect once live strategy entries are
-                enabled (currently disabled pending venue canary evidence).
+                terminal-empty), automatically flatten the residual leg —
+                persisted as a flat-* signal the reconciliation supervisor
+                then tracks to terminal state. Follows the resolved Passive
+                Limit Unwind policy: pegs a limit first, falls back to market
+                when the calm gates trip (spread/volatility) or tries exhaust;
+                a strategy set to &quot;off&quot; exits straight at market.
+                On by default: imbalances are always detected and block the
+                ticker; this only controls whether the engine also acts on
+                them. Takes effect once live strategy entries are enabled
+                (currently disabled pending venue canary evidence).
               </label>
             </div>
 

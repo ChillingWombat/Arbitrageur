@@ -1842,7 +1842,10 @@ pub(crate) fn dec_to_f64(value: Decimal, what: &str) -> Result<f64, String> {
 /// Any path without its own strategy record (triangle, radar, external
 /// residuals) inherits the global policy. `Some` only when the resolved
 /// config is enabled and valid — everything else falls back to market.
-fn passive_cfg_for(state: &AppEngineState, strategy_id: &str) -> Option<PassiveUnwindConfig> {
+pub(crate) fn passive_cfg_for(
+    state: &AppEngineState,
+    strategy_id: &str,
+) -> Option<PassiveUnwindConfig> {
     let key = strategy_id.trim().to_lowercase();
     let map = state.strategy_params.read();
     let params = map.get(key.as_str());
