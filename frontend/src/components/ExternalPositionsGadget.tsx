@@ -530,7 +530,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                     type="button"
                     onClick={() => { setMode("auto"); setArmed(false); }}
                     className={`${tabCls(mode === "auto")} w-28 text-center`}
-                    title="Auto Limit: works the global Passive Limit Unwind policy — pegged limit, re-priced on timeout, market fallback so the exit always completes"
+                    title="Auto Limit: works the global Auto Position Exit policy — pegged limit, re-priced on timeout, market fallback so the exit always completes"
                   >
                     Auto Limit
                   </button>

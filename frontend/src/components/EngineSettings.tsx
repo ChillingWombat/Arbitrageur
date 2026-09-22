@@ -128,7 +128,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Guardrails & Execution Modes (slippage is per-strategy now: each bot
   // configurator carries its own max_slippage_bps gate)
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
-  // Global Passive Limit Unwind policy — strategies on "inherit" use this;
+  // Global Auto Position Exit policy — strategies on "inherit" use this;
   // the Portfolio Monitor's Auto Limit exit runs it too.
   const [passiveUnwind, setPassiveUnwind] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
   // Historical retention: empty string = unlimited (None on the backend)
@@ -148,7 +148,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
-  const [autoResolveResidual, setAutoResolveResidual] = useState(true);
   const [liveEntryEnabled, setLiveEntryEnabled] = useState(false);
   const [liveEntryMaxNotional, setLiveEntryMaxNotional] = useState(0);
   // Canary run state (Safety → live entries)
@@ -448,7 +447,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginCritPct(s.margin_critical_usage_pct ?? 85);
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
         setMaxLeverage(s.max_leverage ?? 10);
-        setAutoResolveResidual(s.auto_resolve_residual_exposure ?? true);
         setLiveEntryEnabled(s.live_entry_enabled ?? false);
         setLiveEntryMaxNotional(s.live_entry_max_notional_usd ?? 0);
         setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
@@ -618,7 +616,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           margin_critical_usage_pct: Number(marginCritPct) || 0,
           margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
           max_leverage: Math.trunc(Number(maxLeverage)) || 0,
-          auto_resolve_residual_exposure: autoResolveResidual,
           live_entry_enabled: liveEntryEnabled,
           live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
           passive_unwind: {
@@ -1416,11 +1413,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
-            {/* Global Passive Limit Unwind — single limit-exit policy */}
+            {/* Global Auto Position Exit — single limit-exit policy */}
             <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="space-y-1 min-w-0">
                 <label className="text-slate-800 font-bold text-xs flex items-center">
-                  Passive Limit Unwind (Limit Exits)
+                  Auto Position Exit
                   <InfoTooltip
                     position="bottom"
                     text={"The shared limit-exit policy. Enabled by default: reduce-exit paths (strategy flattens, the Portfolio Monitor's Auto Limit mode, scheduled auto exits, residual auto-flattens) first work a pegged limit order — mid-spread by default, re-priced on timeout. The system itself decides limit vs market per attempt: the calm gates (max spread / fast volatility) skip straight to market when the book is too volatile, and the try-count fallback market-closes any remainder, so exposure is never left open.\n\nEach strategy chooses in its own configurator: Inherit (this policy), Custom (its own params), or Off (always market). Kill-switch and explicit emergency flattens always stay market — this never slows a panic exit."}
@@ -1686,27 +1683,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
                 Caps every strategy (Risk Control default 10x). Per-strategy targets in the configurators can only lower it — never exceed it. Applies live on save.
               </p>
-            </div>
-
-            <div className="flex items-start gap-2.5 pt-1">
-              <input type="checkbox" id="auto-resolve-residual" disabled={loading}
-                checked={autoResolveResidual}
-                onChange={(e) => setAutoResolveResidual(e.target.checked)}
-                className="mt-0.5 accent-accent" />
-              <label htmlFor="auto-resolve-residual" className="text-xs text-slate-700 leading-snug">
-                <span className="font-bold">Auto-flatten residual exposure.</span>{" "}
-                When a live entry ends imbalanced (one leg filled, the other
-                terminal-empty), automatically flatten the residual leg —
-                persisted as a flat-* signal the reconciliation supervisor
-                then tracks to terminal state. Follows the resolved Passive
-                Limit Unwind policy: pegs a limit first, falls back to market
-                when the calm gates trip (spread/volatility) or tries exhaust;
-                a strategy set to &quot;off&quot; exits straight at market.
-                On by default: imbalances are always detected and block the
-                ticker; this only controls whether the engine also acts on
-                them. Takes effect once live strategy entries are enabled
-                (currently disabled pending venue canary evidence).
-              </label>
             </div>
 
             <div className="flex items-start gap-2.5 pt-1 border-t border-slate-200 mt-2">

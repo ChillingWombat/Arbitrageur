@@ -768,7 +768,6 @@ export interface EngineSettingsDto {
   margin_critical_usage_pct?: number;
   margin_min_liquidation_distance_pct?: number;
   max_leverage?: number;
-  auto_resolve_residual_exposure?: boolean;
   /** Opt-in live strategy-entry switch (spatial path only). */
   live_entry_enabled?: boolean;
   /** Per-leg USD notional cap for live entries; 0 refuses all. */
