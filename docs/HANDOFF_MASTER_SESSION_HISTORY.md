@@ -2590,3 +2590,11 @@ The same canary exposed a second, subtler defect — an **ack-before-fill-report
 - A leg non-terminal after poll+cancel keeps its verified identity for the reconciler — the previous safety net is unchanged.
 
 Regression tests pin the canary failure shape: late fill → `Success`; never-filling leg → cancelled → `BothFailed`; sibling-error unwind covers the terminal (not snapshot) quantity; mismatched fetch echoes are never adopted. Verified: 49 execution tests, 389 desktop tests, clippy/fmt clean.
+
+### Operator-configurable auto-exit hold deadline (2026-09-23, later)
+
+The futures auto-exit's `TimedOut` trigger was hardcoded to `SpatialExitConfig::default().max_hold_secs` (86400s/24h) — now operator-configurable:
+
+- **New setting**: `EngineSettingsDto.auto_exit_max_hold_secs` (seconds, validated 60–604800 = 1min–7d, default 86400). Persisted under kv `engine.auto_exit_max_hold_secs`, restored at boot, **live-applied on save** — the 5s convergence supervisor reads `state.settings` each pass, so a new deadline takes effect on the next tick without restart.
+- **UI**: System Settings → Auto Position Exit → "Max hold before auto-exit (min)" — sits outside the limit-exit policy grid since the hold deadline is a *trigger* (fires regardless of limit/market execution mode); radar-bot positions keep their own per-bot `Hold timeout ×`.
+- Validation rejects out-of-range values with a clear error; tests pin the bounds and kv round-trip.

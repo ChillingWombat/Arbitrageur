@@ -3479,7 +3479,11 @@ pub async fn check_spatial_convergence_impl(
                 .into(),
         );
     }
-    let cfg = SpatialExitConfig::default();
+    let cfg = SpatialExitConfig {
+        max_hold_secs: i64::try_from(state.settings.read().auto_exit_max_hold_secs)
+            .unwrap_or(i64::MAX),
+        ..SpatialExitConfig::default()
+    };
     cfg.validate().map_err(|e| e.to_string())?;
     if let Some(s) = symbol {
         validate_market_symbol(s)?;

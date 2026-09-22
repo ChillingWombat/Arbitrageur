@@ -2308,6 +2308,9 @@ pub fn save_engine_settings_impl(
     if settings.max_leverage < 1 || settings.max_leverage > 100 {
         return Err("Max leverage must be within 1–100x".into());
     }
+    if !(60..=604_800).contains(&settings.auto_exit_max_hold_secs) {
+        return Err("Auto-exit max hold must be within 60 seconds–7 days".into());
+    }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
@@ -2519,6 +2522,10 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
+    let _ = state.state_store.kv_set(
+        "engine.auto_exit_max_hold_secs",
+        &sanitized.auto_exit_max_hold_secs.to_string(),
+    );
     // The passive-unwind policy persists — an operator who disables the
     // default-on limit exits must not have the choice silently revert on
     // restart. (Residual auto-flatten is unconditional — no flag.)
@@ -9685,6 +9692,32 @@ mod tests {
             ..base.clone()
         };
         assert!(save_engine_settings_impl(bad, &state).is_err());
+        // Auto-exit hold deadline: below the 60s floor and above the 7d cap
+        // are refused; a sane value saves and round-trips through kv.
+        let bad = EngineSettingsDto {
+            auto_exit_max_hold_secs: 30,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            auto_exit_max_hold_secs: 604_801,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let good = EngineSettingsDto {
+            auto_exit_max_hold_secs: 3600,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(good, &state).is_ok());
+        assert_eq!(
+            state
+                .state_store
+                .kv_get("engine.auto_exit_max_hold_secs")
+                .unwrap()
+                .as_deref(),
+            Some("3600")
+        );
+        assert_eq!(state.settings.read().auto_exit_max_hold_secs, 3600);
 
         let ok = save_engine_settings_impl(base, &state);
         assert!(ok.is_ok());
