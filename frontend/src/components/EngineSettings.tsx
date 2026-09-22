@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import {
   AlertCircle,
   CheckCircle2,
@@ -81,6 +82,9 @@ interface EngineSettingsProps {
   systemStatus?: SystemStatusDto | null;
   onClose?: () => void;
   onSettingsSaved?: (newSettings: EngineSettingsDto) => void;
+  /** Optional header portal target (SettingsModal's title bar) — the vault
+   *  lock/unlock button renders there instead of the tab action row. */
+  headerActionsEl?: HTMLDivElement | null;
 }
 
 // Custom equality for React.memo: the component only reads
@@ -90,6 +94,7 @@ interface EngineSettingsProps {
 // every poll and scrolling stutters.
 function areEngineSettingsPropsEqual(p: EngineSettingsProps, n: EngineSettingsProps): boolean {
   if (p.onClose !== n.onClose || p.onSettingsSaved !== n.onSettingsSaved) return false;
+  if (p.headerActionsEl !== n.headerActionsEl) return false;
   if (p.systemStatus === n.systemStatus) return true;
   return (
     JSON.stringify(p.systemStatus?.active_venues ?? null) ===
@@ -97,7 +102,7 @@ function areEngineSettingsPropsEqual(p: EngineSettingsProps, n: EngineSettingsPr
   );
 }
 
-export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, onClose, onSettingsSaved }) => {
+export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, onClose, onSettingsSaved, headerActionsEl }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
   const [pinging, setPinging] = useState(false);
 
@@ -928,28 +933,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           </button>
         </div>
 
-        {/* Right Header: Unlock / Lock Vault action on Exchanges Tab */}
+        {/* Vault lock/unlock is hoisted into the modal header via portal
+            (headerActionsEl); the tab row keeps only tab-scoped actions. */}
         <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
-          {activeTab === "exchanges" && api.isTauri && (
-            <button
-              type="button"
-              onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
-              className="px-2 py-2 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
-              title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
-            >
-              {isVaultLocked ? (
-                <>
-                  <Unlock className="w-3.5 h-3.5 text-warn" />
-                  <span className="font-semibold text-slate-700">Unlock Vault</span>
-                </>
-              ) : (
-                <>
-                  <Lock className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Lock Vault</span>
-                </>
-              )}
-            </button>
-          )}
           {activeTab === "network" &&
             !isVaultLocked &&
             configuredVenues.includes("remote_hsm") && (
@@ -1945,6 +1931,30 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       </div>
     </form>
   </div>
+
+  {/* Vault lock/unlock hoisted into the modal header (right of the title,
+      before the close button). Shows on every tab — vault state is global. */}
+  {headerActionsEl && api.isTauri && createPortal(
+    <button
+      type="button"
+      onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
+      className="px-2 py-1.5 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+      title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
+    >
+      {isVaultLocked ? (
+        <>
+          <Unlock className="w-3.5 h-3.5 text-warn" />
+          <span className="font-semibold text-slate-700">Unlock Vault</span>
+        </>
+      ) : (
+        <>
+          <Lock className="w-3.5 h-3.5 text-slate-500" />
+          <span>Lock Vault</span>
+        </>
+      )}
+    </button>,
+    headerActionsEl,
+  )}
 
   {/* Vault Unlock Modal (desktop only) */}
   <VaultUnlockModal
