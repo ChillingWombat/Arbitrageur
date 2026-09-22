@@ -1103,7 +1103,6 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             state={saveBtn.state === "saved" && dirty ? "idle" : saveBtn.state}
             disabled={busy || locked || !dirty}
             onClick={handleSave}
-            className="font-mono font-bold"
           />
         </div>
 
@@ -1298,7 +1297,6 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
           <SaveButton
             state={saveBtn.state}
             onClick={handleCreate}
-            className="font-mono font-bold"
           />
         </div>
         {toolkitOpen && venue.toLowerCase() === "popdex" && (

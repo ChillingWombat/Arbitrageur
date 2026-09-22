@@ -81,7 +81,11 @@ interface SaveButtonProps {
   type?: "button" | "submit";
   onClick?: () => void;
   disabled?: boolean;
-  /** Extra classes (width overrides etc.) — state colors stay managed. */
+  /**
+   * Extra classes for layout only (margins, alignment). Width and
+   * typography are fixed by design — every Save Changes button renders
+   * identically across the app; do not pass width/font classes.
+   */
   className?: string;
 }
 
@@ -103,7 +107,7 @@ export const SaveButton: React.FC<SaveButtonProps> = ({
       type={type}
       onClick={onClick}
       disabled={disabled || state === "saving"}
-      className={`btn-accent ${palette} ${className}`.trim()}
+      className={`btn-accent w-36 ${palette} ${className}`.trim()}
       aria-live="polite"
     >
       {state === "saving" ? (
