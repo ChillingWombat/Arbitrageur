@@ -394,10 +394,34 @@ async fn scan_funding_opportunities_for_symbol(
         }
     }
 
+    // Symbol-collision guard: two venues quoting irreconcilable mids for one
+    // canonical symbol are different instruments (index perp vs same-named
+    // memecoin) — a carry pair across them is NOT hedged, so refuse it
+    // rather than fabricate a delta-neutral position. Only evaluated when
+    // both legs' books exist; missing books fall through ungated.
+    type BookSides = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+    let top_mid = |books: Option<&BookSides>| -> Option<f64> {
+        let (asks, bids) = books?;
+        let a = asks.first()?.0;
+        let b = bids.first()?.0;
+        (a.is_finite() && b.is_finite() && a > 0.0 && b > 0.0).then_some((a + b) / 2.0)
+    };
+
     for i in 0..rates.len() {
         for j in (i + 1)..rates.len() {
             let (id_a, _name_a, ref r_a) = rates[i];
             let (id_b, _name_b, ref r_b) = rates[j];
+
+            if let (Some(ma), Some(mb)) =
+                (top_mid(perp_books.get(id_a)), top_mid(perp_books.get(id_b)))
+            {
+                if (ma / mb).max(mb / ma) > 2.0 {
+                    tracing::warn!(
+                        "funding: refusing {symbol} pair {id_a}/{id_b} — mid mismatch {ma} vs {mb} (symbol collision)"
+                    );
+                    continue;
+                }
+            }
 
             let Some(fee_total) = funding_round_trip_fee_bps(
                 effective_venue_fee_bps(state, id_a),
@@ -1137,23 +1161,33 @@ pub async fn get_funding_trend_impl(
     let long_hist = map_funding(long_v);
     let short_hist = map_funding(short_v);
 
-    // Ticker mid history: mean mid per minute bucket across venues so the
-    // price overlay is venue-neutral. Bounded for payload size.
-    let mut buckets: HashMap<i64, (f64, u32)> = HashMap::new();
+    // Ticker mid history: median mid per minute bucket across venues —
+    // venue-neutral AND robust to a residual outlier surviving the store's
+    // consistency filter (a mean lets one bad mid move the whole line).
+    let mut buckets: HashMap<i64, Vec<f64>> = HashMap::new();
     if let Ok(samples) = state.state_store.spread_samples(symbol, from_ms, now_ms) {
         for s in samples {
             if !s.mid.is_finite() || s.mid <= 0.0 || s.ts_ms < 0 {
                 continue;
             }
-            let b = s.ts_ms / 60_000 * 60_000;
-            let e = buckets.entry(b).or_insert((0.0, 0));
-            e.0 += s.mid;
-            e.1 += 1;
+            buckets
+                .entry(s.ts_ms / 60_000 * 60_000)
+                .or_default()
+                .push(s.mid);
         }
     }
     let mut price_hist: Vec<(i64, f64)> = buckets
         .into_iter()
-        .map(|(b, (sum, n))| (b, sum / f64::from(n.max(1))))
+        .filter_map(|(b, mut ms)| {
+            ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let n = ms.len();
+            let m = if n % 2 == 1 {
+                ms[n / 2]
+            } else {
+                (ms[n / 2 - 1] + ms[n / 2]) / 2.0
+            };
+            (m.is_finite() && m > 0.0).then_some((b, m))
+        })
         .collect();
     price_hist.sort_by_key(|(t, _)| *t);
     let current_mid_usd = price_hist.last().map(|(_, m)| *m);

@@ -25,9 +25,15 @@ fn canonical_base_merges_equivalent_index_underlyings() {
     assert_eq!(canonical_base("USTEC"), "NAS100");
     // Siblings in the same class.
     assert_eq!(canonical_base("US500"), "SPX500");
-    assert_eq!(canonical_base("SPX"), "SPX500");
     assert_eq!(canonical_base("US30"), "US30");
     assert_eq!(canonical_base("DJ30"), "US30");
+    // Ambiguous short forms do NOT merge: "SPX" is the SPX6900 memecoin on
+    // crypto venues (~$0.5), not the S&P index — fusing them corrupts every
+    // downstream pairing and chart.
+    assert_eq!(canonical_base("SPX"), "SPX");
+    assert_eq!(canonical_base("SPX-USDC"), "SPX");
+    assert_eq!(canonical_base("NQ"), "NQ");
+    assert_eq!(canonical_base("DJI"), "DJI");
     // Non-indices untouched (incl. quote-strip behavior).
     assert_eq!(canonical_base("BTC-USDC"), "BTC");
     assert_eq!(canonical_base("BTCUSDT"), "BTC");
@@ -1487,6 +1493,156 @@ fn test_spread_samples_prune_retention_and_cap() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].ts_ms, 8_000);
     assert_eq!(rows[1].ts_ms, 9_000);
+}
+
+/* --------- symbol-collision consistency filter (spread_samples) -------- */
+
+/// Insert a sample row straight into the table, bypassing the write-time
+/// incumbent gate — reproduces pollution persisted before the gate (and
+/// read-side filter) existed, which is exactly what production DBs carry.
+fn raw_sample(store: &StateStore, symbol: &str, venue: &str, ts_ms: i64, mid: f64) {
+    store
+        .conn
+        .lock()
+        .execute(
+            "INSERT INTO spread_samples
+                (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![symbol, venue, ts_ms, mid, mid - 0.01, mid + 0.01],
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_spread_samples_incumbent_survives_late_intruder() {
+    // Regression for the observed SPX500 corruption: the key was born as an
+    // index instrument (~7600) on vanta, then a same-ticker memecoin
+    // (~0.5) flooded it from several venues at a far higher rate — rows
+    // persisted before the write gate existed. The incumbent scale must
+    // survive: quote frequency never steals identity.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64; // one consistency bucket
+                        // Incumbent history: six index-scale buckets from one venue.
+    for i in 0..6 {
+        raw_sample(&store, "SPX500", "vanta", i * b, 7_600.0 + i as f64);
+    }
+    // Intruder flood: memecoin-scale rows, three venues, many buckets —
+    // already out-numbers the incumbent inside the read window.
+    for i in 6..30 {
+        raw_sample(&store, "SPX500", "vanta", i * b, 0.5);
+        raw_sample(&store, "SPX500", "hyperliquid", i * b, 0.5);
+        raw_sample(&store, "SPX500", "lighter", i * b, 0.5);
+    }
+    let rows = store.spread_samples("SPX500", 0, i64::MAX).unwrap();
+    assert!(!rows.is_empty(), "incumbent rows must survive");
+    assert!(
+        rows.iter().all(|r| r.mid > 1_000.0),
+        "only the index scale remains: {rows:?}"
+    );
+    // A window containing ONLY intruder data is an honest gap, not a
+    // coherent-but-wrong memecoin series.
+    let intruder_only = store.spread_samples("SPX500", 10 * b, 20 * b).unwrap();
+    assert!(
+        intruder_only.is_empty(),
+        "window of pure off-scale data collapses to a gap"
+    );
+}
+
+#[test]
+fn test_spread_samples_majority_of_peers_beats_hot_venue() {
+    // New key born with a hot corrupt feed in its first bucket: the three
+    // corroborating index venues out-vote the memecoin feed inside the
+    // incumbent cells even though it wrote the most rows — one venue, one
+    // bucket, one vote.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64;
+    for i in 0..4 {
+        raw_sample(&store, "SPX500", "vanta", i * b, 7_600.0);
+        raw_sample(&store, "SPX500", "lighter", i * b, 7_601.0);
+        raw_sample(&store, "SPX500", "okx", i * b, 7_599.0);
+        // The hot corrupt venue wrote far more rows per bucket.
+        for k in 0..20 {
+            raw_sample(&store, "SPX500", "hyperliquid", i * b + k, 0.5);
+        }
+    }
+    let rows = store.spread_samples("SPX500", 0, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 12, "only the three index venues survive");
+    assert!(rows.iter().all(|r| r.mid > 1_000.0));
+    assert!(rows.iter().all(|r| r.venue_id != "hyperliquid"));
+}
+
+#[test]
+fn test_spread_samples_write_gate_rejects_off_scale() {
+    // Once a key has an incumbent scale, the write path itself refuses
+    // irreconcilable mids — pollution stops at the boundary, not at read.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64;
+    for i in 0..3 {
+        store
+            .record_spread_samples("IDX", i * b, &[sample("vanta", 7_600.0)])
+            .unwrap();
+    }
+    store
+        .record_spread_samples("IDX", 3 * b, &[sample("binance", 0.5)])
+        .unwrap();
+    let rows = store.spread_samples("IDX", 0, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 3, "off-scale write was rejected");
+    assert!(rows.iter().all(|r| r.mid > 1_000.0));
+    // On-scale writes still land.
+    store
+        .record_spread_samples("IDX", 4 * b, &[sample("binance", 7_610.0)])
+        .unwrap();
+    assert_eq!(store.spread_samples("IDX", 0, i64::MAX).unwrap().len(), 4);
+}
+
+#[test]
+fn test_spread_samples_single_venue_mixed_splits_per_bucket() {
+    // One venue quoting both scales (vanta's SPX500 flip): on-scale cells
+    // survive, collided rows in the same or other buckets drop — the venue
+    // is not smeared into one window median and not excluded wholesale.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64;
+    for i in 0..4 {
+        store
+            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_600.0)])
+            .unwrap();
+    }
+    // Same venue flips to memecoin scale for two buckets, then back
+    // (raw inserts — the write gate would rightly refuse these today).
+    for i in [4, 5] {
+        raw_sample(&store, "IDX2", "vanta", i * b, 0.5);
+    }
+    for i in 6..8 {
+        store
+            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_605.0)])
+            .unwrap();
+    }
+    let rows = store.spread_samples("IDX2", 0, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 6);
+    assert!(rows.iter().all(|r| r.mid > 1_000.0));
+    assert!(rows.iter().all(|r| r.ts_ms / b != 4 && r.ts_ms / b != 5));
+}
+
+#[test]
+fn test_spread_samples_repriced_together_is_not_corruption() {
+    // Consensus is relative: every venue repricing 2x together stays
+    // consistent — the filter arbitrates SCALE SPLITS, not volatility.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64;
+    for i in 0..3 {
+        store
+            .record_spread_samples("VOL", i * b, &[sample("aaa", 100.0), sample("bbb", 100.5)])
+            .unwrap();
+    }
+    // Hmm — a genuine 2x reprice inside the incumbent window: cells at
+    // 100 and 200 are within 3x of each other, so both corroborate.
+    for i in 3..6 {
+        store
+            .record_spread_samples("VOL", i * b, &[sample("aaa", 210.0), sample("bbb", 209.0)])
+            .unwrap();
+    }
+    let rows = store.spread_samples("VOL", 0, i64::MAX).unwrap();
+    assert_eq!(rows.len(), 12, "mutual reprice within 3x is kept");
 }
 
 /* ------------------ signal-event audit log (V9) ------------------ */
