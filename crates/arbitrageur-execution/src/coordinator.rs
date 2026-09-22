@@ -1,11 +1,86 @@
 use crate::emergency_unwind::EmergencyUnwindHandler;
 use crate::smart_routing::SmartOrderRouter;
 use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::order::{OrderRequest, OrderResponse};
+use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::types::{Decimal, OrderStatus, Side};
 use arbitrageur_risk::circuit_breaker::CircuitBreaker;
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
+
+/// Bounded venue-status window for a still-working leg. Venue acks
+/// regularly precede the fill report, so a non-terminal leg is polled
+/// before the coordinator classifies it — a fill landing moments later must
+/// resolve on fresh venue truth, not force an unnecessary unwind of the
+/// other leg. Kept short: every poll defers compensation for a real fill.
+#[cfg(not(test))]
+const LEG_SETTLE_POLLS: u32 = 5;
+#[cfg(test)]
+const LEG_SETTLE_POLLS: u32 = 3;
+#[cfg(not(test))]
+const LEG_SETTLE_INTERVAL: Duration = Duration::from_millis(600);
+#[cfg(test)]
+const LEG_SETTLE_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Poll a non-terminal, identity-verified leg until it reaches a terminal
+/// status or the poll budget is spent. When the leg still reported no fill
+/// — or `cancel_partial` is set (the sibling leg can never pair, so no
+/// matched portion is worth keeping) — a still-working order is then
+/// cancelled and polled once more, so classification runs on a terminal
+/// state: an order left working can fill later, outside every tracked
+/// quantity. A wrong-order echo is never adopted; a leg that stays
+/// non-terminal regardless returns with its verified identity intact for
+/// the reconciler, which retries cancel under its own budget.
+async fn settle_working_leg(
+    exchange: &Arc<dyn ExchangeAdapter>,
+    symbol: &str,
+    client_order_id: &str,
+    resp: OrderResponse,
+    cancel_partial: bool,
+) -> OrderResponse {
+    if resp.status.is_final()
+        || !response_identity_matches(&resp, exchange, symbol, client_order_id)
+    {
+        return resp;
+    }
+    let mut latest = resp;
+    for _ in 0..LEG_SETTLE_POLLS {
+        tokio::time::sleep(LEG_SETTLE_INTERVAL).await;
+        match exchange
+            .fetch_order(symbol, &latest.order_id, Some(client_order_id))
+            .await
+        {
+            Ok(polled) if response_identity_matches(&polled, exchange, symbol, client_order_id) => {
+                latest = polled;
+                if latest.status.is_final() {
+                    return latest;
+                }
+            }
+            Ok(_) => return latest,
+            Err(_) => continue,
+        }
+    }
+    if (latest.filled_qty == Decimal::ZERO || cancel_partial) && !latest.status.is_final() {
+        let _ = exchange
+            .cancel_order(CancelRequest {
+                venue: exchange.venue_id(),
+                symbol: symbol.to_string(),
+                order_id: Some(latest.order_id.clone()),
+                client_order_id: Some(client_order_id.to_string()),
+            })
+            .await;
+        tokio::time::sleep(LEG_SETTLE_INTERVAL).await;
+        if let Ok(polled) = exchange
+            .fetch_order(symbol, &latest.order_id, Some(client_order_id))
+            .await
+        {
+            if response_identity_matches(&polled, exchange, symbol, client_order_id) {
+                latest = polled;
+            }
+        }
+    }
+    latest
+}
 
 /// Result of an atomic two-leg arbitrage execution attempt.
 #[derive(Debug)]
@@ -213,6 +288,15 @@ impl AtomicArbitrageCoordinator {
         match (res_a, res_b) {
             // Case 1: Both legs executed successfully
             (Ok(fill_a), Ok(fill_b)) => {
+                // Acks can precede the fill report: settle still-working
+                // legs on venue truth first (zero-fill remainders are
+                // cancelled so they can never fill later untracked).
+                // Partially-filled legs keep working for the matched-pair
+                // trim below — their remainder is the pair's inventory.
+                let (fill_a, fill_b) = tokio::join!(
+                    settle_working_leg(exchange_a, &sym_a, &cid_a, fill_a, false),
+                    settle_working_leg(exchange_b, &sym_b, &cid_b, fill_b, false),
+                );
                 let identity_a = response_identity_matches(&fill_a, exchange_a, &sym_a, &cid_a);
                 let identity_b = response_identity_matches(&fill_b, exchange_b, &sym_b, &cid_b);
                 let complete_a =
@@ -522,6 +606,13 @@ impl AtomicArbitrageCoordinator {
                 self.circuit_breaker
                     .record_error(&format!("Leg B failed: {}", err_str));
 
+                // Leg B can never pair, so a still-working leg A is settled
+                // to a terminal state first (bounded poll, then cancel): the
+                // unwind below must cover the final filled quantity —
+                // unwinding a snapshot while the order keeps working orphans
+                // the remainder as untracked exposure.
+                let fill_a = settle_working_leg(exchange_a, &sym_a, &cid_a, fill_a, true).await;
+
                 if fill_a.filled_qty <= Decimal::ZERO {
                     error!("Leg B failed and Leg A reported zero filled quantity; no exposure to unwind: {}", err_str);
                     if !fill_a.status.is_final() {
@@ -602,6 +693,9 @@ impl AtomicArbitrageCoordinator {
                 let err_str = err_a.to_string();
                 self.circuit_breaker
                     .record_error(&format!("Leg A failed: {}", err_str));
+
+                // Same settle-first rule as Case 2, mirrored.
+                let fill_b = settle_working_leg(exchange_b, &sym_b, &cid_b, fill_b, true).await;
 
                 if fill_b.filled_qty <= Decimal::ZERO {
                     error!("Leg A failed and Leg B reported zero filled quantity; no exposure to unwind: {}", err_str);
