@@ -2367,3 +2367,25 @@ clippy+fmt clean, app restarted on the new binary.
 - **KV persistence added** (was session-only): `engine.auto_resolve_residual` ("true"/"false") + `engine.passive_unwind` (JSON blob) save in `save_engine_settings_impl`, load via `load_exec_policy_settings` in `AppEngineState::new*`. Fail-closed: corrupt/invalid blobs log a warn and keep code defaults. Without this an operator's disable would silently revert on restart — now that the default is ON that direction of revert is the dangerous one.
 - **Test ergonomics**: fixtures (`setup_test_state_with_venues`, `lighter_only_state`, `seeded_state`) set `passive_unwind.timeout_secs = 0` — the field's doc explicitly blesses 0 for tests; without it lifecycle tests rode real 10s×3 sleeps (suite 13s→82s). Mock venues got a tight-spread `fetch_orderbook` so the limit path actually runs. `e2e_residual_flatten_disabled_by_default` renamed → `respects_disable_flag` (flag defaults on now; test pins the disable path). New `test_exec_policy_settings_defaults_on_and_persisted_overrides` pins the KV round-trip.
 - Verified: 372 desktop tests, clippy, fmt, vite build, release build. App restarted on `3321c09` binary; HL/Lighter/Robinhood lanes healthy.
+
+## Session 2026-09-23 — shared capacity curve + detail modals on every strategy
+
+### DepthCurvePoint + CapacityChart (shared)
+
+- `pair_monitor::capacity_ladder` gained `depth_curve: Vec<DepthCurvePoint>` — per-chunk `{cum_usd, cum_net_bps, cum_exp_bps?, marg_net_bps, marg_exp_bps?}` from the same lockstep book walk (marginal exp = `p·dev⁺ − friction`; expected fields `None` without a win-rate curve — never fabricated).
+- `DepthCurvePointDto` + `BpsCapacityTierDto` now derive `Deserialize` too (Spatial/Funding DTOs embed them and derive `Deserialize`). `From<&DepthCurvePoint>` on the DTO keeps conversions one-line.
+- `frontend/src/components/CapacityChart.tsx` (new): profit-vs-size SVG with three segmented switches — **Expected|Net**, **Cumulative|Marginal**, **$|bps** — x-axis 0 → the depth where the selected measure's marginal turns non-positive; dashed markers at `optimalSizeUsd`/`breakevenSizeUsd`; USD derives as `bps·cumUsd/1e4` (marginal `$` view is per-$1k). Honest empty states: `points < 2` → "no depth data"; no expected series → "switch to Net" note.
+- `frontend/src/components/DetailBits.tsx` (new): `DetailField`/`DetailSection` extracted out of OpportunityRadar so every detail modal shares the same section markup.
+
+### Per-strategy wiring
+
+- **Spread radar**: modal bar ladders replaced by the chart (headline metrics kept); `Capacity tiers ($)` moved Signal thresholds → Monitor section.
+- **Funding**: `funding_carry::funding_depth_curve(asks, bids, income_bps, friction_bps, p_win)` — carry income is depth-invariant so `marg = income + cross − fees`; income prefers the `expected_return` back-out (`carry_income_bps` helper) then `net_8h·hold/8`, then a single funding period. `win_probability`/`expected_return_usd` hoisted above the DTO push in both carry and basis paths so the curve uses identical values to the card.
+- **Triangle**: `triangle_depth_curve` re-evaluates `evaluate_triangular_cycle` on a 24-point geometric ladder (leg-1 `BuyBase` ask notional caps hi; configured size always included; `break` on first unfillable size — depth is monotonic); marginal = finite difference between rungs. Expected `None` (no win model for atomic cycles).
+- **Spatial**: `scan_spatial_opportunities_impl` emits the full `capacity_ladder` report per route — `optimal_size_usd`, `breakeven_size_usd`, `expected_capacity_usd`, `bps_capacity_ladder`, `depth_curve`. New `monitor::pair_pwin_curve` lifts the μ/σ episode-bucket construction out of `pair_win_probability_ex` (same statistics, now shared); baseline = μ when a curve exists, else 0 (raw gross economics) with expected fields `None`. LiveMatrix rows are clickable → new `SpatialDetailModal` (Route / Economics / Friction & Gates / Capacity + chart + Execute); the row's Execute cell stopPropagates.
+- **Prediction & Spot**: `depth_curve` fields exist but stay empty — both scan impls are stubs (`Ok(vec![])`), so no book data exists to curve. PredictionHub cards open a new `PredictionDetailModal` (parity economics + honest "no depth data"); SpotArbitrageBot's selected-opp panel gained the same capacity block. If/when those pipelines land, the curves light up without frontend changes.
+
+### Verification
+
+- 373 desktop + 120 math + 210 frontend tests; clippy/fmt/tsc clean; vite + release (`--features custom-protocol`) builds green; app restarted on the new binary.
+- New math tests pin the funding curve (cross degradation, expected-scales-income-only, empty-book/`None`-win honesty).

@@ -269,6 +269,14 @@ pub struct TickerStrategyConfigDto {
    - **Endpoint overrides wired**: Engine Settings → Network & VPS URL fields were round-tripped through the UI but never reached adapter constructors. They now persist under `endpoints.*` kv keys (only non-default values — UI display-prefills differ from adapter base paths, so persisting unconditionally would silently rewrite every endpoint on any unrelated Save), restore at boot, and feed `HyperliquidAdapter`/`LighterAdapter`/`VantaAdapter`/`ArcusAdapter`/`KrakenAdapter`/`PolymarketAdapter`/`KalshiAdapter`/`PopDexAdapter` construction. Adapters build once at startup — an edited endpoint applies on the NEXT app start. `robinhood_rpc_url` is intentionally unwired: it is a chain RPC endpoint (`rpc.robinhood.network`), not the Lighter-protocol REST base the Robinhood adapter consumes, and no code path reads a chain RPC today.
    - **Lighter submit truthfulness**: `LighterAdapter::place_order` returns `status=New, filled_qty=0` unconditionally after `sendTx` accept — Lighter's submit response carries only a tx hash, so a fill that lands at commit reports zero-fill. This is why the first canary's filled leg was recorded empty (the real 0.005 ETH long orphaned on venue until closed externally). Mitigated by the `UnresolvedExposure` path above: every `New` response now enters order-id-persisted polling where `fetch_order` discovers the true fill.
    - **Hub symbol-key normalization (2026-09-21 follow-up)**: the market-data hub exact-matched `(venue, symbol)` while WS lanes publish bare bases (`ETH`) and account/execution readers ask canonical (`ETH-USDC`) — every WS-fed book was invisible to canonical readers, so reads fell to REST (extra Lighter edge pressure) and the external-position close path could not find a live book at all. `MarketDataHub` now keys on `normalize_symbol_key` (uppercase base, quote/class suffixes stripped, `-SPOT` preserved, index aliases folded) at every boundary; `validate_adapter_book`/`validate_monitor_book`/`validate_feed_book` compare canonical bases. The close path additionally falls back to a one-shot adapter REST fetch (seeded into the hub) and reports the real failure reason when nothing is fresh. `feed.rs` gained `info`-level lane lifecycle logging plus a 10s `ws_connect` timeout (a stalled upgrade previously wedged a lane forever, silently). DeltaGuard's status column is now three-state: `Delta Neutral` only when net qty is ~zero, `Residual` for nonzero exposure within tolerance, `Exposure Skew` over the limit.
+16. **Shared capacity curve + detail modals everywhere (2026-09-23)**:
+   - **`DepthCurvePoint` curve**: `capacity_ladder` now also emits a per-chunk curve `{cum_usd, cum_net_bps, cum_exp_bps?, marg_net_bps, marg_exp_bps?}` — running raw and probability-weighted capture per unit at each consumed book level. The shared `CapacityChart.tsx` renders profit-vs-size with three switch sets: **Expected | Net** (probability-weighted vs raw), **Cumulative | Marginal** (total vs per-unit at that depth), **$ | bps**, x-axis 0 → the depth where the selected measure's marginal turns non-positive. USD derives client-side as `bps · cumUsd / 1e4`.
+   - **Spread radar**: the detail modal's Capacity section replaces both bar ladders with the curve (headline metrics stay). `Capacity tiers ($)` moved from Signal thresholds to the **Monitor** section of the configurator.
+   - **Funding**: `funding_depth_curve` walks long-ask × short-bid in lockstep; carry income is depth-invariant (`net_8h × modelled hold`, or the `expected_return` back-out) so the curve degrades purely through the entry cross — `marg = income + cross − fees`; expected scales income by `win_probability` (costs are certain). Emitted on `FundingOpportunityDto.depth_curve` for carry and basis; CarryDetailModal gained the curve block.
+   - **Triangle**: `triangle_depth_curve` evaluates `evaluate_triangular_cycle` on a 24-point geometric notional ladder (leg-1 `BuyBase` ask notional caps the top; the configured size is always included exactly); marginal bps are finite differences between rungs. Expected fields are `None` — atomic cycles carry no win-rate model. Rendered in TriangleDetailModal.
+   - **Spatial (LiveMatrix)**: `scan_spatial_opportunities_impl` now emits the full `capacity_ladder` report per route — `optimal_size_usd`, `breakeven_size_usd`, `expected_capacity_usd`, `bps_capacity_ladder`, `depth_curve` — using `pair_pwin_curve` (the same μ/σ episode model `pair_win_probability_ex` evaluates) plus the monitor's `capacity_tiers_usd`/`min_win_probability`. Rows open a new **SpatialDetailModal** (Route / Economics / Friction & Gates / Capacity sections + curve + Execute) — shared `DetailBits.tsx` (`DetailField`/`DetailSection`) extracted so every modal uses identical section markup.
+   - **Prediction & Spot**: `depth_curve` field present but empty — both scan impls are stubs returning `[]` (no book pipeline exists), so the new detail modals render the honest "no depth data" state rather than a fabricated curve.
+   - **Fail-honest**: `cum_exp_bps`/`marg_exp_bps` are `None` whenever no win-rate model exists; the chart shows "No win-rate curve — expected series unavailable; switch to Net" instead of inventing weights.
 15. **UI consistency & capacity instrumentation pass (2026-09-22)**:
    - **Strategy rename**: the `futures` strategy's display name is **Simple Spread** (was "Single Spread") — nav tab, configurator, log monitor label, `STRATEGY_DISPLAY_NAMES`. The persisted strategy id stays `"futures"`; nothing keys on the label.
    - **Opportunity history (durable)**: the monitor engine has always persisted every detected signal to `monitor_signal_events` (status transitions + minute-bucketed heartbeats with edge/dev bps, p_win, economics snapshot, trigger). `get_monitor_signal_events` IPC + the new **Opportunities** tab in the Simple Spread bottom dock (Execution History / Opportunities / Log Monitor) expose it — per-ticker by default with an all-tickers toggle and a "Detected only" lifecycle filter. `recent_monitor_signal_events` resolves `spread_symbol_aliases`, so `BTC-USDC` queries match canonical `BTC` rows.
@@ -826,6 +834,7 @@ pub struct MonitorRowDto {
     pub capacity_ladder: Vec<CapacityTierDto>, // {sizeUsd,filledUsd,netBps,expectedNetBps,marginalPWin}
     pub expected_capacity_usd: Option<f64>,    // Σ notional·p_win over levels with marginal E[net]>0
     pub bps_capacity_ladder: Vec<BpsCapacityTierDto>, // {minNetBps,capacityUsd} — fillable USD per marginal-E floor
+    pub depth_curve: Vec<DepthCurvePointDto>,  // {cumUsd,cumNetBps,cumExpBps?,margNetBps,margExpBps?} per consumed chunk
     pub funding_carry_bps: Option<f64>,    // signed; null => funding_unknown
     pub funding_unknown: bool,
     pub first_seen_ms: Option<i64>,        // signal discovery (durable)
@@ -857,11 +866,12 @@ funding-unknown as "?".
 
 - Cell headline: `net_bps@optimal` over `optimal_size` (e.g. `9.1bp / $25k`),
   with `breakeven_size` as a subtle sub-line (`max $84k`).
-- The detail modal's **Capacity** section shows the full ladder as mini
-  bar-chart (`$10k→12.4 · $25k→9.1 · $50k→4.7 · $100k→−1.2`) beside the
-  inverse **Net floor → capacity** view (`≥10bps→$3.4k · ≥5bps→$8k …`) and
-  the `expected_capacity_usd` headline — the decaying bars make "profit
-  shrinks as you size up" legible at a glance.
+- The detail modal's **Capacity** section keeps the headline metrics
+  (`expected_capacity_usd`, `optimal_size_usd`, `breakeven_size_usd`) and
+  renders the **capacity curve**: the shared `CapacityChart` over
+  `depth_curve` with Expected|Net × Cumulative|Marginal × $|bps switches,
+  x-axis running 0 → the size where the selected measure's marginal turns
+  non-positive (dashed markers at optimal and breakeven).
 - **Funding** shown as a signed chip on the expected-return cell
   (`carry −2.3bp`) — visually distinguished when positive (carry works for
   us) vs negative (drag); `funding_unknown` rows show a `?` marker so the
