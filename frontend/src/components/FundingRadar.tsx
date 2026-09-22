@@ -450,14 +450,14 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
         ? (size * opp.entry_spread_bps) / 10000
         : 0;
     const net = expectedCarryUsd(opp);
-    // P(net >= target): empirical CDF over the backtest deciles (linear
-    // interpolation, ≈ by construction with 11 points). Target editable,
-    // default $100.
-    const [targetUsd, setTargetUsd] = useState("100");
+    // P(net >= model estimate): the target is this opportunity's own
+    // projected net at scan time — never hand-entered. Empirical CDF over
+    // the backtest deciles (linear interpolation, ≈ with 11 points); the
+    // probability-weighted mean itself is the "Backtest expected" field.
     const probTarget = useMemo(() => {
-      const t = Number(targetUsd);
+      const t = net;
       const d = opp.backtest_deciles_usd;
-      if (!Number.isFinite(t) || !d || d.length === 0 || d.some((v) => !Number.isFinite(v)))
+      if (t == null || !Number.isFinite(t) || !d || d.length === 0 || d.some((v) => !Number.isFinite(v)))
         return null;
       const n = d.length;
       if (t <= d[0]) return 1;
@@ -471,7 +471,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
         }
       }
       return 0;
-    }, [opp.backtest_deciles_usd, targetUsd]);
+    }, [opp.backtest_deciles_usd, net]);
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -710,22 +710,21 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               />
               <div className="space-y-0.5">
                 <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
-                  P(target profit)
+                  P(≥ model estimate)
                   <InfoTooltip
-                    text="Empirical probability that a trailing-history entry nets at least the target (≈, interpolated over 11 net deciles). Unmeasurable below 20 scoreable entries."
+                    text="Empirical probability that a trailing-history entry nets at least THIS opportunity's model estimate — the target is the projected net at scan time, not hand-entered. Interpolated over the 11 backtest net-deciles; unmeasurable below 20 scoreable entries. The probability-weighted mean is 'Backtest expected'."
                     position="top"
                   />
                 </div>
                 <div className="flex items-center gap-1.5">
-                  <span className="text-sm font-bold font-sans text-slate-900 tabular-nums">$</span>
-                  <input
-                    value={targetUsd}
-                    onChange={(e) => setTargetUsd(e.target.value)}
-                    className="w-16 h-9 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono font-bold text-slate-900 tabular-nums focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition"
-                  />
                   <span className="text-sm font-bold font-sans text-accent tabular-nums">
                     {probTarget != null ? `≈${(probTarget * 100).toFixed(0)}%` : "—"}
                   </span>
+                  {net != null && (
+                    <span className="text-[10px] font-sans text-slate-400 tabular-nums">
+                      target {net >= 0 ? "+" : "-"}${Math.abs(net).toFixed(2)}
+                    </span>
+                  )}
                 </div>
                 {opp.backtest_deciles_usd != null && opp.backtest_deciles_usd.length >= 11 && (
                   <div className="text-[10px] font-sans text-slate-400 tabular-nums">
