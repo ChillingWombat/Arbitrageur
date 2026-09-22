@@ -756,14 +756,30 @@ const CapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) =>
   </div>
 ));
 
-const DetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
-  label,
-  value,
-  title,
-}) => (
+const DetailField: React.FC<{
+  label: string;
+  value: React.ReactNode;
+  title?: string;
+  tip?: string;
+}> = ({ label, value, title, tip }) => (
   <div className="space-y-0.5" title={title}>
-    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
+    <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
+      {label}
+      {tip && <InfoTooltip text={tip} position="top" />}
+    </div>
     <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
+  </div>
+);
+
+const DetailSection: React.FC<{ title: string; children: React.ReactNode }> = ({
+  title,
+  children,
+}) => (
+  <div className="space-y-2">
+    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
+      {title}
+    </div>
+    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">{children}</div>
   </div>
 );
 
@@ -843,19 +859,49 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
+            <DetailSection title="Spread state">
               <DetailField
-                label="Expected profit (signed PnL)"
-                value={fmtBpsU(r.expectedProfitBps)}
-                title="Signed probability-weighted PnL per unit. Negative = expected loss — never floored to 0."
+                label="Baseline"
+                value={fmtBpsU(r.baselineBps)}
+                tip="Fair-value mean the pair spread reverts to, estimated from the sample window (bps)."
               />
-              <DetailField label="Net capture" value={fmtBpsU(r.netCaptureBps)} />
-              <DetailField label="Baseline" value={fmtBpsU(r.baselineBps)} />
-              <DetailField label="Deviation" value={fmtBpsU(r.deviationBps)} />
+              <DetailField
+                label="Deviation"
+                value={fmtBpsU(r.deviationBps)}
+                tip="Current signed distance of the live spread from baseline (bps). Sign sets trade direction."
+              />
+              <DetailField
+                label="Net capture"
+                value={fmtBpsU(r.netCaptureBps)}
+                tip="Current spread minus fees and modeled slippage at the displayed size (bps)."
+              />
+              <DetailField
+                label="Persistence"
+                value={fmtPct(r.thresholdRatio)}
+                tip="Fraction of in-window buckets where the deviation stayed at/above the entry level — the persistence gate."
+              />
+              <DetailField
+                label="Coverage"
+                value={fmtPct(r.coverage)}
+                tip="Fraction of expected window buckets where both venues were actually observed — the data-coverage gate."
+              />
+              <DetailField
+                label="Signal age"
+                value={fmtDur(r.signalAgeSecs)}
+                title={`first seen ${fmtTs(r.firstSeenMs)}`}
+              />
+              <DetailField
+                label="Time to converge"
+                value={fmtDur(r.expectedConvergeSecs)}
+                tip="Expected time for the deviation to revert inside the band, from OU / episode statistics."
+              />
+            </DetailSection>
+
+            <DetailSection title="Outcome evidence">
               <DetailField
                 label="Win probability"
                 value={fmtPct(getWin(r))}
-                title={`Directional P(trade is profitable) after edge direction, profitable capacity, funding, exit depth, persistence, coverage, variation and session gates. 0% when this direction has no edge or is hard-blocked.${
+                tip={`Directional P(trade is profitable) after edge direction, profitable capacity, funding, exit depth, persistence, coverage, variation and session gates. 0% when this direction has no edge or is hard-blocked.${
                   r.winProbabilityLower != null && r.winProbabilityUpper != null
                     ? ` 90% CI [${fmtPct(r.winProbabilityLower)} – ${fmtPct(r.winProbabilityUpper)}]` +
                       (r.pWinNEffective != null ? ` on ~${r.pWinNEffective.toFixed(0)} effective episodes` : "") +
@@ -867,7 +913,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               <DetailField
                 label="Net win probability"
                 value={fmtPct(r.netWinProbability)}
-                title={`Empirical P(net > 0): every historical excursion at this deviation replayed through the exit policy and scored on real net bps.${
+                tip={`Empirical P(net > 0): every historical excursion at this deviation replayed through the exit policy and scored on real net bps.${
                   r.netWinLower != null ? ` Wilson lower bound ${fmtPct(r.netWinLower)} (censored = losses)` : ""
                 }${r.outcomeTrials != null ? ` · ${r.outcomeTrials} trials` : ""}${
                   r.outcomeCensored != null && r.outcomeCensored > 0 ? ` · ${r.outcomeCensored} censored` : ""
@@ -876,7 +922,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               <DetailField
                 label="Expected net"
                 value={r.netExpectedBps != null ? fmtBpsU(r.netExpectedBps) : "—"}
-                title={
+                tip={
                   r.netDecilesBps && r.netDecilesBps.length === 11
                     ? `Net-bps deciles of simulated entries at this deviation: P10 ${fmtBpsU(
                         r.netDecilesBps[1]
@@ -885,39 +931,39 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 }
               />
               <DetailField
+                label="Reversion probability"
+                value={fmtPct(getReversion(r))}
+                tip="Direction-insensitive P(|deviation| reverts before the stop band). Informational only — high reversion with negative deviation still means 0% trade win for this direction."
+              />
+              <DetailField
                 label="Median hold"
                 value={r.medianHoldSecs != null ? fmtDur(r.medianHoldSecs) : "—"}
-                title={
+                tip={
                   r.medianWinSecs != null
                     ? `Median hold across simulated episodes; ${fmtDur(r.medianWinSecs)} among profitable ones — capital-turnover context`
                     : "Median hold across simulated episodes"
                 }
               />
+            </DetailSection>
+
+            <DetailSection title="Sizing & PnL">
               <DetailField
-                label="Reversion probability"
-                value={fmtPct(getReversion(r))}
-                title="Direction-insensitive P(|deviation| reverts before the stop band). Informational only — high reversion with negative deviation still means 0% trade win for this direction."
-              />
-              <DetailField
-                label="Persistence"
-                value={fmtPct(r.thresholdRatio)}
-                title="Fraction of in-window buckets at/above entry (persistence gate)"
-              />
-              <DetailField
-                label="Coverage"
-                value={fmtPct(r.coverage)}
-                title="Fraction of expected window buckets with both venues observed (coverage gate)"
+                label="Expected profit (signed PnL)"
+                value={fmtBpsU(r.expectedProfitBps)}
+                tip="Signed probability-weighted PnL per unit. Negative = expected loss — never floored to 0."
               />
               <DetailField label="Exp profit $" value={fmtUsd(r.expectedProfitUsd)} />
-              <DetailField label="Optimal size" value={fmtUsd(r.optimalSizeUsd)} />
-              <DetailField label="Breakeven size" value={fmtUsd(r.breakevenSizeUsd)} />
               <DetailField
-                label="Signal age"
-                value={fmtDur(r.signalAgeSecs)}
-                title={`first seen ${fmtTs(r.firstSeenMs)}`}
+                label="Optimal size"
+                value={fmtUsd(r.optimalSizeUsd)}
+                tip="Size that maximizes expected net edge given visible book depth on both legs."
               />
-              <DetailField label="Time to converge" value={fmtDur(r.expectedConvergeSecs)} />
-            </div>
+              <DetailField
+                label="Breakeven size"
+                value={fmtUsd(r.breakevenSizeUsd)}
+                tip="Largest size before expected net bps turns negative — depth ceiling for this route."
+              />
+            </DetailSection>
 
             {r.blockReason && (
               <div className="p-3 bg-warn-dim border border-warn-border rounded-lg text-xs font-sans text-warn">
