@@ -20,6 +20,7 @@ import type {
   TickerStrategyConfigDto,
   StrategyParamsDto,
   TickerPositionState,
+  VenueCaps,
 } from "../types";
 import {
   PERP_TICKERS,
@@ -77,6 +78,9 @@ interface LiveMatrixProps {
    *  selection is strategy-specific so it lives on this page, not the
    *  universal sidebar. */
   tickerExplorer?: React.ReactNode;
+  /** Backend-reported venue capability (can_submit / can_enter_strategy)
+   *  keyed by venue id — drives the READ-ONLY route badge. */
+  venueCaps?: VenueCaps;
 }
 
 interface MatrixCellViewProps {
@@ -152,10 +156,16 @@ interface OpportunityRowViewProps {
   symbolLabel: string | null;
   onExecute: (opp: SpatialOpportunityDto) => void;
   onSelect: (opp: SpatialOpportunityDto) => void;
+  venueCaps?: Map<string, { canSubmit: boolean; canEnterStrategy: boolean }>;
 }
 
-const LIVE_CAPABLE_VENUES = new Set([
+/** Backend-reported submission capability per venue — authoritative when
+ *  systemStatus has loaded. `undefined` caps map = status not yet loaded;
+ *  fall back to the static approximation so badges don't flash read-only
+ *  on first paint. An *empty* map = genuinely no capable venues. */
+const STATIC_SUBMIT_CAPABLE = new Set([
   "aster",
+  "popdex",
   "hyperliquid",
   "lighter",
   "robinhood",
@@ -164,26 +174,24 @@ const LIVE_CAPABLE_VENUES = new Set([
   "okx",
   "coinbase",
   "kraken",
-  // DexPerpAdapter venues with implemented order paths — the backend
-  // still requires has_live_credentials() before any submission.
+  "decibel",
   "aevo",
   "derive",
   "grvt",
   "ondoperps",
   "pacifica",
   "standx",
-  // EVM spot AMMs (uniswap/uniswap_v2/pancakeswap/pancakeswap_v3/
-  // sushiswap/quickswap) have explicit submission transports, but
-  // automated route entry is backend-disabled
-  // (live_strategy_entry_implemented() = false) pending gas-aware
-  // profitability modeling and credentialed venue evidence. They remain
-  // admitted for market data and account configuration.
 ]);
-const isLiveRoute = (v1: string, v2: string): boolean =>
-  LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
+const isLiveRoute = (v1: string, v2: string, venueCaps?: VenueCaps): boolean => {
+  const cap = (v: string) =>
+    venueCaps
+      ? venueCaps.get(v.toLowerCase())?.canSubmit === true
+      : STATIC_SUBMIT_CAPABLE.has(v.toLowerCase());
+  return cap(v1) && cap(v2);
+};
 
 const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
-  ({ opp, minBps, blocked, blockingIds, botPhase, loading, symbolLabel, onExecute, onSelect }) => {
+  ({ opp, minBps, blocked, blockingIds, botPhase, loading, symbolLabel, onExecute, onSelect, venueCaps }) => {
     const isExec = opp.is_executable;
     const entriesOpen = botPhase === "idle" || botPhase === "running";
     const disabled = !isExec || loading || blocked || !entriesOpen;
@@ -192,7 +200,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
       : botPhase === "paused" || botPhase === "reduce_only" || botPhase === "stopping"
         ? `Entries blocked: bot is ${botPhase.replace("_", "-")}`
         : undefined;
-    const isLive = isLiveRoute(opp.buy_venue, opp.sell_venue);
+    const isLive = isLiveRoute(opp.buy_venue, opp.sell_venue, venueCaps);
     return (
       <tr
         className={`hover:bg-surface-raised transition cursor-pointer ${isExec ? "bg-accent-dim/30" : ""}`}
@@ -214,7 +222,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
               className="ml-1.5 px-1.5 py-0.5 rounded-md border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
               title="Route contains read-only venue(s) — no order submission"
             >
-              PAPER
+              READ-ONLY
             </span>
           )}
         </td>
@@ -461,6 +469,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   tickerExplorer,
   futuresParams = null,
   totalEquityUsd = null,
+  venueCaps,
 }) => {
   // Empty-string alias for internal computations; `symbol` stays nullable so
   // "no selection" is distinguishable from a real ticker.
@@ -1287,6 +1296,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                               symbolLabel={symbol}
                               onExecute={handleExecuteOpp}
                               onSelect={setDetailOpp}
+                              venueCaps={venueCaps}
                             />
                           ))}
                         </tbody>

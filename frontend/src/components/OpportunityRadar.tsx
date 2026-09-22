@@ -26,6 +26,7 @@ import type {
   RadarBotStatusDto,
   SignalExecutionDto,
   StrategyFillPnl,
+  VenueCaps,
 } from "../types";
 import { api } from "../services/api";
 import {
@@ -139,7 +140,7 @@ const VENUE_LABEL: Record<string, string> = {
   okx: "OKX",
 };
 
-const LIVE_CAPABLE_VENUES = new Set([
+const STATIC_SUBMIT_CAPABLE = new Set([
   "aster",
   "popdex",
   "hyperliquid",
@@ -150,6 +151,7 @@ const LIVE_CAPABLE_VENUES = new Set([
   "okx",
   "coinbase",
   "kraken",
+  "decibel",
   // DexPerpAdapter venues with implemented order paths — the backend
   // still requires has_live_credentials() before any submission.
   "aevo",
@@ -158,15 +160,21 @@ const LIVE_CAPABLE_VENUES = new Set([
   "ondoperps",
   "pacifica",
   "standx",
-  // EVM spot AMMs (uniswap/uniswap_v2/pancakeswap/pancakeswap_v3/
-  // sushiswap/quickswap) have explicit submission transports, but
-  // automated route entry is backend-disabled
-  // (live_strategy_entry_implemented() = false) pending gas-aware
-  // profitability modeling and credentialed venue evidence. They remain
-  // admitted for market data and account configuration.
+  // EVM spot AMMs and arcus/ibkr/ig/prediction venues are omitted — no
+  // implemented order submission transport.
 ]);
-const isLiveCapableRoute = (v1: string, v2: string): boolean =>
-  LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());
+/** Backend-reported submission capability per venue (systemStatus). When
+ *  the caps map is absent (status not yet loaded) fall back to the static
+ *  approximation so badges don't flash read-only on first paint. */
+const isLiveCapableRoute = (v1: string, v2: string, venueCaps?: VenueCaps): boolean => {
+  if (venueCaps) {
+    return (
+      venueCaps.get(v1.toLowerCase())?.canSubmit === true &&
+      venueCaps.get(v2.toLowerCase())?.canSubmit === true
+    );
+  }
+  return STATIC_SUBMIT_CAPABLE.has(v1.toLowerCase()) && STATIC_SUBMIT_CAPABLE.has(v2.toLowerCase());
+};
 
 /* ------------------------------------------------------------------ */
 /* Config modal (TickerConfigModal canon)                                */
@@ -724,12 +732,13 @@ interface SignalDetailModalProps {
   onSizeChange: (rowKey: string, value: number) => void;
   onExecute: (row: MonitorRowDto) => void;
   onClose: () => void;
+  venueCaps?: VenueCaps;
 }
 
 const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
-  ({ row: r, held, sizeValue, executing, onSizeChange, onExecute, onClose }) => {
+  ({ row: r, held, sizeValue, executing, onSizeChange, onExecute, onClose, venueCaps }) => {
     const rowKey = `${r.symbol}:${r.buyVenue}:${r.sellVenue}`;
-    const live = isLiveCapableRoute(r.buyVenue, r.sellVenue);
+    const live = isLiveCapableRoute(r.buyVenue, r.sellVenue, venueCaps);
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -767,7 +776,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                   className="px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold border-surface-border bg-surface-raised text-slate-500"
                   title="Route involves a read-only venue — no order submission"
                 >
-                  PAPER
+                  READ-ONLY
                 </span>
               )}
               <span
@@ -964,10 +973,11 @@ interface RadarRowProps {
   onOpenDetail: (rowKey: string) => void;
   onSizeChange: (rowKey: string, value: number) => void;
   onExecute: (row: MonitorRowDto) => void;
+  venueCaps?: VenueCaps;
 }
 
 const RadarRow: React.FC<RadarRowProps> = React.memo(
-  ({ row: r, rowKey: k, held, sizeValue, executing, onOpenDetail, onSizeChange, onExecute }) => {
+  ({ row: r, rowKey: k, held, sizeValue, executing, onOpenDetail, onSizeChange, onExecute, venueCaps }) => {
     return (
       <React.Fragment>
         <tr
@@ -993,12 +1003,12 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
               <VenueLogo venueId={r.sellVenue} name={VENUE_NAME[r.sellVenue] ?? r.sellVenue} size={14} />
               {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
             </span>
-            {!isLiveCapableRoute(r.buyVenue, r.sellVenue) && (
+            {!isLiveCapableRoute(r.buyVenue, r.sellVenue, venueCaps) && (
               <span
                 className="ml-1.5 px-1.5 py-0.2 rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
                 title="Route involves a read-only venue — no order submission"
               >
-                PAPER
+                READ-ONLY
               </span>
             )}
           </td>
@@ -1102,7 +1112,11 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */
 
-const OpportunityRadarInner: React.FC = () => {
+interface OpportunityRadarProps {
+  venueCaps?: VenueCaps;
+}
+
+const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) => {
   const [snap, setSnap] = useState<MonitorSnapshotDto | null>(null);
   const [cfg, setCfg] = useState<MonitorConfigDto | null>(null);
   const [showConfig, setShowConfig] = useState(false);
@@ -1726,6 +1740,7 @@ const OpportunityRadarInner: React.FC = () => {
                   onOpenDetail={handleOpenDetail}
                   onSizeChange={handleSizeChange}
                   onExecute={handleExecute}
+                  venueCaps={venueCaps}
                 />
               );
             })}
@@ -1746,6 +1761,7 @@ const OpportunityRadarInner: React.FC = () => {
             onSizeChange={handleSizeChange}
             onExecute={handleExecute}
             onClose={handleCloseDetail}
+            venueCaps={venueCaps}
           />
         );
       })()}
@@ -1753,4 +1769,4 @@ const OpportunityRadarInner: React.FC = () => {
   );
 };
 
-export const OpportunityRadar: React.FC = React.memo(OpportunityRadarInner);
+export const OpportunityRadar: React.FC<OpportunityRadarProps> = React.memo(OpportunityRadarInner);

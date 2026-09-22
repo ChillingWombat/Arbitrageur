@@ -119,6 +119,15 @@ pub struct VenueStatusDto {
     /// fabricated.
     pub latency_ms: Option<u64>,
     pub fee_bps: f64,
+    /// Adapter-reported order submission capability in the *active*
+    /// environment (`live_order_submission_implemented`). False for
+    /// read-only venues, non-admitted venues, and inert scaffolds.
+    #[serde(default)]
+    pub can_submit: bool,
+    /// Adapter-reported automated strategy-entry capability in the active
+    /// environment (`live_strategy_entry_implemented`).
+    #[serde(default)]
+    pub can_enter_strategy: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -972,6 +981,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("hyperliquid"),
             fee_bps: 2.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "lighter".into(),
@@ -980,6 +991,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("lighter", s.lighter_enabled || account_enabled("lighter")).into(),
             latency_ms: probe_ms("lighter"),
             fee_bps: 1.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "vanta".into(),
@@ -988,6 +1001,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("vanta", s.vanta_enabled || account_enabled("vanta")).into(),
             latency_ms: probe_ms("vanta"),
             fee_bps: 3.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "arcus".into(),
@@ -996,6 +1011,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("arcus", s.arcus_enabled || account_enabled("arcus")).into(),
             latency_ms: probe_ms("arcus"),
             fee_bps: 1.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "robinhood".into(),
@@ -1008,6 +1025,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("robinhood"),
             fee_bps: 2.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "kraken".into(),
@@ -1024,6 +1043,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("kraken"),
             fee_bps: 16.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "polymarket".into(),
@@ -1036,6 +1057,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("polymarket"),
             fee_bps: 0.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "kalshi".into(),
@@ -1044,6 +1067,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("kalshi", s.kalshi_enabled || account_enabled("kalshi")).into(),
             latency_ms: probe_ms("kalshi"),
             fee_bps: 10.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "decibel".into(),
@@ -1052,6 +1077,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("decibel", s.decibel_enabled || account_enabled("decibel")).into(),
             latency_ms: probe_ms("decibel"),
             fee_bps: 2.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "aster".into(),
@@ -1060,6 +1087,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("aster", s.aster_enabled || account_enabled("aster")).into(),
             latency_ms: probe_ms("aster"),
             fee_bps: 3.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "popdex".into(),
@@ -1068,6 +1097,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("popdex", s.popdex_enabled || account_enabled("popdex")).into(),
             latency_ms: probe_ms("popdex"),
             fee_bps: 10.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "binance".into(),
@@ -1076,6 +1107,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("binance", s.binance_enabled || account_enabled("binance")).into(),
             latency_ms: probe_ms("binance"),
             fee_bps: 7.5,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "coinbase".into(),
@@ -1088,6 +1121,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("coinbase"),
             fee_bps: 8.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "okx".into(),
@@ -1096,6 +1131,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("okx", s.okx_enabled || account_enabled("okx")).into(),
             latency_ms: probe_ms("okx"),
             fee_bps: 8.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "ibkr".into(),
@@ -1104,6 +1141,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("ibkr", s.ibkr_enabled || account_enabled("ibkr")).into(),
             latency_ms: probe_ms("ibkr"),
             fee_bps: 1.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
         VenueStatusDto {
             id: "ig".into(),
@@ -1112,6 +1151,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("ig", s.ig_enabled || account_enabled("ig")).into(),
             latency_ms: probe_ms("ig"),
             fee_bps: 5.0,
+            can_submit: false,
+            can_enter_strategy: false,
         },
     ];
     // Long-tail perp venues append dynamically — same admission rule
@@ -1125,6 +1166,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status(vid, account_enabled(vid)).into(),
             latency_ms: probe_ms(vid),
             fee_bps: adapter.taker_fee_bps(),
+            can_submit: false,
+            can_enter_strategy: false,
         });
     }
     for adapter in &state.live_evm_amms {
@@ -1136,7 +1179,20 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status(vid, account_enabled(vid)).into(),
             latency_ms: probe_ms(vid),
             fee_bps: adapter.taker_fee_bps(),
+            can_submit: false,
+            can_enter_strategy: false,
         });
+    }
+
+    // Populate capability flags from the *admitted* env-scoped adapter —
+    // the same object execution resolves, so the UI's READ-ONLY badge
+    // always matches what the backend would actually do. Non-admitted
+    // venues (unknown id, wrong env, disabled) read false.
+    for v in &mut venues {
+        if let Some(adapter) = state.get_adapter(&v.id) {
+            v.can_submit = adapter.live_order_submission_implemented();
+            v.can_enter_strategy = adapter.live_strategy_entry_implemented();
+        }
     }
 
     let current_drawdown = cb

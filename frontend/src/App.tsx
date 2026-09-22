@@ -234,6 +234,21 @@ export const App: React.FC = () => {
     return getAdmittedVenueCodes(systemStatus);
   }, [systemStatus]);
 
+  // Backend-reported order capability per venue id — the authoritative
+  // source for READ-ONLY badges (replaces the static frontend lists that
+  // drifted from the adapters' real flags).
+  const venueCaps = useMemo(() => {
+    if (!systemStatus) return undefined;
+    const map = new Map<string, { canSubmit: boolean; canEnterStrategy: boolean }>();
+    for (const v of systemStatus.active_venues ?? []) {
+      map.set(v.id, {
+        canSubmit: v.can_submit === true,
+        canEnterStrategy: v.can_enter_strategy === true,
+      });
+    }
+    return map;
+  }, [systemStatus]);
+
   // Tickers hidden via their configurator drop out of the explorer and all
   // strategy selection; the Simple Spread configurator's Reveal All clears
   // the manual list (right-click Hide re-adds).
@@ -925,6 +940,7 @@ export const App: React.FC = () => {
               futuresParams={futuresParams}
               totalEquityUsd={totalEquityUsd}
               tickerExplorer={tickerExplorerNode}
+              venueCaps={venueCaps}
             />
           )}
 
@@ -988,7 +1004,7 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "radar" && <OpportunityRadar />}
+          {activeTab === "radar" && <OpportunityRadar venueCaps={venueCaps} />}
 
           {activeTab === "portfolio_monitor" && (
             <PortfolioMonitor
