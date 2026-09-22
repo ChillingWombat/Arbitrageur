@@ -281,8 +281,11 @@ pub async fn get_external_positions_impl(
             unreadable.push(format!("{name}: no live credentials in the vault"));
             continue;
         }
-        let account = match adapter.fetch_account().await {
-            Ok(a) => a,
+        // Share the fresh-TTL + singleflight path so this poll coalesces
+        // with venue-balances / risk-overview reads instead of adding its
+        // own REST hit (Orderly /v1/positions rate-limits hard).
+        let account = match crate::execution::live_account_or_cached(state, vid, &adapter).await {
+            Ok((a, _age)) => a,
             Err(e) => {
                 unreadable.push(format!("{name}: account read failed: {e}"));
                 continue;
