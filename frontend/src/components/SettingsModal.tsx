@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { X, Settings as SettingsIcon } from "lucide-react";
 import { EngineSettings } from "./EngineSettings";
 import type { SystemStatusDto, EngineSettingsDto } from "../types";
@@ -16,6 +16,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   systemStatus,
   onSettingsSaved,
 }) => {
+  // Portal target for actions EngineSettings hoists into the modal header
+  // (vault lock/unlock) — keeps vault state inside EngineSettings.
+  const [headerActionsEl, setHeaderActionsEl] = useState<HTMLDivElement | null>(null);
   // Close on Escape key press
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -58,6 +61,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           </div>
 
           <div className="flex items-center space-x-2.5">
+            <div ref={setHeaderActionsEl} className="flex items-center" />
             <button
               type="button"
               onClick={onClose}
@@ -75,6 +79,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             systemStatus={systemStatus}
             onClose={onClose}
             onSettingsSaved={onSettingsSaved}
+            headerActionsEl={headerActionsEl}
           />
         </div>
       </div>
