@@ -17,6 +17,7 @@ import {
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { BotStatCards } from "./BotStatCards";
 import { InfoTooltip } from "./InfoTooltip";
+import { SaveButton, useSaveButton } from "./SaveButton";
 import { SwitchToggle } from "./SwitchToggle";
 import type {
   MonitorSnapshotDto,
@@ -219,8 +220,7 @@ const ConfigPanel: React.FC<{
 }> = ({ cfg, botCfg, onSave, onClose }) => {
   const [draft, setDraft] = useState<MonitorConfigDto>(cfg);
   const [botDraft, setBotDraft] = useState<RadarBotConfigDto>(botCfg);
-  const [saving, setSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const saveBtn = useSaveButton();
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<string>(MONITOR_SECTIONS[0].id);
   const set = <K extends keyof MonitorConfigDto>(k: K, v: MonitorConfigDto[K]) => {
@@ -259,18 +259,16 @@ const ConfigPanel: React.FC<{
   };
 
   const handleSave = async () => {
-    setSaving(true);
-    setSaveSuccess(false);
     setError(null);
-    try {
-      await onSave({ ...draft, enabled: true }, botDraft);
-      setSaveSuccess(true);
-      setTimeout(onClose, 400);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
+    const ok = await saveBtn.run(async () => {
+      try {
+        await onSave({ ...draft, enabled: true }, botDraft);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        throw e; // rethrow so the save button lands on "Failed!"
+      }
+    });
+    if (ok) setTimeout(onClose, 400);
   };
 
   return (
@@ -688,25 +686,7 @@ const ConfigPanel: React.FC<{
             >
               Cancel
             </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className={`flex items-center space-x-1.5 px-2.5 py-2.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
-                saveSuccess
-                  ? "bg-profit text-white border border-profit-border"
-                  : "bg-accent hover:bg-blue-600 text-white"
-              }`}
-            >
-              {saveSuccess ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  <span>Saved!</span>
-                </>
-              ) : (
-                <span>{saving ? "Saving..." : "Save & Apply"}</span>
-              )}
-            </button>
+            <SaveButton state={saveBtn.state} onClick={handleSave} />
           </div>
       </div>
       </div>

@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowLeftRight,
   Check,
-  CheckCircle2,
   Eye,
   EyeOff,
   KeyRound,
@@ -28,6 +27,7 @@ import type {
 } from "../types";
 import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { SaveButton, useSaveButton } from "./SaveButton";
 import { VenueLogo } from "./VenueLogo";
 
 /* ------------------------------------------------------------------ */
@@ -627,7 +627,7 @@ const PopdexAgentToolkit: React.FC<{
                   setCheck(null);
                 })} className={btnGhost}>Regenerate</button>
               </div>
-              {!keyUsed && <p className="text-[10px] font-sans text-warn">Not saved yet — press “Use this key”, then Save Account on the card.</p>}
+              {!keyUsed && <p className="text-[10px] font-sans text-warn">Not saved yet — press “Use this key”, then “Save Changes” on the card.</p>}
             </div>
           )}
         </div>
@@ -717,7 +717,7 @@ const PopdexAgentToolkit: React.FC<{
               </span>
             )}
           </div>
-          {check?.approved && !keyUsed && <p className="text-[10px] font-sans text-warn">Approved on-chain — press “Use this key” in step 2, then Save Account.</p>}
+          {check?.approved && !keyUsed && <p className="text-[10px] font-sans text-warn">Approved on-chain — press “Use this key” in step 2, then “Save Changes”.</p>}
         </div>
 
         {error && (
@@ -753,7 +753,8 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
+  // Saved persists until the next edit — `dirty` flips the button back.
+  const saveBtn = useSaveButton({ persistSaved: true });
   const [toolkitOpen, setToolkitOpen] = useState(false);
   // Decrypted credentials loaded on demand — never fetched while locked.
   // Security hardening: NEVER hold the whole credential bundle in renderer
@@ -770,7 +771,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
     setMaxLeverage(account.maxLeverage != null ? String(account.maxLeverage) : "");
     setDrafts({});
     setError(null);
-    setSaved(false);
+    saveBtn.reset();
     setShowSecrets({});
     // Drop revealed secrets when switching accounts (they belong to the last one).
     setRevealed({});
@@ -869,7 +870,6 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
     setError(null);
-    setSaved(false);
     try {
       await fn();
       onChanged();
@@ -881,26 +881,31 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   };
 
   const handleSave = () =>
-    run(async () => {
-      const { creds, error } = buildCredentials();
-      if (error) throw new Error(error);
-      if (!label.trim()) throw new Error("Account label is required");
-      const cap = parseMaxLeverage(maxLeverage);
-      await api.upsertAccount({
-        id: account.id,
-        label: label.trim(),
-        enabled: account.enabled,
-        makeDefault: account.isDefault,
-        accountTier: tier,
-        maxLeverage: cap,
-        credentials: creds ?? null,
-      });
-      setDrafts({});
-      setSaved(true);
-      // Drop revealed secrets after save: placeholders fall back to the
-      // presence flags (STORED_MASK) until the user reveals a field again.
-      setRevealed({});
-      setRequested({});
+    void saveBtn.run(async () => {
+      try {
+        const { creds, error } = buildCredentials();
+        if (error) throw new Error(error);
+        if (!label.trim()) throw new Error("Account label is required");
+        const cap = parseMaxLeverage(maxLeverage);
+        await api.upsertAccount({
+          id: account.id,
+          label: label.trim(),
+          enabled: account.enabled,
+          makeDefault: account.isDefault,
+          accountTier: tier,
+          maxLeverage: cap,
+          credentials: creds ?? null,
+        });
+        setDrafts({});
+        // Drop revealed secrets after save: placeholders fall back to the
+        // presence flags (STORED_MASK) until the user reveals a field again.
+        setRevealed({});
+        setRequested({});
+        onChanged();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        throw e; // rethrow so the save button lands on "Failed!"
+      }
     });
 
   const handleToggleEnabled = () =>
@@ -1094,15 +1099,12 @@ export const AccountCard: React.FC<AccountCardProps> = ({
               <KeyRound className="w-3.5 h-3.5" /> Agent Setup Toolkit — generate key & approve
             </button>
           )}
-          <button
-            type="button"
+          <SaveButton
+            state={saveBtn.state === "saved" && dirty ? "idle" : saveBtn.state}
             disabled={busy || locked || !dirty}
-            onClick={() => void handleSave()}
-            className="btn-accent text-xs font-mono font-bold flex items-center gap-1.5"
-          >
-            {saved && !dirty ? <CheckCircle2 className="w-3 h-3" /> : null}
-            <span>{busy ? "Saving..." : saved && !dirty ? "Saved" : "Save Account"}</span>
-          </button>
+            onClick={handleSave}
+            className="font-mono font-bold"
+          />
         </div>
 
         {error && (
@@ -1164,13 +1166,15 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
   const [label, setLabel] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState(false);
+  const saveBtn = useSaveButton();
   const [error, setError] = useState<string | null>(null);
   const [toolkitOpen, setToolkitOpen] = useState(false);
+  // Inputs disable while the create-save is in flight.
+  const busy = saveBtn.state === "saving";
 
   const handleCreate = async () => {
-    setBusy(true);
     setError(null);
+    await saveBtn.run(async () => {
     try {
       const effectiveLabel = label.trim() || autoLabel;
       const creds: AccountCredentialInput = {};
@@ -1204,8 +1208,9 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
       onDone();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setBusy(false);
+      throw e; // rethrow so the save button lands on "Failed!"
     }
+    });
   };
 
   return (
@@ -1290,14 +1295,11 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               <KeyRound className="w-3.5 h-3.5" /> Agent Setup Toolkit — generate key & approve
             </button>
           )}
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void handleCreate()}
-            className="btn-accent text-xs font-mono font-bold flex items-center gap-1.5"
-          >
-            <span>{busy ? "Saving..." : "Save Account"}</span>
-          </button>
+          <SaveButton
+            state={saveBtn.state}
+            onClick={handleCreate}
+            className="font-mono font-bold"
+          />
         </div>
         {toolkitOpen && venue.toLowerCase() === "popdex" && (
           <PopdexAgentToolkit
