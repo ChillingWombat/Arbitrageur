@@ -765,7 +765,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               {!live && (
                 <span
                   className="px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold border-surface-border bg-surface-raised text-slate-500"
-                  title="Route involves a read-only venue — paper execution only"
+                  title="Route involves a read-only venue — no order submission"
                 >
                   PAPER
                 </span>
@@ -945,7 +945,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               className="px-2.5 py-2.5 text-xs rounded-lg shadow-2xs cursor-pointer"
               disabled={!r.executable}
               executing={executing}
-              title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
+              title={r.executable ? "execute trade" : r.blockReason ?? "blocked"}
               onClick={() => onExecute(r)}
             />
           </div>
@@ -996,7 +996,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             {!isLiveCapableRoute(r.buyVenue, r.sellVenue) && (
               <span
                 className="ml-1.5 px-1.5 py-0.2 rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
-                title="Route involves a read-only venue — paper execution only"
+                title="Route involves a read-only venue — no order submission"
               >
                 PAPER
               </span>
@@ -1084,7 +1084,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 className="px-2 py-2 text-xs rounded-lg shadow-2xs cursor-pointer"
                 disabled={!r.executable}
                 executing={executing}
-                title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
+                title={r.executable ? "execute trade" : r.blockReason ?? "blocked"}
                 onClick={() => onExecute(r)}
               />
             </div>
@@ -1133,7 +1133,7 @@ const OpportunityRadarInner: React.FC = () => {
   const [execError, setExecError] = useState<string | null>(null);
   const [execSuccess, setExecSuccess] = useState<string | null>(null);
   const [sizeUsd, setSizeUsd] = useState<Record<string, number>>({});
-  // Autonomous convergence bot (paper-only, opt-in). Backend BotMode is the
+  // Autonomous convergence bot (opt-in). Backend BotMode is the
   // single source of truth — no page-local lifecycle phase.
   const [botCfg, setBotCfg] = useState<RadarBotConfigDto | null>(null);
   const [botStatus, setBotStatus] = useState<RadarBotStatusDto | null>(null);

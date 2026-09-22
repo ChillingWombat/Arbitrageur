@@ -72,7 +72,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           </span>
           {(tickerLogs[0] ?? logs[0])?.is_live === false && (
             <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
-              Paper Trading
+              Testnet Trading
             </span>
           )}
         </div>

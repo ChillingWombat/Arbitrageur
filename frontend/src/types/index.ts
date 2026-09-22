@@ -172,7 +172,7 @@ export interface TickerStrategyConfigDto {
  * "funding" | "spot"), shared across all tickers. Per-ticker contract/runtime
  * state stays in TickerStrategyConfigDto. */
 
-/** Passive limit unwind/rebalance controls (paper-only, fail-closed).
+/** Passive limit unwind/rebalance controls (fail-closed).
  * Peg `spreadPercentile` 0 = aggressive touch … 50 = mid … 100 = passive
  * edge; `timeoutSecs` bounds every limit attempt; `maxTries` bounds retries
  * before market fallback; the calm gate skips passive when the spread or
@@ -203,7 +203,7 @@ export interface StrategyParamsDto {
   slidingWindowMode: "manual" | "auto";
   slidingWindowSecs: number;
   // Simple Spread sizing: one grid step = min(mult x venue min lot,
-  // maxStepUsd / price); max steps derive per ticker from paper equity x pct.
+  // maxStepUsd / price); max steps derive per ticker from venue equity x pct.
   stepSizeMult: number;
   maxStepUsd: number;
   maxTickerEquityPct: number;
@@ -760,7 +760,7 @@ export interface EngineSettingsDto {
   bind_address: string;
 
   // Execution & Warm-up Modes
-  trading_mode: "paper" | "real";
+  trading_mode: "testnet" | "live";
   paper_starting_balance_usd?: number;
   fast_warmup_enabled: boolean;
 
@@ -872,7 +872,10 @@ export interface ScheduledExitDto {
 export interface ExternalPositionsResponse {
   positions: ExternalPositionDto[];
   unreadable: string[];
-  liveMode: boolean;
+  /** Active trading environment — "testnet" | "live" (display context only;
+   * closes are gated per-position by closeSupported). */
+  environment: string;
+  venueNotes?: string[];
 }
 
 export interface CloseRecommendationDto {
@@ -947,6 +950,9 @@ export interface AccountDto {
    *  ceiling of 5 still applies). Effective leverage is
    *  min(strategy, account, venue). */
   maxLeverage: number | null;
+  /** "testnet" | "live" — which environment this account's credentials bind
+   *  to. Immutable once created. */
+  environment: string;
 }
 
 export interface AccountCredentialInput {
@@ -978,6 +984,9 @@ export interface AccountUpsertInput {
    *  authoritative: sending null clears a stored cap. Partial updaters must
    *  echo the current value (see AccountDto.maxLeverage). */
   maxLeverage?: number | null;
+  /** "testnet" | "live" — which environment this account's credentials bind
+   *  to. Omit on create to use the active environment; immutable after. */
+  environment?: string;
   credentials?: AccountCredentialInput | null;
 }
 
@@ -1073,7 +1082,7 @@ export interface UtilisationHistory {
   pointCount: number;
 }
 
-/** Durable margin-utilisation observation for a paper venue. */
+/** Durable margin-utilisation observation for a venue account. */
 export interface MarginSnapshot {
   venue: string;
   accountId: string;
@@ -1147,7 +1156,7 @@ export interface TickerPositionState {
   netPositionQty: number;
 }
 
-/** Result of an emergency per-strategy flatten (paper venues only). */
+/** Result of an emergency per-strategy flatten. */
 export interface FlattenResultDto {
   strategyId: string;
   symbol: string | null;

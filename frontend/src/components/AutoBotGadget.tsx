@@ -48,7 +48,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
         }`}
         title={
           armed
-            ? "Entries + exits armed (paper-only)"
+            ? "Entries + exits armed (testnet)"
             : cfg?.mode === "reduce_only" && open.length > 0
               ? "Auto-exit active: managing open positions until dynamic baseline convergence"
               : "Not arming entries"

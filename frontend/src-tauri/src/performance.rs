@@ -180,7 +180,7 @@ pub fn get_strategy_fill_pnl_impl(
             }
         }
     }
-    let is_live = *state.is_live_mode.read();
+    let is_live = state.is_live();
     if want == crate::attribution::UNATTRIBUTED_STRATEGY_ID {
         // Quarantine query: report only the quarantined families.
         return Ok(crate::attribution::StrategyFillPnl {

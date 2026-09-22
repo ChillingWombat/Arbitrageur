@@ -8,7 +8,7 @@
 //! [`UNATTRIBUTED_STRATEGY_ID`] — excluded from attributed sums and counted
 //! separately, never silently absorbed.
 //!
-//! Paper-only accounting over already-recorded fills. No fee schedule or
+//! Accounting over already-recorded fills. No fee schedule or
 //! route-economics input lives here.
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ pub const UNATTRIBUTED_STRATEGY_ID: &str = "unattributed";
 /// Canonical ledger identity for a signal strategy. `futures` keeps its
 /// legacy `spatial_spread` lot namespace; `radar` gets its own namespace so
 /// radar cycles no longer co-mingle with manual futures fills in the shared
-/// spatial paper path. Funding/spot/prediction/stat_arb map to their stable
+/// spatial dispatch path. Funding/spot/prediction/stat_arb map to their stable
 /// metric namespaces for future fill paths (those executors are currently
 /// disabled and record no fills).
 pub fn ledger_strategy_id(signal_strategy: &str) -> String {

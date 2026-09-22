@@ -894,6 +894,11 @@ impl EvmAmmAdapter {
     pub fn spec_id(&self) -> &'static str {
         self.spec.id
     }
+    /// EVM chain id this venue's contracts live on — used to share a
+    /// chain-level RPC override across same-chain venues.
+    pub fn chain_id(&self) -> u64 {
+        self.spec.chain_id
+    }
     pub fn spec_name(&self) -> &'static str {
         self.spec.name
     }

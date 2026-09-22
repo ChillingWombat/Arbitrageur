@@ -25,7 +25,7 @@ import type {
   VenueBalanceInfo,
   VenueLaneStatusDto,
 } from "../types";
-import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
+import { STRATEGY_DISPLAY_NAMES, venueHasTestnet } from "../types/tickers";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { VenueLogo } from "./VenueLogo";
@@ -1188,7 +1188,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   // Grey-out rule: the Enabled switch stays disabled (grey, unclickable) while
   // any required account-card field is empty. Optional fields never block.
   // A stored value (presence flag) or a non-empty draft/revealed value counts
-  // as filled. Empty-field venues (edgeX, long-tail paper venues) have no
+  // as filled. Empty-field venues (edgeX, long-tail venues) have no
   // required fields and are always enableable. While the vault is locked the
   // presence is unknowable, so gating is skipped (locked=false bypass above).
   const requiredFilled = fields.every(
@@ -1336,6 +1336,16 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             title="Account label used in strategy routing"
             className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
           />
+          <span
+            className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold tracking-wide shrink-0 border ${
+              account.environment === "live"
+                ? "bg-loss-dim/40 text-loss border-loss-border/60"
+                : "bg-accent/10 text-accent border-accent/30"
+            }`}
+            title={`This account's credentials bind to the ${account.environment === "live" ? "live production" : "testnet/demo"} environment`}
+          >
+            {account.environment === "live" ? "LIVE" : "TESTNET"}
+          </span>
           {account.isDefault ? (
             <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
               Default Account
@@ -1689,6 +1699,8 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
 export interface VenueAccountsSectionProps {
   venue: string;
   locked: boolean;
+  /** Active trading environment — badges cards and gates testnet-incapable venues. */
+  environment?: "testnet" | "live";
   bal?: VenueBalanceInfo | null;
   lane?: VenueLaneStatusDto | null;
   fallbackEnabled?: boolean;
@@ -1701,6 +1713,7 @@ export interface VenueAccountsSectionProps {
 export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
   venue,
   locked,
+  environment,
   bal,
   lane,
   fallbackEnabled = false,
@@ -1730,6 +1743,17 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
       {loadError && (
         <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
           {loadError}
+        </div>
+      )}
+
+      {environment === "testnet" && !venueHasTestnet(venue) && (
+        <div className="flex items-start gap-2 px-3 py-2 rounded-lg border bg-warn-dim/40 border-warn-border text-[11px] font-mono text-slate-700">
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn" />
+          <span>
+            {venueDisplay(venue)} has no public testnet — accounts created now bind to Testnet
+            but stay ineligible until the venue exposes a demo endpoint. Switch to Live Trading
+            to manage production credentials.
+          </span>
         </div>
       )}
 

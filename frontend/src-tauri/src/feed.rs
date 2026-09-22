@@ -84,7 +84,7 @@ fn venue_ws_enabled(state: &AppEngineState, venue: &str) -> bool {
     };
     flag || state
         .state_store
-        .has_enabled_account(venue)
+        .has_enabled_account(venue, state.env().as_str())
         .unwrap_or(false)
 }
 

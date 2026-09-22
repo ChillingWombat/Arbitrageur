@@ -233,10 +233,10 @@ export const DEFAULT_STEP_SIZING: StepSizingParams = {
   maxTickerEquityPct: 20,
 };
 
-/** Sum of live venue paper equities, or null when balances are unavailable
+/** Sum of venue equities, or null when balances are unavailable
  *  (empty, non-finite, or zero-sum). Callers must treat null as unknown and
  *  fail closed — never substitute a hardcoded seed. */
-export function resolveTotalPaperEquity(
+export function resolveTotalVenueEquity(
   balances: { equity_usd: number }[]
 ): number | null {
   const sum = (balances ?? []).reduce(

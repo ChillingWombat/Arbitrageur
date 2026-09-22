@@ -31,7 +31,7 @@ import {
   formatStrategyName,
   type PerpTicker,
 } from "../types/tickers";
-import { computeSafeLeverage, deriveStepSizing, resolveTotalPaperEquity } from "../services/contractSpecs";
+import { computeSafeLeverage, deriveStepSizing, resolveTotalVenueEquity } from "../services/contractSpecs";
 import {
   clampWindowValue,
   durationParts,
@@ -426,7 +426,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       api
         .getVenueBalances()
         .then((balances) => {
-          setTotalEquityUsd(resolveTotalPaperEquity(balances ?? []));
+          setTotalEquityUsd(resolveTotalVenueEquity(balances ?? []));
         })
         .catch(() => {
           setTotalEquityUsd(null);

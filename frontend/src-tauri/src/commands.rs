@@ -28,19 +28,18 @@ use std::sync::Arc;
 use tauri::State;
 
 /// Strategies whose live dispatch is built: spatial two-leg only. Triangle
-/// and funding legs still dispatch on paper simulators below their gates,
-/// so live mode keeps refusing there until a real dispatch exists.
-pub(crate) const LIVE_ENTRY_SPATIAL_ONLY: &str = "Live execution is currently implemented for the spatial two-leg path only; this strategy's live dispatch is not built. Use Paper Trading.";
+/// and funding legs still refuse in live mode until a real dispatch exists.
+pub(crate) const LIVE_ENTRY_SPATIAL_ONLY: &str = "Live execution is currently implemented for the spatial two-leg path only; this strategy's live dispatch is not built. Use Testnet Trading.";
 
 /// Live strategy-entry gate. Live mode without `live_entry_enabled` stays
 /// read + risk-reducing closes. Entry is admitted only when the operator
 /// opted in, the vault is unlocked, and every leg's adapter both submits
 /// and polls orders (the reconciler requires `fetch_order`). The machinery
-/// is implemented but not yet venue-proven — the opt-in is the operator
-/// accepting that.
+/// is venue-proven for the spatial pair path; the opt-in remains the
+/// operator accepting the residual one-sided-exposure risk.
 pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result<(), String> {
     if !state.settings.read().live_entry_enabled {
-        return Err("Live strategy entries are disabled — enable 'live_entry_enabled' in Engine Settings (Safety) to opt in. Order polling, residual auto-resolution, and cancel retry are implemented but not yet proven against real venues".into());
+        return Err("Live strategy entries are disabled — enable 'live_entry_enabled' in Engine Settings (Risk Control) to opt in. Entries reconcile via venue order polling; a partially-filled entry unwinds the filled leg automatically".into());
     }
     if !state.vault.write().is_unlocked() {
         return Err("Live strategy entries require an unlocked credential vault".into());
@@ -407,7 +406,7 @@ pub(crate) fn effective_venue_fee_bps(state: &AppEngineState, venue: &str) -> f6
     let plus = matches!(venue.to_ascii_lowercase().as_str(), "lighter" | "robinhood")
         && state
             .state_store
-            .default_account(venue)
+            .default_account(venue, state.env().as_str())
             .ok()
             .flatten()
             .is_some_and(|a| a.account_tier == "plus");
@@ -670,10 +669,11 @@ pub(crate) fn validate_adapter_book(
 /// All venue ids currently enabled — engine flag OR an enabled account
 /// profile. Drives which venues the status poll latency-probes.
 fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto) -> Vec<String> {
+    let env = state.env();
     let account_enabled = |venue: &str| {
         state
             .state_store
-            .has_enabled_account(venue)
+            .has_enabled_account(venue, env.as_str())
             .unwrap_or(false)
     };
     let mut out = Vec::new();
@@ -814,7 +814,7 @@ async fn probe_http(spec: PublicProbe) -> Result<(), String> {
 
 pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStatusDto, String> {
     let cb = &state.circuit_breaker;
-    let is_live = *state.is_live_mode.read();
+    let is_live = state.is_live();
     let total_pnl = if is_live {
         state
             .total_realized_profit_live
@@ -843,10 +843,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     let s = state.settings.read().clone();
     // A venue is enabled when its engine flag is set OR it owns an enabled
     // account profile — the same admission rule `get_venues` applies.
+    let env = state.env();
     let account_enabled = |venue: &str| {
         state
             .state_store
-            .has_enabled_account(venue)
+            .has_enabled_account(venue, env.as_str())
             .unwrap_or(false)
     };
     // Admission is authoritative for the `supported` leg: a venue reports
@@ -1854,14 +1855,14 @@ pub async fn execute_spot_arbitrage_impl(
 }
 
 // ---------------------------------------------------------------------------
-// Triangular arbitrage (single-venue A -> B -> C -> A cycles, paper-only)
+// Triangular arbitrage (single-venue A -> B -> C -> A cycles)
 // ---------------------------------------------------------------------------
 
 /// Strategy id under which triangle residuals are recorded. The 2-leg signal
 /// ledger cannot represent an atomic 3-leg cycle as one row (1-2 leg cap), so
 /// a completed cycle's legs persist as individual 1-leg `Imbalanced` signals:
 /// each one blocks its symbol and unwinds through the existing symbol-scoped
-/// flatten path, exactly like any other open paper position.
+/// flatten path, exactly like any other open position.
 pub(crate) const TRIANGLE_STRATEGY_ID: &str = "triangle";
 pub(crate) const FUNDING_STRATEGY_ID: &str = "funding";
 
@@ -2093,7 +2094,7 @@ pub(crate) fn record_execution_failure(
             position_step: None,
             max_units: None,
             nominal_hurdle_bps: None,
-            is_live: *state.is_live_mode.read(),
+            is_live: state.is_live(),
         },
     );
 }
@@ -2120,7 +2121,7 @@ pub fn get_execution_logs_by_mode_impl(
     state: &AppEngineState,
     is_live_filter: Option<bool>,
 ) -> Result<Vec<ExecutionLogEntry>, String> {
-    let mode = is_live_filter.unwrap_or_else(|| *state.is_live_mode.read());
+    let mode = is_live_filter.unwrap_or_else(|| state.is_live());
     let logs = state.execution_logs.read();
     let filtered: Vec<ExecutionLogEntry> =
         logs.iter().filter(|l| l.is_live == mode).cloned().collect();
@@ -2136,12 +2137,12 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
     if enabled {
         let is_unlocked = state.vault.write().is_unlocked();
         if !is_unlocked {
-            *state.is_live_mode.write() = false;
+            state.set_environment(crate::state::TradingEnvironment::Testnet);
             return Err("Cannot enable Live Trading while the secure credential vault is locked. Unlock the vault first.".into());
         }
         state.sync_vault_credentials_to_adapters();
         let ready_venues: Vec<String> = state
-            .get_venues()
+            .venues_for_env(crate::state::TradingEnvironment::Live)
             .into_iter()
             .filter(|(_, _, adapter)| {
                 adapter.live_order_submission_implemented() && adapter.has_live_credentials()
@@ -2150,26 +2151,26 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
             .collect();
         let ready_count = ready_venues.len();
         if ready_count < 2 {
-            *state.is_live_mode.write() = false;
+            state.set_environment(crate::state::TradingEnvironment::Testnet);
             return Err(format!(
                 "Live Trading requires at least two venues with authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
                 if ready_venues.is_empty() { "none".to_string() } else { ready_venues.join(", ") }
             ));
         }
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         {
             let mut s = state.settings.write();
-            s.trading_mode = "real".to_string();
+            s.trading_mode = "live".to_string();
         }
-        let _ = state.state_store.kv_set("engine.trading_mode", "real");
+        let _ = state.state_store.kv_set("engine.trading_mode", "live");
         Ok(true)
     } else {
-        *state.is_live_mode.write() = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
         {
             let mut s = state.settings.write();
-            s.trading_mode = "paper".to_string();
+            s.trading_mode = "testnet".to_string();
         }
-        let _ = state.state_store.kv_set("engine.trading_mode", "paper");
+        let _ = state.state_store.kv_set("engine.trading_mode", "testnet");
         Ok(false)
     }
 }
@@ -2191,20 +2192,23 @@ pub fn save_engine_settings_impl(
     mut settings: EngineSettingsDto,
     state: &AppEngineState,
 ) -> Result<String, String> {
-    let is_real = settings.trading_mode.eq_ignore_ascii_case("real");
-    let is_paper = settings.trading_mode.eq_ignore_ascii_case("paper");
-    if !is_real && !is_paper {
-        return Err("trading_mode must be 'paper' or 'real'".into());
+    let normalized_mode = settings.trading_mode.trim().to_ascii_lowercase();
+    if !matches!(
+        normalized_mode.as_str(),
+        "live" | "testnet" | "real" | "paper"
+    ) {
+        return Err("trading_mode must be 'live' or 'testnet'".into());
     }
+    let target_env = crate::state::TradingEnvironment::from_mode(&normalized_mode);
 
-    if is_real {
+    if target_env == crate::state::TradingEnvironment::Live {
         let is_unlocked = state.vault.write().is_unlocked();
         if !is_unlocked {
-            return Err("Cannot switch to 'real' trading mode while the secure credential vault is locked. Unlock the vault first.".into());
+            return Err("Cannot switch to Live trading while the secure credential vault is locked. Unlock the vault first.".into());
         }
         state.sync_vault_credentials_to_adapters();
         let ready_venues: Vec<String> = state
-            .get_venues()
+            .venues_for_env(crate::state::TradingEnvironment::Live)
             .into_iter()
             .filter(|(_, _, adapter)| {
                 adapter.live_order_submission_implemented() && adapter.has_live_credentials()
@@ -2214,14 +2218,14 @@ pub fn save_engine_settings_impl(
         let ready_count = ready_venues.len();
         if ready_count < 2 {
             return Err(format!(
-                "Cannot switch to 'real' trading mode: At least two venues must have authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
+                "Cannot switch to Live trading: At least two venues must have authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
                 if ready_venues.is_empty() { "none".to_string() } else { ready_venues.join(", ") }
             ));
         }
-        *state.is_live_mode.write() = true;
-    } else {
-        *state.is_live_mode.write() = false;
     }
+    // Normalize legacy values before persisting.
+    settings.trading_mode = target_env.as_str().to_string();
+    state.set_environment(target_env);
     settings.spread_samples_max_days = match settings.spread_samples_max_days {
         None => None,
         Some(0) => None,
@@ -2337,10 +2341,11 @@ pub fn save_engine_settings_impl(
     // A venue credential stays enabled when either the engine flag is on or
     // an enabled account profile exists — a settings save can never disable a
     // venue the user explicitly switched on at the account level.
+    let env_str = state.env().as_str().to_string();
     let account_enabled = |venue: &str| {
         state
             .state_store
-            .has_enabled_account(venue)
+            .has_enabled_account(venue, &env_str)
             .unwrap_or(false)
     };
     let enablement: Vec<(String, bool)> = vec![
@@ -2452,29 +2457,33 @@ pub fn save_engine_settings_impl(
                 .kv_set("retention.max_gb", &gb.to_string());
         }
     }
-    // A changed starting balance reinitializes every paper account: fresh
-    // equity, no open positions. Unrelated saves leave paper state alone.
-    // Re-anchor the breaker to the new paper universe so the balance change
-    // itself is never misread as a drawdown halt.
-    let prev_balance = state.settings.read().paper_starting_balance_usd;
-    if sanitized.paper_starting_balance_usd != prev_balance {
-        if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
-            for (_, paper) in state.paper_exchanges() {
-                paper.reset_account(eq);
-            }
-            // A reset moves the baseline itself: rebase every account's
-            // expected equity to the new starting balance (flat, no event).
-            let f = sanitized.paper_starting_balance_usd;
-            if f.is_finite() && f >= 0.0 {
-                let now_ms = Utc::now().timestamp_millis();
-                for (vid, _) in state.paper_exchanges() {
-                    let _ = state.state_store.set_equity_expectation(vid, f, "", now_ms);
-                }
-            }
+    // A changed starting balance reinitializes test simulators: fresh
+    // equity, no open positions. Production has no simulated accounts —
+    // Testnet/Live balances are owned by the venues. Test-only block.
+    #[cfg(test)]
+    {
+        let prev_balance = state.settings.read().paper_starting_balance_usd;
+        if sanitized.paper_starting_balance_usd != prev_balance {
             if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
-                let n = state.paper_exchanges().len() as u32;
-                if n > 0 {
-                    cb_reanchor_to_paper(state, eq * Decimal::from(n));
+                for (_, paper) in state.paper_exchanges() {
+                    paper.reset_account(eq);
+                }
+                // A reset moves the baseline itself: rebase every account's
+                // expected equity to the new starting balance.
+                let f = sanitized.paper_starting_balance_usd;
+                if f.is_finite() && f >= 0.0 {
+                    let now_ms = Utc::now().timestamp_millis();
+                    for (vid, _) in state.paper_exchanges() {
+                        let _ = state
+                            .state_store
+                            .set_equity_expectation(&vid, f, "", now_ms);
+                    }
+                }
+                if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
+                    let n = state.paper_exchanges().len() as u32;
+                    if n > 0 {
+                        cb_reanchor_to_paper(state, eq * Decimal::from(n));
+                    }
                 }
             }
         }
@@ -3189,6 +3198,20 @@ pub async fn set_live_mode(
 }
 
 #[tauri::command]
+pub async fn set_trading_environment(
+    environment: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<bool, String> {
+    match environment.trim().to_ascii_lowercase().as_str() {
+        "live" => set_live_mode_impl(true, &state),
+        "testnet" => set_live_mode_impl(false, &state),
+        other => Err(format!(
+            "Unknown trading environment '{other}' — expected 'testnet' or 'live'"
+        )),
+    }
+}
+
+#[tauri::command]
 pub async fn set_engine_paused(
     paused: bool,
     state: State<'_, Arc<AppEngineState>>,
@@ -3215,7 +3238,7 @@ pub async fn cancel_venue_order(
     client_order_id: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
-    if *state.is_live_mode.read() && !state.vault.write().is_unlocked() {
+    if state.is_live() && !state.vault.write().is_unlocked() {
         return Err(
             "Cannot cancel a venue order in Live Trading mode while the secure credential vault is locked. Unlock the vault first."
                 .into(),
@@ -3780,16 +3803,16 @@ pub(crate) const MARGIN_SNAPSHOT_MIN_INTERVAL_MS: i64 = 60_000;
 /// Default trailing window for the average-utilisation stat (24h).
 pub(crate) const UTILISATION_DEFAULT_WINDOW_MS: i64 = 24 * 3_600_000;
 
-/// Record one margin-utilisation snapshot per admitted paper venue unless
-/// the per-venue cadence cap says the last write is still fresh. Best
-/// effort: account reads or store writes never break execution. Called on
-/// fills dispatches (open, triangle, flatten) and by the periodic retention
+/// Record one margin-utilisation snapshot per admitted venue unless the
+/// per-venue cadence cap says the last write is still fresh. Best effort:
+/// account reads or store writes never break execution. Called on fills
+/// dispatches (open, triangle, flatten) and by the periodic retention
 /// heartbeat so history stays bounded yet continuous.
 pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms: i64) {
     if now_ms < 0 {
         return;
     }
-    for (vid, paper) in state.paper_exchanges() {
+    for (vid, _, adapter) in state.get_venues() {
         let fresh = state
             .margin_snapshot_at
             .lock()
@@ -3798,7 +3821,9 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
         if fresh {
             continue;
         }
-        let account = match paper.fetch_account().await {
+        // Uncredentialed venues fail the account read and skip — same
+        // best-effort semantics the old simulator loop had.
+        let account = match adapter.fetch_account().await {
             Ok(acc) => acc,
             Err(_) => continue,
         };
@@ -3828,15 +3853,17 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
     }
 }
 
-/// Per-venue actual paper equity snapshot, taken immediately before a
-/// fills dispatch.
-pub(crate) async fn snapshot_paper_equity(state: &AppEngineState) -> HashMap<String, f64> {
+/// Pre-trade per-venue equity snapshot keyed `{env}-{venue}` — the baseline
+/// `refresh_equity_expectations_after_fills` measures own-fill deltas
+/// against. Reads the active environment's admitted adapters.
+pub(crate) async fn snapshot_venue_equity(state: &AppEngineState) -> HashMap<String, f64> {
     let mut map = HashMap::new();
-    for (vid, paper) in state.paper_exchanges() {
-        if let Ok(acc) = paper.fetch_account().await {
+    let env_str = state.env().as_str();
+    for (vid, _name, adapter) in state.get_venues() {
+        if let Ok(acc) = adapter.fetch_account().await {
             if let Ok(f) = acc.equity.to_string().parse::<f64>() {
                 if f.is_finite() {
-                    map.insert(vid.to_string(), f);
+                    map.insert(format!("{env_str}-{vid}"), f);
                 }
             }
         }
@@ -3849,34 +3876,45 @@ pub(crate) async fn snapshot_paper_equity(state: &AppEngineState) -> HashMap<Str
 /// baseline exists yet) + (actual_after - actual_before). The dispatch
 /// window holds the execution lock, so the delta is own fills minus fees
 /// by construction. Best-effort: attribution must never break execution.
+/// Keys are `{env}-{venue}` so the two environments' baselines never mix.
 pub(crate) async fn refresh_equity_expectations_after_fills(
     state: &AppEngineState,
     before: &HashMap<String, f64>,
 ) {
     let now_ms = Utc::now().timestamp_millis();
-    for (vid, paper) in state.paper_exchanges() {
-        let Ok(acc) = paper.fetch_account().await else {
+    let env_str = state.env().as_str();
+    for (vid, _name, adapter) in state.get_venues() {
+        let key = format!("{env_str}-{vid}");
+        let Ok(mut acc) = adapter.fetch_account().await else {
             continue;
         };
+        // Post-trade reads must see post-trade state: refresh the
+        // last-known-good account cache so a caller inside the fresh window
+        // doesn't get served the pre-trade snapshot.
+        acc.venue = vid.into();
+        state
+            .last_good_accounts
+            .lock()
+            .insert(key.clone(), (acc.clone(), now_ms));
         let Ok(after) = acc.equity.to_string().parse::<f64>() else {
             continue;
         };
         if !after.is_finite() {
             continue;
         }
-        let Some(b) = before.get(vid).copied() else {
+        let Some(b) = before.get(&key).copied() else {
             continue;
         };
         let prior = state
             .state_store
-            .get_equity_expectation(vid)
+            .get_equity_expectation(&key)
             .ok()
             .flatten()
             .map(|(e, _, _)| e);
         let next = prior.unwrap_or(b) + (after - b);
         if next.is_finite() && next >= 0.0 {
             let _ = state.state_store.set_equity_expectation(
-                vid,
+                &key,
                 next,
                 &position_signature(&acc.positions),
                 now_ms,
@@ -4229,6 +4267,9 @@ mod tests {
     #[tokio::test]
     async fn test_system_status_reflects_account_level_enablement() {
         let (state, dir) = test_state_with_vault("status-acct");
+        // Live environment: robinhood/ibkr have no testnet endpoints, so
+        // account-level enablement for them is only visible under Live.
+        state.set_environment(crate::state::TradingEnvironment::Live);
 
         // No flags, no accounts: everything OFFLINE.
         let status = get_system_status_impl(&state).await.expect("status");
@@ -4238,6 +4279,7 @@ mod tests {
         // flag unset — status must match what get_venues actually admits.
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -4274,6 +4316,7 @@ mod tests {
         // ticker universe derives from).
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -4298,6 +4341,7 @@ mod tests {
         // Binance is admitted by get_venues with its live adapter:
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -4322,6 +4366,7 @@ mod tests {
         // UNSUPPORTED — enabled is not the same as stream-capable.
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -4832,8 +4877,9 @@ mod tests {
 
         assert_eq!(risk.circuit_breaker_state, "ACTIVE");
         assert!(!risk.is_halted);
-        // Six seeded paper accounts at 100k equity each
-        assert_eq!(risk.total_portfolio_value_usd, 600000.0);
+        // No venues enabled → no accounts → zero portfolio value (venue
+        // truth, not simulated seed equity).
+        assert_eq!(risk.total_portfolio_value_usd, 0.0);
 
         // Flat book: no observed positions means no delta entries at all
         assert!(risk.net_deltas.is_empty());
@@ -5194,6 +5240,7 @@ mod tests {
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5216,6 +5263,7 @@ mod tests {
 
         let a2 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5254,6 +5302,7 @@ mod tests {
         // Venue identity is immutable on update.
         assert!(upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: Some(a2.id.clone()),
@@ -5269,6 +5318,7 @@ mod tests {
 
         let updated = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: Some(a2.id.clone()),
@@ -5313,6 +5363,7 @@ mod tests {
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5330,6 +5381,7 @@ mod tests {
         .expect("create a1");
         let a2 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5388,6 +5440,7 @@ mod tests {
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5407,6 +5460,7 @@ mod tests {
         .expect("create a1");
         let a2 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5453,6 +5507,7 @@ mod tests {
         // secret; both must persist.
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5479,6 +5534,7 @@ mod tests {
         // the endpoint while untouched secrets survive the same merge.
         let updated = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: Some(a1.id.clone()),
@@ -5508,6 +5564,7 @@ mod tests {
         // must not resurrect or clear the endpoint.
         let re_set = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: Some(a1.id.clone()),
@@ -5526,6 +5583,7 @@ mod tests {
         assert!(re_set.has_base_url);
         let untouched = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: Some(a1.id.clone()),
@@ -5564,6 +5622,7 @@ mod tests {
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5583,6 +5642,7 @@ mod tests {
         .expect("create a1");
         let a2 = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5690,6 +5750,9 @@ mod tests {
         lock_vault_impl(&state);
         unlock_vault_impl("test password", &state).expect("unlock migrates");
 
+        // Legacy unbound creds migrate to the live environment — scope the
+        // listing accordingly (accounts are env-filtered).
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let accounts = list_accounts_impl(Some("hyperliquid"), &state).expect("accounts");
         assert_eq!(accounts.len(), 1);
         assert_eq!(accounts[0].id, "hyperliquid-default");
@@ -5750,6 +5813,7 @@ mod tests {
 
         let hl = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5764,6 +5828,7 @@ mod tests {
         .expect("hl account");
         let lt = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5778,6 +5843,7 @@ mod tests {
         .expect("lt account");
         let lt_disabled = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -5859,6 +5925,7 @@ mod tests {
 
         let a = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -6082,14 +6149,14 @@ mod tests {
         state.execution_logs.write().push(live_entry);
 
         // In paper mode: only paper logs returned
-        *state.is_live_mode.write() = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
         let paper_logs = get_execution_logs_impl(&state).expect("paper logs");
         assert_eq!(paper_logs.len(), 1);
         assert_eq!(paper_logs[0].id, "exec-paper-1");
         assert!(!paper_logs[0].is_live);
 
         // In live mode: only live logs returned
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let live_logs = get_execution_logs_impl(&state).expect("live logs");
         assert_eq!(live_logs.len(), 1);
         assert_eq!(live_logs[0].id, "exec-live-1");
@@ -6110,7 +6177,7 @@ mod tests {
         );
 
         // Verify balances report correct is_live flag in paper mode
-        *state.is_live_mode.write() = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
         let paper_balances = get_venue_balances_impl(&state)
             .await
             .expect("paper balances");
@@ -6120,7 +6187,7 @@ mod tests {
         }
 
         // Verify balances report correct is_live flag in live mode
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let live_balances = get_venue_balances_impl(&state)
             .await
             .expect("live balances");
@@ -6213,22 +6280,21 @@ mod tests {
     #[tokio::test]
     async fn test_funding_carry_live_refusal_names_missing_leg() {
         let state = setup_test_state_with_venues();
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
             .await
             .expect_err("live funding must refuse without two-leg reconciliation");
-        // Lighter live submission is implemented (vendored Go signer), so the
-        // refusal now names the credential blocker instead of "not implemented".
+        // Test sims report credentialed+capable, so the refusal centers on
+        // the missing two-leg live dispatch, not per-leg blockers.
         assert!(
-            err.contains("lighter")
-                && (err.contains("credentials") || err.contains("not implemented")),
-            "refusal must name the lighter leg and its blocker: {err}"
+            err.contains("spatial-only") || err.contains("not built"),
+            "refusal must name the missing live-dispatch capability: {err}"
         );
         assert!(
-            err.contains("Paper Trading"),
-            "refusal must point at paper: {err}"
+            err.contains("Testnet"),
+            "refusal must point at testnet: {err}"
         );
-        *state.is_live_mode.write() = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 
     #[tokio::test]
@@ -6346,12 +6412,7 @@ mod tests {
                 .expect("basis paper dispatch");
         assert!(res.execution_success);
         assert!(
-            res.message.contains("paper"),
-            "result must say paper: {}",
-            res.message
-        );
-        assert!(
-            res.message.contains("BTC-SPOT"),
+            res.message.contains("BTC-SPOT") && res.message.contains("BTC-USDC"),
             "result must name exact legs: {}",
             res.message
         );
@@ -7073,6 +7134,7 @@ mod tests {
 
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: Some("plus".into()),
                 max_leverage: None,
                 id: None,
@@ -7634,6 +7696,7 @@ mod tests {
                 false,
                 "standard",
                 None,
+                None,
             )
             .expect("disable account");
         let off = EngineSettingsDto {
@@ -7706,11 +7769,11 @@ mod tests {
         let res = set_live_mode_impl(true, &state);
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("locked"));
-        assert!(!*state.is_live_mode.read());
+        assert!(!state.is_live());
 
         let res_off = set_live_mode_impl(false, &state).expect("disable live mode");
         assert!(!res_off);
-        assert!(!*state.is_live_mode.read());
+        assert!(!state.is_live());
     }
 
     #[tokio::test]
@@ -7727,7 +7790,7 @@ mod tests {
             get_engine_settings_impl(&state)
                 .expect("settings")
                 .trading_mode,
-            "paper"
+            "testnet"
         );
     }
 
@@ -7785,6 +7848,9 @@ mod tests {
 
         // 5. Capabilities report: submission readiness is distinct from
         // strategy-entry readiness; no adapter has reconciliation yet.
+        // Capabilities describe the ACTIVE environment — aster has no
+        // testnet endpoint, so switch to Live first.
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let caps = get_venue_execution_capabilities_impl(&state);
         let aster_cap = caps.iter().find(|c| c.venue == "aster").expect("aster cap");
         assert!(aster_cap.supports_live);
@@ -7823,7 +7889,7 @@ mod tests {
         // 6. Live mode successfully enabled
         let live_ok = set_live_mode_impl(true, &state).expect("enable live mode");
         assert!(live_ok);
-        assert!(*state.is_live_mode.read());
+        assert!(state.is_live());
 
         // 7a. Live strategy entry refuses while `live_entry_enabled` is off,
         // before any signal is inserted or any account/book/order work is
@@ -7950,10 +8016,10 @@ mod tests {
         // 2. Enable live mode and verify persisted to kv store
         let ok = set_live_mode_impl(true, &state).expect("enable live mode");
         assert!(ok);
-        assert!(*state.is_live_mode.read());
+        assert!(state.is_live());
         assert_eq!(
             state.state_store.kv_get("engine.trading_mode").unwrap(),
-            Some("real".to_string())
+            Some("live".to_string())
         );
 
         // 3. Lock vault: live executions will fail closed because vault is locked
@@ -7963,7 +8029,7 @@ mod tests {
         let unlock_res = unlock_vault_impl("test-password-123", &state).expect("unlock");
         assert!(unlock_res.is_unlocked);
         assert!(
-            *state.is_live_mode.read(),
+            state.is_live(),
             "live mode should automatically restore upon unlocking vault when real mode was chosen"
         );
     }
@@ -7972,9 +8038,13 @@ mod tests {
     async fn test_auto_lock_keeps_credentials_manual_lock_wipes() {
         let (state, _dir) = test_state_with_vault("autolock-sync");
         state.settings.write().aster_enabled = true;
+        // Aster has no testnet endpoint — its accounts/credentials are
+        // live-environment only.
+        state.set_environment(crate::state::TradingEnvironment::Live);
         initialize_vault_impl("test-password-123", &state).expect("init vault");
         upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
@@ -8522,6 +8592,7 @@ mod tests {
         let state = AppEngineState::new();
         let created = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 id: None,
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
@@ -8538,6 +8609,7 @@ mod tests {
         for bad in [Some(0), Some(6), Some(99)] {
             let res = upsert_account_impl(
                 AccountUpsertInput {
+                    environment: None,
                     id: Some(created.id.clone()),
                     venue: String::new(),
                     label: "Main".into(),
@@ -8553,6 +8625,7 @@ mod tests {
         }
         let cleared = upsert_account_impl(
             AccountUpsertInput {
+                environment: None,
                 id: Some(created.id.clone()),
                 venue: String::new(),
                 label: "Main".into(),
@@ -8599,11 +8672,21 @@ mod tests {
                 true,
                 "standard",
                 Some(2),
+                Some("testnet"),
             )
             .expect("capped account");
         state
             .state_store
-            .upsert_account("lt-main", "lighter", "Main", true, true, "standard", None)
+            .upsert_account(
+                "lt-main",
+                "lighter",
+                "Main",
+                true,
+                true,
+                "standard",
+                None,
+                Some("testnet"),
+            )
             .expect("uncapped account");
         let (eff, cap) = resolve_effective_leverage(
             &state,
@@ -9369,7 +9452,9 @@ mod tests {
     async fn test_venue_balances_report_paper_account() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
-        assert_eq!(balances.len(), 4);
+        // Testnet-admitted venues: hyperliquid, lighter, vanta (robinhood
+        // and arcus have no public demo endpoint → live-only).
+        assert_eq!(balances.len(), 3);
         assert!(balances.iter().any(|b| b.venue == "vanta"));
         for b in &balances {
             assert!(b.available_margin_usd > 0.0);
@@ -9736,8 +9821,10 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        assert_eq!(before.total_portfolio_value_usd, 600000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 600000.0);
+        // Three testnet-admitted venues (hl/lighter/vanta sims @ 100k each);
+        // robinhood/arcus sims are live-only venues, unadmitted here.
+        assert_eq!(before.total_portfolio_value_usd, 300000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 300000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -10315,6 +10402,7 @@ mod tests {
                 false,
                 "standard",
                 None,
+                None,
             )
             .expect("account");
 
@@ -10393,25 +10481,19 @@ mod tests {
         crossed.timestamp = Utc::now();
         state.market_data_hub.update_orderbook(crossed);
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
-        seed_test_book(
-            &state,
-            "robinhood",
-            "BTC-USDC",
-            dec!(64360.0),
-            dec!(64365.0),
-        );
         seed_test_book(&state, "vanta", "BTC-USDC", dec!(64360.0), dec!(64365.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
         seed_test_funding(&state, "vanta", "BTC-USDC");
 
+        // Testnet admits hl/lighter/vanta — robinhood/arcus sims installed
+        // by the fixture are live-only venues and stay unadmitted here.
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
             .expect("books");
-        assert_eq!(books.len(), 3);
+        assert_eq!(books.len(), 2);
         assert_eq!(books[0].venue_id, "lighter");
-        assert_eq!(books[1].venue_id, "robinhood");
-        assert_eq!(books[2].venue_id, "vanta");
+        assert_eq!(books[1].venue_id, "vanta");
 
         let opps = scan_spatial_opportunities_impl("BTC-USDC", 5.0, 0.1, &state)
             .await
@@ -10545,11 +10627,12 @@ mod tests {
         // Mark the equity universe as already anchored so the snapshot measures
         // drawdown against the 1M baseline instead of re-anchoring (universe
         // switches re-anchor; steady-state snapshots measure).
-        *state.last_risk_live_universe.write() = Some(*state.is_live_mode.read());
+        *state.last_risk_live_universe.write() = Some(state.is_live());
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        assert_eq!(risk.current_drawdown_usd, 400000.0);
-        assert_eq!(risk.drawdown_pct, 40.0);
+        // Equity universe = 3 testnet venues @ 100k → 300k vs 1M baseline.
+        assert_eq!(risk.current_drawdown_usd, 700000.0);
+        assert_eq!(risk.drawdown_pct, 70.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();
@@ -10699,13 +10782,6 @@ mod tests {
             dec!(60005.0),
         );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(60120.0), dec!(60125.0));
-        seed_test_book(
-            &state,
-            "robinhood",
-            "BTC-USDC",
-            dec!(60120.0),
-            dec!(60125.0),
-        );
         seed_test_book(&state, "vanta", "BTC-USDC", dec!(60120.0), dec!(60125.0));
         seed_test_funding(&state, "hyperliquid", "BTC-USDC");
         seed_test_funding(&state, "lighter", "BTC-USDC");
@@ -10714,13 +10790,13 @@ mod tests {
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
             .expect("books");
-        assert_eq!(books.len(), 4);
+        assert_eq!(books.len(), 3);
 
         let rows = state
             .state_store
             .spread_samples("BTC-USDC", 0, i64::MAX)
             .expect("samples");
-        assert_eq!(rows.len(), 4, "one row per reporting venue per poll");
+        assert_eq!(rows.len(), 3, "one row per reporting venue per poll");
         let hl = rows.iter().find(|r| r.venue_id == "hyperliquid").unwrap();
         assert_eq!(hl.mid, 60002.5);
         assert_eq!(hl.best_bid, 60000.0);
@@ -11057,12 +11133,14 @@ mod tests {
     #[tokio::test]
     async fn test_margin_snapshot_cadence_caps_frequency() {
         let state = setup_test_state_with_venues();
+        // Snapshots record one row per ADMITTED venue — under Testnet only
+        // venues with demo endpoints are admitted (hl/lighter/vanta here).
         let venues: Vec<String> = state
-            .paper_exchanges()
+            .get_venues()
             .iter()
-            .map(|(vid, _)| vid.to_string())
+            .map(|(vid, _, _)| vid.to_string())
             .collect();
-        assert!(!venues.is_empty(), "test state must admit paper venues");
+        assert!(!venues.is_empty(), "test state must admit venues");
         let count_all = || {
             venues
                 .iter()
@@ -11255,8 +11333,18 @@ mod tests {
             "partial close must leave exactly one residual root signal"
         );
 
-        let acc_hl = state.ex_hl.fetch_account().await.expect("hl account");
-        let acc_lgt = state.ex_lighter.fetch_account().await.expect("lgt account");
+        let acc_hl = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("hl account");
+        let acc_lgt = state
+            .test_sim("lighter")
+            .expect("lighter sim")
+            .fetch_account()
+            .await
+            .expect("lgt account");
         let hl_qty = acc_hl
             .get_position("BTC-USDC")
             .map(|p| p.quantity)
@@ -11292,8 +11380,18 @@ mod tests {
             second.notes
         );
 
-        let acc_hl = state.ex_hl.fetch_account().await.expect("hl account");
-        let acc_lgt = state.ex_lighter.fetch_account().await.expect("lgt account");
+        let acc_hl = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("hl account");
+        let acc_lgt = state
+            .test_sim("lighter")
+            .expect("lighter sim")
+            .fetch_account()
+            .await
+            .expect("lgt account");
         assert!(
             acc_hl.positions.is_empty(),
             "no residual or reverse position may remain: {:?}",
@@ -11397,17 +11495,23 @@ mod tests {
                 dec!(10.0),
             ));
         state
-            .ex_hl
+            .test_sim("hyperliquid")
+            .expect("hl sim")
             .replace_orderbook(paper_book)
             .expect("seed paper book");
 
         let open = arbitrageur_core::order::OrderRequest::new_market(
-            state.ex_hl.venue_id(),
+            state.test_sim("hyperliquid").expect("hl sim").venue_id(),
             "BTC-USDC",
             Side::Buy,
             dec!(0.2),
         );
-        let resp = state.ex_hl.place_order(open).await.expect("open position");
+        let resp = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .place_order(open)
+            .await
+            .expect("open position");
         assert_eq!(resp.status, arbitrageur_core::types::OrderStatus::Filled);
 
         for (id, strategy) in [("root-fut", "futures"), ("root-spot", "spot")] {
@@ -11440,7 +11544,12 @@ mod tests {
             .await
             .expect("flatten futures");
 
-        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        let acc = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("hl account");
         let pos = acc
             .get_position("BTC-USDC")
             .expect("spot strategy's residual must remain");
@@ -11517,16 +11626,22 @@ mod tests {
                 dec!(10.0),
             ));
         state
-            .ex_hl
+            .test_sim("hyperliquid")
+            .expect("hl sim")
             .replace_orderbook(paper_book)
             .expect("seed paper book");
         let open = arbitrageur_core::order::OrderRequest::new_market(
-            state.ex_hl.venue_id(),
+            state.test_sim("hyperliquid").expect("hl sim").venue_id(),
             "BTC-USDC",
             Side::Buy,
             dec!(0.1),
         );
-        state.ex_hl.place_order(open).await.expect("open position");
+        state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .place_order(open)
+            .await
+            .expect("open position");
         state
             .state_store
             .record_signal_execution(&NewSignalExecution {
@@ -11575,7 +11690,12 @@ mod tests {
             "no market fallback expected, got {:?}",
             res.notes
         );
-        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        let acc = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("hl account");
         assert!(
             acc.get_position("BTC-USDC").is_none(),
             "position must be fully closed"
@@ -11600,7 +11720,12 @@ mod tests {
             "expected fallback note, got {:?}",
             res.notes
         );
-        let acc = state.ex_hl.fetch_account().await.expect("hl account");
+        let acc = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("hl account");
         assert!(
             acc.get_position("BTC-USDC").is_none(),
             "fallback must still close the position"
@@ -12194,7 +12319,7 @@ mod tests {
         .await
         .is_err());
         // Live mode hard-refuses paper dispatch.
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         assert!(execute_triangle_arbitrage_impl(
             mk(opp.id.clone(), "lighter", 1000.0, 1.0),
             &state

@@ -1319,7 +1319,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               <EmptyState
                 plain
                 title="No Open Funding Positions"
-                hint="Carry/basis fills aggregate here per symbol with live PnL after paper execution. Live strategy entries remain disabled until terminal order reconciliation exists."
+                hint="Carry/basis fills aggregate here per symbol with live PnL after execution. Live strategy entries remain disabled until terminal order reconciliation exists."
               />
             ) : (
               <div className="divide-y divide-surface-border">

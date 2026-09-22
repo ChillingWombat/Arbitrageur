@@ -5,6 +5,21 @@
 
 use super::*;
 
+/// Validated account environment label for `exchange_accounts.environment`.
+/// 'live' = production venue APIs; 'testnet' = the venue's public demo/test
+/// API. Accounts never move between environments — a testnet account is a
+/// distinct credential set, not a flag on a live account.
+fn normalize_environment(raw: Option<&str>) -> anyhow::Result<String> {
+    match raw.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") => Ok("live".into()),
+        Some("live") => Ok("live".into()),
+        Some("testnet") | Some("test") => Ok("testnet".into()),
+        Some(other) => {
+            anyhow::bail!("invalid account environment '{other}': expected live or testnet")
+        }
+    }
+}
+
 impl StateStore {
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_account(
@@ -16,11 +31,13 @@ impl StateStore {
         make_default: bool,
         account_tier: &str,
         max_leverage: Option<u32>,
+        environment: Option<&str>,
     ) -> anyhow::Result<AccountProfile> {
         let id = normalize_id(id)?;
         let venue = normalize_venue(venue)?;
         let label = normalize_label(label)?;
         let account_tier = normalize_account_tier(account_tier)?;
+        let environment = normalize_environment(environment)?;
         let max_leverage_i64 = match max_leverage {
             None => None,
             Some(v) if (1..=5).contains(&v) => Some(i64::from(v)),
@@ -33,21 +50,28 @@ impl StateStore {
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let existing_venue: Option<String> = tx
+        let existing: Option<(String, String)> = tx
             .query_row(
-                "SELECT venue FROM exchange_accounts WHERE id = ?1",
+                "SELECT venue, environment FROM exchange_accounts WHERE id = ?1",
                 [&id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        if let Some(existing) = existing_venue {
-            if existing != venue {
+        if let Some((existing_venue, existing_env)) = existing {
+            if existing_venue != venue {
                 anyhow::bail!("account venue is immutable once created");
+            }
+            if existing_env != environment {
+                anyhow::bail!("account environment is immutable once created — create a separate account for the other environment");
             }
         }
 
         let prior_default: Option<String> = tx
-            .query_row(ENABLED_DEFAULT_BY_VENUE_SQL, [&venue], |r| r.get(0))
+            .query_row(
+                ENABLED_DEFAULT_BY_VENUE_SQL,
+                params![venue, environment],
+                |r| r.get(0),
+            )
             .optional()?;
 
         tx.execute(
@@ -59,7 +83,8 @@ impl StateStore {
                 enabled,
                 account_tier,
                 now,
-                max_leverage_i64
+                max_leverage_i64,
+                environment,
             ],
         )?;
 
@@ -77,14 +102,17 @@ impl StateStore {
             match preserved {
                 Some(pid) => Some(pid),
                 None => tx
-                    .query_row(FALLBACK_DEFAULT_SQL, [&venue], |r| r.get(0))
+                    .query_row(FALLBACK_DEFAULT_SQL, params![venue, environment], |r| {
+                        r.get(0)
+                    })
                     .optional()?,
             }
         };
 
-        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now])?;
+        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now, environment])?;
         if let Some(chosen_id) = chosen {
-            let updated = tx.execute(SET_DEFAULT_SQL, params![venue, now, chosen_id])?;
+            let updated =
+                tx.execute(SET_DEFAULT_SQL, params![venue, now, chosen_id, environment])?;
             if updated != 1 {
                 anyhow::bail!("failed to assign default account for venue {venue}");
             }
@@ -103,14 +131,14 @@ impl StateStore {
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let row: Option<(String, bool)> = tx
+        let row: Option<(String, bool, String)> = tx
             .query_row(
-                "SELECT venue, enabled FROM exchange_accounts WHERE id = ?1",
+                "SELECT venue, enabled, environment FROM exchange_accounts WHERE id = ?1",
                 [&account_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let (stored_venue, stored_enabled) =
+        let (stored_venue, stored_enabled, environment) =
             row.ok_or_else(|| anyhow::anyhow!("account {account_id} does not exist"))?;
         if stored_venue != venue {
             anyhow::bail!("account {account_id} does not belong to venue {venue}");
@@ -119,8 +147,11 @@ impl StateStore {
             anyhow::bail!("disabled account cannot be the venue default");
         }
 
-        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now])?;
-        let updated = tx.execute(SET_DEFAULT_SQL, params![venue, now, account_id])?;
+        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now, environment])?;
+        let updated = tx.execute(
+            SET_DEFAULT_SQL,
+            params![venue, now, account_id, environment],
+        )?;
         if updated != 1 {
             anyhow::bail!("failed to assign default account for venue {venue}");
         }
@@ -160,14 +191,14 @@ impl StateStore {
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
 
-        let venue: Option<String> = tx
+        let venue_env: Option<(String, String)> = tx
             .query_row(
-                "SELECT venue FROM exchange_accounts WHERE id = ?1",
+                "SELECT venue, environment FROM exchange_accounts WHERE id = ?1",
                 [&account_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(venue) = venue else {
+        let Some((venue, environment)) = venue_env else {
             return Ok(false);
         };
 
@@ -188,11 +219,14 @@ impl StateStore {
         }
 
         let next_default: Option<String> = tx
-            .query_row(FALLBACK_DEFAULT_SQL, [&venue], |r| r.get(0))
+            .query_row(FALLBACK_DEFAULT_SQL, params![venue, environment], |r| {
+                r.get(0)
+            })
             .optional()?;
-        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now])?;
+        tx.execute(CLEAR_DEFAULTS_SQL, params![venue, now, environment])?;
         if let Some(chosen_id) = next_default {
-            let updated = tx.execute(SET_DEFAULT_SQL, params![venue, now, chosen_id])?;
+            let updated =
+                tx.execute(SET_DEFAULT_SQL, params![venue, now, chosen_id, environment])?;
             if updated != 1 {
                 anyhow::bail!("failed to reassign default account for venue {venue}");
             }
@@ -201,30 +235,40 @@ impl StateStore {
         Ok(true)
     }
 
-    pub fn has_enabled_account(&self, venue: &str) -> anyhow::Result<bool> {
+    /// `environment` scopes admission: a venue counts as enabled only when an
+    /// account exists for the *active* environment — a live credential must
+    /// never admit a testnet adapter or vice versa.
+    pub fn has_enabled_account(&self, venue: &str, environment: &str) -> anyhow::Result<bool> {
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(Some(environment))?;
         let conn = self.conn.lock();
         let exists: bool = conn.query_row(
             "SELECT EXISTS(
-    SELECT 1 FROM exchange_accounts WHERE venue = ?1 AND enabled = 1
+    SELECT 1 FROM exchange_accounts WHERE venue = ?1 AND environment = ?2 AND enabled = 1
 )",
-            [&venue],
+            params![venue, environment],
             |r| r.get(0),
         )?;
         Ok(exists)
     }
 
-    pub fn default_account(&self, venue: &str) -> anyhow::Result<Option<AccountProfile>> {
+    /// The default enabled account for a venue within one environment.
+    pub fn default_account(
+        &self,
+        venue: &str,
+        environment: &str,
+    ) -> anyhow::Result<Option<AccountProfile>> {
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(Some(environment))?;
         let conn = self.conn.lock();
         Ok(conn
             .query_row(
-                "SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
+                "SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at
 FROM exchange_accounts
-WHERE venue = ?1 AND enabled = 1
+WHERE venue = ?1 AND environment = ?2 AND enabled = 1
 ORDER BY is_default DESC, label COLLATE NOCASE, id
 LIMIT 1",
-                [&venue],
+                params![venue, environment],
                 account_from_row,
             )
             .optional()?)
@@ -334,24 +378,30 @@ ORDER BY r.strategy_id COLLATE NOCASE, r.label COLLATE NOCASE, r.id"
         }
     }
 
+    /// Routes eligible for a strategy under one environment — both leg
+    /// accounts must be enabled *and* live in the requested environment
+    /// (a live/testnet mix can never be a valid route).
     pub fn eligible_strategy_routes(
         &self,
         strategy_id: &str,
         venue_a: &str,
         venue_b: &str,
+        environment: &str,
     ) -> anyhow::Result<Vec<StrategyAccountRoute>> {
         let sid = normalize_strategy_id(strategy_id)?;
         let venue_a = normalize_venue(venue_a)?;
         let venue_b = normalize_venue(venue_b)?;
+        let environment = normalize_environment(Some(environment))?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&format!(
             "{ROUTE_JOIN_SQL}
 WHERE r.strategy_id = ?1 AND r.enabled = 1
   AND a.enabled = 1 AND b.enabled = 1
+  AND a.environment = ?4 AND b.environment = ?4
   AND ((a.venue = ?2 AND b.venue = ?3) OR (a.venue = ?3 AND b.venue = ?2))
 ORDER BY r.label COLLATE NOCASE, r.id"
         ))?;
-        let rows = stmt.query_map(params![sid, venue_a, venue_b], route_from_row)?;
+        let rows = stmt.query_map(params![sid, venue_a, venue_b, environment], route_from_row)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

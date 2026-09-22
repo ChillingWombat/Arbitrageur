@@ -1,10 +1,10 @@
 //! OpportunityExecutor — autonomous convergence bot engine (GitHub issue #5).
 //!
-//! Opt-in, paper-only consumer of the spread monitor's ready-opportunity
+//! Opt-in, testnet consumer of the spread monitor's ready-opportunity
 //! seam. One background task polls `ready_opportunities()`, runs every
 //! candidate through the pure gate pipeline in `arbitrageur_strategy`, sizes
 //! from the capacity ladder, and dispatches entries through the SAME guarded
-//! paper primitive as the manual row-Execute button
+//! primitive as the manual row-Execute button
 //! (`execute_monitor_opportunity_impl`). Exits unwind through the existing
 //! symbol-scoped flatten path. Every decision — enter, skip with reason,
 //! exit — is appended to `monitor_signal_events` with the signal belief
@@ -17,11 +17,11 @@
 //!
 //! Fail-closed posture:
 //! - Default config is inert (`enabled = false`, mode `off`).
-//! - Live mode hard-blocks entries at the tick AND inside the paper path.
+//! - Live mode hard-blocks entries at the tick AND inside the dispatch path.
 //! - A corrupt persisted config falls back to inert, never to permissive.
 //! - Audit-write failures are surfaced in status, never block risk exits.
 //! - Flatten is symbol-scoped: at most one radar position per symbol can
-//!   exist (the paper path rejects a second paper position on the same
+//!   exist (the dispatch path rejects a second position on the same
 //!   symbol), so an exit unwinds exactly the pair the bot opened.
 //!
 //! Restart recovery: open positions persist in `radar_bot_positions` with
@@ -196,9 +196,10 @@ pub struct RadarBotStatusDto {
     pub snapshot_present: bool,
 }
 
-/// Execution seam. Production calls the existing guarded paper path; tests
-/// inject scripted mocks. Paper-only by construction: neither method has a
-/// live-mode variant, and both callees hard-block live mode themselves.
+/// Execution seam. Production calls the existing guarded dispatch path; tests
+/// inject scripted mocks. Testnet-only by construction: both callees
+/// hard-block live mode themselves (autonomous entries need manual gating
+/// that only the operator path provides).
 pub trait BotDispatch: Send + Sync {
     fn enter<'a>(
         &'a self,
@@ -219,9 +220,9 @@ pub trait BotDispatch: Send + Sync {
 /// Production dispatch: entries reuse `execute_monitor_opportunity_impl`
 /// (identical gates to the manual button); exits reuse the symbol-scoped
 /// flatten path for the `radar` strategy.
-pub struct PaperDispatch;
+pub struct VenueDispatch;
 
-impl BotDispatch for PaperDispatch {
+impl BotDispatch for VenueDispatch {
     fn enter<'a>(
         &'a self,
         symbol: &'a str,
@@ -690,7 +691,7 @@ impl OpportunityExecutor {
             Err(r) => (false, Some(r)),
         };
         GateContext {
-            live_mode: *state.is_live_mode.read(),
+            live_mode: state.is_live(),
             engine_paused: *state.is_paused.read(),
             monitor_enabled: state
                 .monitor
@@ -1006,7 +1007,7 @@ impl OpportunityExecutor {
             if *self.shutdown.lock() {
                 return;
             }
-            let wait_secs = self.tick_once(&state, &PaperDispatch).await;
+            let wait_secs = self.tick_once(&state, &VenueDispatch).await;
             tokio::time::sleep(Duration::from_secs(wait_secs)).await;
         }
     }
@@ -1365,9 +1366,9 @@ mod tests {
         assert_eq!(dispatch.enter_calls(), 0);
         assert!(bot_events(&state, "bot_skip").is_empty());
 
-        // Live mode hard-blocks.
+        // Live mode hard-blocks autonomous entries.
         let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         let dispatch = MockDispatch::ok();
         bot.tick_once(&state, &dispatch).await;
         assert_eq!(dispatch.enter_calls(), 0);
@@ -1375,7 +1376,7 @@ mod tests {
             .economics_json
             .as_deref()
             .unwrap_or("")
-            .contains("paper-only")));
+            .contains("testnet-only")));
 
         // Engine pause blocks.
         let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);

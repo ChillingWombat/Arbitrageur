@@ -65,7 +65,7 @@ fn main() {
         tauri::async_runtime::spawn(async move { monitor.run(bg_state).await });
     }
 
-    // Install and spawn the autonomous convergence bot (opt-in, paper-only,
+    // Install and spawn the autonomous convergence bot (opt-in, testnet,
     // inert until explicitly armed via the radar bot config).
     {
         let bot = auto_exec::OpportunityExecutor::new();
@@ -150,6 +150,7 @@ fn main() {
             commands::get_execution_logs,
             commands::get_venue_execution_capabilities,
             commands::set_live_mode,
+            commands::set_trading_environment,
             commands::set_engine_paused,
             commands::reconcile_orders_now,
             commands::cancel_venue_order,

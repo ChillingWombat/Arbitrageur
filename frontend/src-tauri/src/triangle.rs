@@ -477,7 +477,7 @@ fn record_triangle_leg_fill(
     };
     let account_id = state
         .state_store
-        .default_account(venue_id)
+        .default_account(venue_id, state.env().as_str())
         .ok()
         .flatten()
         .map(|a| a.id);
@@ -540,19 +540,13 @@ pub async fn execute_triangle_arbitrage_impl(
                 .into(),
         );
     }
-    if *state.is_live_mode.read() {
+    if state.is_live() {
         return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
 
-    let adapter = state.get_adapter(&params.venue).ok_or_else(|| {
-        format!(
-            "Venue '{}' is not admitted for paper execution",
-            params.venue
-        )
-    })?;
-    let paper = state
-        .get_paper_exchange(&params.venue)
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", params.venue))?;
+    let adapter = state
+        .get_adapter(&params.venue)
+        .ok_or_else(|| format!("Venue '{}' is not admitted for execution", params.venue))?;
     let vid = adapter.venue_id();
 
     // The caller-supplied spread is never trusted: re-scan and match the
@@ -584,7 +578,7 @@ pub async fn execute_triangle_arbitrage_impl(
                 .into(),
         );
     }
-    if *state.is_live_mode.read() {
+    if state.is_live() {
         return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
     let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols, true)
@@ -604,7 +598,7 @@ pub async fn execute_triangle_arbitrage_impl(
     }
 
     // One-open-pair-per-symbol, extended to the cycle: any blocking ledger
-    // signal or any open paper position on a leg symbol refuses dispatch.
+    // signal or any open position on a leg symbol refuses dispatch.
     for sym in &plan.leg_symbols {
         if let Some(blocker) = state
             .state_store
@@ -620,17 +614,25 @@ pub async fn execute_triangle_arbitrage_impl(
             ));
         }
     }
-    let pre_acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
+    let pre_acc = adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("account read on {} failed: {e}", params.venue))?;
     let dust = triangle_dust_qty();
     for sym in &plan.leg_symbols {
-        if pre_acc.get_position(sym).is_some_and(|p| p.quantity > dust) {
+        if adapter
+            .account_position_for(&pre_acc, sym)
+            .ok()
+            .flatten()
+            .is_some_and(|p| p.quantity > dust)
+        {
             return Err(format!(
-                "An open paper position already exists for {sym}; flatten it before cycling"
+                "An open position already exists for {sym}; flatten it before cycling"
             ));
         }
     }
 
-    let (target_leverage, account_cap) = resolve_effective_leverage(
+    let (target_leverage, _account_cap) = resolve_effective_leverage(
         state,
         "futures",
         "futures",
@@ -639,13 +641,6 @@ pub async fn execute_triangle_arbitrage_impl(
         &params.venue,
         None,
     )?;
-    if let Some(paper) = state.get_paper_exchange(&params.venue) {
-        if paper.max_leverage_cap() != account_cap {
-            paper
-                .set_max_leverage_cap(account_cap)
-                .map_err(|e| e.to_string())?;
-        }
-    }
     let size_dec = Decimal::from_f64_retain(params.trade_size_usd)
         .ok_or_else(|| "Invalid trade size".to_string())?;
     // Conservative margin bound: three full-notional legs against free margin.
@@ -660,34 +655,26 @@ pub async fn execute_triangle_arbitrage_impl(
     match margin_monitor.evaluate_account(&pre_acc) {
         MarginHealthStatus::Empty => {
             return Err(format!(
-                "Paper account {} has no funds; execution refused",
+                "Account {} has no funds; execution refused",
                 params.venue
             ));
         }
         MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
             return Err(format!(
-                "Paper account {} margin status is critical/breached; execution refused",
+                "Account {} margin status is critical/breached; execution refused",
                 params.venue
             ));
         }
         _ => {}
     }
 
-    for book in &books {
-        paper
-            .replace_orderbook(book.clone())
-            .map_err(|e| e.to_string())?;
-    }
-
-    let mut equity_before = dec!(0);
+    // Pre-trade equity snapshot of the traded venue (env-namespaced key) —
+    // the baseline the post-fill attribution refresh measures against.
     let mut equity_before_by_venue = HashMap::new();
-    for (vid, p) in state.paper_exchanges() {
-        let acc = p.fetch_account().await.map_err(|e| e.to_string())?;
-        equity_before += acc.equity;
-        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
-            if f.is_finite() {
-                equity_before_by_venue.insert(vid.to_string(), f);
-            }
+    let env_str = state.env().as_str();
+    if let Ok(f) = pre_acc.equity.to_string().parse::<f64>() {
+        if f.is_finite() {
+            equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
         }
     }
 
@@ -713,8 +700,8 @@ pub async fn execute_triangle_arbitrage_impl(
         .enumerate()
     {
         // Codebase convention (spatial path + ledger): f64 quantities cross
-        // into Decimal through their shortest string rendering, so the paper
-        // position and the ledger residual are bit-identical and flatten
+        // into Decimal through their shortest string rendering, so the venue
+        // position and the ledger residual stay bit-identical and flatten
         // closes exactly. from_f64_retain's exact-binary expansion disagrees
         // at ~1e-22 and would strand dust.
         let qty = match Decimal::from_str_exact(&qty_f.to_string())
@@ -728,12 +715,12 @@ pub async fn execute_triangle_arbitrage_impl(
             }
         };
         let order = arbitrageur_core::order::OrderRequest::new_market(
-            paper.venue_id(),
+            adapter.venue_id(),
             sym,
             *order_side,
             qty,
         );
-        match paper.place_order(order).await {
+        match adapter.place_order(order).await {
             Ok(resp)
                 if resp.filled_qty == qty
                     && resp.remaining_qty == dec!(0)
@@ -759,19 +746,27 @@ pub async fn execute_triangle_arbitrage_impl(
     }
     let latency_us = started.elapsed().as_micros() as u64;
 
-    let mut equity_after = dec!(0);
-    for (_, p) in state.paper_exchanges() {
-        equity_after += p.fetch_account().await.map_err(|e| e.to_string())?.equity;
-    }
     refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
-    let attempt_pnl = equity_after - equity_before;
+    // Realized cash delta of the fills: buys spend, sells receive, fees
+    // subtract. For a balanced triangle cycle this is the negative
+    // spread+fee cost; the opened position's value is unrealized on venue.
+    let attempt_pnl: Decimal = fills
+        .iter()
+        .map(|(idx, r)| {
+            let px = r.avg_fill_price.unwrap_or(dec!(0));
+            let signed = match plan.order_sides[*idx] {
+                Side::Sell => r.filled_qty * px,
+                Side::Buy => -r.filled_qty * px,
+            };
+            signed - r.fee
+        })
+        .sum();
     let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
     let total_f = {
         let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - state.paper_baseline_equity();
+        *total_pnl += attempt_pnl;
         total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
     };
-    state.circuit_breaker.update_equity(equity_after);
 
     let fee_total_f: f64 = fills
         .iter()
@@ -837,7 +832,7 @@ pub async fn execute_triangle_arbitrage_impl(
             position_step: None,
             max_units: None,
             nominal_hurdle_bps: Some(params.min_profit_bps),
-            is_live: false,
+            is_live: state.is_live(),
         });
         return Err(format!(
             "Triangle cycle PARTIAL ({}/3 legs): {err}; residuals recorded — flatten leg symbols to unwind",
@@ -861,7 +856,7 @@ pub async fn execute_triangle_arbitrage_impl(
         net_profit: attempt_pnl_f,
         latency_us,
         note: format!(
-            "Triangle cycle dispatched 3/3 paper legs ({cycle_note}); spread position open — unwind each leg symbol via flatten. Record errors: {}",
+            "Triangle cycle dispatched 3/3 legs ({cycle_note}); spread position open — unwind each leg symbol via flatten. Record errors: {}",
             record_errors.join("; ")
         ),
         direction: Some(plan.path.clone()),
@@ -870,7 +865,7 @@ pub async fn execute_triangle_arbitrage_impl(
         position_step: None,
         max_units: None,
         nominal_hurdle_bps: Some(params.min_profit_bps),
-        is_live: false,
+        is_live: state.is_live(),
     });
 
     maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
@@ -887,7 +882,7 @@ pub async fn execute_triangle_arbitrage_impl(
         realized_profit_usd: attempt_pnl_f,
         total_cumulative_pnl_usd: total_f,
         message: format!(
-            "Triangle cycle dispatched on {}: 3/3 paper legs filled, realized P&L ${attempt_pnl_f:.2}; spread position open — flatten leg symbols to unwind",
+            "Triangle cycle dispatched on {}: 3/3 legs filled, realized P&L ${attempt_pnl_f:.2}; spread position open — flatten leg symbols to unwind",
             params.venue
         ),
     })

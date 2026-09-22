@@ -52,7 +52,7 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
               <th className="py-2.5 px-3 text-right" title="Execution events involving this venue">Trades</th>
               <th className="py-2.5 px-3 text-right" title="Total net profit / trades">Avg PnL / trade</th>
               <th className="py-2.5 px-3 text-right" title="Sum of fee-inclusive net profit">Total PnL</th>
-              <th className="py-2.5 px-3 text-right" title="Current paper equity">Equity</th>
+              <th className="py-2.5 px-3 text-right" title="Current venue equity">Equity</th>
               <th className="py-2.5 px-3 text-right" title="Used margin / equity, current snapshot">Utilisation</th>
               <th className="py-2.5 px-3 text-right" title="Time-averaged utilisation over 24h">24h avg util</th>
             </tr>

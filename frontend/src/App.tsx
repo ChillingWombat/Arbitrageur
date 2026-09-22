@@ -47,7 +47,7 @@ import {
   type PerpTicker,
   STRATEGY_DISPLAY_NAMES,
 } from "./types/tickers";
-import { deriveStepSizing, resolveTotalPaperEquity } from "./services/contractSpecs";
+import { deriveStepSizing, resolveTotalVenueEquity } from "./services/contractSpecs";
 
 // Fixed design canvas — the app always renders at this size and is uniformly
 // scaled to fit the window. Ratio ~1.88:1 sits just below a maximized 16:9
@@ -434,7 +434,7 @@ export const App: React.FC = () => {
       setTriangleOpps(triangle);
       setTickerPositionState(tickerPos);
       setOpenPositions(positions);
-      setTotalEquityUsd(resolveTotalPaperEquity(balances));
+      setTotalEquityUsd(resolveTotalVenueEquity(balances));
 
       if (configs && configs.length > 0) {
         setStrategyConfigs((prev) => {

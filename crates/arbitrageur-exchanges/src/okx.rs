@@ -21,6 +21,10 @@ pub struct OkxAdapter {
     /// is cleared. Never mutated after construction.
     default_base_url: Zeroizing<String>,
     base_url: RwLock<Zeroizing<String>>,
+    /// OKX demo trading is the production host + `x-simulated-trading: 1`
+    /// on signed requests (and demo-minted keys). Set once for the testnet
+    /// adapter instance; never toggled at runtime.
+    simulated_trading: bool,
     api_key: RwLock<Option<Zeroizing<String>>>,
     api_secret: RwLock<Option<Zeroizing<String>>>,
     passphrase: RwLock<Option<Zeroizing<String>>>,
@@ -83,11 +87,27 @@ impl OkxAdapter {
             },
             default_base_url: Zeroizing::new(base.clone()),
             base_url: RwLock::new(Zeroizing::new(base)),
+            simulated_trading: false,
             api_key: RwLock::new(api_key.map(Zeroizing::new)),
             api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
             passphrase: RwLock::new(passphrase.map(Zeroizing::new)),
             rate_limiter: AccountRequestCoordinator::new("okx", 200, 3000, 500, 15000),
         }
+    }
+
+    /// Demo-trading adapter: same host as production but every signed request
+    /// carries `x-simulated-trading: 1`, routing it to the demo namespace.
+    /// Requires API keys minted under the account's Demo Trading section —
+    /// production keys are rejected there with 50101.
+    pub fn for_testnet(
+        base_url: Option<String>,
+        api_key: Option<String>,
+        api_secret: Option<String>,
+        passphrase: Option<String>,
+    ) -> Self {
+        let mut adapter = Self::new(base_url, api_key, api_secret, passphrase);
+        adapter.simulated_trading = true;
+        adapter
     }
 
     pub fn update_credentials(
@@ -241,6 +261,9 @@ impl OkxAdapter {
             .header("OK-ACCESS-TIMESTAMP", ts)
             .header("OK-ACCESS-PASSPHRASE", passphrase.to_string())
             .header("Content-Type", "application/json");
+        if self.simulated_trading {
+            req = req.header("x-simulated-trading", "1");
+        }
         if !body_str.is_empty() {
             req = req.body(body_str.to_string());
         }

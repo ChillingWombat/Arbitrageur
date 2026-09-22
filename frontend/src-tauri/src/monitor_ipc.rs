@@ -132,9 +132,9 @@ pub async fn execute_monitor_opportunity(
 
 /// Shared monitor-entry primitive. The manual row-Execute button and the
 /// autonomous convergence bot both enter through here, so the fail-closed
-/// gates (executability, stale books, paper-only, blocking signals) apply
-/// identically to human and bot flow. Paper-only: the inner spatial path
-/// hard-blocks live mode.
+/// gates (executability, stale books, env-capability, blocking signals) apply
+/// identically to human and bot flow. In live mode the inner spatial path
+/// applies `live_entry_gate` (opt-in + vault + per-leg notional cap).
 pub(crate) async fn execute_monitor_opportunity_impl(
     symbol: &str,
     buy_venue: &str,

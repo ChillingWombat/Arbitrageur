@@ -2614,3 +2614,33 @@ The selector panel showed apparent duplicate rows (two "XAG", two "XRP", two "ZE
 - **Fix** (`crates/arbitrageur-exchanges/src/decibel.rs`): `derivable_account_address` + per-chain `evm_login_account`/`sui_login_account`/`solana_login_account` mirror the official SDK's `derivable-account.ts` exactly — `sha3_256(bcs(FunctionInfo) || bcs_bytes(AbstractPublicKey{identity, domain}) || 0x05)`, EIP-55 via alloy `Address::to_checksum`, bs58 for Solana pubkeys, domain `app.decibel.trade` (`testnet-app.decibel.trade` on testnet). `owner_candidates` orders by input shape (40-hex → EVM-derived then zero-padded; 64-hex → native Aptos then Sui-derived; else Solana-derived) and cached `resolve_owner` probes `subaccounts?owner=` per candidate — first non-empty wins. Wired through `fetch_account` and all write paths (`place_order`/`cancel_order`/`fetch_order`); `owner_address` renamed `configured_owner` and intentionally no longer canonicalizes (padding a 40-hex input would erase the EVM shape). Cache cleared by `update_credentials`.
 - **Field semantics**: any connected wallet string now works — Aptos account, EVM/Sui address, or Solana pubkey. The *subaccount* address (`0x00fa32…`) is still wrong input (it owns no subaccounts); the API-wallet private key (`0x7206f77d…`, holds `TradePerpsAllMarkets` delegation) remains what signs orders — a derivable login account has no ed25519 key at all.
 - **Verified**: live — the still-configured `0x2b9B…` resolved to `0xd97b59b4…` on the rebuilt binary and the account read populated figures with zero errors; 209 exchange tests (12 decibel, incl. the on-chain-verified pair and official SDK test vectors), clippy/fmt/tsc clean, release rebuilt + restarted.
+
+## Session 2026-09-23 — environment model refactor: paper retired, real testnet/live environments
+
+### The change
+
+Paper trading is gone from production. `TradingEnvironment::{Testnet, Live}` (state.rs) replaces the `is_live_mode` boolean; `trading_mode` persists `testnet`/`live` (schema v29 adds `exchange_accounts.environment`; legacy `paper`→testnet / `real`→live migrate on load, new writes validate strictly). `from_mode` fails closed — unknown values load as testnet, never live.
+
+### Testnet = real venue demo endpoints, not simulation
+
+`tn_*` adapter set alongside `live_*` (state.rs): Hyperliquid `api.hyperliquid-testnet.xyz`, Lighter `testnet.zklighter.elliot.ai`, Binance `testnet.binancefuture.com`, OKX demo via `OkxAdapter::for_testnet` (`x-simulated-trading: 1`), Kraken `demo-futures.kraken.com`, Vanta/Orderly `testnet-api.orderly.org`, Decibel Aptos testnet (`testnet-app.decibel.trade` domain in derivable-account auth), PopDEX testnet (chain 34952, pinned regardless of `popdex_network`). `venues_for_env` admits flags+accounts per env — testnet admits only those 8 venues; venues without public demo endpoints (Coinbase, Aster, Robinhood, Arcus, Polymarket, DexPerp long-tail, EVM AMMs) are ineligible, **never simulated**. `SimulatedExchange` survives only under `#[cfg(test)]` as `test_sims`/`test_adapters` injected over `get_venues()` — production has no paper path.
+
+### Environment-scoped accounts & caches
+
+`exchange_accounts.environment` is immutable post-create; `AccountUpsertInput.environment` `None` = active env. `has_enabled_account`/`default_account`/`eligible_strategy_routes` take env (routes can never mix live+testnet accounts — SQL-enforced). `apply_live_credentials`/`apply_testnet_credentials` split vault resolution per env. `live_account_or_cached`, equity expectations, and margin snapshots key on `{env}-{venue}` — an env switch can never serve the other env's snapshot. `list_accounts` filters to the active env (the Exchanges tab manages the credential set you're looking at).
+
+### Execution-path unification
+
+Every `!is_live` parallel-fake branch collapsed onto the live path: balances, positions, equity expectations, fills PnL (coordinator-reported profit both envs), flatten, liq-trim, funding, triangle, external positions. `snapshot_venue_equity` (was `snapshot_paper_equity`) reads env adapters. `PaperDispatch` → `VenueDispatch`; autonomous radar-bot entries stay testnet-only by GateContext (manual live entries flow through `live_entry_gate` — opt-in + vault + per-leg notional cap, venue-proven by the HL↔Lighter canary).
+
+### Frontend
+
+`trading_mode: "testnet" | "live"` end-to-end; `api.setTradingEnvironment(env)` → new `set_trading_environment` IPC (strict validation; `set_live_mode` retained for compat). Testnet copy explains real venue demo endpoints + per-venue availability; the paper-balance control is gone (venues own demo balances — fund via their faucets). Account cards badge LIVE/TESTNET (`AccountDto.environment`); `VenueAccountsSection` warns when a venue has no testnet while in testnet mode. `getEnabledConnectedVenueCodes` admits only `TESTNET_CAPABLE_VENUE_IDS` in testnet. ExternalPositions shows an env badge and gates closes on per-position `closeSupported` (both envs submit real orders). Exchange sidebar groups: Primary / TradFi / Perp DEX long-tail / EVM AMM per chain via `groupExchangesBySection`.
+
+### EVM AMM chain-shared RPC
+
+`EvmAmmAdapter::chain_id()` added; `apply_live_credentials` builds a per-chain override map — an account `base_url` on any venue of a chain applies to every same-chain adapter lacking its own override (e.g. set Alchemy on Uniswap → SushiSwap/Uniswap V2 inherit it).
+
+### Verification
+
+389 desktop tests + 213 frontend tests + tsc/clippy/fmt clean. New coverage: schema v29 migration, env-scoped account/routes SQL, testnet admission set, env-namespaced caches, strict env-write validation, testnet-capable venue filter, ExternalPositions env badge.

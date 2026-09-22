@@ -8,7 +8,7 @@
 - **Read:** The adapter can request and parse the named public/authenticated data. Individual endpoints can still be unavailable and must fail closed.
 - **Submit:** The adapter can sign and transmit an order to the venue. This does **not** prove that the order filled.
 - **Reconcile:** The engine can follow an accepted order through terminal fill/cancel/expiry, recover after restart, and attribute partial fills without guessing.
-- **Paper strategy:** The strategy executes against authentic venue books through a local simulated account.
+- **Testnet strategy:** The strategy executes real orders against the venue's public demo/test endpoints — same signing, dispatch, and reconciliation path as live, against demo balances. Venues without a public testnet are simply ineligible in this environment; nothing is simulated.
 - **Live strategy entry:** The strategy may open real positions automatically or from a strategy button.
 - **Risk-reducing submission:** A user-directed reduce-only close can be sent, but an acknowledgement may remain “working” until independently confirmed.
 
@@ -16,19 +16,19 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 
 ## Strategy capability
 
-| Strategy / path | Authentic scan | Paper execution | Live entry | Exit / reconciliation | Current operator meaning |
+| Strategy / path | Authentic scan | Testnet execution | Live entry | Exit / reconciliation | Current operator meaning |
 |---|---|---|---|---|---|
-| Cross-venue perpetual spatial | Yes | Yes | **Opt-in canary** (`live_entry_enabled` + per-leg notional cap; off by default) | Live orders poll to terminal state and restart-recover; opt-in auto residual-flatten + bounded cancel retry exist, pending venue evidence | Canary entries only — keep the cap minimal |
-| Spread Radar manual entry | Yes | Yes | **Disabled** | Paper bot-managed exits | Paper only |
-| Spread Radar autonomous bot | Yes | Yes, opt-in | **Disabled** | Paper bot-managed exits with audit | Paper only |
-| Perp/perp funding carry | Yes where both funding and books exist | Yes | **Disabled** | Manual paper flatten; no automated live lifecycle | Paper only |
-| Same-venue spot/perp basis | Yes where one adapter exposes both exact books | Yes after the leg-identity remediation | **Disabled** | Exact per-leg paper flatten | Paper only |
+| Cross-venue perpetual spatial | Yes | Yes (testnet-capable venues) | **Opt-in** (`live_entry_enabled` + per-leg notional cap; off by default) — venue-proven by the HL↔Lighter live canary | Orders poll to terminal state and restart-recover; unconditional residual auto-flatten + bounded cancel retry | Keep the cap minimal — residual one-sided-exposure risk remains on venue outage |
+| Spread Radar manual entry | Yes | Yes | Via `live_entry_enabled` gate | Bot-managed exits | Testnet |
+| Spread Radar autonomous bot | Yes | Yes, opt-in | **Testnet-only** (GateContext hard-blocks live autonomous entries) | Bot-managed exits with audit | Testnet only |
+| Perp/perp funding carry | Yes where both funding and books exist | Yes | **Disabled** — no two-leg live dispatch yet | Manual flatten | Testnet only |
+| Same-venue spot/perp basis | Yes where one adapter exposes both exact books | Yes | **Disabled** | Exact per-leg flatten | Testnet only |
 | Cross-venue spot arbitrage | No usable scanner | No | **Disabled** | Not implemented | Roadmap |
-| Single-venue triangular | Yes on exact supported books | Yes | **Disabled** | Residuals use paper flatten | Paper only |
+| Single-venue triangular | Yes on exact supported books | Yes | **Disabled** | Residual flatten | Testnet only |
 | Cross-ticker | Research/quote path only | No | **Disabled** | Not implemented | Roadmap |
 | Prediction parity | Research scan when both configured adapters return real books | No | **Disabled** | Not implemented | Research only |
 | Statistical arbitrage | Analysis tools | No integrated dispatcher | **Disabled** | Not implemented | Research only |
-| External-position close | Authenticated account read | N/A | User-directed risk-reducing submission only | Working orders are continuously polled (5s) and restart-recovered by the reconciliation supervisor; unresolved orders escalate after 15 min; synthetic `sim-*` paper ids are never polled | Monitor to terminal state; confirm at the venue |
+| External-position close | Authenticated account read | N/A | User-directed risk-reducing submission (works in both environments — testnet submits real demo-venue orders) | Working orders are continuously polled (5s) and restart-recovered by the reconciliation supervisor; unresolved orders escalate after 15 min | Monitor to terminal state; confirm at the venue |
 | Emergency flatten | Attributed position read | Yes | User-directed risk-reducing submission only | Same continuous reconciliation; venue still authoritative | Monitor to terminal state; confirm at the venue |
 
 ## Venue adapter capability
@@ -63,6 +63,25 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | Uniswap V3, Uniswap V2, PancakeSwap V2, PancakeSwap V3, SushiSwap, QuickSwap (EvmAmmAdapter, spot AMM — standard routers) | On-chain quoter/factory reads — probe-verified live; one-level book synthesized from real executable quotes (bid = exact-in 1 base, ask = exact-out cost of 1 base; both sides required, crossed/empty books fail) | N/A — spot pools | Yes — local EVM wallet account read | Yes — wallet-signed `swapExact*`/`exact*Single` txs; exact-in sells and exact-out buys; limit orders map to min-out/max-in bounds, post-only refused | Atomic swap — nothing rests to cancel | Spot pools — N/A | Submit returns tx hash as `New` immediately; `eth_getTransactionReceipt` polling is the authority — Filled/Rejected require BOTH input-spent and output-received `Transfer` proof; mined gas reported in native fee; restart reconciliation | Unit + live `eth_call` smoke test (`live_market_smoke`, `--ignored`); no credentialed swap evidence yet | **No — pending gas-aware profitability integration and credentialed venue evidence** (`live_strategy_entry_implemented` = false) |
 | Camelot V2, Aerodrome, Velodrome, Ramses (legacy), Pharaoh (legacy) (EvmAmmAdapter, spot AMM — market data only) | Live public market data — probe-verified factory/quoter reads; one-level book with real quoted depth (ask via reverse exact-in) | N/A — spot pools | Optional address-only account read — no private key requested or loaded | **No** — Camelot router uses a custom referrer ABI; Solidly routers lack exact-output buys | **No** | Spot pools — N/A | **No** — no order submission, cancel, or status polling | Unit + live `eth_call` smoke test (`live_market_smoke`, `--ignored`) | **No** |
 
+## Environments
+
+The engine runs two real execution environments (`TradingEnvironment`); there is no simulated execution in production.
+
+**Testnet** dispatches real signed orders against venue demo endpoints — the same submission/reconciliation pipeline as live, against demo balances:
+
+| Venue | Testnet endpoint |
+|---|---|
+| Hyperliquid | `api.hyperliquid-testnet.xyz` |
+| Lighter | `testnet.zklighter.elliot.ai` (chain 300) |
+| Binance (USDT-M perp) | `testnet.binancefuture.com` |
+| OKX | main host + `x-simulated-trading: 1` demo header |
+| Kraken | `demo-futures.kraken.com` |
+| Vanta / Orderly | `testnet-api.orderly.org` |
+| Decibel | Aptos testnet (`testnet-app.decibel.trade` domain) |
+| PopDEX | Morph testnet (chain 34952, `testnet-api.popdex.xyz`) |
+
+Venues without a public demo endpoint — Coinbase, Aster, Robinhood, Arcus, Polymarket, all DexPerp long-tail venues, and all EVM AMMs — are ineligible in testnet; they are never simulated. Testnet account profiles are a separate credential set (`exchange_accounts.environment = 'testnet'`) managed while Testnet Trading is the active mode; fund them at each venue's own faucet.
+
 ## Live mode
 
 Live mode currently means:
@@ -72,7 +91,8 @@ Live mode currently means:
 3. Explicit risk-reducing close submissions can be requested where an adapter supports them.
 4. Live position reads are matched through adapter-owned account-position normalization (for example `BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, and Lighter market IDs). Unknown or ambiguous mappings leave the position unresolved rather than treated as flat. Quantities and prices are kept in venue-native contract units (e.g. `1000PEPE-USDT` positions stay denominated in `1000PEPE` units with per-unit prices — no ×1000 rescaling in either direction).
 5. **New strategy entries are gated, not blanket-blocked** — the spatial two-leg path dispatches live orders when the operator enables `live_entry_enabled` AND sets `live_entry_max_notional_usd` (per-leg refusal, never clamped). All other strategy paths (triangle, funding carry, spot/monitor) refuse live dispatch. Every accepted non-final leg lands in `unresolved`/`imbalanced` reconciliation with its venue order id persisted; an operator acknowledge control resolves escalated signals after manual venue review.
-6. **Market data stays websocket-primary in live mode** — the feed supervisor no longer suspends WS lanes when live; orderbooks flow via WS into `MarketDataHub` and REST is fallback-only (2s freshness bound enforced at execution). The monitor keeps running as the hub's REST feeder for venues without a WS lane and as the funding refresher; its own execution stays paper-only. Engine pause still suspends both.
+6. **Market data stays websocket-primary in live mode** — the feed supervisor no longer suspends WS lanes when live; orderbooks flow via WS into `MarketDataHub` and REST is fallback-only (2s freshness bound enforced at execution). The monitor keeps running as the hub's REST feeder for venues without a WS lane and as the funding refresher. Engine pause still suspends both.
+7. **Accounts are environment-scoped** — live credential profiles never bind to testnet adapters and vice versa; strategy routes are same-environment only.
 
 Before enabling Live mode:
 
