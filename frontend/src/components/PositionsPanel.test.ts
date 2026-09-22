@@ -30,18 +30,21 @@ const baseProps = {
   onOpenTickerExplorer: () => {},
 };
 
-test("position card renders identity, grey PnL, and signed venue rows", () => {
+test("position card renders identity, grey PnL, and long/short sums", () => {
   const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
-  // Identity + strategy chip + PnL field below
-  assert.match(html, /BTC-USDC/);
-  assert.match(html, /SPREAD/);
+  // Strategy chip left of the ticker + PnL field below
+  const chip = html.indexOf(">SPREAD<");
+  const sym = html.indexOf(">BTC-USDC<");
+  assert.ok(chip >= 0 && sym > chip, "strategy chip renders left of the symbol");
   assert.match(html, /PnL \+\$4\.20/);
-  // Venue rows: long on top (+), short below (-), each labelled with its leg symbol.
-  const hl = html.indexOf(">HL BTC-USDC<");
-  const lt = html.indexOf(">LGT BTC-USDC<");
-  assert.ok(hl >= 0 && lt > hl, "long venue row renders above short venue row");
-  assert.match(html, /\+1\.5000/);
-  assert.match(html, /-1\.5000/);
+  // Exposure sums across venues — no per-venue tags, no trailing zeros.
+  const longIdx = html.indexOf(">Long<");
+  const shortIdx = html.indexOf(">Short<");
+  assert.ok(longIdx >= 0 && shortIdx > longIdx, "long sum renders above short sum");
+  assert.match(html, /\+1\.5/);
+  assert.match(html, /-1\.5/);
+  assert.doesNotMatch(html, /1\.5000/);
+  assert.doesNotMatch(html, /HL BTC-USDC/);
 });
 
 test("selected card carries the light-blue accent-dim class", () => {
@@ -87,7 +90,7 @@ test("current-strategy scope disables gracefully on strategy-less tabs", () => {
 
 test("position card has right-click context menu hint", () => {
   const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
-  assert.match(html, /Right-click for position menu: Reduce-Only, Emergency Clear, Non-Emergency Clear/);
+  assert.match(html, /Left-click: position details · Right-click: Reduce-Only \/ Clear actions/);
 });
 
 test("position card renders Reduce-Only badge when marked reduce-only", () => {

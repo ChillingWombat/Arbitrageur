@@ -13,7 +13,7 @@ import {
   Clock,
 } from "lucide-react";
 import type { OpenPositionDto, SystemStatusDto } from "../types";
-import { VENUE_ID_TO_CODE } from "../types/tickers";
+
 import {
   scopeAndSortPositions,
   isPositionReduceOnly,
@@ -23,6 +23,7 @@ import {
 } from "../services/positionsQuant";
 import { api } from "../services/api";
 import { EmptyState } from "./EmptyState";
+import { PositionDetailModal } from "./PositionDetailModal";
 
 interface PositionsPanelProps {
   positions: OpenPositionDto[];
@@ -53,16 +54,14 @@ const SCOPE_BUTTON_LABEL: Record<string, string> = {
   prediction: "Prediction",
 };
 
-const venueLabel = (venue: string): string =>
-  VENUE_ID_TO_CODE[venue.toLowerCase()] ?? venue.toUpperCase().slice(0, 6);
-
 const formatUsd = (v: number): string =>
   `${v < 0 ? "-" : "+"}$${Math.abs(v).toFixed(2)}`;
 
 const formatQty = (q: number): string => {
   const abs = Math.abs(q);
   const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
-  return `${q < 0 ? "-" : "+"}${abs.toFixed(digits)}`;
+  const trimmed = abs.toFixed(digits).replace(/\.?0+$/, "");
+  return `${q < 0 ? "-" : "+"}${trimmed === "" ? "0" : trimmed}`;
 };
 
 const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
@@ -107,6 +106,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
     () => scopeAndSortPositions(positions, scope, currentStrategyId, sortOption),
     [positions, scope, currentStrategyId, sortOption],
   );
+
+  // Left-click detail modal
+  const [detailPos, setDetailPos] = useState<OpenPositionDto | null>(null);
 
   // Context menu state on position cards
   const [contextMenu, setContextMenu] = useState<{
@@ -298,7 +300,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
       {/* Column subheader */}
       <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[11px] font-sans text-slate-500 font-semibold uppercase tracking-wider">
         <span>Position</span>
-        <span className="text-right">Venue Net ±</span>
+        <span className="text-right">Σ Long · Σ Short</span>
       </div>
 
       {/* Position cards */}
@@ -317,18 +319,30 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           scoped.map((pos) => {
             const isSelected = selectedPositionKey === pos.key;
             const isReduce = isPositionReduceOnly(pos.symbol);
+            const longSum = pos.venues.reduce(
+              (a, v) => (v.netQty > 0 ? a + v.netQty : a),
+              0,
+            );
+            const shortSum = pos.venues.reduce(
+              (a, v) => (v.netQty < 0 ? a + v.netQty : a),
+              0,
+            );
             return (
               <div
                 key={pos.key}
                 role="button"
                 tabIndex={0}
-                onClick={() => onSelectPosition(pos)}
+                onClick={() => {
+                  onSelectPosition(pos);
+                  setDetailPos(pos);
+                }}
                 onContextMenu={(e) => handleContextMenu(e, pos)}
-                title="Right-click for position menu: Reduce-Only, Emergency Clear, Non-Emergency Clear"
+                title="Left-click: position details · Right-click: Reduce-Only / Clear actions"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
                     e.preventDefault();
                     onSelectPosition(pos);
+                    setDetailPos(pos);
                   }
                 }}
                 className={`w-full px-2.5 py-2 rounded-lg border text-left transition cursor-pointer flex items-start justify-between ${
@@ -337,17 +351,15 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300 shadow-2xs"
                 }`}
               >
-                {/* Left: position identity + PnL below */}
+                {/* Left: strategy chip + symbol + PnL below */}
                 <div className="flex flex-col min-w-0 pr-2">
                   <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
+                      {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
+                    </span>
                     <span className="font-bold text-xs font-sans tracking-tight text-slate-900 truncate">
                       {pos.symbol}
                     </span>
-                    {scope === "all" && (
-                      <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
-                        {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
-                      </span>
-                    )}
                     {isReduce && (
                       <span
                         className="text-[9px] px-1.5 py-0.2 rounded bg-warn-dim text-warn font-mono font-bold border border-warn-border whitespace-nowrap"
@@ -371,24 +383,21 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                   </span>
                 </div>
 
-                {/* Right: per-venue signed net quantities — buy top, sell bottom */}
+                {/* Right: system-triggered exposure summed across venues —
+                    total long (positive) and total short (negative). */}
                 <div className="flex flex-col items-end space-y-0.5 shrink-0 font-mono">
-                  {pos.venues.map((v) => (
-                    <div key={`${v.venue}|${v.symbol}`} className="flex items-baseline space-x-1.5 text-xs">
-                      <span className="text-slate-400 font-mono text-[11px]">{venueLabel(v.venue)} {v.symbol}</span>
-                      <span
-                        className={`tabular-nums font-semibold ${
-                          v.netQty > 0
-                            ? "text-slate-800"
-                            : v.netQty < 0
-                            ? "text-slate-800"
-                            : "text-slate-400"
-                        }`}
-                      >
-                        {formatQty(v.netQty)}
-                      </span>
-                    </div>
-                  ))}
+                  <div className="flex items-baseline space-x-1.5 text-xs">
+                    <span className="text-slate-400 font-sans text-[10px] font-semibold">Long</span>
+                    <span className="tabular-nums font-semibold text-slate-800">
+                      {formatQty(longSum)}
+                    </span>
+                  </div>
+                  <div className="flex items-baseline space-x-1.5 text-xs">
+                    <span className="text-slate-400 font-sans text-[10px] font-semibold">Short</span>
+                    <span className="tabular-nums font-semibold text-slate-800">
+                      {formatQty(shortSum)}
+                    </span>
+                  </div>
                 </div>
               </div>
             );
@@ -469,6 +478,11 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           <span>System Settings</span>
         </button>
       </div>
+
+      {/* Left-click Position Details */}
+      {detailPos && (
+        <PositionDetailModal pos={detailPos} onClose={() => setDetailPos(null)} />
+      )}
 
       {/* Right-click Context Menu on Position Card */}
       {contextMenu && (

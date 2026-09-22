@@ -505,12 +505,12 @@ pub fn aggregate_open_positions(
 
     const EPS: f64 = 1e-9;
     let mut groups: BTreeMap<(String, String, String), Vec<&SignalExecution>> = BTreeMap::new();
-    for s in signals {
-        if !s.status.counts_as_open() {
-            continue;
-        }
-        // Leg-symbol venue set: one segment per distinct (venue, leg symbol)
-        // so a same-venue spot+perp pair groups as two rows, not one.
+    // Flatten children carry `flat-{parent}-xxxx` ids and single-venue legs —
+    // their fills offset the PARENT's exposure, so they must join the parent's
+    // group rather than form a separate (usually zero-fill) card.
+    let by_id: std::collections::HashMap<&str, &SignalExecution> =
+        signals.iter().map(|s| (s.id.as_str(), s)).collect();
+    let venue_key_of = |s: &SignalExecution| -> String {
         let mut segs: Vec<String> = s
             .legs
             .iter()
@@ -518,9 +518,39 @@ pub fn aggregate_open_positions(
             .collect();
         segs.sort();
         segs.dedup();
-        let venue_key = segs.join("+");
+        segs.join("+")
+    };
+    for s in signals {
+        // A `flat-*` child's fills offset its parent's exposure — count them
+        // whenever the parent group is open, even if the child itself has
+        // already closed (its fills are real reductions). An open parent's
+        // own fills count while the parent is open.
+        let owner: &SignalExecution = match s
+            .id
+            .strip_prefix("flat-")
+            .and_then(|t| t.rsplit_once('-').map(|(p, _)| p))
+            .and_then(|pid| by_id.get(pid).copied())
+        {
+            Some(parent) => {
+                if !parent.status.counts_as_open() {
+                    continue;
+                }
+                parent
+            }
+            None => {
+                if !s.status.counts_as_open() {
+                    continue;
+                }
+                s
+            }
+        };
+        let venue_key = venue_key_of(owner);
         groups
-            .entry((s.strategy_id.to_lowercase(), s.symbol.clone(), venue_key))
+            .entry((
+                owner.strategy_id.to_lowercase(),
+                owner.symbol.clone(),
+                venue_key,
+            ))
             .or_default()
             .push(s);
     }

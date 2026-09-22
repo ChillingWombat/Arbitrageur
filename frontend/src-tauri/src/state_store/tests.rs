@@ -2334,6 +2334,51 @@ fn test_aggregate_open_positions_partial_flatten_nets_residual() {
     assert_eq!(p.signal_count, 2);
 }
 
+#[test]
+fn test_aggregate_open_positions_single_leg_flatten_child_merges() {
+    // The canary shape: a residual flatten child carries ONLY the residual
+    // venue's leg — under venue-set grouping it formed its own zero card.
+    let store = StateStore::open_in_memory().unwrap();
+    filled_two_leg(
+        &store,
+        "s1",
+        "ETH-USDC",
+        "futures",
+        "hyperliquid",
+        "lighter",
+        0.005,
+        2700.0,
+        2700.0,
+    );
+    let mut child = two_leg_signal("flat-s1-a1b2", "ETH-USDC", None, None);
+    child.legs.truncate(1); // keep only the first (hyperliquid) leg…
+    child.legs[0].venue = "lighter".into(); // …retargeted to the residual venue
+    child.legs[0].side = LegSide::Long; // close the parent's short
+    child.legs[0].intended_qty = 0.005;
+    store.record_signal_execution(&child).unwrap();
+    store
+        .apply_leg_fill("flat-s1-a1b2", LegSide::Long, 0.005, 2700.0, 0.0, None)
+        .unwrap();
+    store
+        .update_signal_status("flat-s1-a1b2", SignalStatus::Closed, None)
+        .unwrap();
+
+    let signals = store.list_signals(None, None).unwrap();
+    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    // The single-leg child must merge into the parent's group — the canary
+    // bug rendered it as a second card showing a fabricated +0 position.
+    assert_eq!(
+        positions.len(),
+        1,
+        "single-leg flatten child must join the parent's position group"
+    );
+    let p = &positions[0];
+    // Parent lighter short (−0.005) + child lighter long (+0.005) → flat.
+    let lgt = p.venues.iter().find(|v| v.venue == "lighter");
+    assert!(lgt.map(|v| v.net_qty.abs() < 1e-9).unwrap_or(true));
+    assert_eq!(p.signal_count, 2);
+}
+
 /* ------------------ seasonality Phase 2 + autotune apply (V12) -------- */
 
 fn har_row() -> HarAnchorRow {
