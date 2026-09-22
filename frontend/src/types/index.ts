@@ -798,6 +798,16 @@ export interface EngineSettingsDto {
   git_repo: string;
 }
 
+/** Live storage footprint behind the Historical Price Data retention
+ *  inputs: whole-DB bytes (what the GB budget enforces) plus the
+ *  top-of-book sample span (what the day limit enforces). */
+export interface StorageStatsDto {
+  db_bytes: number;
+  sample_rows: number;
+  oldest_sample_ts_ms: number | null;
+  newest_sample_ts_ms: number | null;
+}
+
 export interface VaultStatus {
   is_initialized: boolean;
   is_unlocked: boolean;

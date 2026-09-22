@@ -156,6 +156,7 @@ fn main() {
             commands::acknowledge_signal,
             commands::get_engine_settings,
             commands::save_engine_settings,
+            commands::get_storage_stats,
             commands::get_ticker_strategy_config,
             commands::save_ticker_strategy_config,
             commands::get_all_ticker_strategy_configs,

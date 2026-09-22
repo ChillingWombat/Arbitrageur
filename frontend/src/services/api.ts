@@ -26,6 +26,7 @@ import type {
   SimStepResultDto,
   ExecutionLogEntry,
   EngineSettingsDto,
+  StorageStatsDto,
   CrossTickerExecutionParams,
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
@@ -161,6 +162,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "cancel_venue_order",
   "get_engine_settings",
   "save_engine_settings",
+  "get_storage_stats",
   "get_ticker_strategy_config",
   "save_ticker_strategy_config",
   "get_all_ticker_strategy_configs",
@@ -738,6 +740,10 @@ export const api = {
 
   async saveEngineSettings(settings: EngineSettingsDto): Promise<string> {
     return invokeDesktop<string>("save_engine_settings", { settings });
+  },
+
+  async getStorageStats(): Promise<StorageStatsDto> {
+    return invokeDesktop<StorageStatsDto>("get_storage_stats");
   },
 
   async getRiskOverview(): Promise<RiskOverviewDto> {

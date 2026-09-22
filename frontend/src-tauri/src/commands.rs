@@ -3270,6 +3270,37 @@ pub async fn save_engine_settings(
     save_engine_settings_impl(settings, &state)
 }
 
+/// Live storage footprint behind the Historical Price Data retention
+/// inputs: the SQLite file size the GB budget enforces on, and the
+/// top-of-book sample span the day limit enforces on.
+#[derive(Clone, Serialize)]
+pub struct StorageStatsDto {
+    pub db_bytes: u64,
+    pub sample_rows: u64,
+    pub oldest_sample_ts_ms: Option<i64>,
+    pub newest_sample_ts_ms: Option<i64>,
+}
+
+#[tauri::command]
+pub async fn get_storage_stats(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<StorageStatsDto, String> {
+    let db_bytes = state
+        .state_store
+        .db_size_bytes()
+        .map_err(|e| e.to_string())?;
+    let (rows, oldest, newest) = state
+        .state_store
+        .spread_samples_stats()
+        .map_err(|e| e.to_string())?;
+    Ok(StorageStatsDto {
+        db_bytes,
+        sample_rows: rows.max(0) as u64,
+        oldest_sample_ts_ms: oldest,
+        newest_sample_ts_ms: newest,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Per-strategy auto-hide ticker filters + effective leverage + strategy tickers
 // ---------------------------------------------------------------------------
