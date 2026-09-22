@@ -2356,3 +2356,14 @@ clippy+fmt clean, app restarted on the new binary.
 - The opportunities gadget is ticker-scoped by default because the dock lives inside the ticker page; the backend already supports `symbol: null` for a strategy-wide view (the UI toggle uses it).
 - `monitor_signal_events` grows unboundedly (minute heartbeats per live pair) — a retention pass may be worth adding if DB size becomes an issue.
 - Spot bot deploy is now labeled "Execute" like everything else — its semantics (atomic dual-leg dispatch) are unchanged, but if a persistent-bot mode is ever added the label distinction should return.
+
+## Session 2026-09-22 (continued) — execution-policy defaults flipped on
+
+### Passive unwind + residual auto-flatten default ON, persisted (3321c09)
+
+- `EngineSettingsDto.passive_unwind` now defaults **enabled** via `default_passive_unwind_policy()` — per operator direction that the system picks limit-vs-market itself (calm gates: `max_spread_bps`/`max_fast_vol_bps`; fallback: `max_tries` → market). **`PassiveUnwindConfig::default()` intentionally stays disabled** — `passive_cfg_for`'s legacy heuristic treats a per-strategy row with `enabled=true` as "custom" mode; flipping the struct default would silently reinterpret every legacy row.
+- `auto_resolve_residual_exposure` defaults **on** — an imbalanced live entry auto-flattens the residual instead of only blocking the ticker.
+- `dispatch_residual_flatten` (reconciliation.rs) now routes through `execute_passive_reduce_live` when a policy resolves — residual legs get limit-peg first with market fallback, not blind market. Strategy `passive_mode="off"` → straight market. `emergency_market` still resolves no passive config — panic paths unchanged.
+- **KV persistence added** (was session-only): `engine.auto_resolve_residual` ("true"/"false") + `engine.passive_unwind` (JSON blob) save in `save_engine_settings_impl`, load via `load_exec_policy_settings` in `AppEngineState::new*`. Fail-closed: corrupt/invalid blobs log a warn and keep code defaults. Without this an operator's disable would silently revert on restart — now that the default is ON that direction of revert is the dangerous one.
+- **Test ergonomics**: fixtures (`setup_test_state_with_venues`, `lighter_only_state`, `seeded_state`) set `passive_unwind.timeout_secs = 0` — the field's doc explicitly blesses 0 for tests; without it lifecycle tests rode real 10s×3 sleeps (suite 13s→82s). Mock venues got a tight-spread `fetch_orderbook` so the limit path actually runs. `e2e_residual_flatten_disabled_by_default` renamed → `respects_disable_flag` (flag defaults on now; test pins the disable path). New `test_exec_policy_settings_defaults_on_and_persisted_overrides` pins the KV round-trip.
+- Verified: 372 desktop tests, clippy, fmt, vite build, release build. App restarted on `3321c09` binary; HL/Lighter/Robinhood lanes healthy.
