@@ -8,7 +8,7 @@ use arbitrageur_exchanges::ws::{
     apply_lighter_delta, hyperliquid_subscribe_message, lighter_book_from_sides,
     lighter_default_market_symbol_map, lighter_delta_continuous, lighter_market_symbol_map,
     lighter_subscribe_message, lighter_ws_url, parse_hyperliquid_l2book_data, parse_lighter_delta,
-    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_subscribe_message, vanta_ws_url,
+    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_subscribe_topic, vanta_ws_url,
     HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS,
 };
 use chrono::Utc;
@@ -26,6 +26,9 @@ const ROBINHOOD_LIGHTER_BASE_URL: &str = "https://api.rh.lighter.xyz";
 /// Generic WS keepalive for venues without a protocol-level heartbeat
 /// (hyperliquid, vanta). Lighter uses `LIGHTER_KEEPALIVE_SECS`.
 const WS_KEEPALIVE_SECS: u64 = 30;
+/// Orderly closes WS conns that miss its application-level ping (~every
+/// 10-30s expected); send `{"event":"ping"}` well inside that window.
+const VANTA_KEEPALIVE_SECS: u64 = 20;
 
 /// Delay between subscription frames during the connect burst — instant
 /// floods get the connection RST by venue-side WS flood protection.
@@ -222,51 +225,76 @@ fn top_sample(book: &OrderBook, venue_id: &VenueId) -> Option<VenueSampleEntry> 
 }
 
 /// Canonical-base symbols listed on an admitted venue, via the existing
-/// REST `fetch_markets` cold-start path.
-async fn venue_bases(state: &AppEngineState, venue: &str) -> anyhow::Result<Vec<String>> {
-    let adapter = state
-        .get_adapter(venue)
-        .ok_or_else(|| anyhow::anyhow!("{venue} is not admitted; skipping WS lane"))?;
-    let markets = adapter.fetch_markets().await?;
-    let mut bases: Vec<String> = markets
+/// Native coin -> canonical base. WS subscriptions must use `venue_symbol`
+/// verbatim: Hyperliquid kills the connection on any unlisted-coin sub, and
+/// canonicalization uppercases (`kPEPE` -> `KPEPE`), producing invalid subs.
+fn hyperliquid_coin_map(
+    markets: &[arbitrageur_core::market::MarketMetadata],
+) -> HashMap<String, String> {
+    markets
         .iter()
-        .map(|m| canonical_base(&m.symbol.base))
-        .filter(|b| !b.is_empty())
-        .collect();
-    bases.sort();
-    bases.dedup();
-    Ok(bases)
+        .filter(|m| m.is_active)
+        .filter_map(|m| {
+            let coin = m.venue_symbol.trim();
+            (!coin.is_empty() && !coin.to_uppercase().ends_with("-SPOT"))
+                .then(|| (coin.to_string(), canonical_base(&m.symbol.base)))
+        })
+        .collect()
 }
 
-fn hyperliquid_coin(symbol_base: &str) -> Option<String> {
-    if symbol_base.trim().is_empty() || symbol_base.to_uppercase().ends_with("-SPOT") {
-        return None;
-    }
-    Some(
-        symbol_base
-            .split('-')
-            .next()
-            .unwrap_or(symbol_base)
-            .to_string(),
-    )
+/// "<native_symbol>@orderbook" -> canonical base. Same rule as
+/// `hyperliquid_coin_map`: Orderly-family edges close conns on topics whose
+/// symbol is not a listed native name.
+fn vanta_topic_map(
+    markets: &[arbitrageur_core::market::MarketMetadata],
+) -> HashMap<String, String> {
+    markets
+        .iter()
+        .filter(|m| m.is_active)
+        .filter_map(|m| {
+            let sym = m.venue_symbol.trim();
+            (!sym.is_empty()).then(|| (format!("{sym}@orderbook"), canonical_base(&m.symbol.base)))
+        })
+        .collect()
 }
 
 async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     let venue_id = VenueId::new("hyperliquid");
-    let mut coin_map: HashMap<String, String> = HashMap::new();
-    for base in venue_bases(state, "hyperliquid").await? {
-        if let Some(coin) = hyperliquid_coin(&base) {
-            coin_map.insert(coin, base);
-        }
-    }
+    let adapter = state
+        .get_adapter("hyperliquid")
+        .ok_or_else(|| anyhow::anyhow!("hyperliquid is not admitted; skipping WS lane"))?;
+    // Subscribe with the venue-native coin (`venue_symbol`), not the
+    // canonical base: canonicalization uppercases (`kPEPE` -> `KPEPE`) and
+    // Hyperliquid RSTs the whole connection on any unlisted-coin sub.
+    let markets = adapter
+        .fetch_markets()
+        .await
+        .map_err(|e| anyhow::anyhow!("venue_bases: {e}"))?;
+    let coin_map = hyperliquid_coin_map(&markets);
     if coin_map.is_empty() {
         anyhow::bail!("hyperliquid lists no subscribable markets");
     }
-    let ws = ws_connect(HYPERLIQUID_WS_URL).await?;
+    let ws = ws_connect(HYPERLIQUID_WS_URL)
+        .await
+        .map_err(|e| anyhow::anyhow!("ws_connect: {e}"))?;
+    {
+        use tokio_tungstenite::MaybeTlsStream;
+        let peer = match ws.get_ref() {
+            MaybeTlsStream::Plain(s) => s.peer_addr().ok(),
+            MaybeTlsStream::Rustls(s) => s.get_ref().0.peer_addr().ok(),
+            _ => None,
+        };
+        if let Some(peer) = peer {
+            tracing::info!("feed: hyperliquid WS handshake ok via {peer}");
+        }
+    }
     let (mut write, mut read) = ws.split();
-    for coin in coin_map.keys() {
+    for (i, coin) in coin_map.keys().enumerate() {
         let frame = hyperliquid_subscribe_message(coin).to_string();
-        write.send(Message::Text(frame)).await?;
+        write
+            .send(Message::Text(frame))
+            .await
+            .map_err(|e| anyhow::anyhow!("sub_burst[{i}] {coin}: {e}"))?;
         // Pace the burst: servers RST connections that flood subscribes.
         tokio::time::sleep(Duration::from_millis(SUB_BURST_PACE_MS)).await;
     }
@@ -506,18 +534,24 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
         }
     };
     let venue_id = VenueId::new("vanta");
-    let bases = venue_bases(state, "vanta").await?;
-    if bases.is_empty() {
+    let adapter = state
+        .get_adapter("vanta")
+        .ok_or_else(|| anyhow::anyhow!("vanta is not admitted; skipping WS lane"))?;
+    // Subscribe with the venue-native symbol (`venue_symbol`), not the
+    // canonical base — canonicalization can produce names the venue does
+    // not list, and Orderly-family edges close conns on invalid topics.
+    let markets = adapter
+        .fetch_markets()
+        .await
+        .map_err(|e| anyhow::anyhow!("venue_bases: {e}"))?;
+    let topics = vanta_topic_map(&markets);
+    if topics.is_empty() {
         anyhow::bail!("vanta lists no subscribable markets");
-    }
-    let mut topics: HashMap<String, String> = HashMap::new();
-    for base in &bases {
-        topics.insert(format!("PERP_{base}_USDC@orderbook"), base.clone());
     }
     let ws = ws_connect(&ws_url).await?;
     let (mut write, mut read) = ws.split();
-    for (sub_id, base) in (1u64..).zip(topics.values()) {
-        let frame = vanta_subscribe_message(sub_id, base).to_string();
+    for (sub_id, topic) in (1u64..).zip(topics.keys()) {
+        let frame = vanta_subscribe_topic(sub_id, topic).to_string();
         write.send(Message::Text(frame)).await?;
         tokio::time::sleep(Duration::from_millis(SUB_BURST_PACE_MS)).await;
     }
@@ -525,12 +559,17 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
         "feed: vanta WS connected; subscribed {} topics",
         topics.len()
     );
-    let mut keepalive = tokio::time::interval(Duration::from_secs(WS_KEEPALIVE_SECS));
+    let mut keepalive = tokio::time::interval(Duration::from_secs(VANTA_KEEPALIVE_SECS));
     keepalive.tick().await;
     loop {
         let msg = tokio::select! {
+            // Orderly keepalive is application-level `{"event":"ping"}` —
+            // protocol-level WS Ping frames do not count, and the server
+            // closes conns that look idle (~2min).
             _ = keepalive.tick() => {
-                write.send(Message::Ping(Vec::new())).await?;
+                write
+                    .send(Message::Text(r#"{"event":"ping"}"#.to_string()))
+                    .await?;
                 continue;
             }
             msg = read.next() => msg,
@@ -563,7 +602,56 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrageur_core::market::{MarketMetadata, Symbol};
     use arbitrageur_core::types::dec;
+
+    fn market(venue: &str, venue_symbol: &str, base: &str) -> MarketMetadata {
+        MarketMetadata {
+            symbol: Symbol::perp(base, "USDC"),
+            venue: VenueId::new(venue),
+            venue_symbol: venue_symbol.to_string(),
+            price_decimals: 5,
+            size_decimals: 3,
+            min_order_size: dec!(0.001),
+            min_notional: dec!(10),
+            maker_fee_bps: dec!(0),
+            taker_fee_bps: dec!(2.5),
+            contract_size: dec!(1),
+            is_active: true,
+        }
+    }
+
+    #[test]
+    fn hyperliquid_coin_map_uses_native_coin_not_canonical() {
+        // Regression: Hyperliquid RSTs the conn on unlisted-coin subs.
+        // `kPEPE` must be subscribed verbatim — canonical base `KPEPE`
+        // is an unlisted name and must never reach the wire.
+        let markets = vec![
+            market("hyperliquid", "BTC", "BTC"),
+            market("hyperliquid", "kPEPE", "kPEPE"),
+        ];
+        let map = hyperliquid_coin_map(&markets);
+        assert_eq!(map.get("BTC").map(String::as_str), Some("BTC"));
+        assert_eq!(map.get("kPEPE").map(String::as_str), Some("KPEPE"));
+        assert!(!map.contains_key("KPEPE"), "canonical form is not a coin");
+    }
+
+    #[test]
+    fn vanta_topic_map_uses_native_symbol_not_canonical() {
+        let markets = vec![
+            market("vanta", "PERP_BTC_USDC", "BTC"),
+            market("vanta", "PERP_1000PEPE_USDC", "1000PEPE"),
+        ];
+        let map = vanta_topic_map(&markets);
+        assert_eq!(
+            map.get("PERP_BTC_USDC@orderbook").map(String::as_str),
+            Some("BTC")
+        );
+        assert_eq!(
+            map.get("PERP_1000PEPE_USDC@orderbook").map(String::as_str),
+            Some("1000PEPE")
+        );
+    }
 
     fn book(venue: &str, symbol: &str, bid: f64, ask: f64) -> OrderBook {
         let mut b = OrderBook::new(VenueId::new(venue), symbol.to_string());
@@ -591,13 +679,6 @@ mod tests {
         assert!(
             validate_feed_book(&book("hyperliquid", "BTC", 101.0, 100.0), &venue, "BTC").is_err()
         );
-    }
-
-    #[test]
-    fn hyperliquid_coin_rejects_spot_suffixed_bases() {
-        assert_eq!(hyperliquid_coin("BTC").as_deref(), Some("BTC"));
-        assert!(hyperliquid_coin("").is_none());
-        assert!(hyperliquid_coin("ETH-SPOT").is_none());
     }
 
     #[test]

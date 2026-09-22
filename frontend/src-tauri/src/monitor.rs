@@ -578,6 +578,11 @@ pub(crate) const PAIR_STOP_MULT: f64 = 3.0;
 /// Series alignment gap (ms) shared by both paths.
 pub(crate) const PAIR_ALIGN_GAP_MS: i64 = 30_000;
 
+/// Max concurrent REST book fetches per venue lane. HTTP/1.1-only venue
+/// edges open one TCP conn per in-flight request; keeping the burst small
+/// stays under per-IP connection limits and protects the WS lane.
+const MAX_INFLIGHT_BOOK_FETCHES: usize = 4;
+
 /// Standard normal CDF via the Abramowitz-Stegun erf approximation
 /// (|error| <= 1.5e-7). No extra dependency for one closed-form call.
 fn normal_cdf(x: f64) -> f64 {
@@ -1722,11 +1727,23 @@ impl SpreadMonitorEngine {
         // whole cycle; each job's lane is keyed back on completion.
         // Concurrent identical keys share one request via the single-flight
         // map instead of firing N.
+        //
+        // Bound in-flight requests per venue: venue edges that only speak
+        // HTTP/1.1 (e.g. api.hyperliquid.xyz negotiates no ALPN) open one
+        // TCP conn per in-flight request. An unbounded burst plus keep-alive
+        // linger trips the edge's per-IP connection limit, which then RSTs
+        // unrelated new conns — including the venue's own WS upgrade.
         let flights = state.orderbook_flights.clone();
         let mut set = tokio::task::JoinSet::new();
+        let mut venue_sems: HashMap<String, Arc<tokio::sync::Semaphore>> = HashMap::new();
         for job in jobs {
             let flights = flights.clone();
+            let sem = venue_sems
+                .entry(job.venue.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT_BOOK_FETCHES)))
+                .clone();
             set.spawn(async move {
+                let _permit = sem.acquire_owned().await.ok();
                 let res = flights.fetch(&job.adapter, &job.symbol).await;
                 (job.venue, job.symbol, res)
             });
