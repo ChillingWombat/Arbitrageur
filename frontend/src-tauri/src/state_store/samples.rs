@@ -101,6 +101,18 @@ impl StateStore {
         Ok(stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
+    /// Global retained-history stats: row count plus oldest/newest sample
+    /// timestamps across every symbol and venue. One table scan; the caller
+    /// decides how often that is affordable.
+    pub fn spread_samples_stats(&self) -> anyhow::Result<(i64, Option<i64>, Option<i64>)> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*), MIN(ts_ms), MAX(ts_ms) FROM spread_samples",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?)
+    }
+
     /// Drop samples older than `retain_after_ts_ms`, then enforce a global row
     /// cap by evicting the oldest rows first.
     pub fn prune_spread_samples(

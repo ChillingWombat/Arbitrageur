@@ -24,7 +24,7 @@ import {
   retentionDaysToInput,
   retentionGbToInput,
 } from "../services/retention";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto } from "../types";
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
@@ -103,6 +103,20 @@ function areEngineSettingsPropsEqual(p: EngineSettingsProps, n: EngineSettingsPr
   );
 }
 
+function formatRetainedSpan(oldestMs: number | null, newestMs: number | null): string {
+  if (oldestMs == null || newestMs == null || newestMs <= oldestMs) return "—";
+  const days = (newestMs - oldestMs) / 86_400_000;
+  if (days >= 1) return `${days.toFixed(1)} days`;
+  return `${((newestMs - oldestMs) / 3_600_000).toFixed(1)} hours`;
+}
+
+function formatStorageBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(2)} GB`;
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, onClose, onSettingsSaved, headerActionsEl }) => {
   const [liveVenues, setLiveVenues] = useState<VenueStatusDto[]>([]);
   const [pinging, setPinging] = useState(false);
@@ -120,6 +134,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Historical retention: empty string = unlimited (None on the backend)
   const [maxHistoryDays, setMaxHistoryDays] = useState("");
   const [maxStorageGb, setMaxStorageGb] = useState("");
+  const [storageStats, setStorageStats] = useState<StorageStatsDto | null>(null);
   const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
   const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
 
@@ -536,6 +551,26 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     };
     tick();
     const id = setInterval(tick, 5000);
+    return () => {
+      dead = true;
+      clearInterval(id);
+    };
+  }, []);
+
+  // Retained-history footprint behind the retention inputs — one table
+  // scan per tick, so poll slower than the venue lanes.
+  useEffect(() => {
+    let dead = false;
+    const tick = async () => {
+      try {
+        const s = await api.getStorageStats();
+        if (!dead) setStorageStats(s);
+      } catch {
+        /* store unavailable — stats stay empty */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 15000);
     return () => {
       dead = true;
       clearInterval(id);
@@ -1497,6 +1532,25 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
                   />
                 </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-surface-border pt-2.5 text-[11px] text-slate-500">
+                <span title="Oldest → newest top-of-book sample across every symbol and venue">
+                  Retained{" "}
+                  <span className="font-semibold text-slate-700 tabular-nums">
+                    {storageStats
+                      ? formatRetainedSpan(storageStats.oldest_sample_ts_ms, storageStats.newest_sample_ts_ms)
+                      : "—"}
+                  </span>
+                </span>
+                <span title="Whole local database file — the GB limit above enforces on this">
+                  Stored{" "}
+                  <span className="font-semibold text-slate-700 tabular-nums">
+                    {storageStats ? formatStorageBytes(storageStats.db_bytes) : "—"}
+                  </span>
+                </span>
+                <span className="text-slate-400 tabular-nums">
+                  {storageStats ? `${storageStats.sample_rows.toLocaleString()} samples` : ""}
+                </span>
               </div>
             </div>
 
