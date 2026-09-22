@@ -18,16 +18,22 @@ export const DetailField: React.FC<{
   </div>
 );
 
-/** Titled metric group — the shared section container every opportunity
- *  detail modal uses. */
-export const DetailSection: React.FC<{ title: string; children: React.ReactNode }> = ({
-  title,
-  children,
-}) => (
-  <div className="space-y-2">
-    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
+/** Titled metric group — the shared bordered section container every
+ *  opportunity detail modal uses. `gridClassName` overrides the inner
+ *  layout (e.g. non-metric children like the triangle leg cards). */
+export const DetailSection: React.FC<{
+  title: string;
+  children: React.ReactNode;
+  gridClassName?: string;
+  tip?: string;
+}> = ({ title, children, gridClassName, tip }) => (
+  <div className="rounded-xl border border-surface-border bg-surface-raised/40 px-3.5 py-3 space-y-2.5">
+    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
       {title}
+      {tip && <InfoTooltip text={tip} position="top" />}
     </div>
-    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">{children}</div>
+    <div className={gridClassName ?? "grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3"}>
+      {children}
+    </div>
   </div>
 );

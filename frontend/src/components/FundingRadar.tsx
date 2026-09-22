@@ -486,7 +486,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
           if (e.target === e.currentTarget) onClose();
         }}
       >
-        <div className="bg-surface border border-surface-border rounded-2xl w-[680px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+        <div className="bg-surface border border-surface-border rounded-2xl w-[880px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold bg-accent-dim text-accent border border-accent-line">
@@ -735,14 +735,11 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               </div>
             </DetailSection>
 
-          <div>
-            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5 flex items-center">
-              Capacity curve — profit vs position size
-              <InfoTooltip
-                text="Carry profit vs position size walked through both leg orderbooks. Carry income is depth-invariant (net rate × modelled hold) — the curve degrades only through the entry cross. Expected = income scaled by the Breakeven (model) probability; Net = raw. Dashed marker: depth-supported size."
-                position="top"
-              />
-            </div>
+          <DetailSection
+            title="Capacity curve — profit vs position size"
+            gridClassName="block"
+            tip="Carry profit vs position size walked through both leg orderbooks. Carry income is depth-invariant (net rate × modelled hold) — the curve degrades only through the entry cross. Expected = income scaled by the Breakeven (model) probability; Net = raw. Dashed marker: depth-supported size."
+          >
             {(opp.depth_curve?.length ?? 0) >= 2 ? (
               <CapacityChart
                 points={opp.depth_curve ?? []}
@@ -751,18 +748,15 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
             ) : (
               <span className="text-slate-400 text-xs">no depth data</span>
             )}
-          </div>
+          </DetailSection>
 
-          <div>
-            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5 flex items-center">
-              Funding trend
-              <InfoTooltip
-                text={`Solid lines: per-venue funding prints (%/8h, left axis). Blue: ${opp.symbol} mid (right axis). Dashed gray: net gap (short − long) on shared timestamps. Dashed green: model-expected path from the current net print decaying to the min-APR exit over the modelled hold. Dotted red: min-APR exit threshold.`}
-                position="top"
-              />
-            </div>
+          <DetailSection
+            title="Funding trend"
+            gridClassName="block"
+            tip={`Solid lines: per-venue funding prints (%/8h, left axis). Blue: ${opp.symbol} mid (right axis). Dashed gray: net gap (short − long) on shared timestamps. Dashed green: model-expected path from the current net print decaying to the min-APR exit over the modelled hold. Dotted red: min-APR exit threshold.`}
+          >
             <FundingTrendGraph opp={opp} minAprPct={minAprPct} />
-          </div>
+          </DetailSection>
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
@@ -824,7 +818,7 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="bg-surface border border-surface-border rounded-2xl w-[680px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+      <div className="bg-surface border border-surface-border rounded-2xl w-[880px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold bg-accent-dim text-accent border border-accent-line">

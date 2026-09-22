@@ -19,7 +19,6 @@ import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
 import { DetailField, DetailSection } from "./DetailBits";
-import { InfoTooltip } from "./InfoTooltip";
 import { CapacityChart } from "./CapacityChart";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
@@ -87,7 +86,7 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
           if (e.target === e.currentTarget) onClose();
         }}
       >
-        <div className="bg-surface border border-surface-border rounded-2xl w-[640px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+        <div className="bg-surface border border-surface-border rounded-2xl w-[800px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <Triangle className="w-3.5 h-3.5 text-accent shrink-0" />
@@ -113,12 +112,11 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            <div>
-              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center">
-                Legs
-                <InfoTooltip text="The three atomic trades of the cycle, executed in order on one venue. Price is the book level used at scan time; Fee is that leg's taker commission." position="top" />
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <DetailSection
+              title="Legs"
+              gridClassName="grid grid-cols-1 sm:grid-cols-3 gap-3"
+              tip="The three atomic trades of the cycle, executed in order on one venue. Price is the book level used at scan time; Fee is that leg's taker commission."
+            >
               {legs.map(({ leg, label, tone }) => (
                 <div key={label} className="rounded-xl border border-surface-border bg-surface-raised p-3 space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -138,8 +136,7 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
                   </div>
                 </div>
               ))}
-              </div>
-            </div>
+            </DetailSection>
 
             <DetailSection title="Economics">
               <DetailField
@@ -185,17 +182,17 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
               </span>
             </div>
 
-            <div>
-              <div className="text-[11px] font-sans font-medium text-slate-400 mb-1.5 flex items-center">
-                Capacity curve — net profit vs cycle size
-                <InfoTooltip text="Net cycle profit vs start notional, evaluated at a size ladder through all three leg books (VWAP per leg). Atomic cycles have no win-rate model — only the Net series is meaningful; Expected is unavailable by construction." position="top" />
-              </div>
+            <DetailSection
+              title="Capacity curve — net profit vs cycle size"
+              gridClassName="block"
+              tip="Net cycle profit vs start notional, evaluated at a size ladder through all three leg books (VWAP per leg). Atomic cycles have no win-rate model — only the Net series is meaningful; Expected is unavailable by construction."
+            >
               {(opp.depth_curve?.length ?? 0) >= 2 ? (
                 <CapacityChart points={opp.depth_curve ?? []} />
               ) : (
                 <span className="text-slate-400 text-xs">no depth data</span>
               )}
-            </div>
+            </DetailSection>
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
