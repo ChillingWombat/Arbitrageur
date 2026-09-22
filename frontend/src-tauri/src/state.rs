@@ -388,6 +388,39 @@ fn default_git_repo() -> String {
 fn default_true() -> bool {
     true
 }
+/// The global passive-unwind policy defaults ON: per-strategy `custom`
+/// configs keep `PassiveUnwindConfig::default()` (disabled) so the legacy
+/// mode heuristic (`enabled` → "custom") still resolves correctly — only
+/// this shared policy flips.
+fn default_passive_unwind_policy() -> PassiveUnwindConfig {
+    PassiveUnwindConfig {
+        enabled: true,
+        ..PassiveUnwindConfig::default()
+    }
+}
+
+/// Overlay persisted execution-policy toggles onto `settings`. Operator
+/// overrides (saved via Engine Settings) survive restarts; fail-closed —
+/// an unreadable or invalid blob keeps the code defaults rather than
+/// half-applying a corrupt record.
+fn load_exec_policy_settings(
+    state_store: &crate::state_store::StateStore,
+    settings: &mut EngineSettingsDto,
+) {
+    if let Ok(Some(raw)) = state_store.kv_get("engine.auto_resolve_residual") {
+        if raw == "true" || raw == "false" {
+            settings.auto_resolve_residual_exposure = raw == "true";
+        }
+    }
+    if let Ok(Some(raw)) = state_store.kv_get("engine.passive_unwind") {
+        match serde_json::from_str::<PassiveUnwindConfig>(&raw) {
+            Ok(cfg) if cfg.validate().is_ok() => settings.passive_unwind = cfg,
+            _ => {
+                tracing::warn!("engine settings: ignoring invalid persisted passive_unwind blob")
+            }
+        }
+    }
+}
 fn default_kraken_spot_url() -> String {
     "https://api.kraken.com".into()
 }
@@ -481,11 +514,14 @@ pub struct EngineSettingsDto {
     /// takes min(strategy target, account max, venue max, this).
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
-    /// Opt-in: when a live entry lands `imbalanced` (one leg filled, the
-    /// other terminal-empty), submit a reduce-only flatten for the residual
-    /// leg automatically. Off by default — detection and ticker blocking
-    /// always happen; auto-compensation is an explicit operator decision.
-    #[serde(default)]
+    /// When a live entry lands `imbalanced` (one leg filled, the other
+    /// terminal-empty), submit a reduce-only flatten for the residual leg
+    /// automatically. On by default — detection and ticker blocking always
+    /// happen; the flatten follows the resolved passive-unwind policy
+    /// (limit-peg first, market fallback when the calm gates trip or tries
+    /// exhaust; a strategy whose passive mode is `off` goes straight to
+    /// market).
+    #[serde(default = "default_true")]
     pub auto_resolve_residual_exposure: bool,
     /// Opt-in: allow live strategy entries on the spatial two-leg path.
     /// Reconciliation machinery (poll supervisor, residual auto-resolution,
@@ -503,8 +539,10 @@ pub struct EngineSettingsDto {
     /// the single shared limit-exit configuration. Strategies with
     /// `*_passive_mode = "inherit"` (the default) use this record; "custom"
     /// uses the strategy's own params; "off" always market-exits. The
-    /// popup's Auto Limit mode also runs this policy. Disabled by default.
-    #[serde(default)]
+    /// popup's Auto Limit mode also runs this policy. Enabled by default —
+    /// the calm gates (spread/fast-vol ceilings) and try-count fallback are
+    /// what decide limit vs market per attempt, not the toggle.
+    #[serde(default = "default_passive_unwind_policy")]
     pub passive_unwind: PassiveUnwindConfig,
 
     // Exchange Enablement Toggles
@@ -680,10 +718,10 @@ impl Default for EngineSettingsDto {
             margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
             max_leverage: default_max_leverage(),
-            auto_resolve_residual_exposure: false,
+            auto_resolve_residual_exposure: true,
             live_entry_enabled: false,
             live_entry_max_notional_usd: 0.0,
-            passive_unwind: PassiveUnwindConfig::default(),
+            passive_unwind: default_passive_unwind_policy(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -1432,6 +1470,7 @@ impl AppEngineState {
                 initial_settings.margin_critical_usage_pct = 85.0;
             }
         }
+        load_exec_policy_settings(&state_store, &mut initial_settings);
         // Venue endpoint overrides come from Engine Settings (Network & VPS)
         // and persist under `endpoints.*` kv keys — blank falls back to each
         // adapter's built-in default. NOTE: adapters are constructed once
@@ -2299,5 +2338,54 @@ mod tests {
         assert_eq!(s.vanta_url, "https://api.orderly.org");
         assert_eq!(s.polymarket_url, "https://clob.polymarket.com");
         assert_eq!(s.kalshi_url, "https://trading-api.kalshi.com");
+    }
+
+    #[test]
+    fn test_exec_policy_settings_defaults_on_and_persisted_overrides() {
+        let store = crate::state_store::StateStore::open_in_memory().unwrap();
+
+        // No persisted keys → code defaults: both policies ON.
+        let mut s = EngineSettingsDto::default();
+        assert!(s.auto_resolve_residual_exposure);
+        assert!(s.passive_unwind.enabled);
+        load_exec_policy_settings(&store, &mut s);
+        assert!(s.auto_resolve_residual_exposure);
+        assert!(s.passive_unwind.enabled);
+
+        // Persisted operator overrides win over the defaults.
+        store
+            .kv_set("engine.auto_resolve_residual", "false")
+            .unwrap();
+        let cfg = PassiveUnwindConfig {
+            enabled: false,
+            timeout_secs: 42,
+            ..PassiveUnwindConfig::default()
+        };
+        store
+            .kv_set(
+                "engine.passive_unwind",
+                &serde_json::to_string(&cfg).unwrap(),
+            )
+            .unwrap();
+        let mut s = EngineSettingsDto::default();
+        load_exec_policy_settings(&store, &mut s);
+        assert!(!s.auto_resolve_residual_exposure);
+        assert!(!s.passive_unwind.enabled);
+        assert_eq!(s.passive_unwind.timeout_secs, 42);
+
+        // Corrupt/invalid blobs are ignored fail-closed (defaults kept).
+        store
+            .kv_set("engine.auto_resolve_residual", "garbage")
+            .unwrap();
+        store
+            .kv_set(
+                "engine.passive_unwind",
+                "{\"enabled\":false,\"maxTries\":99}",
+            )
+            .unwrap();
+        let mut s = EngineSettingsDto::default();
+        load_exec_policy_settings(&store, &mut s);
+        assert!(s.auto_resolve_residual_exposure);
+        assert!(s.passive_unwind.enabled);
     }
 }

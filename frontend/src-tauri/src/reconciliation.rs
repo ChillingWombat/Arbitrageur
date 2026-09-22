@@ -20,6 +20,7 @@
 //! The supervisor runs one pass immediately at startup (restart recovery)
 //! and then every `POLL_INTERVAL_SECS`.
 
+use crate::execution::{passive_cfg_for, FlattenLiveRefresh};
 use crate::state::AppEngineState;
 use crate::state_store::{
     LegSide, NewSignalExecution, NewSignalLeg, SignalExecution, SignalLeg, SignalStatus,
@@ -27,6 +28,7 @@ use crate::state_store::{
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side};
+use arbitrageur_execution::passive_unwind::execute_passive_reduce_live;
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -593,6 +595,11 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
     }
     tracing::warn!("reconcile: {signal_id} imbalanced — dispatching residual flatten {close_id}");
 
+    // Residual flattens run the resolved passive-unwind policy (limit-peg
+    // first, market fallback when the calm gates trip — too volatile /
+    // too wide — or tries exhaust). A strategy whose mode is `off` keeps
+    // the straight market path.
+    let passive_cfg = passive_cfg_for(state, &exec.strategy_id);
     for (leg, qty) in &residuals {
         let child_side = match leg.side {
             LegSide::Long => LegSide::Short,
@@ -626,42 +633,87 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             LegSide::Long => Side::Sell,
             LegSide::Short => Side::Buy,
         };
-        let mut req =
-            OrderRequest::new_market(adapter.venue_id(), leg.symbol.clone(), order_side, qty_dec);
-        req.reduce_only = true;
-        let client_order_id = req.client_order_id.clone();
-        match adapter.place_order(req).await {
-            Ok(resp) => {
-                if !resp.order_id.trim().is_empty() {
-                    if let Err(e) = state.state_store.record_leg_order_id(
-                        &close_id,
-                        child_side,
-                        &resp.order_id,
-                        Some(&client_order_id),
-                    ) {
-                        tracing::error!("reconcile: persist order id for {close_id} failed: {e}");
+        let (resp, client_order_id) = match &passive_cfg {
+            Some(cfg) => {
+                let refresher = FlattenLiveRefresh {
+                    state,
+                    venue_id: adapter.venue_id(),
+                    symbol: leg.symbol.clone(),
+                    adapter: adapter.clone(),
+                };
+                match execute_passive_reduce_live(
+                    &adapter,
+                    &refresher,
+                    &leg.symbol,
+                    order_side,
+                    qty_dec,
+                    cfg,
+                    None,
+                )
+                .await
+                {
+                    Ok(report) => {
+                        tracing::info!(
+                            "reconcile: residual flatten {close_id} on {} via {:?} ({} limit tries)",
+                            leg.venue,
+                            report.outcome,
+                            report.limit_tries
+                        );
+                        let cid = report.response.client_order_id.clone();
+                        (report.response, cid)
                     }
-                }
-                if resp.filled_qty > dec!(0) {
-                    let qty_f = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
-                    let fee_f = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
-                    let px_f = resp
-                        .avg_fill_price
-                        .and_then(|p| p.to_string().parse::<f64>().ok())
-                        .unwrap_or(0.0);
-                    let oid = (!resp.order_id.trim().is_empty()).then_some(resp.order_id.as_str());
-                    if qty_f > 0.0 && px_f > 0.0 {
-                        let _ = state
-                            .state_store
-                            .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
+                    Err(e) => {
+                        tracing::error!(
+                            "reconcile: passive residual flatten on {} failed: {e:#}",
+                            leg.venue
+                        );
+                        continue;
                     }
                 }
             }
-            Err(e) => {
-                tracing::error!(
-                    "reconcile: residual flatten order on {} rejected: {e}",
-                    leg.venue
+            None => {
+                let mut req = OrderRequest::new_market(
+                    adapter.venue_id(),
+                    leg.symbol.clone(),
+                    order_side,
+                    qty_dec,
                 );
+                req.reduce_only = true;
+                let client_order_id = req.client_order_id.clone();
+                match adapter.place_order(req).await {
+                    Ok(resp) => (resp, client_order_id),
+                    Err(e) => {
+                        tracing::error!(
+                            "reconcile: residual flatten order on {} rejected: {e}",
+                            leg.venue
+                        );
+                        continue;
+                    }
+                }
+            }
+        };
+        if !resp.order_id.trim().is_empty() {
+            let cid = (!client_order_id.trim().is_empty()).then_some(client_order_id.as_str());
+            if let Err(e) =
+                state
+                    .state_store
+                    .record_leg_order_id(&close_id, child_side, &resp.order_id, cid)
+            {
+                tracing::error!("reconcile: persist order id for {close_id} failed: {e}");
+            }
+        }
+        if resp.filled_qty > dec!(0) {
+            let qty_f = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+            let fee_f = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+            let px_f = resp
+                .avg_fill_price
+                .and_then(|p| p.to_string().parse::<f64>().ok())
+                .unwrap_or(0.0);
+            let oid = (!resp.order_id.trim().is_empty()).then_some(resp.order_id.as_str());
+            if qty_f > 0.0 && px_f > 0.0 {
+                let _ = state
+                    .state_store
+                    .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
             }
         }
     }
@@ -1009,9 +1061,21 @@ mod tests {
         }
         async fn fetch_orderbook(
             &self,
-            _s: &str,
+            s: &str,
         ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
-            unimplemented!()
+            // Tight ~2bps spread so the passive-unwind calm gates pass and
+            // the residual flatten exercises its limit-first path.
+            let mut b =
+                arbitrageur_core::quote::OrderBook::new(VenueId::new(self.venue), s.to_string());
+            b.bids.push(arbitrageur_core::quote::BookLevel::new(
+                dec!(99.99),
+                dec!(10),
+            ));
+            b.asks.push(arbitrageur_core::quote::BookLevel::new(
+                dec!(100.01),
+                dec!(10),
+            ));
+            Ok(b)
         }
         async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
             unimplemented!()
@@ -1084,6 +1148,9 @@ mod tests {
         legs: Vec<(&'static str, LegSide)>,
     ) -> (AppEngineState, String) {
         let state = AppEngineState::new();
+        // Passive unwind is default-on; zero the attempt wait so the
+        // limit/cancel/fallback sequence runs instantly in tests.
+        state.settings.write().passive_unwind.timeout_secs = 0;
         let sid = format!("sig-{}", rand::random::<u32>());
         state
             .state_store
@@ -1145,10 +1212,13 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_fill_plus_cancel_empty_is_imbalanced() {
+        // Scope is imbalance detection, not the auto-flatten — disable it
+        // explicitly so the pass cannot dispatch (default is now on).
         let (state, sid) = seeded_state(
             "futures",
             vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
         );
+        state.settings.write().auto_resolve_residual_exposure = false;
         state.test_adapters.write().unwrap().insert(
             "kraken".into(),
             Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
@@ -1364,13 +1434,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_residual_flatten_disabled_by_default() {
-        // Without the opt-in flag an imbalanced entry stays imbalanced —
-        // no order is dispatched.
+    async fn e2e_residual_flatten_respects_disable_flag() {
+        // With the flag explicitly off an imbalanced entry stays imbalanced —
+        // no order is dispatched. (The flag defaults on; this pins the
+        // disable path.)
         let (state, sid) = seeded_state(
             "futures",
             vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
         );
+        state.settings.write().auto_resolve_residual_exposure = false;
         let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
         state
             .test_adapters
