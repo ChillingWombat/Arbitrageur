@@ -10,7 +10,7 @@ import type { ExecutionLogEntry, UtilisationHistory, VenueBalanceInfo } from "..
  *   venue, so a two-leg trade counts on both of its venues.
  * - Totals sum `net_profit`, which the backend records net of fees — gross
  *   and fee legs are never re-added.
- * - Utilisation is the paper account's used-margin share
+ * - Utilisation is the venue account's used-margin share
  *   (`margin_rate_pct` = initial margin / equity).
  * - The 24h average is the time-weighted mean of retained margin snapshots;
  *   when snapshots cover less than the full window the note names the

@@ -21,7 +21,7 @@ const OPEN_STATUSES: ReadonlySet<string> = new Set([
 ]);
 
 export const BOT_PROFIT_UNATTRIBUTED_REASON =
-  "Realized fills are not strategy-attributed (shared spatial paper path); per-cycle radar PnL is unavailable.";
+  "Realized fills are not strategy-attributed (shared spatial dispatch path); per-cycle radar PnL is unavailable.";
 
 export interface BotCycleStats {
   completedCycles: number;

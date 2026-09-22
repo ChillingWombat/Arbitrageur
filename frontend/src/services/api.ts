@@ -124,7 +124,7 @@ export function withTimeoutFallback<T>(promise: Promise<T>, fallback: T, ms = 30
 
 // Commands registered in the desktop invoke handler (src-tauri/src/main.rs).
 // Triangle scan/execute and the spatial convergence check are native
-// paper-only commands; in the browser they fail closed with the
+// testnet/demo-venue commands; in the browser they fail closed with the
 // desktop-required error instead of serving synthetic data.
 const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_system_status",
@@ -157,6 +157,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_execution_logs",
   "get_venue_execution_capabilities",
   "set_live_mode",
+  "set_trading_environment",
   "set_engine_paused",
   "reconcile_orders_now",
   "cancel_venue_order",
@@ -769,8 +770,9 @@ export const api = {
     return invokeDesktop<VenueCapabilityDto[]>("get_venue_execution_capabilities");
   },
 
-  async setLiveMode(enabled: boolean): Promise<boolean> {
-    return invokeDesktop<boolean>("set_live_mode", { enabled });
+  /** Switch the trading environment. "live" returns true, "testnet" false. */
+  async setTradingEnvironment(environment: "testnet" | "live"): Promise<boolean> {
+    return invokeDesktop<boolean>("set_trading_environment", { environment });
   },
 
   async setEnginePaused(paused: boolean): Promise<boolean> {
@@ -1147,7 +1149,7 @@ export const api = {
     });
   },
 
-  // ---- Autonomous convergence bot (opt-in, paper-only) ----
+  // ---- Autonomous convergence bot (opt-in) ----
   async getRadarBotConfig(): Promise<RadarBotConfigDto> {
     return invokeDesktop<RadarBotConfigDto>("get_radar_bot_config");
   },

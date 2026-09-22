@@ -278,9 +278,7 @@ export const ExternalPositionsGadget: React.FC = () => {
     ? "Loading positions…"
     : !selected
       ? "Select a position above"
-      : !data.liveMode
-        ? "Paper mode — switch to Live Trading to submit real closes"
-        : !selected.closeSupported
+      : !selected.closeSupported
           ? `${selected.venue} cannot place live orders through the bot`
           : scheduleOn && !scheduleValid
             ? "Pick a future time for the scheduled exit"
@@ -307,6 +305,18 @@ export const ExternalPositionsGadget: React.FC = () => {
           </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {data?.environment && (
+            <span
+              className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${
+                data.environment === "live"
+                  ? "bg-loss-dim/40 text-loss border-loss-border/60"
+                  : "bg-accent/10 text-accent border-accent/30"
+              }`}
+              title={data.environment === "live" ? "Live environment — real venue state, real money" : "Testnet environment — real venue demo endpoints"}
+            >
+              {data.environment === "live" ? "LIVE" : "TESTNET"}
+            </span>
+          )}
           <div className="flex gap-1.5" title="Group positions by ticker (net view) or venue (ops view)">
             <button type="button" onClick={() => setGroupBy("ticker")} className={tabCls(groupBy === "ticker")}>
               By Ticker
@@ -404,7 +414,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                       )}
                       <button
                         type="button"
-                        disabled={!p.closeSupported || !data?.liveMode || quickBusy === p.key}
+                        disabled={!p.closeSupported || quickBusy === p.key}
                         onClick={(e) => {
                           e.stopPropagation();
                           void quickClose(p);
@@ -416,10 +426,8 @@ export const ExternalPositionsGadget: React.FC = () => {
                         }`}
                         title={
                           !p.closeSupported
-                            ? `${p.venue} cannot place live orders through the bot`
-                            : !data?.liveMode
-                              ? "Paper mode — switch to Live Trading to submit real closes"
-                              : quickArm === p.key
+                            ? `${p.venue} cannot place orders through the bot in this environment`
+                            : quickArm === p.key
                                 ? "Click again to fire a reduce-only MARKET close of the full residual"
                                 : `Quick Close ${p.symbol} on ${p.venue} — click once to arm, again to fire a market close of the full residual`
                         }

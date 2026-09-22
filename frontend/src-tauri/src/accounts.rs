@@ -8,7 +8,6 @@ use crate::commands::{
 use crate::state::{AppEngineState, VenueBalanceInfo};
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
-use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,21 +41,18 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
     };
     ensure_credential_migration(state)?;
     state.sync_vault_credentials_to_adapters();
-    if state
-        .settings
-        .read()
-        .trading_mode
-        .eq_ignore_ascii_case("real")
+    if crate::state::TradingEnvironment::from_mode(&state.settings.read().trading_mode)
+        == crate::state::TradingEnvironment::Live
     {
         let ready_count = state
-            .get_venues()
+            .venues_for_env(crate::state::TradingEnvironment::Live)
             .into_iter()
             .filter(|(_, _, adapter)| {
                 adapter.live_order_submission_implemented() && adapter.has_live_credentials()
             })
             .count();
         if ready_count >= 2 {
-            *state.is_live_mode.write() = true;
+            *state.environment.write() = crate::state::TradingEnvironment::Live;
         }
     }
     Ok(status)
@@ -142,6 +138,9 @@ pub struct AccountDto {
     /// Per-account leverage ceiling 1..=5; `None` = unlimited (backend hard
     /// ceiling of 100 still applies; Risk Control global max also caps).
     pub max_leverage: Option<u32>,
+    /// "live" | "testnet" — which venue environment this account's
+    /// credentials bind to. Immutable once created.
+    pub environment: String,
 }
 
 // Intentionally no Debug: may transiently hold credential material.
@@ -226,6 +225,11 @@ pub struct AccountUpsertInput {
     /// are authoritative (sending `None` clears a previously stored cap).
     #[serde(default)]
     pub max_leverage: Option<u32>,
+    /// "live" | "testnet" — create-time only; ignored on update (the stored
+    /// environment is immutable). `None` on create means the currently
+    /// active trading environment.
+    #[serde(default)]
+    pub environment: Option<String>,
     #[serde(default)]
     pub credentials: Option<AccountCredentialInput>,
 }
@@ -288,6 +292,7 @@ pub(crate) fn ensure_default_profile(
                         existing.is_default,
                         &existing.account_tier,
                         existing.max_leverage,
+                        Some(&existing.environment),
                     )
                     .map_err(|e| e.to_string())
             } else {
@@ -296,7 +301,16 @@ pub(crate) fn ensure_default_profile(
         }
         None => state
             .state_store
-            .upsert_account(&pid, venue, "Default", enabled, true, "standard", None)
+            .upsert_account(
+                &pid,
+                venue,
+                "Default",
+                enabled,
+                true,
+                "standard",
+                None,
+                Some("live"),
+            )
             .map_err(|e| e.to_string()),
     }
 }
@@ -365,6 +379,9 @@ pub(crate) fn ensure_credential_migration(state: &AppEngineState) -> Result<(), 
                         true,
                         "standard",
                         None,
+                        // Legacy unbound records predate the env split — they
+                        // were the live credential set.
+                        Some("live"),
                     )
                     .map_err(|e| e.to_string())?;
             }
@@ -413,6 +430,7 @@ fn account_dto(
         api_key_index: presence.and_then(|p| p.api_key_index),
         account_tier: profile.account_tier.clone(),
         max_leverage: profile.max_leverage,
+        environment: profile.environment.clone(),
     }
 }
 
@@ -446,10 +464,17 @@ pub fn list_accounts_impl(
     state: &AppEngineState,
 ) -> Result<Vec<AccountDto>, String> {
     ensure_credential_migration(state)?;
+    let env = state.env().as_str().to_string();
     let profiles = state
         .state_store
         .list_accounts(venue)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        // Accounts are environment-scoped — the page manages the credential
+        // set for the active environment only. Switching Trading Mode swaps
+        // which profiles appear here.
+        .filter(|p| p.environment == env)
+        .collect();
     accounts_with_presence(state, profiles)
 }
 
@@ -484,6 +509,7 @@ pub fn upsert_account_impl(
                         .as_deref()
                         .unwrap_or(&existing.account_tier),
                     input.max_leverage,
+                    Some(&existing.environment),
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -504,6 +530,12 @@ pub fn upsert_account_impl(
                     break;
                 }
             }
+            // An explicit environment wins; otherwise the account lands in
+            // the environment the operator is currently looking at.
+            let env = match input.environment.as_deref() {
+                Some(e) if !e.trim().is_empty() => e.trim().to_lowercase(),
+                _ => state.env().as_str().to_string(),
+            };
             state
                 .state_store
                 .upsert_account(
@@ -514,6 +546,7 @@ pub fn upsert_account_impl(
                     input.make_default,
                     input.account_tier.as_deref().unwrap_or("standard"),
                     input.max_leverage,
+                    Some(&env),
                 )
                 .map_err(|e| e.to_string())?
         }
@@ -792,119 +825,121 @@ pub fn eligible_strategy_routes_impl(
 ) -> Result<Vec<StrategyAccountRoute>, String> {
     state
         .state_store
-        .eligible_strategy_routes(strategy_id, venue_a, venue_b)
+        .eligible_strategy_routes(strategy_id, venue_a, venue_b, state.env().as_str())
         .map_err(|e| e.to_string())
 }
 
 pub async fn get_venue_balances_impl(
     state: &AppEngineState,
 ) -> Result<Vec<VenueBalanceInfo>, String> {
-    let is_live = *state.is_live_mode.read();
+    let is_live = state.is_live();
+    let env_str = state.env().as_str();
+    let env_label = if is_live { "live" } else { "testnet" };
     let monitor = margin_monitor_from_settings(state);
     let mut results = Vec::new();
 
-    if is_live {
-        if state.vault.write().is_unlocked() {
-            state.sync_vault_credentials_to_adapters();
-        }
+    // One code path for both environments: `get_venues()` returns the
+    // active environment's adapters (production or venue demo endpoints).
+    if state.vault.write().is_unlocked() {
+        state.sync_vault_credentials_to_adapters();
+    }
 
-        for (vid, name, adapter) in state.get_venues() {
-            let def_acc_id = state
-                .state_store
-                .default_account(vid)
-                .ok()
-                .flatten()
-                .map(|a| a.id);
-            if !adapter.has_live_credentials() {
-                // Truthful status: credentials stored but vault locked is not
-                // the same as nothing configured (an enabled venue with a
-                // saved account is configured — it just can't be read now).
-                let locked = !state.vault.write().is_unlocked();
-                // `configured_venues` needs the decrypted vault, so a locked
-                // vault always reports false there — fall back to the durable
-                // account table, which knows a credential profile exists even
-                // when its secrets are unreadable.
-                let configured = state
-                    .vault
-                    .write()
-                    .configured_venues()
-                    .unwrap_or_default()
-                    .iter()
-                    .any(|v| v.eq_ignore_ascii_case(vid))
-                    || def_acc_id.is_some();
-                let (status, action) = if locked && configured {
-                    (
-                        "LOCKED".to_string(),
-                        Some(format!(
-                            "Vault is locked — unlock to read the live {name} balance."
-                        )),
-                    )
-                } else {
-                    (
+    for (vid, name, adapter) in state.get_venues() {
+        let def_acc_id = state
+            .state_store
+            .default_account(vid, env_str)
+            .ok()
+            .flatten()
+            .map(|a| a.id);
+        if !adapter.has_live_credentials() {
+            // Truthful status: credentials stored but vault locked is not
+            // the same as nothing configured (an enabled venue with a
+            // saved account is configured — it just can't be read now).
+            let locked = !state.vault.write().is_unlocked();
+            // `configured_venues` needs the decrypted vault, so a locked
+            // vault always reports false there — fall back to the durable
+            // account table, which knows a credential profile exists even
+            // when its secrets are unreadable.
+            let configured = state
+                .vault
+                .write()
+                .configured_venues()
+                .unwrap_or_default()
+                .iter()
+                .any(|v| v.eq_ignore_ascii_case(vid))
+                || def_acc_id.is_some();
+            let (status, action) = if locked && configured {
+                (
+                    "LOCKED".to_string(),
+                    Some(format!(
+                        "Vault is locked — unlock to read the {env_label} {name} balance."
+                    )),
+                )
+            } else {
+                (
                         "NO_CREDENTIALS".to_string(),
                         Some(format!(
-                            "No usable live API credentials for {name} in the secure vault — add them on the account card."
+                            "No usable {env_label} API credentials for {name} in the secure vault — add them on the account card."
                         )),
                     )
-                };
-                results.push(VenueBalanceInfo {
-                    venue: vid.to_string(),
-                    equity_usd: 0.0,
-                    available_margin_usd: 0.0,
-                    margin_rate_pct: 0.0,
-                    status,
-                    recommended_action: action,
-                    is_live: true,
-                    account_id: def_acc_id,
-                });
-                continue;
-            }
+            };
+            results.push(VenueBalanceInfo {
+                venue: vid.to_string(),
+                equity_usd: 0.0,
+                available_margin_usd: 0.0,
+                margin_rate_pct: 0.0,
+                status,
+                recommended_action: action,
+                is_live,
+                account_id: def_acc_id,
+            });
+            continue;
+        }
 
-            match live_account_or_cached(state, vid, &adapter).await {
-                Ok((account, stale_age)) => {
-                    let free_margin_usd = account
-                        .free_margin
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
-                    let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
-                    let margin_rate_pct = account
-                        .margin_usage_pct
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
+        match live_account_or_cached(state, vid, &adapter).await {
+            Ok((account, stale_age)) => {
+                let free_margin_usd = account
+                    .free_margin
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
+                let margin_rate_pct = account
+                    .margin_usage_pct
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
 
-                    if equity_usd.is_finite() {
-                        let now_ms = Utc::now().timestamp_millis();
-                        // Live equity tracks under `live-{venue}`: the
-                        // shared expectations table is keyed by bare venue
-                        // id on the paper path, and a paper baseline must
-                        // never be compared against real account equity
-                        // (it would log a fake deposit/withdrawal event).
-                        match state.state_store.check_account_equity(
-                            &format!("live-{vid}"),
-                            equity_usd,
-                            &position_signature(&account.positions),
-                            now_ms,
-                        ) {
-                            Ok(report) => {
-                                if let Some(event) = report.event {
-                                    tracing::warn!(
+                if equity_usd.is_finite() {
+                    let now_ms = Utc::now().timestamp_millis();
+                    // Equity baselines are namespaced `{env}-{venue}` so
+                    // a testnet baseline is never compared against live
+                    // account equity (it would log a fake
+                    // deposit/withdrawal event).
+                    match state.state_store.check_account_equity(
+                        &format!("{env_str}-{vid}"),
+                        equity_usd,
+                        &position_signature(&account.positions),
+                        now_ms,
+                    ) {
+                        Ok(report) => {
+                            if let Some(event) = report.event {
+                                tracing::warn!(
                                         "external equity delta on {vid}: {} expected {expected} actual {actual} ({kind}) — baseline rebased",
                                         event.delta,
                                         expected = event.expected,
                                         actual = event.actual,
                                         kind = event.kind,
                                     );
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("equity attribution poll failed for {vid}: {e}")
                             }
                         }
+                        Err(e) => {
+                            tracing::warn!("equity attribution poll failed for {vid}: {e}")
+                        }
                     }
+                }
 
-                    let (status, action) = match monitor.evaluate_account(&account) {
+                let (status, action) = match monitor.evaluate_account(&account) {
                         MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
                         MarginHealthStatus::Warning => (
                             "LOW_MARGIN".to_string(),
@@ -926,15 +961,15 @@ pub async fn get_venue_balances_impl(
                         ),
                     };
 
-                    // Stale override: figures above are last-known-good. Inside the
-                    // grace period this stays quiet (STALE); past it, it
-                    // escalates to ERROR so the operator is warned — but the
-                    // cached balance is still reported, never zeroed.
-                    let (status, action) = match stale_age {
+                // Stale override: figures above are last-known-good. Inside the
+                // grace period this stays quiet (STALE); past it, it
+                // escalates to ERROR so the operator is warned — but the
+                // cached balance is still reported, never zeroed.
+                let (status, action) = match stale_age {
                         Some(age) if age > stale_grace_ms(state) => (
                             "ERROR".to_string(),
                             Some(format!(
-                                "Live balance unreadable for {}s — last known ${:.2}. Check the connection, then re-check funds on the venue site.",
+                                "{env_label} balance unreadable for {}s — last known ${:.2}. Check the connection, then re-check funds on the venue site.",
                                 age / 1000,
                                 equity_usd
                             )),
@@ -942,128 +977,40 @@ pub async fn get_venue_balances_impl(
                         Some(age) => (
                             "STALE".to_string(),
                             Some(format!(
-                                "Live read failed — last known ${:.2} from {}s ago.",
+                                "{env_label} read failed — last known ${:.2} from {}s ago.",
                                 equity_usd,
                                 age / 1000
                             )),
                         ),
                         None => (status, action),
                     };
-                    results.push(VenueBalanceInfo {
-                        venue: vid.to_string(),
-                        equity_usd,
-                        available_margin_usd: free_margin_usd,
-                        margin_rate_pct,
-                        status,
-                        recommended_action: action,
-                        is_live: true,
-                        account_id: def_acc_id,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!("failed to fetch live balance for {name} ({vid}): {e}");
-                    results.push(VenueBalanceInfo {
-                        venue: vid.to_string(),
-                        equity_usd: 0.0,
-                        available_margin_usd: 0.0,
-                        margin_rate_pct: 0.0,
-                        status: "ERROR".to_string(),
-                        recommended_action: Some(format!("Failed to retrieve live balance: {e}")),
-                        is_live: true,
-                        account_id: def_acc_id,
-                    });
-                }
+                results.push(VenueBalanceInfo {
+                    venue: vid.to_string(),
+                    equity_usd,
+                    available_margin_usd: free_margin_usd,
+                    margin_rate_pct,
+                    status,
+                    recommended_action: action,
+                    is_live,
+                    account_id: def_acc_id,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("failed to fetch {env_label} balance for {name} ({vid}): {e}");
+                results.push(VenueBalanceInfo {
+                    venue: vid.to_string(),
+                    equity_usd: 0.0,
+                    available_margin_usd: 0.0,
+                    margin_rate_pct: 0.0,
+                    status: "ERROR".to_string(),
+                    recommended_action: Some(format!(
+                        "Failed to retrieve {env_label} balance: {e}"
+                    )),
+                    is_live,
+                    account_id: def_acc_id,
+                });
             }
         }
-
-        return Ok(results);
-    }
-
-    // Only venues currently admitted for paper execution report balances;
-    // figures come from the real simulated account snapshots.
-    for (vid, name, _adapter) in state.get_venues() {
-        let Some(paper) = state.get_paper_exchange(vid) else {
-            continue;
-        };
-        let account = paper.fetch_account().await.map_err(|e| e.to_string())?;
-
-        let free_margin_usd = account
-            .free_margin
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-        let equity_usd = account.equity.to_string().parse::<f64>().unwrap_or(0.0);
-        let margin_rate_pct = account
-            .margin_usage_pct
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-
-        // Attribution poll: compare actual equity against the fills-derived
-        // baseline. Own fills already moved the baseline forward at dispatch,
-        // so any residual delta here is an external flow — recorded and
-        // rebased. Failures only log; balance reporting must never break.
-        if equity_usd.is_finite() {
-            let now_ms = Utc::now().timestamp_millis();
-            match state.state_store.check_account_equity(
-                vid,
-                equity_usd,
-                &position_signature(&account.positions),
-                now_ms,
-            ) {
-                Ok(report) => {
-                    if let Some(event) = report.event {
-                        tracing::warn!(
-                            "external equity delta on {vid}: {} expected {expected} actual {actual} ({kind}) — baseline rebased",
-                            event.delta,
-                            expected = event.expected,
-                            actual = event.actual,
-                            kind = event.kind,
-                        );
-                    }
-                }
-                Err(e) => tracing::warn!("equity attribution poll failed for {vid}: {e}"),
-            }
-        }
-
-        let (status, action) = match monitor.evaluate_account(&account) {
-            MarginHealthStatus::Healthy => ("HEALTHY".to_string(), None),
-            MarginHealthStatus::Warning => (
-                "LOW_MARGIN".to_string(),
-                Some(format!("Warning: {} margin utilization elevated.", name)),
-            ),
-            MarginHealthStatus::Empty => (
-                "EMPTY".to_string(),
-                Some(format!(
-                    "No funds on {} — deposit to enable trading on this venue.",
-                    name
-                )),
-            ),
-            MarginHealthStatus::Critical | MarginHealthStatus::Breached => (
-                "DEPLETED".to_string(),
-                Some(format!(
-                    "Critical: {} margin utilization breached. Execution halted on this leg.",
-                    name
-                )),
-            ),
-        };
-
-        let def_acc_id = state
-            .state_store
-            .default_account(vid)
-            .ok()
-            .flatten()
-            .map(|a| a.id);
-        results.push(VenueBalanceInfo {
-            venue: vid.to_string(),
-            equity_usd,
-            available_margin_usd: free_margin_usd,
-            margin_rate_pct,
-            status,
-            recommended_action: action,
-            is_live: false,
-            account_id: def_acc_id,
-        });
     }
 
     Ok(results)
@@ -1183,8 +1130,8 @@ pub async fn get_account_signer_address(
     get_account_signer_address_impl(&account_id, &state)
 }
 
-/// The signer address the live adapter would sign with *right now* —
-/// derived from the in-memory provisioned key, not the vault record.
+/// The signer address the active-environment adapter would sign with *right
+/// now* — derived from the in-memory provisioned key, not the vault record.
 /// Divergence from `get_account_signer_address` means provisioning is
 /// stale; equality with a rejected-order address confirms which key signed.
 pub fn get_active_signer_address_impl(
@@ -1192,15 +1139,25 @@ pub fn get_active_signer_address_impl(
     state: &AppEngineState,
 ) -> Result<Option<String>, String> {
     let vid = venue.trim().to_lowercase();
+    let is_live = state.is_live();
     if vid == "hyperliquid" || vid == "hl" {
-        return Ok(state.live_hl.active_signer_address());
+        let adapter = if is_live {
+            &state.live_hl
+        } else {
+            &state.tn_hl
+        };
+        return Ok(adapter.active_signer_address());
     }
-    if let Some(a) = state
-        .live_dex_perps
-        .iter()
-        .find(|a| a.venue_id_str().eq_ignore_ascii_case(&vid))
-    {
-        return Ok(a.active_signer_address());
+    // Long-tail DEX perps exist only on the live set — they have no public
+    // testnet, so testnet has no signer to introspect.
+    if is_live {
+        if let Some(a) = state
+            .live_dex_perps
+            .iter()
+            .find(|a| a.venue_id_str().eq_ignore_ascii_case(&vid))
+        {
+            return Ok(a.active_signer_address());
+        }
     }
     Err(format!("no signer introspection for venue '{venue}'"))
 }

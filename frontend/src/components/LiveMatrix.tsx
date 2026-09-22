@@ -71,7 +71,7 @@ interface LiveMatrixProps {
   isPaused?: boolean;
   positionState?: TickerPositionState | null;
   futuresParams?: StrategyParamsDto | null;
-  /** Summed paper-equity backing the derived per-ticker max steps; null = unknown, sizes to 0 steps. */
+  /** Summed venue-equity backing the derived per-ticker max steps; null = unknown, sizes to 0 steps. */
   totalEquityUsd?: number | null;
   /** Left-column ticker selector gadget, composed by the parent — symbol
    *  selection is strategy-specific so it lives on this page, not the
@@ -212,7 +212,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
           {!isLive && (
             <span
               className="ml-1.5 px-1.5 py-0.5 rounded-md border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
-              title="Route contains read-only venue(s) — paper execution only"
+              title="Route contains read-only venue(s) — no order submission"
             >
               PAPER
             </span>

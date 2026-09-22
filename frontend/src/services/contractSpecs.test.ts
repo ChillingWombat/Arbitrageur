@@ -5,7 +5,7 @@ import {
   computeSafeLeverage,
   normalizeVenueKey,
   deriveStepSizing,
-  resolveTotalPaperEquity,
+  resolveTotalVenueEquity,
 } from "./contractSpecs.ts";
 
 test("normalizeVenueKey correctly normalizes variations", () => {
@@ -119,11 +119,11 @@ test("deriveStepSizing maxSteps fails closed (0 steps) on unknown equity", () =>
   assert.ok(noPrice.stepBaseQty >= noPrice.minCompatBase);
 });
 
-test("resolveTotalPaperEquity returns null instead of a fabricated seed", () => {
-  assert.equal(resolveTotalPaperEquity([]), null);
-  assert.equal(resolveTotalPaperEquity([{ equity_usd: NaN }]), null);
-  assert.equal(resolveTotalPaperEquity([{ equity_usd: 0 }]), null);
-  assert.equal(resolveTotalPaperEquity([{ equity_usd: 100_000 }, { equity_usd: 200_000 }]), 300_000);
+test("resolveTotalVenueEquity returns null instead of a fabricated seed", () => {
+  assert.equal(resolveTotalVenueEquity([]), null);
+  assert.equal(resolveTotalVenueEquity([{ equity_usd: NaN }]), null);
+  assert.equal(resolveTotalVenueEquity([{ equity_usd: 0 }]), null);
+  assert.equal(resolveTotalVenueEquity([{ equity_usd: 100_000 }, { equity_usd: 200_000 }]), 300_000);
 });
 
 test("deriveStepSizing session multipliers default to neutral and scale size", () => {

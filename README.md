@@ -16,7 +16,7 @@ The system targets **Spatial Price Differences** (orderbook spread capture) and 
 
 ## Current Safety Status
 
-This repository is a **research platform** with paper strategy execution and narrowly bounded live submission surfaces. Read this before running anything:
+This repository is a **research platform** with testnet strategy execution (real orders on venue demo endpoints) and narrowly bounded live submission surfaces. Read this before running anything:
 
 - **New live strategy entries are disabled and fail closed.** Eleven venue adapters can sign, submit, or cancel orders and authenticated account reads exist; every live-submission venue also implements order-status polling, and a startup + 5-second reconciliation supervisor resolves durable working orders to terminal state with monotonic accounting (unknown/unresolvable orders escalate to `unresolved`, never assumed filled or cancelled). Strategy-level live entries remain blocked pending automated residual-leg resolution, cancel-failure retry, and sandbox/canary evidence. Explicit risk-reducing close submissions may be available where an adapter supports them; monitor them to terminal state and confirm at the venue.
 - **The desktop app admits the enabled venue adapters listed in `docs/CAPABILITIES.md`** for their implemented market/account paths. Public requests disclose your IP address and requested symbols; authenticated requests additionally disclose the configured account identity to that venue.
@@ -24,7 +24,7 @@ This repository is a **research platform** with paper strategy execution and nar
 - **Ticker availability is discovered dynamically from live `fetch_markets`** across admitted venues — the static catalog is metadata/price fallback only, not an allowlist. Each exact `BASE-QUOTE` market is offered when at least two venues actually report it; USDC and USDT listings remain distinct instruments.
 - **Signal baselines use persisted authentic spread samples.** The sliding window accepts a manual duration from 5 minutes to 30 days (default 24 hours), or per-ticker **auto mode**: the median across qualifying venue pairs of `2 × OU half-life`, floored at 30 minutes and capped at 7 days, behind R²/data gates. When history is insufficient, auto mode uses the explicitly labeled manual fallback — and pairs without enough durable baseline coverage cannot trigger divergence execution.
 - **Browser mode has no synthetic demo engine.** All engine and quote calls require the desktop application's IPC; in the browser they fail closed with the desktop-required error rather than fabricating execution, balances, quotes, P&L, risk, or calibration. Tauri command errors propagate to the UI — there is no fallback path.
-- **Paper spatial execution** uses freshly fetched, identity- and structure-validated orderbooks, bounded IOC (immediate-or-cancel) simulation, a maximum 5x leverage, and margin/delta/depth/slippage checks — plus a backend-computed round-trip route-economics gate: expected entry and exit slippage, both venues' current bid/ask crossing, and round-trip commissions must leave expected net at or above the configured target profit (default 1 BPS) before dispatch. Only **one open pair per symbol** is supported by design (shared per-venue paper accounts cannot attribute margin per pair, and flatten is symbol-scoped and would cross-close independent pairs). Positions carry a persisted entry baseline, and the `check_spatial_convergence` IPC unwinds converge/stop/timeout exits through the flatten path, freeing the slot for re-entry; the Spread Radar bot has its own equivalent lifecycle.
+- **Testnet spatial execution** uses freshly fetched, identity- and structure-validated orderbooks, bounded IOC (immediate-or-cancel) dispatch against venue demo endpoints, a maximum 5x leverage, and margin/delta/depth/slippage checks — plus a backend-computed round-trip route-economics gate: expected entry and exit slippage, both venues' current bid/ask crossing, and round-trip commissions must leave expected net at or above the configured target profit (default 1 BPS) before dispatch. Only **one open pair per symbol** is supported by design (shared per-venue accounts cannot attribute margin per pair, and flatten is symbol-scoped and would cross-close independent pairs). Positions carry a persisted entry baseline, and the `check_spatial_convergence` IPC unwinds converge/stop/timeout exits through the flatten path, freeing the slot for re-entry; the Spread Radar bot has its own equivalent lifecycle.
 - **Credential vault:** local AES-256-GCM encryption with Argon2id key derivation, `0600` file / `0700` directory permissions on Unix, and no whole-bundle credential-read IPC. Explicit field-scoped reveal exists only when you ask to reveal a field. Prefer read-only credentials for monitoring; when you intentionally use risk-reducing closes, use the least-privilege trading credential required and never a withdrawal-enabled key.
 
 Nothing here is production-ready. App-level WebSocket supervisors (Hyperliquid, Lighter, Robinhood-Lighter, and Vanta) feed the MarketDataHub with REST fallback; other admitted venues poll REST and the UI still polls the hub on a ~3s cadence.
@@ -114,7 +114,7 @@ pixi run bench
    Per-solve latency: 3.33 microseconds
 ```
 
-### 4. Run Paper Trading Simulation
+### 4. Run Testnet Trading
 Research/demo only: simulates spatial spread and funding carry trading between in-process simulated venues (no live execution):
 ```bash
 pixi run run-sim
@@ -145,12 +145,12 @@ pixi run run-prediction
 Arbitrageur includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
 
 ### 🌟 Frontend Capabilities
-- **⚡ Spatial Matrix:** Public L2 orderbooks from enabled venues with depth visualization, VWAP calculation, and one-click **paper** execution against the built-in simulator.
-- **📈 Funding Carry Radar:** Funding carry research view with normalized rates, APR, compounded APY, and break-even estimates; paper perp/perp and same-venue basis execution is supported where exact books exist, while live strategy entries remain disabled.
+- **⚡ Spatial Matrix:** Public L2 orderbooks from enabled venues with depth visualization, VWAP calculation, and one-click **testnet** execution against venue demo endpoints.
+- **📈 Funding Carry Radar:** Funding carry research view with normalized rates, APR, compounded APY, and break-even estimates; testnet perp/perp and same-venue basis execution is supported where exact books exist; live strategy entries are opt-in (Risk Control).
 - **🎯 Prediction Parity Hub:** Cross-venue parity research for Polymarket CTF CLOB and Kalshi CFTC contracts ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$); payouts are conditional on identical settlement terms and shown returns are indicative only.
 - **🔬 Stat-Arb Lab:** In-memory 2D Kalman filter dynamic hedge ratio ($\beta_t$) and z-score sparkline chart, Bertram-style numerical threshold search, and Ornstein-Uhlenbeck AR(1) MLE fitting.
 - **🛡️ DeltaGuard & Risk Operations:** Current in-memory signed net delta tracking per asset, circuit breaker tripwires (dollar & percentage drawdown), maintenance margin proximity, and manual emergency kill switch.
-- **🧪 Simulation Studio:** High-frequency paper trading engine with continuous auto-run loop, tick-by-tick order trace, and emergency unwind visualization.
+- **🧪 Simulation Studio:** High-frequency testnet trading engine with continuous auto-run loop, tick-by-tick order trace, and emergency unwind visualization.
 - **⚙️ Credential Vault:** Local encrypted credential storage (AES-256-GCM + Argon2id); remote HSM signing is not an integrated backend, and submission-capable adapters are still not live-strategy-entry ready.
 
 ### 🚀 Running the Frontend

@@ -23,41 +23,43 @@ test("getEnabledConnectedVenueCodes returns empty set when settings are undefine
   assert.strictEqual(defaultCodes.size, 0);
 });
 
-test("getEnabledConnectedVenueCodes returns enabled supported venues in paper mode and ignores unsupported", () => {
+test("getEnabledConnectedVenueCodes returns enabled testnet-capable venues and ignores unsupported", () => {
   const settings: VenueSettingsFilter = {
-    trading_mode: "paper",
+    trading_mode: "testnet",
     hyperliquid_enabled: true,
     lighter_enabled: true,
     lighter_api_key: "", // connectivity is never inferred from key strings
     vanta_enabled: true,
     vanta_orderly_key: "ed25519:validkey",
-    robinhood_enabled: true,
+    robinhood_enabled: true, // no public testnet — live-only venue
     arcus_enabled: true, // scaffold only, unsupported
-    aster_enabled: true,
+    aster_enabled: true, // no public testnet — live-only venue
     popdex_enabled: true,
-    kraken_enabled: true, // admitted to paper read-only
+    kraken_enabled: true,
     polymarket_enabled: true, // unsupported
-    kalshi_enabled: true, // unsupported
-  };
-  const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["AST", "HL", "KRK", "LGT", "POP", "RH", "VNT"]);
-});
-
-test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, CB, DCB)", () => {
-  const settings: VenueSettingsFilter = {
-    trading_mode: "paper",
-    binance_enabled: true,
-    okx_enabled: true,
-    coinbase_enabled: true,
+    kalshi_enabled: true, // prediction venue, not in the perp set
+    coinbase_enabled: true, // no public testnet — live-only venue
     decibel_enabled: true,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["BNB", "CB", "DCB", "OKX"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["DCB", "HL", "KRK", "LGT", "POP", "VNT"]);
+});
+
+test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, DCB)", () => {
+  const settings: VenueSettingsFilter = {
+    trading_mode: "testnet",
+    binance_enabled: true,
+    okx_enabled: true,
+    coinbase_enabled: true, // no public testnet — live-only venue
+    decibel_enabled: true,
+  };
+  const codes = getEnabledConnectedVenueCodes(settings, false);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["BNB", "DCB", "OKX"]);
 });
 
 test("getEnabledConnectedVenueCodes does not infer connectivity from credential strings", () => {
   const settings: VenueSettingsFilter = {
-    trading_mode: "paper",
+    trading_mode: "testnet",
     hyperliquid_enabled: false,
     hyperliquid_private_key: "0xdeadbeef",
     lighter_enabled: false,
@@ -70,19 +72,27 @@ test("getEnabledConnectedVenueCodes does not infer connectivity from credential 
 
 test("getEnabledConnectedVenueCodes returns no venues in live mode", () => {
   const settings: VenueSettingsFilter = {
-    trading_mode: "real",
+    trading_mode: "live",
     hyperliquid_enabled: true,
     lighter_enabled: true,
   };
   assert.strictEqual(getEnabledConnectedVenueCodes(settings, true).size, 0);
   assert.strictEqual(getEnabledConnectedVenueCodes(settings, false).size, 0);
 
-  const paperSettings: VenueSettingsFilter = {
-    trading_mode: "paper",
+  // Legacy "real" value still reads as live.
+  const legacySettings: VenueSettingsFilter = {
+    trading_mode: "real",
     hyperliquid_enabled: true,
     lighter_enabled: true,
   };
-  assert.strictEqual(getEnabledConnectedVenueCodes(paperSettings, true).size, 0);
+  assert.strictEqual(getEnabledConnectedVenueCodes(legacySettings, false).size, 0);
+
+  const testnetSettings: VenueSettingsFilter = {
+    trading_mode: "testnet",
+    hyperliquid_enabled: true,
+    lighter_enabled: true,
+  };
+  assert.strictEqual(getEnabledConnectedVenueCodes(testnetSettings, true).size, 0);
 });
 
 test("filterAvailableTickers retains only tickers with at least 2 active venues", () => {

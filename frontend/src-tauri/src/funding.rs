@@ -1355,8 +1355,9 @@ pub async fn execute_funding_carry_impl(
     if !trade_size_usd.is_finite() || trade_size_usd <= 0.0 {
         return Err("trade_size_usd must be a finite positive number".into());
     }
-    if *state.is_live_mode.read() {
-        // Paper-only until two-leg live dispatch + reconciliation exists.
+    let is_live = state.is_live();
+    if is_live {
+        // Testnet-only until two-leg live dispatch + reconciliation exists.
         // Refuse with per-leg reasons so the operator sees exactly what is
         // missing instead of a blanket denial.
         let mut issues = Vec::new();
@@ -1375,7 +1376,7 @@ pub async fn execute_funding_carry_impl(
                 .to_string(),
         );
         return Err(format!(
-            "Live funding execution is not available for {symbol} (LONG {long_venue} / SHORT {short_venue}): {}. Switch to Paper Trading to execute this pair on the simulator.",
+            "Live funding execution is not available for {symbol} (LONG {long_venue} / SHORT {short_venue}): {}. Switch to Testnet to run this pair against venue demo endpoints.",
             issues.join("; ")
         ));
     }
@@ -1455,16 +1456,10 @@ pub async fn execute_funding_carry_impl(
 
     let long_adapter = state
         .get_adapter(long_canon)
-        .ok_or_else(|| format!("Venue '{long_canon}' is not admitted for paper execution"))?;
+        .ok_or_else(|| format!("Venue '{long_canon}' is not admitted for execution"))?;
     let short_adapter = state
         .get_adapter(short_canon)
-        .ok_or_else(|| format!("Venue '{short_canon}' is not admitted for paper execution"))?;
-    let paper_long = state
-        .get_paper_exchange(long_canon)
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{long_canon}'"))?;
-    let paper_short = state
-        .get_paper_exchange(short_canon)
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{short_canon}'"))?;
+        .ok_or_else(|| format!("Venue '{short_canon}' is not admitted for execution"))?;
 
     let _execution_guard = state.execution_lock.lock().await;
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
@@ -1478,7 +1473,7 @@ pub async fn execute_funding_carry_impl(
                 .into(),
         );
     }
-    if *state.is_live_mode.read() {
+    if is_live {
         return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
     }
 
@@ -1603,24 +1598,39 @@ pub async fn execute_funding_carry_impl(
         ));
     }
     let dust = triangle_dust_qty();
-    for (paper, exact, canon) in [
-        (&paper_long, long_sym.as_str(), long_canon),
-        (&paper_short, short_sym.as_str(), short_canon),
+    let acc_long_pre = long_adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("funding long-leg account read on {long_canon} failed: {e}"))?;
+    let acc_short_pre = short_adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("funding short-leg account read on {short_canon} failed: {e}"))?;
+    for (adapter, acc, exact, canon) in [
+        (&long_adapter, &acc_long_pre, long_sym.as_str(), long_canon),
+        (
+            &short_adapter,
+            &acc_short_pre,
+            short_sym.as_str(),
+            short_canon,
+        ),
     ] {
-        let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-        if acc
-            .get_position(exact)
+        if adapter
+            .account_position_for(acc, exact)
+            .ok()
+            .flatten()
             .is_some_and(|pos| pos.quantity > dust)
         {
             return Err(format!(
-                "An open paper position already exists for {exact} on {canon}; flatten it before carrying"
+                "An open position already exists for {exact} on {canon}; flatten it before carrying"
             ));
         }
     }
 
-    // Leverage is per leg: a spot paper leg books at 1x, perp legs at the
-    // resolved funding leverage.
-    let (target_leverage, account_cap) = resolve_effective_leverage(
+    // Leverage is per leg: a spot leg books at 1x, perp legs at the
+    // resolved funding leverage. Venue-side set is best-effort — a rejected
+    // change is not fatal but must be visible.
+    let (target_leverage, _account_cap) = resolve_effective_leverage(
         state,
         "funding",
         "funding",
@@ -1631,44 +1641,34 @@ pub async fn execute_funding_carry_impl(
     )?;
     let long_lev: u32 = if is_basis { 1 } else { target_leverage };
     let short_lev: u32 = target_leverage;
-    for (paper, lev, exact) in [
-        (&paper_long, long_lev, long_sym.as_str()),
-        (&paper_short, short_lev, short_sym.as_str()),
+    for (adapter, lev, exact, canon) in [
+        (&long_adapter, long_lev, long_sym.as_str(), long_canon),
+        (&short_adapter, short_lev, short_sym.as_str(), short_canon),
     ] {
-        if paper.max_leverage_cap() != account_cap {
-            paper
-                .set_max_leverage_cap(account_cap)
-                .map_err(|e| e.to_string())?;
+        if let Err(e) = adapter.set_leverage(exact, lev).await {
+            tracing::warn!(
+                "funding set_leverage {lev}x on {canon} {exact} failed: {e} — order will submit at the venue's existing leverage"
+            );
         }
-        paper
-            .set_leverage(exact, lev)
-            .await
-            .map_err(|e| e.to_string())?;
     }
 
     // Initial margin aggregates by canonical venue: a same-venue pair must
     // cover the spot leg's full notional plus the perp leg's IM.
     let long_im = (qty * long_vwap) / Decimal::from(long_lev.max(1));
     let short_im = (qty * short_vwap) / Decimal::from(short_lev.max(1));
-    let acc_long = paper_long
-        .fetch_account()
-        .await
-        .map_err(|e| e.to_string())?;
-    let acc_short = paper_short
-        .fetch_account()
-        .await
-        .map_err(|e| e.to_string())?;
+    let acc_long = acc_long_pre;
+    let acc_short = acc_short_pre;
     let monitor = margin_monitor_from_settings(state);
     if long_canon == short_canon {
         match monitor.evaluate_account(&acc_long) {
             MarginHealthStatus::Empty => {
                 return Err(format!(
-                    "Paper account {long_canon} has no funds; execution refused"
+                    "Account {long_canon} has no funds; execution refused"
                 ));
             }
             MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
                 return Err(format!(
-                    "Paper account {long_canon} margin status is critical/breached; execution refused"
+                    "Account {long_canon} margin status is critical/breached; execution refused"
                 ));
             }
             _ => {}
@@ -1687,13 +1687,11 @@ pub async fn execute_funding_carry_impl(
         ] {
             match monitor.evaluate_account(acc) {
                 MarginHealthStatus::Empty => {
-                    return Err(format!(
-                        "Paper account {canon} has no funds; execution refused"
-                    ));
+                    return Err(format!("Account {canon} has no funds; execution refused"));
                 }
                 MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
                     return Err(format!(
-                        "Paper account {canon} margin status is critical/breached; execution refused"
+                        "Account {canon} margin status is critical/breached; execution refused"
                     ));
                 }
                 _ => {}
@@ -1706,13 +1704,6 @@ pub async fn execute_funding_carry_impl(
             }
         }
     }
-
-    paper_long
-        .replace_orderbook(long_book.clone())
-        .map_err(|e| e.to_string())?;
-    paper_short
-        .replace_orderbook(short_book.clone())
-        .map_err(|e| e.to_string())?;
 
     let cycle = {
         let mut step = state.sim_step_counter.write();
@@ -1735,10 +1726,11 @@ pub async fn execute_funding_carry_impl(
     // run keeps the root blocked until its own legs reconcile. Legs carry
     // their exact symbols; the root carries the requested perp.
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
+    let env_str = state.env().as_str();
     let account_for = |venue: &str| {
         state
             .state_store
-            .default_account(venue)
+            .default_account(venue, env_str)
             .ok()
             .flatten()
             .map(|a| a.id)
@@ -1778,9 +1770,7 @@ pub async fn execute_funding_carry_impl(
     // each a different event — persist each under its own kind so scoring
     // never mixes semantics. `net_win` (backtest P(net>0)) scores against
     // realized net bps; `funding_persist` and the EV-transform heuristic
-    // persist for audit. Non-fatal on failure. Live mode is hard-gated
-    // above, so is_live reads false here — read it anyway rather than
-    // hardcoding so a future live path stays correct.
+    // persist for audit. Non-fatal on failure.
     for (kind, p) in [
         ("net_win", opp.backtest_win_rate),
         ("funding_persist", opp.persistence_probability),
@@ -1797,28 +1787,28 @@ pub async fn execute_funding_carry_impl(
             FUNDING_STRATEGY_ID,
             &root_symbol,
             &format!("{long_canon}/{short_canon}"),
-            *state.is_live_mode.read(),
+            state.is_live(),
         ) {
             tracing::warn!("persist funding prediction {kind} failed for {signal_id}: {e}");
         }
     }
 
-    let mut equity_before = dec!(0);
+    // Pre-trade equity snapshot of the two traded venues (env-namespaced
+    // keys) — the baseline the post-fill attribution refresh measures
+    // own-fill deltas against.
     let mut equity_before_by_venue = HashMap::new();
-    for (vid, p) in state.paper_exchanges() {
-        let acc = p.fetch_account().await.map_err(|e| e.to_string())?;
-        equity_before += acc.equity;
+    for (vid, acc) in [(long_canon, &acc_long), (short_canon, &acc_short)] {
         if let Ok(f) = acc.equity.to_string().parse::<f64>() {
             if f.is_finite() {
-                equity_before_by_venue.insert(vid.to_string(), f);
+                equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
             }
         }
     }
 
     // Delta-neutral in base terms — lift the long ask, hit the short bid —
     // dispatched concurrently through the atomic coordinator.
-    let long_exec: Arc<dyn ExchangeAdapter> = paper_long.clone();
-    let short_exec: Arc<dyn ExchangeAdapter> = paper_short.clone();
+    let long_exec: Arc<dyn ExchangeAdapter> = long_adapter.clone();
+    let short_exec: Arc<dyn ExchangeAdapter> = short_adapter.clone();
     let order_long = state.coordinator.router().build_ioc_order(
         long_exec.venue_id(),
         long_sym.clone(),
@@ -1840,21 +1830,24 @@ pub async fn execute_funding_carry_impl(
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
 
-    let mut equity_after = dec!(0);
-    for (_, p) in state.paper_exchanges() {
-        equity_after += p.fetch_account().await.map_err(|e| e.to_string())?.equity;
-    }
     refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
-    let attempt_pnl_f = (equity_after - equity_before)
-        .to_string()
-        .parse::<f64>()
-        .unwrap_or(0.0);
+    // Realized P&L comes from the coordinator's verified fill accounting —
+    // identical semantics in both environments.
+    let attempt_pnl_f = match &res {
+        ArbitrageExecutionResult::Success {
+            realized_profit, ..
+        } => realized_profit.to_string().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
+    };
     let total_f = {
-        let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl = equity_after - state.paper_baseline_equity();
+        let mut total_pnl = if state.is_live() {
+            state.total_realized_profit_live.write()
+        } else {
+            state.total_realized_profit.write()
+        };
+        *total_pnl += Decimal::from_str_exact(&attempt_pnl_f.to_string()).unwrap_or(dec!(0));
         total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
     };
-    state.circuit_breaker.update_equity(equity_after);
 
     let net_bps = opp.net_rate_8h_pct * 100.0;
 
@@ -1954,7 +1947,7 @@ pub async fn execute_funding_carry_impl(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!(
-                    "{trim_note}Funding {kind_label} (paper) opened {open_qty} {root_symbol}: {path} at {long_px_f}/{short_px_f}; {carry_note}"
+                    "{trim_note}Funding {kind_label} opened {open_qty} {root_symbol}: {path} at {long_px_f}/{short_px_f}; {carry_note}"
                 ),
                 direction: Some(path.clone()),
                 trigger_spread_bps: Some(net_bps),
@@ -1962,7 +1955,7 @@ pub async fn execute_funding_carry_impl(
                 position_step: None,
                 max_units: None,
                 nominal_hurdle_bps: Some(hurdle),
-                is_live: false,
+                is_live,
             });
 
             maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
@@ -1979,7 +1972,7 @@ pub async fn execute_funding_carry_impl(
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
-                    "{trim_note}Funding {kind_label} (paper) dispatched on {root_symbol} ({path}): 2/2 legs filled {open_qty} (LONG {long_sym} / SHORT {short_sym}), realized P&L ${attempt_pnl_f:.2}; carry position open — flatten {root_symbol} to unwind"
+                    "{trim_note}Funding {kind_label} dispatched on {root_symbol} ({path}): 2/2 legs filled {open_qty} (LONG {long_sym} / SHORT {short_sym}), realized P&L ${attempt_pnl_f:.2}; carry position open — flatten {root_symbol} to unwind"
                 ),
             })
         }
@@ -2068,7 +2061,7 @@ pub async fn execute_funding_carry_impl(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!(
-                    "UNRESOLVED FUNDING EXPOSURE (paper) on {root_symbol} ({path}): leg A [{error_a}]; leg B [{error_b}]"
+                    "UNRESOLVED FUNDING EXPOSURE on {root_symbol} ({path}): leg A [{error_a}]; leg B [{error_b}]"
                 ),
                 direction: Some(path.clone()),
                 trigger_spread_bps: Some(net_bps),
@@ -2076,7 +2069,7 @@ pub async fn execute_funding_carry_impl(
                 position_step: None,
                 max_units: None,
                 nominal_hurdle_bps: Some(hurdle),
-                is_live: false,
+                is_live,
             });
             Err(format!(
                 "UNRESOLVED FUNDING EXPOSURE: leg A [{error_a}]; leg B [{error_b}]"
@@ -2094,32 +2087,35 @@ pub async fn execute_funding_carry_impl(
                 crate::state_store::SignalStatus::Failed,
                 Some(&format!("{other:?}")),
             );
-            record_execution_log(state, ExecutionLogEntry {
-                id: format!("exec-funding-{cycle}"),
-                timestamp: Utc::now().to_rfc3339(),
-                trade_type: "Funding".into(),
-                strategy_id: crate::attribution::attribute_strategy_id(FUNDING_STRATEGY_ID),
-                symbol: root_symbol.clone(),
-                venue_a: opp.long_venue.clone(),
-                venue_b: opp.short_venue.clone(),
-                leg_a_status: status_a.into(),
-                leg_b_status: status_b.into(),
-                success: false,
-                gross_profit: 0.0,
-                fees: 0.0,
-                net_profit: attempt_pnl_f,
-                latency_us,
-                note: format!(
-                    "Funding {kind_label} (paper) compensated failure on {root_symbol} ({path}): {other:?}"
+            record_execution_log(
+                state,
+                ExecutionLogEntry {
+                    id: format!("exec-funding-{cycle}"),
+                    timestamp: Utc::now().to_rfc3339(),
+                    trade_type: "Funding".into(),
+                    strategy_id: crate::attribution::attribute_strategy_id(FUNDING_STRATEGY_ID),
+                    symbol: root_symbol.clone(),
+                    venue_a: opp.long_venue.clone(),
+                    venue_b: opp.short_venue.clone(),
+                    leg_a_status: status_a.into(),
+                    leg_b_status: status_b.into(),
+                    success: false,
+                    gross_profit: 0.0,
+                    fees: 0.0,
+                    net_profit: attempt_pnl_f,
+                    latency_us,
+                    note: format!(
+                    "Funding {kind_label} compensated failure on {root_symbol} ({path}): {other:?}"
                 ),
-                direction: Some(path.clone()),
-                trigger_spread_bps: Some(net_bps),
-                baseline_mean_spread_bps: None,
-                position_step: None,
-                max_units: None,
-                nominal_hurdle_bps: Some(hurdle),
-                is_live: false,
-            });
+                    direction: Some(path.clone()),
+                    trigger_spread_bps: Some(net_bps),
+                    baseline_mean_spread_bps: None,
+                    position_step: None,
+                    max_units: None,
+                    nominal_hurdle_bps: Some(hurdle),
+                    is_live,
+                },
+            );
 
             Ok(SimStepResultDto {
                 cycle,
@@ -2132,9 +2128,7 @@ pub async fn execute_funding_carry_impl(
                 spread_bps: net_bps,
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
-                message: format!(
-                    "Funding {kind_label} (paper) execution failed/unwound: {other:?}"
-                ),
+                message: format!("Funding {kind_label} execution failed/unwound: {other:?}"),
             })
         }
     }

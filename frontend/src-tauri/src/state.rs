@@ -17,7 +17,6 @@ use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
 use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
-use arbitrageur_exchanges::simulated::SimulatedExchange;
 use arbitrageur_exchanges::vanta::VantaAdapter;
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
@@ -32,6 +31,77 @@ use std::sync::Arc;
 use zeroize::Zeroize;
 
 pub use crate::state_store::ExecutionLogEntry;
+
+/// Which venue endpoints the engine talks to. `Live` = production APIs with
+/// real funds; `Testnet` = each venue's public testnet/demo API with a
+/// separate credential set. There is no simulated environment — both modes
+/// resolve real venue adapters, and a venue without a public testnet is
+/// simply ineligible under `Testnet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TradingEnvironment {
+    Testnet,
+    Live,
+}
+
+impl TradingEnvironment {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Testnet => "testnet",
+            Self::Live => "live",
+        }
+    }
+
+    /// Persisted `trading_mode` value → environment. Accepts the retired
+    /// `paper`/`real` spellings so pre-refactor stores migrate transparently;
+    /// anything unrecognised fails safe to `Testnet`.
+    pub fn from_mode(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "live" | "real" => Self::Live,
+            _ => Self::Testnet,
+        }
+    }
+}
+
+/// Vault credentials resolved for one environment, extracted once then
+/// applied to that environment's adapter set. Spec-driven venues keep their
+/// full credential record (each adapter interprets fields per its own auth
+/// model); named venues carry the already-shaped fields they consume.
+#[derive(Default)]
+struct EnvCredentials {
+    aster: (Option<String>, Option<String>),
+    hl_wallet: Option<String>,
+    hl_pk: Option<String>,
+    lighter_idx: Option<u64>,
+    lighter_key: Option<String>,
+    lighter_key_idx: Option<u8>,
+    rh_idx: Option<u64>,
+    rh_key: Option<String>,
+    rh_key_idx: Option<u8>,
+    vanta_acc: Option<String>,
+    vanta_key: Option<String>,
+    vanta_sec: Option<String>,
+    binance_key: Option<String>,
+    binance_sec: Option<String>,
+    okx_key: Option<String>,
+    okx_sec: Option<String>,
+    okx_pass: Option<String>,
+    okx_url: Option<String>,
+    cb_key: Option<String>,
+    cb_sec: Option<String>,
+    cb_pass: Option<String>,
+    kraken_key: Option<String>,
+    kraken_sec: Option<String>,
+    decibel_key: Option<String>,
+    decibel_node_key: Option<String>,
+    decibel_wallet: Option<String>,
+    decibel_pk: Option<String>,
+    popdex_wallet: Option<String>,
+    popdex_agent: Option<String>,
+    dex_perp: std::collections::HashMap<&'static str, ExchangeCredentials>,
+    evm_amm: std::collections::HashMap<&'static str, ExchangeCredentials>,
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TickerStrategyConfigDto {
@@ -336,7 +406,7 @@ fn default_bind_address() -> String {
     "127.0.0.1".into()
 }
 fn default_trading_mode() -> String {
-    "paper".into()
+    "testnet".into()
 }
 fn default_paper_starting_balance() -> f64 {
     100000.0
@@ -480,7 +550,7 @@ pub struct EngineSettingsDto {
 
     // Execution & Risk Modes
     #[serde(default = "default_trading_mode")]
-    pub trading_mode: String, // "paper" or "real"
+    pub trading_mode: String, // "testnet" or "live" (legacy "paper"/"real" migrate on load)
     #[serde(default = "default_paper_starting_balance")]
     pub paper_starting_balance_usd: f64,
     // Reserved — the warm-up cache reuse this describes is not implemented;
@@ -1067,18 +1137,6 @@ type VolumeCache = Mutex<
 
 #[allow(dead_code)]
 pub struct AppEngineState {
-    pub ex_hl: Arc<SimulatedExchange>,
-    pub ex_lighter: Arc<SimulatedExchange>,
-    pub ex_vanta: Arc<SimulatedExchange>,
-    pub ex_robinhood: Arc<SimulatedExchange>,
-    pub ex_arcus: Arc<SimulatedExchange>,
-    pub ex_aster: Arc<SimulatedExchange>,
-    pub ex_popdex: Arc<SimulatedExchange>,
-    pub ex_binance: Arc<SimulatedExchange>,
-    pub ex_okx: Arc<SimulatedExchange>,
-    pub ex_coinbase: Arc<SimulatedExchange>,
-    pub ex_kraken: Arc<SimulatedExchange>,
-    pub ex_decibel: Arc<SimulatedExchange>,
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
@@ -1099,12 +1157,29 @@ pub struct AppEngineState {
     pub live_evm_amms: Vec<Arc<EvmAmmAdapter>>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
+    /// Testnet adapter set — `None` entries mean the venue has no public
+    /// testnet and is ineligible under `TradingEnvironment::Testnet`.
+    /// Endpoint overrides (`endpoints.*`) apply to the live set only;
+    /// testnet adapters always use the built-in testnet defaults.
+    pub tn_hl: Arc<HyperliquidAdapter>,
+    pub tn_lighter: Arc<LighterAdapter>,
+    pub tn_vanta: Arc<VantaAdapter>,
+    pub tn_binance: Arc<BinanceAdapter>,
+    pub tn_okx: Arc<OkxAdapter>,
+    pub tn_kraken: Arc<KrakenAdapter>,
+    pub tn_decibel: Arc<DecibelAdapter>,
+    pub tn_popdex: Arc<PopDexAdapter>,
+    pub tn_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub delta_guard: RwLock<DeltaGuard>,
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
     pub kalman_filter: RwLock<HedgeRatioKalmanFilter>,
-    pub is_live_mode: RwLock<bool>,
+    /// Active venue environment — `Live` production endpoints or `Testnet`
+    /// demo endpoints. Drives adapter selection in `get_venues`, account
+    /// eligibility, and the `is_live` flag on persisted records (testnet
+    /// fills are real venue flow but not real money).
+    pub environment: RwLock<TradingEnvironment>,
     /// Which equity universe the breaker baseline tracks (None = not yet
     /// anchored). Paper<->live switches change the account universe, which is
     /// not a trading loss — the next risk snapshot re-anchors instead of
@@ -1310,99 +1385,14 @@ impl AppEngineState {
     }
 
     fn new_inner(vault_path: PathBuf, state_store: Arc<crate::state_store::StateStore>) -> Self {
-        let ex_hl = Arc::new(SimulatedExchange::new(
-            "hyperliquid",
-            "Hyperliquid (L1)",
-            2,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
-        let ex_lighter = Arc::new(SimulatedExchange::new(
-            "lighter",
-            "Lighter (zkDEX)",
-            5,
-            dec!(1.5),
-            dec!(100000.0),
-        ));
-        let ex_vanta = Arc::new(SimulatedExchange::new(
-            "vanta",
-            "Vanta.exchange",
-            4,
-            dec!(3.0),
-            dec!(100000.0),
-        ));
-        let ex_robinhood = Arc::new(SimulatedExchange::new(
-            "robinhood",
-            "Robinhood Lighter",
-            8,
-            dec!(2.5),
-            dec!(100000.0),
-        ));
-        let ex_arcus = Arc::new(SimulatedExchange::new(
-            "arcus",
-            "Arcus",
-            3,
-            dec!(1.5),
-            dec!(100000.0),
-        ));
-        let ex_aster = Arc::new(SimulatedExchange::new(
-            "aster",
-            "Aster",
-            3,
-            dec!(3.5),
-            dec!(100000.0),
-        ));
-        let ex_popdex = Arc::new(SimulatedExchange::new(
-            "popdex",
-            "PopDEX",
-            3,
-            dec!(10.0),
-            dec!(100000.0),
-        ));
-        let ex_binance = Arc::new(SimulatedExchange::new(
-            "binance",
-            "Binance",
-            2,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
-        let ex_okx = Arc::new(SimulatedExchange::new(
-            "okx",
-            "OKX",
-            2,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
-        let ex_coinbase = Arc::new(SimulatedExchange::new(
-            "coinbase",
-            "Coinbase",
-            3,
-            dec!(10.0),
-            dec!(100000.0),
-        ));
-        let ex_kraken = Arc::new(SimulatedExchange::new(
-            "kraken",
-            "Kraken",
-            3,
-            dec!(2.0),
-            dec!(100000.0),
-        ));
-        let ex_decibel = Arc::new(SimulatedExchange::new(
-            "decibel",
-            "Decibel",
-            4,
-            dec!(2.5),
-            dec!(100000.0),
-        ));
-
         // No synthetic market seeding. All market quotes and orderbooks are fetched dynamically
         // from live venue APIs once API credentials are configured by the user.
 
         let mut initial_settings = EngineSettingsDto::default();
         if let Ok(Some(mode)) = state_store.kv_get("engine.trading_mode") {
-            if mode == "real" || mode == "paper" {
-                initial_settings.trading_mode = mode;
-            }
+            // Retired spellings migrate transparently: paper→testnet, real→live.
+            let normalized = TradingEnvironment::from_mode(&mode).as_str();
+            initial_settings.trading_mode = normalized.to_string();
         }
         if let Ok(Some(raw)) = state_store.kv_get("retention.max_days") {
             if let Ok(days) = raw.parse::<u32>() {
@@ -1604,6 +1594,58 @@ impl AppEngineState {
             endpoint(&initial_settings.kalshi_url),
             None,
         ));
+
+        // Testnet adapter set — public testnet/demo endpoints only.
+        // Venues absent here (Coinbase, Aster, Arcus, Robinhood, Polymarket,
+        // the DexPerp long-tail, and the EVM AMMs) have no usable public
+        // testnet and stay ineligible under Testnet mode rather than being
+        // simulated. Endpoint overrides are live-only; a testnet adapter
+        // always uses the venue's canonical demo host.
+        let tn_hl = Arc::new(HyperliquidAdapter::new(
+            Some("https://api.hyperliquid-testnet.xyz".to_string()),
+            None,
+            None,
+        ));
+        let tn_lighter = Arc::new(LighterAdapter::new(
+            Some("https://testnet.zklighter.elliot.ai".to_string()),
+            None,
+            None,
+        ));
+        let tn_vanta = Arc::new(VantaAdapter::new(
+            Some("https://testnet-api.orderly.org".to_string()),
+            None,
+            None,
+            None,
+        ));
+        let tn_binance = Arc::new(BinanceAdapter::new(
+            Some("https://testnet.binancefuture.com".to_string()),
+            None,
+            None,
+        ));
+        // OKX demo trading shares the production host — the
+        // `x-simulated-trading: 1` header routes it to the demo namespace,
+        // which requires keys minted under a demo account.
+        let tn_okx = Arc::new(OkxAdapter::for_testnet(None, None, None, None));
+        let tn_kraken = Arc::new(KrakenAdapter::new(
+            Some("https://demo-futures.kraken.com/derivatives/api/v3".to_string()),
+            // Kraken spot has no public testnet; production public market
+            // data stays readable — order paths only ever hit the futures
+            // base URL.
+            None,
+            None,
+            None,
+        ));
+        let tn_decibel = Arc::new(DecibelAdapter::new(
+            Some("https://api.testnet.aptoslabs.com/decibel".to_string()),
+            None,
+            None,
+        ));
+        let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
+        let tn_kalshi = Arc::new(KalshiAdapter::new(
+            Some("https://demo-api.kalshi.co/trade-api/v2".to_string()),
+            None,
+        ));
+
         let market_data_hub = MarketDataHub::new(1024, 400);
 
         let cb_config = CircuitBreakerConfig {
@@ -1629,6 +1671,7 @@ impl AppEngineState {
         let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
+        let initial_env = TradingEnvironment::from_mode(&initial_settings.trading_mode);
         let settings = RwLock::new(initial_settings);
 
         // Reload the persisted execution log so the Log Monitor keeps history
@@ -1642,18 +1685,6 @@ impl AppEngineState {
         let strategy_params_map = load_strategy_params(&state_store);
 
         Self {
-            ex_hl,
-            ex_lighter,
-            ex_vanta,
-            ex_robinhood,
-            ex_arcus,
-            ex_aster,
-            ex_popdex,
-            ex_binance,
-            ex_okx,
-            ex_coinbase,
-            ex_kraken,
-            ex_decibel,
             live_hl,
             live_lighter,
             live_vanta,
@@ -1670,12 +1701,21 @@ impl AppEngineState {
             live_evm_amms,
             live_polymarket,
             live_kalshi,
+            tn_hl,
+            tn_lighter,
+            tn_vanta,
+            tn_binance,
+            tn_okx,
+            tn_kraken,
+            tn_decibel,
+            tn_popdex,
+            tn_kalshi,
             market_data_hub,
             circuit_breaker: cb,
             delta_guard,
             coordinator,
             kalman_filter,
-            is_live_mode: RwLock::new(false),
+            environment: RwLock::new(initial_env),
             last_risk_live_universe: RwLock::new(None),
             last_good_accounts: Mutex::new(std::collections::HashMap::new()),
             total_realized_profit: RwLock::new(dec!(0)),
@@ -1715,360 +1755,453 @@ impl AppEngineState {
         // No synthetic markets are ever seeded or fabricated.
     }
 
-    /// Synchronize credentials from the secure vault to live exchange adapters.
-    /// An explicit operator lock clears adapter credentials (panic-halt).
-    /// Timer-based auto-lock only forgets vault secrets — provisioned
-    /// credentials keep working so an unattended deployment stays live.
+    /// Synchronize credentials from the secure vault to exchange adapters in
+    /// BOTH environments. An account row's `environment` decides which adapter
+    /// set receives its credentials — live keys never provision testnet
+    /// adapters and vice versa. An explicit operator lock clears adapter
+    /// credentials (panic-halt); timer-based auto-lock only forgets vault
+    /// secrets — provisioned credentials keep working so an unattended
+    /// deployment stays live.
     pub fn sync_vault_credentials_to_adapters(&self) {
         let mut vault = self.vault.write();
         if !vault.is_unlocked() {
             if vault.is_auto_locked() {
                 return;
             }
-            self.live_aster.update_credentials(None, None);
-            let _ = self.live_popdex.update_credentials(None, None, None);
-            self.live_hl.update_credentials(None, None);
-            self.live_lighter.update_credentials(None, None);
-            self.live_lighter.set_api_key_index(None);
-            self.live_robinhood.update_credentials(None, None);
-            self.live_robinhood.set_api_key_index(None);
-            self.live_vanta.update_credentials(None, None, None);
-            self.live_binance.update_credentials(None, None);
-            self.live_okx.update_credentials(None, None, None);
-            let _ = self.live_okx.set_base_url(None);
-            self.live_coinbase.update_credentials(None, None, None);
-            self.live_kraken.update_credentials(None, None);
-            self.live_decibel.update_credentials(None, None, None, None);
-            for adapter in &self.live_dex_perps {
-                let _ = adapter.update_credentials(None, None, None, None, None, None);
-            }
-            for adapter in &self.live_evm_amms {
-                let _ = adapter.update_credentials(None, None, None, None, None, None);
-                let _ = adapter.set_base_url(None);
-            }
+            self.clear_adapter_credentials();
             return;
         }
 
         if let Ok(data) = vault.get_data() {
-            let get_active_cred = |venues: &[&str]| -> Option<&crate::vault::ExchangeCredentials> {
-                for &v in venues {
-                    if let Ok(Some(acc)) = self.state_store.default_account(v) {
-                        if let Some(cred) = data
-                            .credentials
-                            .iter()
-                            .find(|c| c.enabled && c.profile_id.as_deref() == Some(&acc.id))
-                        {
-                            return Some(cred);
-                        }
-                    }
-                    let has_accounts = self
-                        .state_store
-                        .list_accounts(Some(v))
-                        .map(|l| !l.is_empty())
-                        .unwrap_or(false);
-                    if has_accounts {
-                        return None;
+            let live = self.resolve_env_credentials(data, TradingEnvironment::Live);
+            self.apply_live_credentials(&live);
+            let testnet = self.resolve_env_credentials(data, TradingEnvironment::Testnet);
+            self.apply_testnet_credentials(&testnet);
+        } else {
+            self.clear_adapter_credentials();
+        }
+    }
+
+    /// Strip credentials from every adapter in both environments.
+    fn clear_adapter_credentials(&self) {
+        self.live_aster.update_credentials(None, None);
+        let _ = self.live_popdex.update_credentials(None, None, None);
+        self.live_hl.update_credentials(None, None);
+        self.live_lighter.update_credentials(None, None);
+        self.live_lighter.set_api_key_index(None);
+        self.live_robinhood.update_credentials(None, None);
+        self.live_robinhood.set_api_key_index(None);
+        self.live_vanta.update_credentials(None, None, None);
+        self.live_binance.update_credentials(None, None);
+        self.live_okx.update_credentials(None, None, None);
+        let _ = self.live_okx.set_base_url(None);
+        self.live_coinbase.update_credentials(None, None, None);
+        self.live_kraken.update_credentials(None, None);
+        self.live_decibel.update_credentials(None, None, None, None);
+        for adapter in &self.live_dex_perps {
+            let _ = adapter.update_credentials(None, None, None, None, None, None);
+        }
+        for adapter in &self.live_evm_amms {
+            let _ = adapter.update_credentials(None, None, None, None, None, None);
+            let _ = adapter.set_base_url(None);
+        }
+        self.tn_hl.update_credentials(None, None);
+        self.tn_lighter.update_credentials(None, None);
+        self.tn_lighter.set_api_key_index(None);
+        self.tn_vanta.update_credentials(None, None, None);
+        self.tn_binance.update_credentials(None, None);
+        self.tn_okx.update_credentials(None, None, None);
+        let _ = self.tn_okx.set_base_url(None);
+        self.tn_kraken.update_credentials(None, None);
+        self.tn_decibel.update_credentials(None, None, None, None);
+        let _ = self.tn_popdex.update_credentials(None, None, None);
+        // Kalshi's adapter is a prediction stub — no credential setter exists
+        // to clear; its demo endpoint carries no secrets.
+    }
+
+    /// Resolve vault credentials for one environment. An account row's
+    /// `environment` picks which adapter set its secrets reach; legacy
+    /// unbound venue records (no profile) are treated as live credentials —
+    /// they predate the split and never provision a testnet adapter.
+    fn resolve_env_credentials(
+        &self,
+        data: &crate::vault::VaultData,
+        env: TradingEnvironment,
+    ) -> EnvCredentials {
+        let env_str = env.as_str();
+        let get_active_cred = |venues: &[&str]| -> Option<&crate::vault::ExchangeCredentials> {
+            for &v in venues {
+                if let Ok(Some(acc)) = self.state_store.default_account(v, env_str) {
+                    if let Some(cred) = data
+                        .credentials
+                        .iter()
+                        .find(|c| c.enabled && c.profile_id.as_deref() == Some(&acc.id))
+                    {
+                        return Some(cred);
                     }
                 }
+                let has_accounts = self
+                    .state_store
+                    .list_accounts(Some(v))
+                    .map(|l| l.iter().any(|a| a.environment == env_str))
+                    .unwrap_or(false);
+                if has_accounts {
+                    return None;
+                }
+            }
+            // Legacy unbound venue-keyed records: live credentials only.
+            if env == TradingEnvironment::Live {
                 data.credentials
                     .iter()
                     .find(|c| c.enabled && venues.iter().any(|v| c.venue.eq_ignore_ascii_case(v)))
-            };
-
-            let mut aster_key = None;
-            let mut aster_secret = None;
-            if let Some(cred) = get_active_cred(&["aster", "asterdex"]) {
-                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                    aster_key = Some(cred.api_key.clone());
-                    aster_secret = Some(cred.api_secret.clone());
-                }
-            }
-
-            let mut hl_wallet = None;
-            let mut hl_pk = None;
-            if let Some(cred) = get_active_cred(&["hyperliquid", "hl"]) {
-                let wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                let pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-                if wallet.is_some() && pk.is_some() {
-                    hl_wallet = wallet;
-                    hl_pk = pk;
-                }
-            }
-
-            let mut lighter_idx = None;
-            let mut lighter_key = None;
-            let mut lighter_key_idx: Option<u8> = None;
-            if let Some(cred) = get_active_cred(&["lighter"]) {
-                let key = if !cred.api_key.trim().is_empty() {
-                    Some(cred.api_key.clone())
-                } else {
-                    cred.private_key.clone().filter(|k| !k.trim().is_empty())
-                };
-                if key.is_some() {
-                    lighter_key = key;
-                    lighter_idx = cred.account_index;
-                    lighter_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
-                    if cred.api_key_index.is_some() && lighter_key_idx.is_none() {
-                        tracing::warn!(
-                            "lighter api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
-                            cred.api_key_index
-                        );
-                    }
-                }
-            }
-
-            let mut rh_idx = None;
-            let mut rh_key = None;
-            let mut rh_key_idx: Option<u8> = None;
-            if let Some(cred) = get_active_cred(&["robinhood", "robinhood lighter", "rh"]) {
-                let key = if !cred.api_key.trim().is_empty() {
-                    Some(cred.api_key.clone())
-                } else {
-                    cred.private_key.clone().filter(|k| !k.trim().is_empty())
-                };
-                if key.is_some() {
-                    rh_key = key;
-                    rh_idx = cred.account_index;
-                    rh_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
-                    if cred.api_key_index.is_some() && rh_key_idx.is_none() {
-                        tracing::warn!(
-                            "robinhood api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
-                            cred.api_key_index
-                        );
-                    }
-                }
-            }
-
-            let mut vanta_acc = None;
-            let mut vanta_key = None;
-            let mut vanta_sec = None;
-            if let Some(cred) = get_active_cred(&["vanta", "orderly"]) {
-                if !cred.api_key.trim().is_empty() {
-                    vanta_key = Some(cred.api_key.clone());
-                }
-                if !cred.api_secret.trim().is_empty() {
-                    vanta_sec = Some(cred.api_secret.clone());
-                }
-                vanta_acc = cred
-                    .account_id
-                    .clone()
-                    .filter(|a| !a.trim().is_empty())
-                    .or_else(|| cred.wallet_address.clone().filter(|a| !a.trim().is_empty()));
-            }
-
-            let mut binance_key = None;
-            let mut binance_sec = None;
-            if let Some(cred) = get_active_cred(&["binance", "bnb"]) {
-                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                    binance_key = Some(cred.api_key.clone());
-                    binance_sec = Some(cred.api_secret.clone());
-                }
-            }
-
-            let mut okx_key = None;
-            let mut okx_sec = None;
-            let mut okx_pass = None;
-            let mut okx_url = None;
-            if let Some(cred) = get_active_cred(&["okx"]) {
-                // Regional-domain override applies to public endpoints too —
-                // an app.okx.com account's instrument set differs from the
-                // global site's, so quotes must come from the same entity.
-                okx_url = cred.base_url.clone().filter(|u| !u.trim().is_empty());
-                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                    okx_key = Some(cred.api_key.clone());
-                    okx_sec = Some(cred.api_secret.clone());
-                    okx_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
-                }
-            }
-
-            let mut cb_key = None;
-            let mut cb_sec = None;
-            let mut cb_pass = None;
-            if let Some(cred) = get_active_cred(&["coinbase", "cb"]) {
-                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                    cb_key = Some(cred.api_key.clone());
-                    cb_sec = Some(cred.api_secret.clone());
-                    cb_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
-                }
-            }
-
-            let mut kraken_key = None;
-            let mut kraken_sec = None;
-            if let Some(cred) = get_active_cred(&["kraken", "krk", "kraken_futures", "kraken_spot"])
-            {
-                if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
-                    kraken_key = Some(cred.api_key.clone());
-                    kraken_sec = Some(cred.api_secret.clone());
-                }
-            }
-
-            let mut decibel_key = None;
-            let mut decibel_node_key = None;
-            let mut decibel_wallet = None;
-            let mut decibel_pk = None;
-            if let Some(cred) = get_active_cred(&["decibel", "dcb", "decibel (aptos)"]) {
-                if !cred.api_key.trim().is_empty() {
-                    decibel_key = Some(cred.api_key.clone());
-                }
-                decibel_node_key = cred
-                    .passphrase
-                    .clone()
-                    .filter(|p| !p.trim().is_empty())
-                    .or_else(|| {
-                        if !cred.api_secret.trim().is_empty() {
-                            Some(cred.api_secret.clone())
-                        } else {
-                            None
-                        }
-                    });
-                decibel_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                decibel_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-
-            self.live_aster.update_credentials(aster_key, aster_secret);
-
-            // PopDEX: main account + delegated agent key from the vault, network
-            // from settings. The agent key alone enables trading; the main key
-            // is never held (one-time approveAgent runs externally per docs).
-            let popdex_network = {
-                let guards = self.settings.read();
-                let n = guards.popdex_network.trim().to_string();
-                if n.is_empty() {
-                    None
-                } else {
-                    Some(n)
-                }
-            };
-            let mut popdex_wallet = None;
-            let mut popdex_agent = None;
-            if let Some(cred) = get_active_cred(&["popdex", "pop"]) {
-                popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
-                popdex_agent = cred.private_key.clone().filter(|k| !k.trim().is_empty());
-            }
-            if let Err(e) =
-                self.live_popdex
-                    .update_credentials(popdex_network, popdex_wallet, popdex_agent)
-            {
-                tracing::warn!("PopDEX credential sync refused: {e}");
-            }
-            self.live_hl.update_credentials(hl_wallet, hl_pk);
-            self.live_lighter
-                .update_credentials(lighter_idx, lighter_key);
-            self.live_lighter.set_api_key_index(lighter_key_idx);
-            self.live_robinhood.update_credentials(rh_idx, rh_key);
-            self.live_robinhood.set_api_key_index(rh_key_idx);
-            self.live_vanta
-                .update_credentials(vanta_acc, vanta_key, vanta_sec);
-            self.live_binance
-                .update_credentials(binance_key, binance_sec);
-            // Endpoint identity precedes credentials: a regional-entity key
-            // must never be provisioned onto the wrong host, and a rejected
-            // override withholds the credentials entirely (fail closed).
-            if let Err(e) = self.live_okx.set_base_url(okx_url) {
-                tracing::warn!("OKX base URL override rejected ({e}) — credentials withheld");
-                self.live_okx.update_credentials(None, None, None);
             } else {
-                self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
+                None
             }
-            self.live_coinbase
-                .update_credentials(cb_key, cb_sec, cb_pass);
-            self.live_kraken.update_credentials(kraken_key, kraken_sec);
-            self.live_decibel.update_credentials(
-                decibel_key,
-                decibel_node_key,
-                decibel_wallet,
-                decibel_pk,
-            );
-            // Long-tail perp venues share the generic credential mapping;
-            // each adapter interprets the fields per its own auth model and
-            // refuses incomplete material (fail-closed).
-            for adapter in &self.live_dex_perps {
-                let vid = adapter.spec_id();
-                let cred = get_active_cred(&[vid]);
-                let nonempty = |s: &String| (!s.trim().is_empty()).then(|| s.clone());
-                let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
-                let res = adapter.update_credentials(
-                    cred.and_then(|c| nonempty(&c.api_key)),
-                    cred.and_then(|c| nonempty(&c.api_secret)),
-                    cred.and_then(|c| nonopt(&c.passphrase)),
-                    cred.and_then(|c| nonopt(&c.account_id)),
-                    cred.and_then(|c| nonopt(&c.wallet_address)),
-                    cred.and_then(|c| nonopt(&c.private_key)),
-                );
-                if let Err(e) = res {
-                    tracing::warn!("{vid} credential sync refused: {e}");
+        };
+
+        let mut creds = EnvCredentials::default();
+        if let Some(cred) = get_active_cred(&["aster", "asterdex"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.aster = (Some(cred.api_key.clone()), Some(cred.api_secret.clone()));
+            }
+        }
+        if let Some(cred) = get_active_cred(&["hyperliquid", "hl"]) {
+            let wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+            let pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+            if wallet.is_some() && pk.is_some() {
+                creds.hl_wallet = wallet;
+                creds.hl_pk = pk;
+            }
+        }
+        if let Some(cred) = get_active_cred(&["lighter"]) {
+            let key = if !cred.api_key.trim().is_empty() {
+                Some(cred.api_key.clone())
+            } else {
+                cred.private_key.clone().filter(|k| !k.trim().is_empty())
+            };
+            if key.is_some() {
+                creds.lighter_key = key;
+                creds.lighter_idx = cred.account_index;
+                creds.lighter_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
+                if cred.api_key_index.is_some() && creds.lighter_key_idx.is_none() {
+                    tracing::warn!(
+                        "lighter api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
+                        cred.api_key_index
+                    );
                 }
             }
-            // EVM AMMs: wallet_address + private_key carry the agent wallet;
-            // the account `base_url` field doubles as the RPC override so a
-            // private endpoint (Alchemy/Infura/self-hosted) replaces the
-            // public default.
-            for adapter in &self.live_evm_amms {
-                let vid = adapter.spec_id();
-                let cred = get_active_cred(&[vid]);
-                // A rejected RPC override withholds this adapter's
-                // credentials (fail closed) but never blocks other venues.
-                if let Err(e) = adapter.set_base_url(
-                    cred.and_then(|c| c.base_url.clone().filter(|u| !u.trim().is_empty())),
-                ) {
-                    tracing::warn!("{vid} RPC override rejected ({e}) — credentials withheld");
-                    let _ = adapter.update_credentials(None, None, None, None, None, None);
-                    continue;
-                }
-                let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
-                // Market-data-only venues never receive a private key —
-                // even if a stale vault record still holds one. The wallet
-                // address still flows so balance reads can resolve an owner.
-                let private_key = if LIVE_EVM_AMM_VENUE_IDS.contains(&vid) {
-                    cred.and_then(|c| nonopt(&c.private_key))
-                } else {
-                    None
-                };
-                let res = adapter.update_credentials(
-                    None,
-                    None,
-                    None,
-                    None,
-                    cred.and_then(|c| nonopt(&c.wallet_address)),
-                    private_key,
-                );
-                if let Err(e) = res {
-                    tracing::warn!("{vid} credential sync refused: {e}");
+        }
+        if let Some(cred) = get_active_cred(&["robinhood", "robinhood lighter", "rh"]) {
+            let key = if !cred.api_key.trim().is_empty() {
+                Some(cred.api_key.clone())
+            } else {
+                cred.private_key.clone().filter(|k| !k.trim().is_empty())
+            };
+            if key.is_some() {
+                creds.rh_key = key;
+                creds.rh_idx = cred.account_index;
+                creds.rh_key_idx = cred.api_key_index.and_then(|v| u8::try_from(v).ok());
+                if cred.api_key_index.is_some() && creds.rh_key_idx.is_none() {
+                    tracing::warn!(
+                        "robinhood api_key_index {:?} out of range 0-254; live orders will fail closed until corrected",
+                        cred.api_key_index
+                    );
                 }
             }
-        } else {
-            self.live_aster.update_credentials(None, None);
-            let _ = self.live_popdex.update_credentials(None, None, None);
-            self.live_hl.update_credentials(None, None);
-            self.live_lighter.update_credentials(None, None);
-            self.live_lighter.set_api_key_index(None);
-            self.live_robinhood.update_credentials(None, None);
-            self.live_robinhood.set_api_key_index(None);
-            self.live_vanta.update_credentials(None, None, None);
-            self.live_binance.update_credentials(None, None);
+        }
+        if let Some(cred) = get_active_cred(&["vanta", "orderly"]) {
+            if !cred.api_key.trim().is_empty() {
+                creds.vanta_key = Some(cred.api_key.clone());
+            }
+            if !cred.api_secret.trim().is_empty() {
+                creds.vanta_sec = Some(cred.api_secret.clone());
+            }
+            creds.vanta_acc = cred
+                .account_id
+                .clone()
+                .filter(|a| !a.trim().is_empty())
+                .or_else(|| cred.wallet_address.clone().filter(|a| !a.trim().is_empty()));
+        }
+        if let Some(cred) = get_active_cred(&["binance", "bnb"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.binance_key = Some(cred.api_key.clone());
+                creds.binance_sec = Some(cred.api_secret.clone());
+            }
+        }
+        if let Some(cred) = get_active_cred(&["okx"]) {
+            // Regional-domain override applies to public endpoints too —
+            // an app.okx.com account's instrument set differs from the
+            // global site's, so quotes must come from the same entity.
+            creds.okx_url = cred.base_url.clone().filter(|u| !u.trim().is_empty());
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.okx_key = Some(cred.api_key.clone());
+                creds.okx_sec = Some(cred.api_secret.clone());
+                creds.okx_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
+            }
+        }
+        if let Some(cred) = get_active_cred(&["coinbase", "cb"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.cb_key = Some(cred.api_key.clone());
+                creds.cb_sec = Some(cred.api_secret.clone());
+                creds.cb_pass = cred.passphrase.clone().filter(|p| !p.trim().is_empty());
+            }
+        }
+        if let Some(cred) = get_active_cred(&["kraken", "krk", "kraken_futures", "kraken_spot"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.kraken_key = Some(cred.api_key.clone());
+                creds.kraken_sec = Some(cred.api_secret.clone());
+            }
+        }
+        if let Some(cred) = get_active_cred(&["decibel", "dcb", "decibel (aptos)"]) {
+            if !cred.api_key.trim().is_empty() {
+                creds.decibel_key = Some(cred.api_key.clone());
+            }
+            creds.decibel_node_key = cred
+                .passphrase
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| {
+                    if !cred.api_secret.trim().is_empty() {
+                        Some(cred.api_secret.clone())
+                    } else {
+                        None
+                    }
+                });
+            creds.decibel_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+            creds.decibel_pk = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+        }
+        if let Some(cred) = get_active_cred(&["popdex", "pop"]) {
+            creds.popdex_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+            creds.popdex_agent = cred.private_key.clone().filter(|k| !k.trim().is_empty());
+        }
+        for vid in ADMITTED_DEX_PERP_VENUE_IDS {
+            if let Some(cred) = get_active_cred(&[vid]) {
+                creds.dex_perp.insert(vid, cred.clone());
+            }
+        }
+        for vid in ADMITTED_EVM_AMM_VENUE_IDS {
+            if let Some(cred) = get_active_cred(&[vid]) {
+                creds.evm_amm.insert(vid, cred.clone());
+            }
+        }
+        creds
+    }
+
+    /// Provision resolved credentials onto the production adapter set.
+    fn apply_live_credentials(&self, c: &EnvCredentials) {
+        self.live_aster
+            .update_credentials(c.aster.0.clone(), c.aster.1.clone());
+        // PopDEX: main account + delegated agent key from the vault, network
+        // from settings. The agent key alone enables trading; the main key
+        // is never held (one-time approveAgent runs externally per docs).
+        let popdex_network = {
+            let guards = self.settings.read();
+            let n = guards.popdex_network.trim().to_string();
+            if n.is_empty() {
+                None
+            } else {
+                Some(n)
+            }
+        };
+        if let Err(e) = self.live_popdex.update_credentials(
+            popdex_network,
+            c.popdex_wallet.clone(),
+            c.popdex_agent.clone(),
+        ) {
+            tracing::warn!("PopDEX credential sync refused: {e}");
+        }
+        self.live_hl
+            .update_credentials(c.hl_wallet.clone(), c.hl_pk.clone());
+        self.live_lighter
+            .update_credentials(c.lighter_idx, c.lighter_key.clone());
+        self.live_lighter.set_api_key_index(c.lighter_key_idx);
+        self.live_robinhood
+            .update_credentials(c.rh_idx, c.rh_key.clone());
+        self.live_robinhood.set_api_key_index(c.rh_key_idx);
+        self.live_vanta.update_credentials(
+            c.vanta_acc.clone(),
+            c.vanta_key.clone(),
+            c.vanta_sec.clone(),
+        );
+        self.live_binance
+            .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
+        // Endpoint identity precedes credentials: a regional-entity key
+        // must never be provisioned onto the wrong host, and a rejected
+        // override withholds the credentials entirely (fail closed).
+        if let Err(e) = self.live_okx.set_base_url(c.okx_url.clone()) {
+            tracing::warn!("OKX base URL override rejected ({e}) — credentials withheld");
             self.live_okx.update_credentials(None, None, None);
-            let _ = self.live_okx.set_base_url(None);
-            self.live_coinbase.update_credentials(None, None, None);
-            self.live_kraken.update_credentials(None, None);
-            self.live_decibel.update_credentials(None, None, None, None);
-            for adapter in &self.live_dex_perps {
-                let _ = adapter.update_credentials(None, None, None, None, None, None);
+        } else {
+            self.live_okx.update_credentials(
+                c.okx_key.clone(),
+                c.okx_sec.clone(),
+                c.okx_pass.clone(),
+            );
+        }
+        self.live_coinbase.update_credentials(
+            c.cb_key.clone(),
+            c.cb_sec.clone(),
+            c.cb_pass.clone(),
+        );
+        self.live_kraken
+            .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        self.live_decibel.update_credentials(
+            c.decibel_key.clone(),
+            c.decibel_node_key.clone(),
+            c.decibel_wallet.clone(),
+            c.decibel_pk.clone(),
+        );
+        // Long-tail perp venues share the generic credential mapping;
+        // each adapter interprets the fields per its own auth model and
+        // refuses incomplete material (fail-closed).
+        for adapter in &self.live_dex_perps {
+            let vid = adapter.spec_id();
+            let cred = c.dex_perp.get(vid);
+            let nonempty = |s: &String| (!s.trim().is_empty()).then(|| s.clone());
+            let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
+            let res = adapter.update_credentials(
+                cred.and_then(|c| nonempty(&c.api_key)),
+                cred.and_then(|c| nonempty(&c.api_secret)),
+                cred.and_then(|c| nonopt(&c.passphrase)),
+                cred.and_then(|c| nonopt(&c.account_id)),
+                cred.and_then(|c| nonopt(&c.wallet_address)),
+                cred.and_then(|c| nonopt(&c.private_key)),
+            );
+            if let Err(e) = res {
+                tracing::warn!("{vid} credential sync refused: {e}");
             }
-            for adapter in &self.live_evm_amms {
+        }
+        // EVM AMMs: wallet_address + private_key carry the agent wallet;
+        // the account `base_url` field doubles as the RPC override so a
+        // private endpoint (Alchemy/Infura/self-hosted) replaces the
+        // public default. The override is chain-scoped: setting it on any
+        // venue of a chain applies it to every same-chain venue lacking its
+        // own override (same-chain AMMs share the RPC endpoint).
+        let mut chain_rpc: std::collections::HashMap<u64, String> =
+            std::collections::HashMap::new();
+        for adapter in &self.live_evm_amms {
+            if let Some(u) = c
+                .evm_amm
+                .get(adapter.spec_id())
+                .and_then(|cr| cr.base_url.clone())
+                .filter(|u| !u.trim().is_empty())
+            {
+                chain_rpc.entry(adapter.chain_id()).or_insert(u);
+            }
+        }
+        for adapter in &self.live_evm_amms {
+            let vid = adapter.spec_id();
+            let cred = c.evm_amm.get(vid);
+            let rpc_override = cred
+                .and_then(|c| c.base_url.clone())
+                .filter(|u| !u.trim().is_empty())
+                .or_else(|| chain_rpc.get(&adapter.chain_id()).cloned());
+            // A rejected RPC override withholds this adapter's
+            // credentials (fail closed) but never blocks other venues.
+            if let Err(e) = adapter.set_base_url(rpc_override) {
+                tracing::warn!("{vid} RPC override rejected ({e}) — credentials withheld");
                 let _ = adapter.update_credentials(None, None, None, None, None, None);
-                let _ = adapter.set_base_url(None);
+                continue;
+            }
+            let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
+            // Market-data-only venues never receive a private key —
+            // even if a stale vault record still holds one. The wallet
+            // address still flows so balance reads can resolve an owner.
+            let private_key = if LIVE_EVM_AMM_VENUE_IDS.contains(&vid) {
+                cred.and_then(|c| nonopt(&c.private_key))
+            } else {
+                None
+            };
+            let res = adapter.update_credentials(
+                None,
+                None,
+                None,
+                None,
+                cred.and_then(|c| nonopt(&c.wallet_address)),
+                private_key,
+            );
+            if let Err(e) = res {
+                tracing::warn!("{vid} credential sync refused: {e}");
             }
         }
     }
 
-    /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
-    /// Lighter, Vanta (Orderly), Aster, PopDEX, Binance, OKX, Coinbase,
-    /// Kraken, and Decibel can be enabled for their implemented market/account
-    /// paths, and the long-tail perp venues (`live_dex_perps`) admit when
-    /// they own an enabled account. Admission is a read/submit boundary only —
-    /// it never implies live strategy-entry readiness.
-    pub fn get_venues(
+    /// Provision resolved testnet credentials onto the demo adapter set.
+    /// Same extraction rules; testnet accounts provision `tn_*` adapters
+    /// only. `popdex` is pinned to its testnet network regardless of the
+    /// mainnet-tuned `popdex_network` setting.
+    fn apply_testnet_credentials(&self, c: &EnvCredentials) {
+        self.tn_hl
+            .update_credentials(c.hl_wallet.clone(), c.hl_pk.clone());
+        self.tn_lighter
+            .update_credentials(c.lighter_idx, c.lighter_key.clone());
+        self.tn_lighter.set_api_key_index(c.lighter_key_idx);
+        self.tn_vanta.update_credentials(
+            c.vanta_acc.clone(),
+            c.vanta_key.clone(),
+            c.vanta_sec.clone(),
+        );
+        self.tn_binance
+            .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
+        if let Err(e) = self.tn_okx.set_base_url(c.okx_url.clone()) {
+            tracing::warn!("OKX demo base URL override rejected ({e}) — credentials withheld");
+            self.tn_okx.update_credentials(None, None, None);
+        } else {
+            self.tn_okx.update_credentials(
+                c.okx_key.clone(),
+                c.okx_sec.clone(),
+                c.okx_pass.clone(),
+            );
+        }
+        self.tn_kraken
+            .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        self.tn_decibel.update_credentials(
+            c.decibel_key.clone(),
+            c.decibel_node_key.clone(),
+            c.decibel_wallet.clone(),
+            c.decibel_pk.clone(),
+        );
+        if let Err(e) = self.tn_popdex.update_credentials(
+            Some("testnet".to_string()),
+            c.popdex_wallet.clone(),
+            c.popdex_agent.clone(),
+        ) {
+            tracing::warn!("PopDEX testnet credential sync refused: {e}");
+        }
+    }
+
+    /// Active trading environment — `Live` production endpoints or `Testnet`
+    /// demo endpoints. Everything that resolves venue adapters, account
+    /// eligibility, or `is_live` record flags reads this.
+    pub fn env(&self) -> TradingEnvironment {
+        *self.environment.read()
+    }
+
+    /// `true` in Live environment — marks records/balances as real money.
+    /// Testnet runs the identical code path against demo endpoints and is
+    /// deliberately *not* `is_live` on persisted records.
+    pub fn is_live(&self) -> bool {
+        self.env() == TradingEnvironment::Live
+    }
+
+    pub fn set_environment(&self, env: TradingEnvironment) {
+        *self.environment.write() = env;
+    }
+
+    /// Admitted venue adapters for one environment. Hyperliquid, Lighter,
+    /// Robinhood Lighter, Vanta (Orderly), Aster, PopDEX, Binance, OKX,
+    /// Coinbase, Kraken, and Decibel can be enabled for their implemented
+    /// market/account paths, and the long-tail perp venues (`live_dex_perps`)
+    /// admit when they own an enabled account. Admission is a read/submit
+    /// boundary only — it never implies live strategy-entry readiness.
+    ///
+    /// Under `Testnet`, only venues with a public demo endpoint are eligible
+    /// (the `tn_*` set): Coinbase/Aster/Arcus/Robinhood/Polymarket and the
+    /// spec-driven long-tail have no usable testnet and are never admitted —
+    /// there is no simulated fallback.
+    pub fn venues_for_env(
         &self,
+        env: TradingEnvironment,
     ) -> Vec<(
         &'static str,
         &'static str,
@@ -2080,63 +2213,99 @@ impl AppEngineState {
             Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
         )> = Vec::new();
         let s = self.settings.read();
+        let env_str = env.as_str();
         // A venue is on when its engine flag is set OR it owns an enabled
         // account — the account-zone switch is the same on/off as the flag.
-        let account_enabled =
-            |venue: &str| self.state_store.has_enabled_account(venue).unwrap_or(false);
-        if s.hyperliquid_enabled || account_enabled("hyperliquid") {
-            list.push(("hyperliquid", "Hyperliquid", self.live_hl.clone()));
-        }
-        if s.lighter_enabled || account_enabled("lighter") {
-            list.push(("lighter", "Lighter", self.live_lighter.clone()));
-        }
-        if s.robinhood_enabled || account_enabled("robinhood") {
-            list.push((
-                "robinhood",
-                "Robinhood Lighter",
-                self.live_robinhood.clone(),
-            ));
-        }
-        if s.vanta_enabled || account_enabled("vanta") {
-            list.push(("vanta", "Vanta", self.live_vanta.clone()));
-        }
-        if s.aster_enabled || account_enabled("aster") {
-            list.push(("aster", "Aster", self.live_aster.clone()));
-        }
-        if s.popdex_enabled || account_enabled("popdex") {
-            list.push(("popdex", "PopDEX", self.live_popdex.clone()));
-        }
-        if s.binance_enabled || account_enabled("binance") {
-            list.push(("binance", "Binance", self.live_binance.clone()));
-        }
-        if s.okx_enabled || account_enabled("okx") {
-            list.push(("okx", "OKX", self.live_okx.clone()));
-        }
-        if s.coinbase_enabled || account_enabled("coinbase") {
-            list.push(("coinbase", "Coinbase", self.live_coinbase.clone()));
-        }
-        if s.kraken_enabled
-            || s.kraken_futures_enabled
-            || s.kraken_spot_enabled
-            || account_enabled("kraken")
-        {
-            list.push(("kraken", "Kraken", self.live_kraken.clone()));
-        }
-        if s.decibel_enabled || account_enabled("decibel") {
-            list.push(("decibel", "Decibel", self.live_decibel.clone()));
-        }
-        // Long-tail perp venues have no engine-settings flags — an enabled
-        // account is the only admission switch. Capability flags on the
-        // adapter still gate every downstream live path.
-        for adapter in &self.live_dex_perps {
-            if account_enabled(adapter.spec_id()) {
-                list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+        // Account eligibility is environment-scoped.
+        let account_enabled = |venue: &str| {
+            self.state_store
+                .has_enabled_account(venue, env_str)
+                .unwrap_or(false)
+        };
+        if env == TradingEnvironment::Live {
+            if s.hyperliquid_enabled || account_enabled("hyperliquid") {
+                list.push(("hyperliquid", "Hyperliquid", self.live_hl.clone()));
             }
-        }
-        for adapter in &self.live_evm_amms {
-            if account_enabled(adapter.spec_id()) {
-                list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+            if s.lighter_enabled || account_enabled("lighter") {
+                list.push(("lighter", "Lighter", self.live_lighter.clone()));
             }
+            if s.robinhood_enabled || account_enabled("robinhood") {
+                list.push((
+                    "robinhood",
+                    "Robinhood Lighter",
+                    self.live_robinhood.clone(),
+                ));
+            }
+            if s.vanta_enabled || account_enabled("vanta") {
+                list.push(("vanta", "Vanta", self.live_vanta.clone()));
+            }
+            if s.aster_enabled || account_enabled("aster") {
+                list.push(("aster", "Aster", self.live_aster.clone()));
+            }
+            if s.popdex_enabled || account_enabled("popdex") {
+                list.push(("popdex", "PopDEX", self.live_popdex.clone()));
+            }
+            if s.binance_enabled || account_enabled("binance") {
+                list.push(("binance", "Binance", self.live_binance.clone()));
+            }
+            if s.okx_enabled || account_enabled("okx") {
+                list.push(("okx", "OKX", self.live_okx.clone()));
+            }
+            if s.coinbase_enabled || account_enabled("coinbase") {
+                list.push(("coinbase", "Coinbase", self.live_coinbase.clone()));
+            }
+            if s.kraken_enabled
+                || s.kraken_futures_enabled
+                || s.kraken_spot_enabled
+                || account_enabled("kraken")
+            {
+                list.push(("kraken", "Kraken", self.live_kraken.clone()));
+            }
+            if s.decibel_enabled || account_enabled("decibel") {
+                list.push(("decibel", "Decibel", self.live_decibel.clone()));
+            }
+            // Long-tail perp venues have no engine-settings flags — an enabled
+            // account is the only admission switch. Capability flags on the
+            // adapter still gate every downstream live path.
+            for adapter in &self.live_dex_perps {
+                if account_enabled(adapter.spec_id()) {
+                    list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+                }
+            }
+            for adapter in &self.live_evm_amms {
+                if account_enabled(adapter.spec_id()) {
+                    list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+                }
+            }
+        } else {
+            // Testnet environment — only venues with public demo endpoints.
+            if s.hyperliquid_enabled || account_enabled("hyperliquid") {
+                list.push(("hyperliquid", "Hyperliquid", self.tn_hl.clone()));
+            }
+            if s.lighter_enabled || account_enabled("lighter") {
+                list.push(("lighter", "Lighter", self.tn_lighter.clone()));
+            }
+            if s.vanta_enabled || account_enabled("vanta") {
+                list.push(("vanta", "Vanta", self.tn_vanta.clone()));
+            }
+            if s.popdex_enabled || account_enabled("popdex") {
+                list.push(("popdex", "PopDEX", self.tn_popdex.clone()));
+            }
+            if s.binance_enabled || account_enabled("binance") {
+                list.push(("binance", "Binance", self.tn_binance.clone()));
+            }
+            if s.okx_enabled || account_enabled("okx") {
+                list.push(("okx", "OKX", self.tn_okx.clone()));
+            }
+            if s.kraken_enabled || s.kraken_futures_enabled || account_enabled("kraken") {
+                list.push(("kraken", "Kraken", self.tn_kraken.clone()));
+            }
+            if s.decibel_enabled || account_enabled("decibel") {
+                list.push(("decibel", "Decibel", self.tn_decibel.clone()));
+            }
+            // Prediction venues (kalshi/polymarket) never ride this list —
+            // they resolve through the prediction paths, not the perp
+            // venue set, in either environment.
         }
         // Tests may inject simulated/scripted adapters per venue — route
         // every consumer (scans, dispatch, monitors) through them so seeded
@@ -2161,6 +2330,17 @@ impl AppEngineState {
             }
         }
         list
+    }
+
+    /// Admitted venue adapters for the *active* environment.
+    pub fn get_venues(
+        &self,
+    ) -> Vec<(
+        &'static str,
+        &'static str,
+        Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+    )> {
+        self.venues_for_env(self.env())
     }
 
     /// Resolves an exchange adapter by venue identifier or documented alias.
@@ -2208,11 +2388,19 @@ impl AppEngineState {
         venue_id: &str,
     ) -> Option<Arc<arbitrageur_exchanges::simulated::SimulatedExchange>> {
         let canonical = canonical_venue_id(venue_id)?;
+        // Match the old built-in sims' fee schedule so PnL assertions that
+        // assume nonzero taker fees keep their meaning.
+        let fee_bps = match canonical {
+            "lighter" => dec!(1.5),
+            "vanta" => dec!(3.0),
+            "robinhood" => dec!(2.5),
+            _ => dec!(2.0),
+        };
         let sim = Arc::new(arbitrageur_exchanges::simulated::SimulatedExchange::new(
             canonical,
             canonical,
             0,
-            rust_decimal::Decimal::ZERO,
+            fee_bps,
             rust_decimal::Decimal::new(100_000, 0),
         ));
         self.test_sims
@@ -2222,54 +2410,50 @@ impl AppEngineState {
         Some(sim)
     }
 
-    /// Resolves the paper execution exchange for a venue. A simulator is
-    /// returned only when the venue is currently admitted by `get_venues`;
-    /// no other venue has a paper exchange.
-    pub fn get_paper_exchange(&self, venue_id: &str) -> Option<Arc<SimulatedExchange>> {
+    /// Test-only access to an installed sim handle for seeding books/orders.
+    /// There is no paper exchange in production — under Testnet mode the
+    /// `tn_*` adapters talk to real venue demo endpoints.
+    #[cfg(test)]
+    pub fn test_sim(
+        &self,
+        venue_id: &str,
+    ) -> Option<Arc<arbitrageur_exchanges::simulated::SimulatedExchange>> {
         let canonical = canonical_venue_id(venue_id)?;
-        let admitted = self
-            .get_venues()
-            .into_iter()
-            .any(|(vid, _, _)| vid == canonical);
-        if !admitted {
-            return None;
-        }
-        match canonical {
-            "hyperliquid" => Some(self.ex_hl.clone()),
-            "lighter" => Some(self.ex_lighter.clone()),
-            "robinhood" => Some(self.ex_robinhood.clone()),
-            "vanta" => Some(self.ex_vanta.clone()),
-            "aster" => Some(self.ex_aster.clone()),
-            "popdex" => Some(self.ex_popdex.clone()),
-            "binance" => Some(self.ex_binance.clone()),
-            "okx" => Some(self.ex_okx.clone()),
-            "coinbase" => Some(self.ex_coinbase.clone()),
-            "kraken" => Some(self.ex_kraken.clone()),
-            "decibel" => Some(self.ex_decibel.clone()),
-            _ => None,
-        }
+        self.test_sims.read().ok()?.get(canonical).cloned()
     }
 
-    /// Sum of seed equity across all paper exchanges — the baseline that
-    /// realized paper P&L is measured against. Each exchange tracks its own
-    /// initial equity so a starting-balance reset moves the baseline too.
+    /// Test-only alias: the installed sims stand in for what used to be the
+    /// paper exchange set. Production code never calls this.
+    #[cfg(test)]
+    pub fn paper_exchanges(
+        &self,
+    ) -> Vec<(
+        String,
+        Arc<arbitrageur_exchanges::simulated::SimulatedExchange>,
+    )> {
+        self.test_sims
+            .read()
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Test-only alias for `test_sim` under the old name.
+    #[cfg(test)]
+    pub fn get_paper_exchange(
+        &self,
+        venue_id: &str,
+    ) -> Option<Arc<arbitrageur_exchanges::simulated::SimulatedExchange>> {
+        self.test_sim(venue_id)
+    }
+
+    /// Test-only baseline: sum of starting equities across installed sims
+    /// (the figure `total_realized_profit` is diffed against in sim tests).
+    #[cfg(test)]
     pub fn paper_baseline_equity(&self) -> Decimal {
-        self.paper_exchanges()
-            .iter()
-            .fold(dec!(0), |acc, (_, ex)| acc + ex.initial_equity())
-    }
-
-    /// All paper exchanges used for portfolio accounting, regardless of
-    /// venue enablement toggles.
-    pub fn paper_exchanges(&self) -> Vec<(&'static str, Arc<SimulatedExchange>)> {
-        vec![
-            ("hyperliquid", self.ex_hl.clone()),
-            ("lighter", self.ex_lighter.clone()),
-            ("robinhood", self.ex_robinhood.clone()),
-            ("vanta", self.ex_vanta.clone()),
-            ("aster", self.ex_aster.clone()),
-            ("popdex", self.ex_popdex.clone()),
-        ]
+        self.test_sims
+            .read()
+            .map(|m| m.values().map(|s| s.initial_equity()).sum::<Decimal>())
+            .unwrap_or_default()
     }
 }
 
@@ -2350,7 +2534,7 @@ mod tests {
     #[tokio::test]
     async fn test_app_state_initialization() {
         let state = AppEngineState::new();
-        assert!(!*state.is_live_mode.read());
+        assert!(!state.is_live());
         assert_eq!(*state.total_realized_profit.read(), dec!(0));
         assert!(state.circuit_breaker.is_trading_allowed().is_ok());
 
@@ -2392,20 +2576,21 @@ mod tests {
             s.aster_enabled = true;
             s.popdex_enabled = true;
         }
-        let venues_paper = state.get_venues();
-        assert_eq!(venues_paper.len(), 6);
-        assert_eq!(venues_paper[0].0, "hyperliquid");
-        assert_eq!(venues_paper[1].0, "lighter");
-        assert_eq!(venues_paper[2].0, "robinhood");
-        assert_eq!(venues_paper[3].0, "vanta");
-        assert_eq!(venues_paper[4].0, "aster");
-        assert_eq!(venues_paper[5].0, "popdex");
+        // Testnet environment (default): only venues with a public demo
+        // endpoint are admitted — robinhood/arcus/aster/polymarket/kalshi
+        // have none and are ineligible rather than simulated.
+        let venues_testnet = state.get_venues();
+        assert_eq!(venues_testnet.len(), 4);
+        assert_eq!(venues_testnet[0].0, "hyperliquid");
+        assert_eq!(venues_testnet[1].0, "lighter");
+        assert_eq!(venues_testnet[2].0, "vanta");
+        assert_eq!(venues_testnet[3].0, "popdex");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
-        assert!(state.get_adapter("robinhood").is_some());
+        assert!(state.get_adapter("robinhood").is_none());
         assert!(state.get_adapter("vanta").is_some());
-        assert!(state.get_adapter("aster").is_some());
+        assert!(state.get_adapter("aster").is_none());
         assert!(state.get_adapter("arcus").is_none());
         // Removed venues without native trading API stay unresolvable.
         assert!(state.get_adapter("popdex").is_some());
@@ -2418,12 +2603,13 @@ mod tests {
         assert!(state.get_adapter("polymarket").is_none());
         assert!(state.get_adapter("kalshi").is_none());
         assert!(state.get_adapter("nonexistent").is_none());
-        assert!(state.get_paper_exchange("aster").is_some());
+        // Test sims resolve only after explicit install.
+        assert!(state.get_paper_exchange("aster").is_none());
         assert!(state.get_paper_exchange("ondoperps").is_none());
         assert!(state.get_paper_exchange("grvt").is_none());
         assert!(state.get_paper_exchange("edgex").is_none());
 
-        *state.is_live_mode.write() = true;
+        state.set_environment(crate::state::TradingEnvironment::Live);
         // In live mode, enabled venues remain admitted for market data streaming,
         // while order execution is selectively gated by adapter capability & credentials.
         assert!(!state.get_venues().is_empty());
@@ -2453,6 +2639,8 @@ mod tests {
             s.hyperliquid_enabled = true;
             s.lighter_enabled = true;
         }
+        state.install_test_sim("hyperliquid");
+        state.install_test_sim("lighter");
 
         for alias in [
             "hyperliquid",
@@ -2467,7 +2655,7 @@ mod tests {
             );
             assert!(
                 state.get_paper_exchange(alias).is_some(),
-                "paper alias '{}' must resolve",
+                "sim alias '{}' must resolve",
                 alias
             );
         }
@@ -2493,17 +2681,20 @@ mod tests {
             );
             assert!(
                 state.get_paper_exchange(bad).is_none(),
-                "'{}' must not resolve to a paper exchange",
+                "'{}' must not resolve to a sim exchange",
                 bad
             );
         }
 
+        // Sims are installed per venue — disabling the flag removes the
+        // adapter but the registered sim handle stays resolvable (tests
+        // control admission via install_test_sim, not venue flags).
         {
             let mut s = state.settings.write();
             s.lighter_enabled = false;
         }
-        assert!(state.get_adapter("lighter").is_none());
-        assert!(state.get_paper_exchange("lighter").is_none());
+        assert!(state.get_adapter("lighter").is_some());
+        assert!(state.get_paper_exchange("lighter").is_some());
         assert!(state.get_adapter("hyperliquid").is_some());
     }
 

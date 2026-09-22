@@ -68,7 +68,10 @@ pub struct ExternalPositionsResponse {
     /// present when rows were read but not all surface — answers "why don't
     /// I see venue X's position?" without guessing.
     pub venue_notes: Vec<String>,
-    pub live_mode: bool,
+    /// Active trading environment ("testnet" | "live") — display context for
+    /// the UI. Closes are gated per-position by `close_supported`, not by
+    /// environment: both environments submit real venue orders.
+    pub environment: String,
 }
 
 /// Friction-aware close quote for one external position.
@@ -264,7 +267,7 @@ fn system_qty_for(
 pub async fn get_external_positions_impl(
     state: &AppEngineState,
 ) -> Result<ExternalPositionsResponse, String> {
-    let live_mode = *state.is_live_mode.read();
+    let environment = state.env().as_str().to_string();
     if state.vault.write().is_unlocked() {
         state.sync_vault_credentials_to_adapters();
     }
@@ -379,7 +382,7 @@ pub async fn get_external_positions_impl(
         positions,
         unreadable,
         venue_notes,
-        live_mode,
+        environment,
     })
 }
 
@@ -653,16 +656,13 @@ fn validate_close_response(
     Ok(())
 }
 
-/// Close the external residual with a live reduce-only order.
-/// Paper mode refuses (there is no paper equivalent of a real position);
-/// the recommendation endpoint stays available for analysis either way.
+/// Close the external residual with a reduce-only order on the connected
+/// venue — Live hits production, Testnet hits the venue's demo endpoint.
+/// The recommendation endpoint stays available for analysis either way.
 pub async fn close_external_position_impl(
     input: CloseExternalPositionInput,
     state: &AppEngineState,
 ) -> Result<CloseResultDto, String> {
-    if !*state.is_live_mode.read() {
-        return Err("Switch to Live Trading to close external positions — paper mode cannot flatten real exchange positions".into());
-    }
     if !state.vault.write().is_unlocked() {
         return Err("Vault is locked. Unlock before closing external positions.".into());
     }
@@ -1017,15 +1017,12 @@ pub async fn close_external_position_impl(
 // --- Scheduled exits ---------------------------------------------------------
 
 /// Persist a one-shot scheduled close. All the close-path safety gates are
-/// re-checked at fire time (live mode, vault, fresh account re-read); the
-/// checks here only refuse schedules that could never dispatch.
+/// re-checked at fire time (vault, fresh account re-read); the checks here
+/// only refuse schedules that could never dispatch.
 pub async fn schedule_external_exit_impl(
     input: ScheduleExitInput,
     state: &AppEngineState,
 ) -> Result<crate::state_store::ScheduledExit, String> {
-    if !*state.is_live_mode.read() {
-        return Err("Switch to Live Trading to schedule exits — scheduled closes dispatch real reduce-only orders".into());
-    }
     if !state.vault.write().is_unlocked() {
         return Err("Vault is locked. Unlock before scheduling an exit.".into());
     }

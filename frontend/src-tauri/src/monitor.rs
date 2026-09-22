@@ -1474,7 +1474,7 @@ impl SpreadMonitorEngine {
             }
             // Live mode keeps the monitor running: it is the hub's REST
             // feeder for venues/symbols the WS lanes don't cover and the
-            // only funding-rate refresher. Its execution path is paper-only
+            // only funding-rate refresher. Its execution path stays gated
             // and gated downstream (live-mode refusal at the executor plus
             // the explicit live-entry gate), so suspending here bought no
             // safety — it only darkened the radar and starved the hub.
@@ -2893,8 +2893,9 @@ fn variation_covers_friction(
     true
 }
 
-/// Whether the row may be executed right now. Monitor rows only ever drive
-/// the paper path; live mode and unresolved signals block hard.
+/// Whether the row may be executed right now. Monitor auto-execution only
+/// ever dispatches against testnet venues; live mode and unresolved signals
+/// block hard.
 #[allow(clippy::too_many_arguments)]
 fn execution_gate(
     status: PairStatus,
@@ -2911,10 +2912,10 @@ fn execution_gate(
     state: &AppEngineState,
     symbol: &str,
 ) -> (bool, Option<String>) {
-    if *state.is_live_mode.read() {
+    if state.is_live() {
         return (
             false,
-            Some("live mode: monitor execution is paper-only".into()),
+            Some("live mode: monitor auto-execution is disabled".into()),
         );
     }
     if *state.is_paused.read() {

@@ -449,7 +449,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                   Total {usdPlain(venueTotal)} across {sortedVenues.length} venue{sortedVenues.length === 1 ? "" : "s"}
                 </span>
                 {Math.abs(venueTotal - equity) > Math.max(1, equity * 0.005) && equity > 0 && (
-                  <span title="Header equity comes from risk overview; venue total from venue balances. A drift means mixed live/paper snapshots.">
+                  <span title="Header equity comes from risk overview; venue total from venue balances. A drift means mixed snapshots or a stale read.">
                     Header {usdPlain(equity)}
                   </span>
                 )}

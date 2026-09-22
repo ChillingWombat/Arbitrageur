@@ -101,62 +101,101 @@ export interface ExchangeMetadata {
   name: string;
   type: string;
   feeBps: number;
+  /** Sidebar grouping — EVM AMMs cluster by chain (they share the chain's
+   *  RPC endpoint; the account's baseUrl override is per-chain). */
+  group: string;
+}
+
+/** Sidebar section order — primary venues first, then TradFi, the long-tail
+ *  perp list, then EVM AMMs grouped by chain (same-chain venues share the
+ *  chain RPC endpoint configured via the account's baseUrl). */
+export const EXCHANGE_GROUP_ORDER = [
+  "Primary",
+  "TradFi",
+  "Perp DEX — Long Tail",
+  "EVM AMM — Ethereum",
+  "EVM AMM — BSC",
+  "EVM AMM — Arbitrum",
+  "EVM AMM — Base",
+  "EVM AMM — Optimism",
+  "EVM AMM — Polygon",
+  "EVM AMM — Avalanche",
+];
+
+/** Group a venue list into ordered sections for the sidebar. Within a group
+ *  venues stay alphabetical. Unknown groups append last under their name. */
+export function groupExchangesBySection(
+  list: ExchangeMetadata[]
+): { group: string; venues: ExchangeMetadata[] }[] {
+  const byGroup = new Map<string, ExchangeMetadata[]>();
+  for (const ex of list) {
+    const g = ex.group;
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g)!.push(ex);
+  }
+  const ordered = EXCHANGE_GROUP_ORDER.filter((g) => byGroup.has(g)).map(
+    (g) => ({ group: g, venues: byGroup.get(g)! })
+  );
+  for (const [g, venues] of byGroup) {
+    if (!EXCHANGE_GROUP_ORDER.includes(g)) ordered.push({ group: g, venues });
+  }
+  return ordered;
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
-  { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", feeBps: 30.0 },
-  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 3.0 },
-  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 2.0 },
-  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
-  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 },
-  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
-  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 },
-  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
-  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
-  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 3.0 },
-  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Market Data)", feeBps: 2.0 },
-  { id: "edgex", name: "edgeX", type: "Perp DEX (Market Data)", feeBps: 3.8 },
-  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "extended", name: "Extended", type: "Perp DEX (Market Data)", feeBps: 2.0 },
-  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", feeBps: 5.0 },
-  { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", feeBps: 5.0 },
-  { id: "helix", name: "Helix", type: "Perp DEX (Market Data)", feeBps: 0.01 },
-  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
-  { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 },
-  { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 },
-  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
-  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
-  { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
-  { id: "nado", name: "Nado", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 },
-  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 2.5 },
-  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 },
-  { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", feeBps: 25.0 },
-  { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", feeBps: 25.0 },
-  { id: "paradex", name: "Paradex", type: "Perp DEX (Market Data)", feeBps: 2.0 },
-  { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", feeBps: 30.0 },
-  { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
-  { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 },
-  { id: "qfex", name: "QFEX", type: "Perp DEX (Market Data)", feeBps: 4.0 },
-  { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", feeBps: 30.0 },
-  { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 },
-  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
-  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
-  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 4.0 },
-  { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 },
-  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 5.0 },
-  { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 },
-  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
-  { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", feeBps: 30.0 },
-  { id: "vest", name: "Vest", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", feeBps: 30.0 , group: "EVM AMM — Base" },
+  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 , group: "Primary" },
+  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 , group: "Primary" },
+  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 , group: "Primary" },
+  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
+  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 , group: "Primary" },
+  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 , group: "Primary" },
+  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "edgex", name: "edgeX", type: "Perp DEX (Market Data)", feeBps: 3.8 , group: "Perp DEX — Long Tail" },
+  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "extended", name: "Extended", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
+  { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
+  { id: "helix", name: "Helix", type: "Perp DEX (Market Data)", feeBps: 0.01 , group: "Perp DEX — Long Tail" },
+  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 , group: "Primary" },
+  { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 , group: "TradFi" },
+  { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 , group: "TradFi" },
+  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 , group: "Primary" },
+  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 , group: "Primary" },
+  { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 , group: "Primary" },
+  { id: "nado", name: "Nado", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 , group: "Primary" },
+  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 2.5 , group: "Perp DEX — Long Tail" },
+  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
+  { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
+  { id: "paradex", name: "Paradex", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", feeBps: 30.0 , group: "EVM AMM — Avalanche" },
+  { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 , group: "Primary" },
+  { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 , group: "Primary" },
+  { id: "qfex", name: "QFEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", feeBps: 30.0 , group: "EVM AMM — Polygon" },
+  { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
+  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 , group: "Primary" },
+  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
+  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 5.0 , group: "EVM AMM — Ethereum" },
+  { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
+  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 , group: "Primary" },
+  { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", feeBps: 30.0 , group: "EVM AMM — Optimism" },
+  { id: "vest", name: "Vest", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
 ];
 
 interface EngineSettingsProps {
@@ -217,7 +256,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [maxHistoryDays, setMaxHistoryDays] = useState("");
   const [maxStorageGb, setMaxStorageGb] = useState("");
   const [storageStats, setStorageStats] = useState<StorageStatsDto | null>(null);
-  const [tradingMode, setTradingMode] = useState<"paper" | "real">("paper");
+  const [tradingMode, setTradingMode] = useState<"testnet" | "live">("testnet");
   const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
 
   // Safety: overall circuit-breaker + safety-net limits
@@ -519,7 +558,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMaxStorageGb(retentionGbToInput(s.spread_samples_max_gb));
 
 
-        setTradingMode(s.trading_mode === "real" ? "real" : "paper");
+        setTradingMode(s.trading_mode === "live" ? "live" : "testnet");
         setPaperStartingBalance(s.paper_starting_balance_usd ?? 100000);
         setCbMaxDdUsd(s.cb_max_daily_drawdown_usd ?? 25000);
         setCbMaxDdPct(s.cb_max_daily_drawdown_pct ?? 5);
@@ -778,7 +817,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         await api.saveEngineSettings(payload);
 
         // Ensure live mode state reflects selected mode
-        await api.setLiveMode(tradingMode === "real");
+        await api.setTradingEnvironment(tradingMode);
 
         const sanitized = await api.getEngineSettings();
         setConfiguredVenues(sanitized.configured_venues || []);
@@ -1134,7 +1173,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       No favorites yet — star an exchange to pin it here.
                     </div>
                   )}
-                  {visibleExchanges.map((ex) => {
+                  {groupExchangesBySection(visibleExchanges).map(({ group, venues }) => (
+                    <div key={group}>
+                      {exchangeFilter !== "favorites" && groupExchangesBySection(visibleExchanges).length > 1 && (
+                        <div className="px-2 pt-3 pb-1 text-[10px] font-mono font-bold tracking-wider text-slate-400 uppercase">
+                          {group}
+                        </div>
+                      )}
+                      {venues.map((ex) => {
                     const isSelected = selectedExchange === ex.id;
                     const isEnabled = isExchangeEnabled(ex.id);
                     const bal = getVenueBalance(ex.id);
@@ -1226,19 +1272,21 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                             title={
                               bal.is_live
                                 ? "Real exchange equity"
-                                : "Simulated paper equity, not live exchange equity"
+                                : "Testnet venue equity — demo funds, not live exchange equity"
                             }
                           >
                             {bal.is_live
                               ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                              : `Paper $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
+                              : `Testnet $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
                           </span>
                           )}
                         </div>
                         )}
                       </button>
                     );
-                  })}
+                      })}
+                    </div>
+                  ))}
                 </div>
 
               </div>
@@ -1298,6 +1346,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   <VenueAccountsSection
                     venue="kraken_spot"
                     locked={isVaultLocked}
+                    environment={tradingMode}
                     bal={getVenueBalance("kraken")}
                     lane={getVenueLane("kraken")}
                     fallbackEnabled={krakenSpotEnabled}
@@ -1316,6 +1365,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   <VenueAccountsSection
                     venue="kraken_futures"
                     locked={isVaultLocked}
+                    environment={tradingMode}
                     bal={getVenueBalance("kraken")}
                     lane={getVenueLane("kraken")}
                     fallbackEnabled={krakenFuturesEnabled}
@@ -1362,6 +1412,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <VenueAccountsSection
                 venue={selectedExchange}
                 locked={isVaultLocked}
+                environment={tradingMode}
                 bal={getVenueBalance(selectedExchange)}
                 lane={getVenueLane(selectedExchange)}
                 fallbackEnabled={venueFlagEnabled(selectedExchange)}
@@ -1396,7 +1447,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Paper Trading executes simulated fills against live market data — no real orders are sent and balances are virtual.\n\nLive Trading connects your exchange accounts for account monitoring and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries are off by default and require the explicit canary opt-in in Safety with a per-leg notional cap. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
+                    text={"Testnet Trading executes real orders against each venue's public demo/test endpoints — order flow, signing, and reconciliation run exactly like production, with demo balances instead of real funds. Venues without a public testnet are unavailable in this mode.\n\nLive Trading connects your exchange accounts for real-money execution, account monitoring, and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries are off by default and require the explicit opt-in in Safety with a per-leg notional cap. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1413,13 +1464,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <input
                       type="radio"
                       name="trading_mode"
-                      value="paper"
-                      checked={tradingMode === "paper"}
-                      onChange={() => setTradingMode("paper")}
+                      value="testnet"
+                      checked={tradingMode === "testnet"}
+                      onChange={() => setTradingMode("testnet")}
                       disabled={!hasApiConnectivity}
                       className="text-accent focus:ring-accent"
                     />
-                    <span className="font-semibold text-slate-800">Paper Trading</span>
+                    <span className="font-semibold text-slate-800">Testnet Trading</span>
                   </label>
                   <label
                     className={`flex items-center space-x-2 ${
@@ -1441,8 +1492,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <input
                       type="radio"
                       name="trading_mode"
-                      value="real"
-                      checked={tradingMode === "real"}
+                      value="live"
+                      checked={tradingMode === "live"}
                       disabled={!canSwitchToLive && (vaultStatus?.is_unlocked ?? false)}
                       onChange={() => {
                         if (!vaultStatus?.is_unlocked && api.isTauri) {
@@ -1450,10 +1501,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                           return;
                         }
                         if (canSwitchToLive) {
-                          if (!liveRiskAgreed && tradingMode !== "real") {
+                          if (!liveRiskAgreed && tradingMode !== "live") {
                             setShowLiveRiskModal(true);
                           } else {
-                            setTradingMode("real");
+                            setTradingMode("live");
                           }
                         }
                       }}
@@ -1466,33 +1517,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 </div>
 
                 <p className="text-xs text-warn">
-                  Strategy entries remain disabled in Live mode. Live Trading is limited to account monitoring and risk-reducing closes, such as flattening existing positions.
+                  Live Trading covers account monitoring, risk-reducing closes, and strategy entries when the opt-in below is enabled. Entries stay off by default — enable them explicitly in Risk Control with a per-leg notional cap.
                 </p>
 
               </div>
 
               <div className="pt-3 border-t border-surface-border space-y-1.5">
-                <div className="flex items-center gap-3">
-                  <label className="text-slate-600 block font-mono text-xs">
-                    Paper Starting Balance (USD)
-                  </label>
-                  <input
-                  type="number"
-                  min="1"
-                  step="any"
-                  disabled={loading || tradingMode === "real"}
-                  title={tradingMode === "real" ? "Paper balance applies to Paper Trading mode only" : undefined}
-                  value={paperStartingBalance}
-                  onChange={(e) => setPaperStartingBalance(parseFloat(e.target.value) || 0)}
-                  className={`w-28 shrink-0 px-3 py-1.5 border rounded-lg focus:outline-none focus:ring-1 focus:ring-accent ${
-                    tradingMode === "real"
-                      ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
-                      : "bg-surface-raised border-surface-border text-slate-900"
-                  }`}
-                  />
-                </div>
-                <p className="text-xs text-slate-400 leading-snug border-t border-surface-border/60 pt-1.5">
-                  Virtual equity per paper account. Saving resets paper accounts and clears open positions.
+                <p className="text-xs text-slate-400 leading-snug">
+                  Testnet uses each venue's own demo balance — fund accounts on the venue's testnet faucet, not here. Balances, positions, and order flow are real venue state, not simulation.
                 </p>
               </div>
             </div>
@@ -1783,14 +1815,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 onChange={(e) => setLiveEntryEnabled(e.target.checked)}
                 className="mt-0.5 accent-red-600" />
               <label htmlFor="live-entry-enabled" className="text-xs text-slate-700 leading-snug">
-                <span className="font-bold text-red-700">Enable live strategy entries (canary).</span>{" "}
+                <span className="font-bold text-red-700">Enable live strategy entries.</span>{" "}
                 Permits REAL-money two-leg spatial entries while Trading Mode
                 is Live. Every leg is refused above the notional cap below —
-                caps are never clamped. Order polling, residual auto-flatten,
-                and cancel retry run continuously, but they are not yet
-                proven against real venues: a failed leg can leave one-sided
-                exposure you must close manually. Start with the smallest
-                size that satisfies both venues' minimums.
+                caps are never clamped. Order status is reconciled via
+                authoritative venue polling, residual auto-flatten and cancel
+                retry run continuously, and a partially-filled entry unwinds
+                the filled leg automatically. Residual risk remains: a venue
+                outage at the wrong moment can still leave one-sided
+                exposure you must close manually. Keep the cap small.
               </label>
             </div>
             <div>
@@ -1806,7 +1839,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            {liveEntryEnabled && tradingMode === "real" && (
+            {liveEntryEnabled && tradingMode === "live" && (
               <div className="rounded border border-red-300 bg-red-50 p-2.5 space-y-2">
                 <p className="text-[11px] font-bold text-red-700 tracking-wide">
                   LIVE CANARY — one minimal two-leg entry
@@ -2054,7 +2087,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       try {
         const sanitized = await api.getEngineSettings();
         setConfiguredVenues(sanitized.configured_venues || []);
-        if (sanitized.trading_mode === "real" || sanitized.trading_mode === "paper") {
+        if (sanitized.trading_mode === "live" || sanitized.trading_mode === "testnet" || sanitized.trading_mode === "real" || sanitized.trading_mode === "paper") {
           setTradingMode(sanitized.trading_mode);
         }
         setAccountsEpoch((prev) => prev + 1);
@@ -2181,7 +2214,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             }}
             className="btn-secondary px-2.5 py-2.5 text-xs cursor-pointer"
           >
-            Cancel (Keep Paper)
+            Cancel (Keep Testnet)
           </button>
           <button
             type="button"
@@ -2194,7 +2227,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               const inputNorm = liveRiskConfirmationInput.trim().toUpperCase();
               if (liveRiskAck && (inputNorm === "CONFIRM" || inputNorm === "CONFIRM LIVE TRADING")) {
                 setLiveRiskAgreed(true);
-                setTradingMode("real");
+                setTradingMode("live");
                 setShowLiveRiskModal(false);
                 setLiveRiskConfirmationInput("");
                 setLiveRiskAck(false);

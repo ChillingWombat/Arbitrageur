@@ -1,11 +1,11 @@
 //! Autonomous convergence executor policy — Spread Radar bot (GitHub issue #5).
 //!
-//! Pure decision functions for the opt-in paper-only bot that consumes the
+//! Pure decision functions for the opt-in testnet bot that consumes the
 //! spread monitor's qualified-opportunity stream. No I/O, no engine state,
 //! no time reads: every input arrives as an argument so policy is
 //! deterministic and unit-testable in isolation.
 //!
-//! Contract notes (paper-only, fail-closed):
+//! Contract notes (testnet-only, fail-closed):
 //! - The monitor remains the sole authority on qualification. These functions
 //!   never re-derive P_win, convergence time, or capacity; they consume them
 //!   and refuse to trade when any required field is missing.
@@ -18,7 +18,7 @@
 //! - Stop evaluation uses an entry-relative band (`stop_mult × |entry_dev|`,
 //!   floored at the friction band) because the monitor row DTO does not carry
 //!   the OU σ the stop band was conditioned on. This is the documented
-//!   paper-only approximation; it never overlaps the convergence band.
+//!   testnet-only approximation; it never overlaps the convergence band.
 
 use serde::{Deserialize, Serialize};
 
@@ -333,9 +333,10 @@ pub fn evaluate_entry_gates(
     if !cfg.enabled {
         return deny("bot disabled");
     }
-    // Live-mode hard block: the bot is paper-only, unconditionally.
+    // Live-mode hard block: autonomous entries are testnet-only,
+    // unconditionally. Manual live entries go through a separate gated path.
     if ctx.live_mode {
-        return deny("live mode: bot is paper-only");
+        return deny("live mode: autonomous entries are testnet-only");
     }
     if ctx.engine_paused {
         return deny("engine paused");
@@ -666,7 +667,7 @@ mod tests {
         ctx.live_mode = true;
         let d = evaluate_entry_gates(&s, &cfg, &ctx);
         assert!(!d.allow);
-        assert!(d.reason.contains("paper-only"));
+        assert!(d.reason.contains("testnet-only"));
     }
 
     #[test]

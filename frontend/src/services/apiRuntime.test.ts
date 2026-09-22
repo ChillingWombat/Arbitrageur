@@ -55,9 +55,9 @@ test("invokeDesktop propagates core loader failure", async () => {
   );
 });
 
-test("api.setLiveMode rejects without the desktop application", async () => {
-  await assert.rejects(api.setLiveMode(true), new RegExp(DESKTOP_REQUIRED_ERROR));
-  await assert.rejects(api.setLiveMode(false), new RegExp(DESKTOP_REQUIRED_ERROR));
+test("api.setTradingEnvironment rejects without the desktop application", async () => {
+  await assert.rejects(api.setTradingEnvironment("live"), new RegExp(DESKTOP_REQUIRED_ERROR));
+  await assert.rejects(api.setTradingEnvironment("testnet"), new RegExp(DESKTOP_REQUIRED_ERROR));
 });
 
 test("api.deleteExchangeCredentials rejects without the desktop application", async () => {
@@ -96,7 +96,7 @@ const REGISTERED_NATIVE_COMMANDS = [
   "reset_circuit_breaker",
   "trigger_emergency_killswitch",
   "get_execution_logs",
-  "set_live_mode",
+  "set_trading_environment",
   "set_engine_paused",
   "get_engine_settings",
   "save_engine_settings",

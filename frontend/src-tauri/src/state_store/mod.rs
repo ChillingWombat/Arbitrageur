@@ -79,8 +79,18 @@ pub struct AccountProfile {
     /// min(strategy target, this cap, venue cap, Risk Control global max).
     #[serde(default)]
     pub max_leverage: Option<u32>,
+    /// Which venue environment this account's credentials belong to:
+    /// 'live' (production) or 'testnet' (the venue's public demo API).
+    /// Admission and credential sync scope to the active environment, so a
+    /// live key can never provision a testnet adapter or vice versa.
+    #[serde(default = "default_account_environment")]
+    pub environment: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+fn default_account_environment() -> String {
+    "live".into()
 }
 
 fn default_account_tier() -> String {
@@ -750,47 +760,46 @@ pub struct ScheduledExit {
 /// pruning can never wipe the audit trail's newest window either.
 pub const MONITOR_SIGNAL_EVENTS_MAX_ROWS: i64 = 50_000;
 
-const ACCOUNT_COLS: &str =
-    "id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at";
+const ACCOUNT_COLS: &str = "id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at";
 
 const ACCOUNT_BY_ID_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at
 FROM exchange_accounts
 WHERE id = ?1";
 
 const ACCOUNT_ALL_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at
 FROM exchange_accounts
-ORDER BY venue COLLATE NOCASE, is_default DESC, label COLLATE NOCASE, id";
+ORDER BY venue COLLATE NOCASE, environment, is_default DESC, label COLLATE NOCASE, id";
 
 const ACCOUNT_BY_VENUE_SQL: &str = "\
-SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at
+SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at
 FROM exchange_accounts
 WHERE venue = ?1
-ORDER BY is_default DESC, label COLLATE NOCASE, id";
+ORDER BY environment, is_default DESC, label COLLATE NOCASE, id";
 
 const ENABLED_DEFAULT_BY_VENUE_SQL: &str = "\
 SELECT id FROM exchange_accounts
-WHERE venue = ?1 AND is_default = 1 AND enabled = 1
+WHERE venue = ?1 AND environment = ?2 AND is_default = 1 AND enabled = 1
 LIMIT 1";
 
 const FALLBACK_DEFAULT_SQL: &str = "\
 SELECT id FROM exchange_accounts
-WHERE venue = ?1 AND enabled = 1
+WHERE venue = ?1 AND environment = ?2 AND enabled = 1
 ORDER BY label COLLATE NOCASE, id
 LIMIT 1";
 
 const CLEAR_DEFAULTS_SQL: &str = "\
-UPDATE exchange_accounts SET is_default = 0, updated_at = ?2 WHERE venue = ?1";
+UPDATE exchange_accounts SET is_default = 0, updated_at = ?2 WHERE venue = ?1 AND environment = ?3";
 
 const SET_DEFAULT_SQL: &str = "\
 UPDATE exchange_accounts SET is_default = 1, updated_at = ?2
-WHERE venue = ?1 AND id = ?3 AND enabled = 1";
+WHERE venue = ?1 AND environment = ?4 AND id = ?3 AND enabled = 1";
 
 const ACCOUNT_UPSERT_SQL: &str = "\
 INSERT INTO exchange_accounts
-    (id, venue, label, enabled, is_default, account_tier, max_leverage, created_at, updated_at)
-VALUES (?1, ?2, ?3, ?4, 0, ?5, ?7, ?6, ?6)
+    (id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at)
+VALUES (?1, ?2, ?3, ?4, 0, ?5, ?7, ?8, ?6, ?6)
 ON CONFLICT(id) DO UPDATE SET
     label = excluded.label,
     enabled = excluded.enabled,
@@ -1398,6 +1407,46 @@ ALTER TABLE spread_samples ADD COLUMN ask_depth REAL;
 PRAGMA user_version = 28;
 COMMIT;";
 
+/// v29 adds `exchange_accounts.environment` ('live' | 'testnet') — the two
+/// credential sets model: an account belongs to exactly one environment and
+/// venue admission/credential sync scope to the active one. Existing rows
+/// default to 'live'. The table is rebuilt because the old UNIQUE(venue,
+/// label) must widen to (venue, label, environment) — the same account
+/// label may legitimately exist once per environment — and the one-default
+/// partial index becomes per-(venue, environment).
+const MIGRATION_V29_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE exchange_accounts_v29 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    venue TEXT NOT NULL COLLATE NOCASE CHECK(length(venue) BETWEEN 1 AND 64),
+    label TEXT NOT NULL COLLATE NOCASE CHECK(length(label) BETWEEN 1 AND 80),
+    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+    is_default INTEGER NOT NULL CHECK(is_default IN (0, 1)),
+    account_tier TEXT NOT NULL DEFAULT 'standard'
+        CHECK(account_tier IN ('standard', 'plus', 'premium', 'builder')),
+    max_leverage INTEGER CHECK(max_leverage IS NULL OR max_leverage BETWEEN 1 AND 5),
+    environment TEXT NOT NULL DEFAULT 'live' CHECK(environment IN ('live', 'testnet')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(venue, label, environment)
+);
+INSERT INTO exchange_accounts_v29
+    (id, venue, label, enabled, is_default, account_tier, max_leverage,
+     environment, created_at, updated_at)
+    SELECT id, venue, label, enabled, is_default, account_tier, max_leverage,
+           'live', created_at, updated_at
+    FROM exchange_accounts;
+DROP TABLE exchange_accounts;
+ALTER TABLE exchange_accounts_v29 RENAME TO exchange_accounts;
+CREATE UNIQUE INDEX ux_exchange_accounts_one_default
+    ON exchange_accounts(venue, environment) WHERE is_default = 1;
+CREATE INDEX ix_exchange_accounts_venue_enabled
+    ON exchange_accounts(venue, environment, enabled);
+PRAGMA user_version = 29;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1652,8 +1701,9 @@ fn account_from_row(row: &Row<'_>) -> rusqlite::Result<AccountProfile> {
         max_leverage: row
             .get::<_, Option<i64>>(6)?
             .and_then(|v| u32::try_from(v).ok()),
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        environment: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -1835,7 +1885,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 28 {
+        if version > 29 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2002,6 +2052,12 @@ impl StateStore {
         }
         if version <= 27 {
             if let Err(err) = conn.execute_batch(MIGRATION_V28_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 28 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V29_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

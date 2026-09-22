@@ -545,6 +545,21 @@ impl ExchangeAdapter for SimulatedExchange {
         Ok(())
     }
 
+    /// The simulator fully implements submission/cancel locally — under
+    /// `cfg(test)` it stands in for a credentialed venue, so capability
+    /// gates must see it as capable rather than fail-closed.
+    fn supports_live_execution(&self) -> bool {
+        true
+    }
+
+    fn live_order_submission_implemented(&self) -> bool {
+        true
+    }
+
+    fn has_live_credentials(&self) -> bool {
+        true
+    }
+
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
         if symbol.trim().is_empty() {
             anyhow::bail!(

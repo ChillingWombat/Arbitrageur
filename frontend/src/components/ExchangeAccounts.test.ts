@@ -100,6 +100,7 @@ function makeMockAccount(overrides: Partial<AccountDto> = {}): AccountDto {
     apiKeyIndex: null,
     accountTier: "standard",
     maxLeverage: null,
+    environment: "live",
     ...overrides,
   };
 }

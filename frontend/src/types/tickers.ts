@@ -156,12 +156,41 @@ export interface VenueSettingsFilter {
 }
 
 /**
+ * Venue codes with public testnet/demo endpoints — the only venues the
+ * engine admits in the Testnet environment. Mirrors the `tn_*` adapter set
+ * in venues_for_env; venues without a demo endpoint (Robinhood, Aster,
+ * Coinbase, long-tail perps, EVM AMMs) are live-only.
+ */
+const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "DCB"]);
+
+/**
+ * Venue IDs with public testnet/demo endpoints — mirrors the backend `tn_*`
+ * adapter set in venues_for_env. Used to badge account cards when the
+ * active environment is Testnet: an account created for a venue without a
+ * demo endpoint can never be admitted while the engine runs testnet.
+ */
+export const TESTNET_CAPABLE_VENUE_IDS = new Set([
+  "hyperliquid",
+  "lighter",
+  "vanta",
+  "popdex",
+  "binance",
+  "okx",
+  "kraken",
+  "kraken_futures",
+  "decibel",
+]);
+
+export function venueHasTestnet(venueId: string): boolean {
+  return TESTNET_CAPABLE_VENUE_IDS.has(venueId.trim().toLowerCase());
+}
+
+/**
  * Determines the set of natively connected venue codes from sanitized engine settings.
- * Hyperliquid ("HL"), Lighter ("LGT"), Robinhood Lighter ("RH"), Vanta/Orderly
- * ("VNT"), Aster ("AST") and PopDEX ("POP") expose native market-data
- * adapters in this phase, and only outside live trading mode.
  * Public read-only feeds require the venue's enable toggle, not secrets; connectivity
- * is never inferred from credential-looking strings.
+ * is never inferred from credential-looking strings. In Live mode this returns an
+ * empty set — flag state never proves connectivity. In Testnet mode only
+ * testnet-capable venues count.
  *
  * Prefer getAdmittedVenueCodes(systemStatus) — the backend's own admission report —
  * over this flag-based approximation; it cannot drift from what get_venues admits.
@@ -171,47 +200,34 @@ export function getEnabledConnectedVenueCodes(
   isLiveMode?: boolean
 ): Set<string> {
   const active = new Set<string>();
-  if (!settings || isLiveMode === true || settings.trading_mode === "real") {
+  if (
+    !settings ||
+    isLiveMode === true ||
+    settings.trading_mode === "live" ||
+    settings.trading_mode === "real"
+  ) {
     return active;
   }
 
-  if (settings.hyperliquid_enabled === true) {
-    active.add("HL");
-  }
-  if (settings.lighter_enabled === true) {
-    active.add("LGT");
-  }
-  if (settings.robinhood_enabled === true) {
-    active.add("RH");
-  }
-  if (settings.vanta_enabled === true) {
-    active.add("VNT");
-  }
-  if (settings.aster_enabled === true) {
-    active.add("AST");
-  }
-  if (settings.popdex_enabled === true) {
-    active.add("POP");
-  }
-  if (settings.binance_enabled === true) {
-    active.add("BNB");
-  }
-  if (settings.okx_enabled === true) {
-    active.add("OKX");
-  }
-  if (settings.coinbase_enabled === true) {
-    active.add("CB");
-  }
-  if (
+  const admit = (code: string, enabled?: boolean) => {
+    if (enabled === true && TESTNET_CAPABLE_CODES.has(code)) {
+      active.add(code);
+    }
+  };
+
+  admit("HL", settings.hyperliquid_enabled);
+  admit("LGT", settings.lighter_enabled);
+  admit("VNT", settings.vanta_enabled);
+  admit("POP", settings.popdex_enabled);
+  admit("BNB", settings.binance_enabled);
+  admit("OKX", settings.okx_enabled);
+  admit(
+    "KRK",
     settings.kraken_enabled === true ||
-    settings.kraken_futures_enabled === true ||
-    settings.kraken_spot_enabled === true
-  ) {
-    active.add("KRK");
-  }
-  if (settings.decibel_enabled === true) {
-    active.add("DCB");
-  }
+      settings.kraken_futures_enabled === true ||
+      settings.kraken_spot_enabled === true
+  );
+  admit("DCB", settings.decibel_enabled);
   return active;
 }
 
@@ -296,7 +312,7 @@ export function tickerUnavailabilityReason(
     return "Engine status unavailable — start the desktop app so venue lanes can report.";
   }
   if (status.is_live_mode) {
-    return "Live Trading mode has no read-only market lanes — switch to Paper mode to stream venue quotes.";
+    return "Live Trading mode has no read-only market lanes — switch to Testnet mode to stream venue quotes.";
   }
   if (activeVenueCodes.size === 0) {
     const enabled = (status.active_venues ?? []).filter(

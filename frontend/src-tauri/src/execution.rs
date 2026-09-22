@@ -11,7 +11,7 @@ use crate::commands::{
     compute_route_economics, effective_venue_fee_bps, fetch_multi_market_quotes_impl,
     live_entry_gate, live_entry_notional_guard, maybe_record_margin_snapshots,
     record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
-    reject_if_strategy_filtered, resolve_effective_leverage, snapshot_paper_equity,
+    reject_if_strategy_filtered, resolve_effective_leverage, snapshot_venue_equity,
     strategy_slippage_bps, validate_adapter_book, validate_market_symbol, ConvergenceCheckDto,
     MarginHealthDto, NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
 };
@@ -24,7 +24,7 @@ use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use arbitrageur_execution::coordinator::ArbitrageExecutionResult;
 use arbitrageur_execution::passive_unwind::{
-    execute_passive_reduce, PassiveBookRefresh, PassiveOutcome, PassiveUnwindConfig,
+    PassiveBookRefresh, PassiveOutcome, PassiveUnwindConfig,
 };
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
 use arbitrageur_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
@@ -91,10 +91,12 @@ pub(crate) fn resolve_signal_accounts(
             short: Some(short),
         });
     }
-    if let Ok(routes) = state
-        .state_store
-        .eligible_strategy_routes(strategy_id, venue_a, venue_b)
-    {
+    if let Ok(routes) = state.state_store.eligible_strategy_routes(
+        strategy_id,
+        venue_a,
+        venue_b,
+        state.env().as_str(),
+    ) {
         if let Some(r) = routes.into_iter().next() {
             let (long, short) = if r.account_a_venue.eq_ignore_ascii_case(venue_a) {
                 (r.account_a_id, r.account_b_id)
@@ -112,13 +114,13 @@ pub(crate) fn resolve_signal_accounts(
         route_id: None,
         long: state
             .state_store
-            .default_account(venue_a)
+            .default_account(venue_a, state.env().as_str())
             .ok()
             .flatten()
             .map(|a| a.id),
         short: state
             .state_store
-            .default_account(venue_b)
+            .default_account(venue_b, state.env().as_str())
             .ok()
             .flatten()
             .map(|a| a.id),
@@ -325,7 +327,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 .into(),
         );
     }
-    let is_live = *state.is_live_mode.read();
+    let is_live = state.is_live();
     if is_live {
         live_entry_gate(state, &[buy_venue, sell_venue])?;
     }
@@ -362,13 +364,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     if crate::state::canonical_venue_id(buy_venue) == crate::state::canonical_venue_id(sell_venue) {
         return Err("Buy and sell venues must resolve to distinct canonical venues".into());
     }
-
-    let buy_paper = state
-        .get_paper_exchange(buy_vid.as_str())
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", buy_venue))?;
-    let sell_paper = state
-        .get_paper_exchange(sell_vid.as_str())
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{}'", sell_venue))?;
 
     // Order books must come from the hub cache (max age 2s) or a fresh fetch
     // through the admitted read-only adapter; ticker data is not a substitute.
@@ -595,25 +590,16 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         })?;
 
     let margin_monitor = margin_monitor_from_settings(state);
-    let acc_buy = if is_live {
-        buy_adapter
-            .fetch_account()
-            .await
-            .map_err(|e| format!("Failed to fetch live account on {}: {}", buy_venue, e))?
-    } else {
-        buy_paper.fetch_account().await.map_err(|e| e.to_string())?
-    };
-    let acc_sell = if is_live {
-        sell_adapter
-            .fetch_account()
-            .await
-            .map_err(|e| format!("Failed to fetch live account on {}: {}", sell_venue, e))?
-    } else {
-        sell_paper
-            .fetch_account()
-            .await
-            .map_err(|e| e.to_string())?
-    };
+    // Both environments read real venue accounts — the adapter is the
+    // environment-scoped one (production or venue testnet).
+    let acc_buy = buy_adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("Failed to fetch account on {}: {}", buy_venue, e))?;
+    let acc_sell = sell_adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("Failed to fetch account on {}: {}", sell_venue, e))?;
     for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
         match margin_monitor.evaluate_account(acc) {
             MarginHealthStatus::Empty => {
@@ -632,7 +618,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // then the per-symbol legacy fallback, then 5) lowered via min() by
     // each leg account's cap and the venue cap. Feeds both the IM
     // pre-checks below and the set_leverage calls after the books load.
-    let (target_leverage, account_cap) = resolve_effective_leverage(
+    let (target_leverage, _account_cap) = resolve_effective_leverage(
         state,
         "futures",
         strategy_id,
@@ -676,74 +662,39 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         );
     }
 
-    if !is_live {
-        buy_paper
-            .replace_orderbook(book_buy.clone())
-            .map_err(|e| e.to_string())?;
-        sell_paper
-            .replace_orderbook(book_sell.clone())
-            .map_err(|e| e.to_string())?;
-        // Harden the simulator's own margin paths with the same account cap, so
-        // a raw strategy target passed anywhere else still books at the cap.
-        // Venue-wide last-write-wins; a tighter cap only ever refuses, never
-        // over-leverages, so the failure direction stays fail-closed.
-        for paper in [&buy_paper, &sell_paper] {
-            if paper.max_leverage_cap() != account_cap {
-                paper
-                    .set_max_leverage_cap(account_cap)
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-        buy_paper
-            .set_leverage(symbol, target_leverage)
-            .await
-            .map_err(|e| e.to_string())?;
-        sell_paper
-            .set_leverage(symbol, target_leverage)
-            .await
-            .map_err(|e| e.to_string())?;
-    } else {
-        // Live leverage set is best-effort: venues may reject no-op changes
-        // or cap at account level. A rejected change is NOT fatal (the order
-        // submits at existing leverage) but must be visible — an operator
-        // reading "5x" while the venue kept 20x changes margin math.
-        for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
-            if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
-                tracing::warn!(
-                    "live set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
-                );
-            }
+    // Leverage set is best-effort in both environments: venues may reject
+    // no-op changes or cap at account level. A rejected change is NOT fatal
+    // (the order submits at existing leverage) but must be visible — an
+    // operator reading "5x" while the venue kept 20x changes margin math.
+    for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
+        if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
+            tracing::warn!(
+                "set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
+            );
         }
     }
 
     let (buy_exec, sell_exec): (
         Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
         Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
-    ) = if is_live {
-        (buy_adapter.clone(), sell_adapter.clone())
-    } else {
-        (buy_paper.clone(), sell_paper.clone())
-    };
+    ) = (buy_adapter.clone(), sell_adapter.clone());
 
     let order_buy =
         router.build_ioc_order(buy_exec.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
     let order_sell =
         router.build_ioc_order(sell_exec.venue_id(), symbol, Side::Sell, sell_ref, qty_dec);
 
-    let mut equity_before = dec!(0);
+    // Pre-trade equity snapshot of the two traded venues — the baseline the
+    // post-fill attribution refresh measures own-fill deltas against.
+    // Keys are `{env}-{venue}` matching the balances poll's namespacing.
     let mut equity_before_by_venue = HashMap::new();
-    if !is_live {
-        for (vid, paper) in state.paper_exchanges() {
-            let acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-            equity_before += acc.equity;
-            if let Ok(f) = acc.equity.to_string().parse::<f64>() {
-                if f.is_finite() {
-                    equity_before_by_venue.insert(vid.to_string(), f);
-                }
+    let env_str = state.env().as_str();
+    for (vid, acc) in [(buy_vid.as_str(), &acc_buy), (sell_vid.as_str(), &acc_sell)] {
+        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+            if f.is_finite() {
+                equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
             }
         }
-    } else {
-        equity_before = acc_buy.equity + acc_sell.equity;
     }
 
     // Persist the selected candidate as in_flight BEFORE dispatch: if the
@@ -823,44 +774,31 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
 
-    let (attempt_pnl_f, total_f) = if !is_live {
-        let mut equity_after = dec!(0);
-        for (_, paper) in state.paper_exchanges() {
-            equity_after += paper
-                .fetch_account()
-                .await
-                .map_err(|e| e.to_string())?
-                .equity;
-        }
-        // Own fills move the expected-equity baselines forward so the next
-        // attribution poll does not misread trade PnL as a manual flow.
-        refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
-        let attempt_pnl = equity_after - equity_before;
-        let pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
-        // Realized portfolio P&L is always derived from actual paper-account
-        // equity: fees, unwind slippage, and any residual loss are included;
-        // unrealized open-position exposure is not marked into it.
-        let tot_f = {
-            let mut total_pnl = state.total_realized_profit.write();
-            *total_pnl = equity_after - state.paper_baseline_equity();
-            total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-        };
-        state.circuit_breaker.update_equity(equity_after);
-        (pnl_f, tot_f)
-    } else {
-        let pnl_f = match &res {
-            ArbitrageExecutionResult::Success {
-                realized_profit, ..
-            } => realized_profit.to_string().parse::<f64>().unwrap_or(0.0),
-            _ => 0.0,
-        };
-        let tot_f = {
-            let mut total_pnl = state.total_realized_profit_live.write();
-            *total_pnl += Decimal::from_str_exact(&pnl_f.to_string()).unwrap_or(dec!(0));
-            total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-        };
-        (pnl_f, tot_f)
+    // Own fills move the expected-equity baselines forward so the next
+    // attribution poll does not misread trade PnL as a manual flow. Runs in
+    // both environments (testnet venue equity moves exactly like live).
+    refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
+
+    // Per-attempt realized P&L comes from the coordinator's verified fill
+    // accounting (fees + slippage included) — identical semantics in both
+    // environments. The testnet and live accumulators stay separate so a
+    // demo session can never masquerade as real-money performance.
+    let pnl_f = match &res {
+        ArbitrageExecutionResult::Success {
+            realized_profit, ..
+        } => realized_profit.to_string().parse::<f64>().unwrap_or(0.0),
+        _ => 0.0,
     };
+    let tot_f = {
+        let mut total_pnl = if is_live {
+            state.total_realized_profit_live.write()
+        } else {
+            state.total_realized_profit.write()
+        };
+        *total_pnl += Decimal::from_str_exact(&pnl_f.to_string()).unwrap_or(dec!(0));
+        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
+    };
+    let (attempt_pnl_f, total_f) = (pnl_f, tot_f);
 
     let cycle = {
         let mut step = state.sim_step_counter.write();
@@ -1016,7 +954,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 latency_us,
                 note: format!(
                     "{trim_note}{} position opened; expected convergence capture ${:.2} is unrealized{baseline_note}",
-                    if is_live { "Live real" } else { "Paper" },
+                    if is_live { "Live" } else { "Testnet" },
                     expected_capture_f
                 ),
                 direction: direction
@@ -1045,7 +983,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
                     "{trim_note}{} position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
-                    if is_live { "Live" } else { "Paper" },
+                    if is_live { "Live" } else { "Testnet" },
                     buy_venue,
                     sell_venue,
                     attempt_pnl_f,
@@ -1516,10 +1454,12 @@ pub async fn execute_prediction_arbitrage_impl(
     Err("Native 'prediction' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
-/// Re-anchor the breaker after a paper-universe reset (sync context).
+/// Re-anchor the breaker after a test-simulator account reset. Production
+/// has no simulated accounts, so this exists only for `cfg(test)` callers.
+#[cfg(test)]
 pub(crate) fn cb_reanchor_to_paper(state: &AppEngineState, total: Decimal) {
     state.circuit_breaker.reanchor_baseline(total);
-    *state.last_risk_live_universe.write() = Some(*state.is_live_mode.read());
+    *state.last_risk_live_universe.write() = Some(state.is_live());
 }
 
 /// Live account read with last-known-good fallback.
@@ -1539,8 +1479,11 @@ pub(crate) async fn live_account_or_cached(
     // served as fresh (it IS fresh — `Some(age)` is reserved for reads that
     // actually failed, which callers surface as STALE/ERROR).
     const ACCOUNT_FRESH_MS: i64 = 2_500;
+    // Cache/singleflight keys are env-namespaced — a live snapshot must
+    // never be served to a testnet read after an environment switch.
+    let key = format!("{}-{vid}", state.env().as_str());
     let now_ms = Utc::now().timestamp_millis();
-    if let Some((acc, ts)) = state.last_good_accounts.lock().get(vid).cloned() {
+    if let Some((acc, ts)) = state.last_good_accounts.lock().get(&key).cloned() {
         if now_ms.saturating_sub(ts) < ACCOUNT_FRESH_MS {
             return Ok((acc, None));
         }
@@ -1549,13 +1492,13 @@ pub(crate) async fn live_account_or_cached(
     let lock = state
         .account_fetch_locks
         .lock()
-        .entry(vid.to_string())
+        .entry(key.clone())
         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
         .clone();
     let _permit = lock.lock().await;
     // A waiter may find a fresh snapshot the leader just wrote.
     let now_ms = Utc::now().timestamp_millis();
-    if let Some((acc, ts)) = state.last_good_accounts.lock().get(vid).cloned() {
+    if let Some((acc, ts)) = state.last_good_accounts.lock().get(&key).cloned() {
         let age = now_ms.saturating_sub(ts);
         if age < ACCOUNT_FRESH_MS {
             tracing::debug!("{vid}: account read coalesced with in-flight fetch ({age}ms old)");
@@ -1569,11 +1512,11 @@ pub(crate) async fn live_account_or_cached(
             state
                 .last_good_accounts
                 .lock()
-                .insert(vid.to_string(), (acc.clone(), now_ms));
+                .insert(key.clone(), (acc.clone(), now_ms));
             Ok((acc, None))
         }
         Err(e) => {
-            let cached = state.last_good_accounts.lock().get(vid).cloned();
+            let cached = state.last_good_accounts.lock().get(&key).cloned();
             match cached {
                 Some((acc, ts)) => {
                     let age = Utc::now().timestamp_millis().saturating_sub(ts);
@@ -1611,66 +1554,45 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let cb = &state.circuit_breaker;
     let monitor = margin_monitor_from_settings(state);
 
-    // Risk telemetry: live mode reads live adapters for admitted venues so
-    // the header reconciles with the Capital Allocation gadget. Paper mode
-    // sums all paper simulators (legacy baseline — disabled venues still
-    // hold paper equity; the venue gadget shows admitted only and the UI
-    // footers the drift).
-    let is_live = *state.is_live_mode.read();
+    // Risk telemetry reads the active environment's admitted adapters so
+    // the header reconciles with the Capital Allocation gadget — production
+    // in Live, venue demo endpoints in Testnet. A venue whose read fails
+    // keeps contributing its last-known-good figures: a connectivity blip
+    // is not a loss of funds and must not move the portfolio total or trip
+    // the drawdown breaker.
+    let is_live = state.is_live();
     let mut accounts = Vec::new();
-    if is_live {
-        // A venue whose read fails keeps contributing its last-known-good
-        // figures: a connectivity blip is not a loss of funds and must not
-        // move the portfolio total or trip the drawdown breaker.
-        let manual_locked = {
-            let mut vault = state.vault.write();
-            vault.is_initialized() && !vault.is_unlocked() && !vault.is_auto_locked()
-        };
-        for (vid, _name, adapter) in state.get_venues() {
-            match live_account_or_cached(state, vid, &adapter).await {
-                Ok((acc, stale_age)) => {
-                    if let Some(age) = stale_age {
-                        if manual_locked {
-                            tracing::warn!(
-                                "risk overview: {vid} read paused (vault locked), showing last-known figures ({}s old)",
-                                age / 1000
-                            );
-                        } else {
-                            tracing::warn!(
-                                "risk overview: {vid} read failed, using last-known figures ({}s old)",
-                                age / 1000
-                            );
-                        }
-                    }
-                    accounts.push(acc);
-                }
-                Err(e) => {
+    let manual_locked = {
+        let mut vault = state.vault.write();
+        vault.is_initialized() && !vault.is_unlocked() && !vault.is_auto_locked()
+    };
+    for (vid, _name, adapter) in state.get_venues() {
+        match live_account_or_cached(state, vid, &adapter).await {
+            Ok((acc, stale_age)) => {
+                if let Some(age) = stale_age {
                     if manual_locked {
                         tracing::warn!(
-                            "risk overview: {vid} read paused (vault locked, no cached figures)"
+                            "risk overview: {vid} read paused (vault locked), showing last-known figures ({}s old)",
+                            age / 1000
                         );
                     } else {
                         tracing::warn!(
-                            "risk overview: live account read failed for {vid} (no cache): {e}"
+                            "risk overview: {vid} read failed, using last-known figures ({}s old)",
+                            age / 1000
                         );
                     }
                 }
-            }
-        }
-        // Fall back to paper baseline if no live account read succeeded
-        // (e.g. missing credentials) so the overview never goes blank.
-        if accounts.is_empty() {
-            for (vid, paper) in state.paper_exchanges() {
-                let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-                acc.venue = vid.into();
                 accounts.push(acc);
             }
-        }
-    } else {
-        for (vid, paper) in state.paper_exchanges() {
-            let mut acc = paper.fetch_account().await.map_err(|e| e.to_string())?;
-            acc.venue = vid.into();
-            accounts.push(acc);
+            Err(e) => {
+                if manual_locked {
+                    tracing::warn!(
+                        "risk overview: {vid} read paused (vault locked, no cached figures)"
+                    );
+                } else {
+                    tracing::warn!("risk overview: account read failed for {vid} (no cache): {e}");
+                }
+            }
         }
     }
 
@@ -1925,57 +1847,7 @@ pub(crate) fn passive_cfg_for(
     }
 }
 
-/// Re-fetcher for passive retries: every attempt re-prices from a newly
-/// fetched, validated adapter book mirrored into the paper exchange —
-/// exactly like the initial flatten fetch, never a stale peg.
-struct FlattenPaperRefresh<'a> {
-    state: &'a AppEngineState,
-    venue_label: String,
-    venue_id: VenueId,
-    symbol: String,
-    paper: Arc<arbitrageur_exchanges::simulated::SimulatedExchange>,
-}
-
-#[async_trait::async_trait]
-impl PassiveBookRefresh for FlattenPaperRefresh<'_> {
-    async fn fresh_book(&self) -> anyhow::Result<OrderBook> {
-        // Mirror the initial flatten fetch: prefer the hub's fresh book
-        // (no network, no revalidation — the hub only holds live books),
-        // else fetch from the adapter with full validation.
-        if let Some(b) = self.state.market_data_hub.get_valid_orderbook(
-            &self.venue_id,
-            &self.symbol,
-            Some(std::time::Duration::from_secs(2)),
-        ) {
-            self.paper
-                .replace_orderbook(b.clone())
-                .map_err(anyhow::Error::msg)?;
-            return Ok(b);
-        }
-        let adapter = self.state.get_adapter(&self.venue_label).ok_or_else(|| {
-            anyhow::anyhow!(
-                "Venue '{}' is not admitted for paper execution",
-                self.venue_label
-            )
-        })?;
-        let b = adapter.fetch_orderbook(&self.symbol).await.map_err(|e| {
-            anyhow::anyhow!(
-                "No fresh {} orderbook for {}: {e}",
-                self.venue_label,
-                self.symbol
-            )
-        })?;
-        validate_adapter_book(&b, &self.venue_id, &self.symbol)
-            .map_err(|e| anyhow::anyhow!("Flatten order book rejected: {e}"))?;
-        self.state.market_data_hub.update_orderbook(b.clone());
-        self.paper
-            .replace_orderbook(b.clone())
-            .map_err(anyhow::Error::msg)?;
-        Ok(b)
-    }
-}
-
-/// Live-venue refresher for passive re-pegs: a fresh WS-fed hub book wins;
+/// Venue refresher for passive re-pegs: a fresh WS-fed hub book wins;
 /// otherwise the single-flight REST fetch is validated and mirrored into
 /// the hub — the same resolution order every other live read takes.
 pub(crate) struct FlattenLiveRefresh<'a> {
@@ -2028,118 +1900,6 @@ struct FlattenLegArgs<'a> {
     execution_type: Option<&'a str>,
 }
 
-/// Place a reduce-only market order on a venue's paper exchange to close one
-/// filled leg. Returns (filled_qty, avg_price, fee_usd, order_id).
-async fn flatten_leg_on_paper(
-    args: FlattenLegArgs<'_>,
-) -> Result<Option<(Decimal, Decimal, Decimal, String)>, String> {
-    let FlattenLegArgs {
-        state,
-        venue,
-        symbol,
-        side,
-        qty,
-        strategy_id,
-        sig_id,
-        notes,
-        execution_type,
-    } = args;
-    let canonical = crate::state::canonical_venue_id(venue)
-        .ok_or_else(|| format!("Unknown venue '{venue}'"))?;
-    let adapter = state
-        .get_adapter(venue)
-        .ok_or_else(|| format!("Venue '{venue}' is not admitted for paper execution"))?;
-    let vid = adapter.venue_id();
-    let paper = state
-        .get_paper_exchange(canonical)
-        .ok_or_else(|| format!("No paper exchange admitted for venue '{venue}'"))?;
-
-    let book = match state.market_data_hub.get_valid_orderbook(
-        &vid,
-        symbol,
-        Some(std::time::Duration::from_secs(2)),
-    ) {
-        Some(b) => b,
-        None => {
-            let b = adapter
-                .fetch_orderbook(symbol)
-                .await
-                .map_err(|e| format!("No fresh {venue} orderbook for {symbol}: {e}"))?;
-            validate_adapter_book(&b, &vid, symbol)
-                .map_err(|e| format!("Flatten order book rejected: {e}"))?;
-            state.market_data_hub.update_orderbook(b.clone());
-            b
-        }
-    };
-    paper.replace_orderbook(book).map_err(|e| e.to_string())?;
-
-    if qty <= dec!(0) {
-        return Err("Invalid leg quantity".to_string());
-    }
-    let passive_cfg = match execution_type {
-        Some("emergency_market") => None,
-        Some("non_emergency_limit") => {
-            Some(passive_cfg_for(state, strategy_id).unwrap_or_else(|| {
-                arbitrageur_execution::passive_unwind::PassiveUnwindConfig {
-                    enabled: true,
-                    ..Default::default()
-                }
-            }))
-        }
-        _ => passive_cfg_for(state, strategy_id),
-    };
-    if let Some(cfg) = passive_cfg {
-        let paper_adapter: Arc<dyn ExchangeAdapter> = paper.clone();
-        let refresher = FlattenPaperRefresh {
-            state,
-            venue_label: venue.to_string(),
-            venue_id: vid.clone(),
-            symbol: symbol.to_string(),
-            paper: paper.clone(),
-        };
-        // No fast-vol tracker exists on the flatten path, so the spread leg
-        // is the hard guard (documented in `calm_gate_ok`).
-        let report =
-            execute_passive_reduce(&paper_adapter, &refresher, symbol, side, qty, &cfg, None)
-                .await
-                .map_err(|e| format!("passive reduce failed: {e:#}"))?;
-        match &report.outcome {
-            PassiveOutcome::LimitFilled => notes.push(format!(
-                "{sig_id}: {venue} leg passively closed {qty} (limit, {} tries)",
-                report.limit_tries
-            )),
-            PassiveOutcome::LimitPartialThenMarket => notes.push(format!(
-                "{sig_id}: {venue} leg limit-partial, remainder at market ({qty})"
-            )),
-            PassiveOutcome::MarketFallback { reason } => notes.push(format!(
-                "{sig_id}: {venue} leg passive skipped, market exit ({reason})"
-            )),
-        }
-        let resp = report.response;
-        if resp.filled_qty <= dec!(0) {
-            return Ok(None);
-        }
-        let px = resp
-            .avg_fill_price
-            .filter(|p| *p > dec!(0))
-            .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
-        return Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)));
-    }
-    let mut order =
-        arbitrageur_core::order::OrderRequest::new_market(paper.venue_id(), symbol, side, qty);
-    order.reduce_only = true;
-
-    let resp = paper.place_order(order).await.map_err(|e| e.to_string())?;
-    if resp.filled_qty <= dec!(0) {
-        return Ok(None);
-    }
-    let px = resp
-        .avg_fill_price
-        .filter(|p| *p > dec!(0))
-        .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
-    Ok(Some((resp.filled_qty, px, resp.fee, resp.order_id)))
-}
-
 /// Outcome of one flatten-leg dispatch. `fill` is present only when the
 /// venue reported an actual fill; `order_id`/`client_order_id` are present
 /// whenever the venue accepted the order so the reconciler can keep polling
@@ -2150,23 +1910,10 @@ struct FlattenLegOutcome {
     fill: Option<(Decimal, Decimal, Decimal)>,
 }
 
-/// Place a reduce-only market order on a venue (paper or live) to close one
-/// filled leg.
-async fn flatten_leg(args: FlattenLegArgs<'_>, is_live: bool) -> Result<FlattenLegOutcome, String> {
-    if !is_live {
-        return flatten_leg_on_paper(args).await.map(|res| match res {
-            Some((q, p, f, oid)) => FlattenLegOutcome {
-                order_id: Some(oid),
-                client_order_id: None,
-                fill: Some((q, p, f)),
-            },
-            None => FlattenLegOutcome {
-                order_id: None,
-                client_order_id: None,
-                fill: None,
-            },
-        });
-    }
+/// Place a reduce-only close order on a venue to flatten one filled leg.
+/// The adapter is environment-scoped: Live hits production, Testnet hits
+/// the venue's demo endpoint — one code path, no simulation.
+async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, String> {
     let FlattenLegArgs {
         state,
         venue,
@@ -2402,19 +2149,18 @@ pub async fn flatten_ticker_positions_with_type_impl(
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
-    let is_live = *state.is_live_mode.read();
-    if is_live {
-        let is_unlocked = state.vault.write().is_unlocked();
-        if !is_unlocked {
-            return Err("Cannot flatten in Live Trading mode while the secure credential vault is locked. Unlock the vault first.".into());
-        }
+    let is_live = state.is_live();
+    // Live flatten dispatches real reduce-only orders — the vault must be
+    // unlocked so venue calls authenticate. Testnet relies on adapter-level
+    // auth failure (a locked vault has already stripped credentials).
+    if is_live && !state.vault.write().is_unlocked() {
+        return Err(
+            "Cannot flatten while the secure credential vault is locked. Unlock the vault first."
+                .into(),
+        );
     }
     let _execution_guard = state.execution_lock.lock().await;
-    let flatten_equity_before = if !is_live {
-        snapshot_paper_equity(state).await
-    } else {
-        HashMap::new()
-    };
+    let flatten_equity_before = snapshot_venue_equity(state).await;
 
     let all_signals = state
         .state_store
@@ -2446,7 +2192,6 @@ pub async fn flatten_ticker_positions_with_type_impl(
         *step
     };
 
-    let papers = state.paper_exchanges();
     let opposite = |s: LegSide| match s {
         LegSide::Long => LegSide::Short,
         LegSide::Short => LegSide::Long,
@@ -2505,7 +2250,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
             let Some(canonical) = crate::state::canonical_venue_id(&leg.venue) else {
                 undetermined = true;
                 out.notes.push(format!(
-                    "{}: venue '{}' is not a canonical paper venue",
+                    "{}: venue '{}' is not a canonical venue",
                     sig.id, leg.venue
                 ));
                 continue;
@@ -2531,65 +2276,37 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 continue;
             }
             if !accounts.contains_key(canonical) && !unreadable.contains(canonical) {
-                if is_live {
-                    match state.get_adapter(canonical) {
-                        Some(adapter) => {
-                            if !adapter.live_order_submission_implemented()
-                                || !adapter.has_live_credentials()
-                            {
-                                unreadable.insert(canonical);
-                                out.notes.push(format!(
-                                    "{}: venue '{}' lacks authenticated live order-submission capability",
-                                    sig.id, leg.venue
-                                ));
-                            } else {
-                                match adapter.fetch_account().await {
-                                    Ok(acc) => {
-                                        accounts.insert(canonical, acc);
-                                    }
-                                    Err(e) => {
-                                        unreadable.insert(canonical);
-                                        out.notes.push(format!(
-                                            "{}: cannot read {} live account: {e}",
-                                            sig.id, leg.venue
-                                        ));
-                                    }
+                match state.get_adapter(canonical) {
+                    Some(adapter) => {
+                        if !adapter.live_order_submission_implemented()
+                            || !adapter.has_live_credentials()
+                        {
+                            unreadable.insert(canonical);
+                            out.notes.push(format!(
+                                "{}: venue '{}' lacks authenticated order-submission capability",
+                                sig.id, leg.venue
+                            ));
+                        } else {
+                            match adapter.fetch_account().await {
+                                Ok(acc) => {
+                                    accounts.insert(canonical, acc);
+                                }
+                                Err(e) => {
+                                    unreadable.insert(canonical);
+                                    out.notes.push(format!(
+                                        "{}: cannot read {} account: {e}",
+                                        sig.id, leg.venue
+                                    ));
                                 }
                             }
                         }
-                        None => {
-                            unreadable.insert(canonical);
-                            out.notes.push(format!(
-                                "{}: no live adapter exists for venue '{}'",
-                                sig.id, leg.venue
-                            ));
-                        }
                     }
-                } else {
-                    match papers
-                        .iter()
-                        .find(|(vid, _)| *vid == canonical)
-                        .map(|(_, p)| p.clone())
-                    {
-                        Some(paper) => match paper.fetch_account().await {
-                            Ok(acc) => {
-                                accounts.insert(canonical, acc);
-                            }
-                            Err(e) => {
-                                unreadable.insert(canonical);
-                                out.notes.push(format!(
-                                    "{}: cannot read {} paper account: {e}",
-                                    sig.id, leg.venue
-                                ));
-                            }
-                        },
-                        None => {
-                            unreadable.insert(canonical);
-                            out.notes.push(format!(
-                                "{}: no paper account exists for venue '{}'",
-                                sig.id, leg.venue
-                            ));
-                        }
+                    None => {
+                        unreadable.insert(canonical);
+                        out.notes.push(format!(
+                            "{}: no adapter exists for venue '{}' in this environment",
+                            sig.id, leg.venue
+                        ));
                     }
                 }
             }
@@ -2598,7 +2315,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 continue;
             }
             let pos = match accounts.get(canonical) {
-                Some(acc) if is_live => match state.get_adapter(canonical) {
+                Some(acc) => match state.get_adapter(canonical) {
                     Some(adapter) => match adapter.account_position_for(acc, &leg.symbol) {
                         Ok(position) => position,
                         Err(e) => {
@@ -2612,7 +2329,6 @@ pub async fn flatten_ticker_positions_with_type_impl(
                     },
                     None => None,
                 },
-                Some(acc) => acc.get_position(&leg.symbol).cloned(),
                 None => None,
             };
             match pos {
@@ -2722,27 +2438,24 @@ pub async fn flatten_ticker_positions_with_type_impl(
 
         let mut leg_desc = Vec::new();
         for t in &targets {
-            match flatten_leg(
-                FlattenLegArgs {
-                    state,
-                    venue: &t.venue,
-                    symbol: &t.exact_symbol,
-                    side: t.order_side,
-                    qty: t.qty,
-                    strategy_id: &sig.strategy_id,
-                    sig_id: &sig.id,
-                    notes: &mut out.notes,
-                    execution_type,
-                },
-                is_live,
-            )
+            match flatten_leg(FlattenLegArgs {
+                state,
+                venue: &t.venue,
+                symbol: &t.exact_symbol,
+                side: t.order_side,
+                qty: t.qty,
+                strategy_id: &sig.strategy_id,
+                sig_id: &sig.id,
+                notes: &mut out.notes,
+                execution_type,
+            })
             .await
             {
                 Ok(outcome) => {
                     // Persist the accepted order id BEFORE any fill write so a
                     // working order is always reachable by the reconciliation
                     // supervisor — a zero-fill ack must not orphan the order.
-                    if let (true, Some(oid)) = (is_live, outcome.order_id.as_deref()) {
+                    if let Some(oid) = outcome.order_id.as_deref() {
                         if let Err(e) = state.state_store.record_leg_order_id(
                             &close_id,
                             t.leg_side,
@@ -2809,55 +2522,30 @@ pub async fn flatten_ticker_positions_with_type_impl(
             if residual <= dec!(0) {
                 continue;
             }
-            if is_live {
-                let Some(adapter) = state.get_adapter(exp.canonical) else {
-                    fully_flat = false;
-                    continue;
-                };
-                match adapter.fetch_account().await {
-                    Ok(acc) => match adapter.account_position_for(&acc, &exp.exact_symbol) {
-                        Ok(None) => {}
-                        Ok(Some(p)) if p.side != exp.expected_pos_side => {
-                            fully_flat = false;
-                            out.notes.push(format!(
-                                "{}: {} position side {:?} contradicts {:?} leg; leaving open",
-                                sig.id, exp.canonical, p.side, exp.entry_side
-                            ));
-                        }
-                        Ok(Some(_)) => fully_flat = false,
-                        Err(e) => {
-                            fully_flat = false;
-                            out.notes.push(format!(
-                                "{}: cannot resolve {} account position {} after close: {e}",
-                                sig.id, exp.canonical, exp.exact_symbol
-                            ));
-                        }
-                    },
-                    Err(_) => fully_flat = false,
-                }
-            } else {
-                let Some((_, paper)) = papers.iter().find(|(vid, _)| *vid == exp.canonical) else {
-                    fully_flat = false;
-                    continue;
-                };
-                match paper.fetch_account().await {
-                    Ok(acc) => match acc
-                        .positions
-                        .iter()
-                        .find(|p| p.symbol == exp.exact_symbol && p.quantity > dec!(0))
-                    {
-                        None => {}
-                        Some(p) if p.side != exp.expected_pos_side => {
-                            fully_flat = false;
-                            out.notes.push(format!(
-                                "{}: {} position side {:?} contradicts {:?} leg; leaving open",
-                                sig.id, exp.canonical, p.side, exp.entry_side
-                            ));
-                        }
-                        Some(_) => fully_flat = false,
-                    },
-                    Err(_) => fully_flat = false,
-                }
+            let Some(adapter) = state.get_adapter(exp.canonical) else {
+                fully_flat = false;
+                continue;
+            };
+            match adapter.fetch_account().await {
+                Ok(acc) => match adapter.account_position_for(&acc, &exp.exact_symbol) {
+                    Ok(None) => {}
+                    Ok(Some(p)) if p.side != exp.expected_pos_side => {
+                        fully_flat = false;
+                        out.notes.push(format!(
+                            "{}: {} position side {:?} contradicts {:?} leg; leaving open",
+                            sig.id, exp.canonical, p.side, exp.entry_side
+                        ));
+                    }
+                    Ok(Some(_)) => fully_flat = false,
+                    Err(e) => {
+                        fully_flat = false;
+                        out.notes.push(format!(
+                            "{}: cannot resolve {} account position {} after close: {e}",
+                            sig.id, exp.canonical, exp.exact_symbol
+                        ));
+                    }
+                },
+                Err(_) => fully_flat = false,
             }
         }
 
@@ -2945,22 +2633,10 @@ pub async fn flatten_ticker_positions_with_type_impl(
         })
         .count();
 
-    if !is_live {
-        let mut equity_after = dec!(0);
-        for (_, paper) in state.paper_exchanges() {
-            equity_after += paper
-                .fetch_account()
-                .await
-                .map_err(|e| e.to_string())?
-                .equity;
-        }
-        {
-            let mut total_pnl = state.total_realized_profit.write();
-            *total_pnl = equity_after - state.paper_baseline_equity();
-        }
-        state.circuit_breaker.update_equity(equity_after);
-        refresh_equity_expectations_after_fills(state, &flatten_equity_before).await;
-    }
+    // Flatten fills move the expected-equity baselines forward in both
+    // environments so the next attribution poll doesn't read own fills as
+    // external flows.
+    refresh_equity_expectations_after_fills(state, &flatten_equity_before).await;
     maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
     Ok(out)
@@ -3268,7 +2944,6 @@ async fn maybe_liq_trim_pair(
     buy: &crate::state_store::SignalLeg,
     sell: &crate::state_store::SignalLeg,
     threshold_pct: f64,
-    is_live: bool,
 ) -> Option<(&'static str, &'static str, String, bool)> {
     use arbitrageur_strategy::pair_trim::PairTrimDecision;
 
@@ -3284,30 +2959,19 @@ async fn maybe_liq_trim_pair(
         }
     }
 
-    // Resolve each leg's live/paper position (side-checked).
+    // Resolve each leg's venue position (side-checked). Fresh cache only —
+    // never fetch here (REST pressure), never trim on stale telemetry.
+    // Cache keys are env-namespaced (`{env}-{venue}`).
+    let env_str = state.env().as_str();
     let resolve_pos = async |leg: &crate::state_store::SignalLeg| {
         let canonical = crate::state::canonical_venue_id(&leg.venue)?;
-        let acc = if is_live {
-            // Fresh cache only — never fetch here (REST pressure), never
-            // trim on stale telemetry.
-            let (acc, ts) = state.last_good_accounts.lock().get(canonical)?.clone();
-            if Utc::now().timestamp_millis().saturating_sub(ts) > 120_000 {
-                return None;
-            }
-            acc
-        } else {
-            state
-                .get_paper_exchange(canonical)?
-                .fetch_account()
-                .await
-                .ok()?
-        };
-        if is_live {
-            let adapter = state.get_adapter(canonical)?;
-            adapter.account_position_for(&acc, &leg.symbol).ok()?
-        } else {
-            acc.get_position(&leg.symbol).cloned()
+        let key = format!("{env_str}-{canonical}");
+        let (acc, ts) = state.last_good_accounts.lock().get(&key)?.clone();
+        if Utc::now().timestamp_millis().saturating_sub(ts) > 120_000 {
+            return None;
         }
+        let adapter = state.get_adapter(canonical)?;
+        adapter.account_position_for(&acc, &leg.symbol).ok()?
     };
     let (Some(long_pos), Some(short_pos)) = (resolve_pos(buy).await, resolve_pos(sell).await)
     else {
@@ -3373,33 +3037,28 @@ async fn maybe_liq_trim_pair(
                     crate::state_store::LegSide::Long => crate::state_store::LegSide::Short,
                     crate::state_store::LegSide::Short => crate::state_store::LegSide::Long,
                 };
-                match flatten_leg(
-                    FlattenLegArgs {
-                        state,
-                        venue: &leg.venue,
-                        symbol: &leg.symbol,
-                        side: order_side,
-                        qty: trim_dec,
-                        strategy_id: &sig.strategy_id,
-                        sig_id: &sig.id,
-                        notes: &mut notes,
-                        execution_type: Some("emergency_market"),
-                    },
-                    is_live,
-                )
+                match flatten_leg(FlattenLegArgs {
+                    state,
+                    venue: &leg.venue,
+                    symbol: &leg.symbol,
+                    side: order_side,
+                    qty: trim_dec,
+                    strategy_id: &sig.strategy_id,
+                    sig_id: &sig.id,
+                    notes: &mut notes,
+                    execution_type: Some("emergency_market"),
+                })
                 .await
                 {
                     Ok(outcome) => {
-                        if is_live {
-                            if let Some(oid) = outcome.order_id.as_deref() {
-                                if let Err(e) = state.state_store.record_leg_order_id(
-                                    &close_id,
-                                    close_side,
-                                    oid,
-                                    outcome.client_order_id.as_deref(),
-                                ) {
-                                    note.push_str(&format!("; {oid} id persistence failed: {e}"));
-                                }
+                        if let Some(oid) = outcome.order_id.as_deref() {
+                            if let Err(e) = state.state_store.record_leg_order_id(
+                                &close_id,
+                                close_side,
+                                oid,
+                                outcome.client_order_id.as_deref(),
+                            ) {
+                                note.push_str(&format!("; {oid} id persistence failed: {e}"));
                             }
                         }
                         match outcome.fill {
@@ -3563,7 +3222,6 @@ pub async fn check_spatial_convergence_impl(
                 // Liquidation-distance trim rides the same 5s supervisor:
                 // while the edge is inside the band, still protect the
                 // pair against a leg approaching liquidation.
-                let is_live = *state.is_live_mode.read();
                 let trim_threshold = state
                     .strategy_params
                     .read()
@@ -3571,7 +3229,7 @@ pub async fn check_spatial_convergence_impl(
                     .and_then(|p| p.futures_liq_trim_pct)
                     .filter(|t| t.is_finite() && *t > 0.0 && *t <= 100.0);
                 let trim = match trim_threshold {
-                    Some(t) => maybe_liq_trim_pair(state, sig, buy, sell, t, is_live).await,
+                    Some(t) => maybe_liq_trim_pair(state, sig, buy, sell, t).await,
                     None => None,
                 };
                 match trim {
@@ -3758,9 +3416,10 @@ mod account_read_tests {
             .await
             .expect("seed read");
         // Age the cache past the fresh window so the next call re-fetches.
+        // Cache keys are env-namespaced (`{env}-{vid}`) — default env is testnet.
         {
             let mut map = state.last_good_accounts.lock();
-            if let Some(entry) = map.get_mut("mock") {
+            if let Some(entry) = map.get_mut("testnet-mock") {
                 entry.1 -= 10_000;
             }
         }

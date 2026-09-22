@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -164,11 +164,12 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
     assert!(first.is_default);
-    assert!(store.has_enabled_account("hyperliquid").unwrap());
-    assert!(!store.has_enabled_account("lighter").unwrap());
+    assert!(store.has_enabled_account("hyperliquid", "live").unwrap());
+    assert!(!store.has_enabled_account("lighter", "live").unwrap());
 
     let second = store
         .upsert_account(
@@ -179,11 +180,16 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
     assert!(!second.is_default);
     assert_eq!(
-        store.default_account("hyperliquid").unwrap().unwrap().id,
+        store
+            .default_account("hyperliquid", "live")
+            .unwrap()
+            .unwrap()
+            .id,
         "hl_main"
     );
 
@@ -195,6 +201,7 @@ fn test_default_account_lifecycle() {
             true,
             false,
             "standard",
+            None,
             None,
         )
         .unwrap();
@@ -211,9 +218,13 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
-    let promoted = store.default_account("hyperliquid").unwrap().unwrap();
+    let promoted = store
+        .default_account("hyperliquid", "live")
+        .unwrap()
+        .unwrap();
     assert_eq!(promoted.id, "hl_alt");
 
     store
@@ -224,6 +235,7 @@ fn test_default_account_lifecycle() {
             false,
             false,
             "standard",
+            None,
             None,
         )
         .unwrap();
@@ -236,10 +248,14 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
-    assert!(store.default_account("hyperliquid").unwrap().is_none());
-    assert!(!store.has_enabled_account("hyperliquid").unwrap());
+    assert!(store
+        .default_account("hyperliquid", "live")
+        .unwrap()
+        .is_none());
+    assert!(!store.has_enabled_account("hyperliquid", "live").unwrap());
 
     let reenabled = store
         .upsert_account(
@@ -249,6 +265,7 @@ fn test_default_account_lifecycle() {
             true,
             false,
             "standard",
+            None,
             None,
         )
         .unwrap();
@@ -267,6 +284,7 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             true,
             "standard",
             None,
+            None,
         )
         .unwrap();
     store
@@ -277,6 +295,7 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             true,
             false,
             "standard",
+            None,
             None,
         )
         .unwrap();
@@ -289,10 +308,14 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
     assert!(store.delete_account("a_main").unwrap());
-    let promoted = store.default_account("hyperliquid").unwrap().unwrap();
+    let promoted = store
+        .default_account("hyperliquid", "live")
+        .unwrap()
+        .unwrap();
     assert_eq!(promoted.id, "a_beta");
 }
 
@@ -300,7 +323,16 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
 fn test_validation_and_immutable_venue() {
     let store = StateStore::open_in_memory().unwrap();
     assert!(store
-        .upsert_account("", "hyperliquid", "Main", true, false, "standard", None)
+        .upsert_account(
+            "",
+            "hyperliquid",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            None
+        )
         .is_err());
     assert!(store
         .upsert_account(
@@ -310,6 +342,7 @@ fn test_validation_and_immutable_venue() {
             true,
             false,
             "standard",
+            None,
             None
         )
         .is_err());
@@ -321,17 +354,27 @@ fn test_validation_and_immutable_venue() {
             true,
             false,
             "standard",
+            None,
             None
         )
         .is_err());
     assert!(store
-        .upsert_account("a", "", "Main", true, false, "standard", None)
+        .upsert_account("a", "", "Main", true, false, "standard", None, None)
         .is_err());
     assert!(store
-        .upsert_account("a", "bad venue", "Main", true, false, "standard", None)
+        .upsert_account(
+            "a",
+            "bad venue",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            None
+        )
         .is_err());
     assert!(store
-        .upsert_account("a", "hyperliquid", "", true, false, "standard", None)
+        .upsert_account("a", "hyperliquid", "", true, false, "standard", None, None)
         .is_err());
     assert!(store
         .upsert_account(
@@ -341,6 +384,7 @@ fn test_validation_and_immutable_venue() {
             true,
             false,
             "standard",
+            None,
             None
         )
         .is_err());
@@ -352,6 +396,7 @@ fn test_validation_and_immutable_venue() {
             true,
             false,
             "standard",
+            None,
             None
         )
         .is_err());
@@ -365,10 +410,11 @@ fn test_validation_and_immutable_venue() {
             false,
             "standard",
             None,
+            None,
         )
         .unwrap();
     assert!(store
-        .upsert_account("acct1", "lighter", "Moved", true, false, "standard", None)
+        .upsert_account("acct1", "lighter", "Moved", true, false, "standard", None, None)
         .is_err());
     let renamed = store
         .upsert_account(
@@ -378,6 +424,7 @@ fn test_validation_and_immutable_venue() {
             true,
             false,
             "standard",
+            None,
             None,
         )
         .unwrap();
@@ -389,13 +436,31 @@ fn test_validation_and_immutable_venue() {
 fn test_label_uniqueness_scoped_to_venue() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", None)
+        .upsert_account(
+            "a1",
+            "hyperliquid",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     assert!(store
-        .upsert_account("a2", "hyperliquid", "MAIN", true, false, "standard", None)
+        .upsert_account(
+            "a2",
+            "hyperliquid",
+            "MAIN",
+            true,
+            false,
+            "standard",
+            None,
+            None
+        )
         .is_err());
     store
-        .upsert_account("a2", "lighter", "main", true, false, "standard", None)
+        .upsert_account("a2", "lighter", "main", true, false, "standard", None, None)
         .unwrap();
     assert_eq!(store.list_accounts(None).unwrap().len(), 2);
 }
@@ -404,17 +469,37 @@ fn test_label_uniqueness_scoped_to_venue() {
 fn test_route_rules_and_canonicalization() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
-        .unwrap();
-    store
-        .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard", None)
-        .unwrap();
-    store
-        .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
+        .upsert_account(
+            "hl_a",
+            "hyperliquid",
+            "HL A",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     store
         .upsert_account(
-            "lt_off", "lighter", "LT Off", false, false, "standard", None,
+            "hl_b",
+            "hyperliquid",
+            "HL B",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
+        .unwrap();
+    store
+        .upsert_account(
+            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
+        )
+        .unwrap();
+    store
+        .upsert_account(
+            "lt_off", "lighter", "LT Off", false, false, "standard", None, None,
         )
         .unwrap();
 
@@ -463,10 +548,21 @@ fn test_route_rules_and_canonicalization() {
 fn test_referenced_account_delete_requires_route_removal() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
+        .upsert_account(
+            "hl_a",
+            "hyperliquid",
+            "HL A",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     store
-        .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
+        .upsert_account(
+            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
+        )
         .unwrap();
     store
         .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -485,16 +581,38 @@ fn test_referenced_account_delete_requires_route_removal() {
 fn test_eligible_strategy_routes_filters() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .upsert_account("hl_a", "hyperliquid", "HL A", true, false, "standard", None)
+        .upsert_account(
+            "hl_a",
+            "hyperliquid",
+            "HL A",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     store
-        .upsert_account("hl_b", "hyperliquid", "HL B", true, false, "standard", None)
+        .upsert_account(
+            "hl_b",
+            "hyperliquid",
+            "HL B",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     store
-        .upsert_account("lt_a", "lighter", "LT A", true, false, "standard", None)
+        .upsert_account(
+            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
+        )
         .unwrap();
     store
-        .upsert_account("lt_b", "lighter", "LT B", true, false, "standard", None)
+        .upsert_account(
+            "lt_b", "lighter", "LT B", true, false, "standard", None, None,
+        )
         .unwrap();
 
     store
@@ -507,27 +625,29 @@ fn test_eligible_strategy_routes_filters() {
         .upsert_strategy_route("r3", "futures", "Stale", "hl_a", "lt_b", true)
         .unwrap();
     store
-        .upsert_account("lt_b", "lighter", "LT B", false, false, "standard", None)
+        .upsert_account(
+            "lt_b", "lighter", "LT B", false, false, "standard", None, None,
+        )
         .unwrap();
 
     let eligible = store
-        .eligible_strategy_routes("futures", "hyperliquid", "lighter")
+        .eligible_strategy_routes("futures", "hyperliquid", "lighter", "live")
         .unwrap();
     assert_eq!(eligible.len(), 1);
     assert_eq!(eligible[0].id, "r1");
 
     let reversed = store
-        .eligible_strategy_routes("futures", "lighter", "hyperliquid")
+        .eligible_strategy_routes("futures", "lighter", "hyperliquid", "live")
         .unwrap();
     assert_eq!(reversed.len(), 1);
     assert_eq!(reversed[0].id, "r1");
 
     assert!(store
-        .eligible_strategy_routes("futures", "hyperliquid", "kraken")
+        .eligible_strategy_routes("futures", "hyperliquid", "kraken", "live")
         .unwrap()
         .is_empty());
     assert!(store
-        .eligible_strategy_routes("spot", "hyperliquid", "lighter")
+        .eligible_strategy_routes("spot", "hyperliquid", "lighter", "live")
         .unwrap()
         .is_empty());
 }
@@ -538,10 +658,21 @@ fn test_file_store_persists_across_reopen() {
     {
         let store = StateStore::open(&file).unwrap();
         store
-            .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
+            .upsert_account(
+                "hl_a",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                None,
+                None,
+            )
             .unwrap();
         store
-            .upsert_account("lt_a", "lighter", "Alt", true, false, "standard", None)
+            .upsert_account(
+                "lt_a", "lighter", "Alt", true, false, "standard", None, None,
+            )
             .unwrap();
         store
             .upsert_strategy_route("r1", "futures", "Route", "hl_a", "lt_a", true)
@@ -601,7 +732,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 28);
+    assert_eq!(version, 29);
     store
         .record_signal_execution(&NewSignalExecution {
             id: "fund-1".to_string(),
@@ -685,10 +816,21 @@ fn test_v22_backfill_copies_parent_root_symbol() {
 fn test_signal_lifecycle_blocks_then_frees_ticker() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
+        .upsert_account(
+            "hl_a",
+            "hyperliquid",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     store
-        .upsert_account("lt_a", "lighter", "Main", true, false, "standard", None)
+        .upsert_account(
+            "lt_a", "lighter", "Main", true, false, "standard", None, None,
+        )
         .unwrap();
 
     let sig = store
@@ -965,7 +1107,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 28);
+    assert_eq!(v, 29);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -1106,7 +1248,16 @@ fn test_signal_validation_and_account_fk() {
 
     // account_has_signal_legs gates deletion.
     store
-        .upsert_account("hl_a", "hyperliquid", "Main", true, false, "standard", None)
+        .upsert_account(
+            "hl_a",
+            "hyperliquid",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            None,
+        )
         .unwrap();
     assert!(!store.account_has_signal_legs("hl_a").unwrap());
     store
@@ -1401,7 +1552,7 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 28);
+        assert_eq!(version, 29);
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -1929,7 +2080,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 28);
+    assert_eq!(v, 29);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2049,7 +2200,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 28);
+    assert_eq!(v10, 29);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -2637,7 +2788,8 @@ fn test_max_leverage_validation_bounds() {
             true,
             false,
             "standard",
-            Some(0)
+            Some(0),
+            None
         )
         .is_err());
     assert!(store
@@ -2648,7 +2800,8 @@ fn test_max_leverage_validation_bounds() {
             true,
             false,
             "standard",
-            Some(6)
+            Some(6),
+            None
         )
         .is_err());
     assert!(store
@@ -2659,12 +2812,22 @@ fn test_max_leverage_validation_bounds() {
             true,
             false,
             "standard",
-            Some(99)
+            Some(99),
+            None
         )
         .is_err());
     for ok in [None, Some(1), Some(3), Some(5)] {
         store
-            .upsert_account("a1", "hyperliquid", "Main", true, false, "standard", ok)
+            .upsert_account(
+                "a1",
+                "hyperliquid",
+                "Main",
+                true,
+                false,
+                "standard",
+                ok,
+                None,
+            )
             .unwrap();
         let got = store.get_account("a1").unwrap().expect("row");
         assert_eq!(got.max_leverage, ok);
@@ -2675,14 +2838,23 @@ fn test_max_leverage_validation_bounds() {
 fn test_max_leverage_roundtrip_update_and_clear() {
     let store = StateStore::open_in_memory().unwrap();
     let created = store
-        .upsert_account("a1", "lighter", "Main", true, true, "standard", Some(2))
+        .upsert_account(
+            "a1",
+            "lighter",
+            "Main",
+            true,
+            true,
+            "standard",
+            Some(2),
+            None,
+        )
         .unwrap();
     assert_eq!(created.max_leverage, Some(2));
     let listed = store.list_accounts(Some("lighter")).unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].max_leverage, Some(2));
     let cleared = store
-        .upsert_account("a1", "lighter", "Main", true, true, "standard", None)
+        .upsert_account("a1", "lighter", "Main", true, true, "standard", None, None)
         .unwrap();
     assert_eq!(cleared.max_leverage, None);
     let fetched = store.get_account("a1").unwrap().expect("row");
@@ -2928,7 +3100,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 28);
+    assert_eq!(v, 29);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",

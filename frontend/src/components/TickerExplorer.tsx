@@ -39,7 +39,7 @@ interface TickerExplorerProps {
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
-  /** Universal Simple Spread sizing params + paper equity — the per-ticker
+  /** Universal Simple Spread sizing params + venue equity — the per-ticker
    *  grid cap derives from these, not from an authored max. */
   futuresParams?: StrategyParamsDto | null;
   totalEquityUsd?: number | null;
