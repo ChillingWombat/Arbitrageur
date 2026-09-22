@@ -521,7 +521,7 @@ pub struct EngineSettingsDto {
     /// default) refuses every live entry even when `live_entry_enabled`.
     #[serde(default)]
     pub live_entry_max_notional_usd: f64,
-    /// Global Passive Limit Unwind policy (System Settings → Execution):
+    /// Global Auto Position Exit policy (System Settings → Execution):
     /// the single shared limit-exit configuration. Strategies with
     /// `*_passive_mode = "inherit"` (the default) use this record; "custom"
     /// uses the strategy's own params; "off" always market-exits. The

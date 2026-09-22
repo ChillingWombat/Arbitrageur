@@ -499,9 +499,10 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
     // probability-weighted mean itself is the "Backtest expected" field.
     const probTarget = useMemo(() => {
       const t = net;
-      const d = opp.backtest_deciles_usd;
-      if (t == null || !Number.isFinite(t) || !d || d.length === 0 || d.some((v) => !Number.isFinite(v)))
+      const raw = opp.backtest_deciles_usd;
+      if (t == null || !Number.isFinite(t) || !raw || raw.length === 0 || raw.some((v) => !Number.isFinite(v)))
         return null;
+      const d = [...raw].sort((a, b) => a - b);
       const n = d.length;
       if (t <= d[0]) return 1;
       if (t > d[n - 1]) return 0;

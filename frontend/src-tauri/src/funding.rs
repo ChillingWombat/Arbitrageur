@@ -1060,7 +1060,8 @@ pub struct FundingTrendPoint {
 /// funding history (percent), ticker mid-price history (USD), and the latest
 /// live mid for the caption. All series ascending by time, downsampled to a
 /// few hundred points. Empty series mean "no history yet" — clients render
-/// the current prints only and must never interpolate fabrications.
+/// the current prints only; gaps may be carried forward (a funding print is
+/// a standing rate until superseded) but never synthesized.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FundingTrendDto {
     pub symbol: String,

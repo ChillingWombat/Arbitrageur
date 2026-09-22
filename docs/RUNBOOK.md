@@ -143,10 +143,11 @@ the spatial two-leg path (triangle and funding live dispatch is not built).
 To run one minimal real-money entry:
 
 1. Unlock the credential vault; set Trading Mode to **Live Trading**.
-2. Engine Settings → Safety: enable **Auto-flatten residual exposure**
-   (recommended so a mixed outcome self-heals) and **Enable live strategy
+2. Engine Settings → Execution: enable **Enable live strategy
    entries**; set **Live max notional per leg** just above both venues'
-   minimums (e.g. $15–25).
+   minimums (e.g. $15–25). Residual auto-flatten is unconditional (no
+   toggle since 2026-09-22) — a mixed outcome always self-heals via
+   reduce-only flatten children.
 3. Pick a symbol with **no open position on either venue** — the entry
    refuses if `fetch_account` shows one. Keep existing positions untouched:
    the system never sweeps account positions; it only manages signal legs

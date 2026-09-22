@@ -772,7 +772,7 @@ export interface EngineSettingsDto {
   live_entry_enabled?: boolean;
   /** Per-leg USD notional cap for live entries; 0 refuses all. */
   live_entry_max_notional_usd?: number;
-  /** Global Passive Limit Unwind policy (Execution section). Strategies on
+  /** Global Auto Position Exit policy (Execution section). Strategies on
    * `*PassiveMode = "inherit"` use this; the popup's Auto Limit mode runs
    * it too. Serialized camelCase like PassiveUnwindDto. */
   passive_unwind?: PassiveUnwindDto;
