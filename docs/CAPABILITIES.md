@@ -1,6 +1,6 @@
 # Capability Matrix
 
-**Status date:** 2026-09-22
+**Status date:** 2026-09-23
 **Authority:** This file and `README.md` define current runtime capability. Historical handoffs describe what was attempted at the time and are not capability guarantees.
 
 ## Capability vocabulary
@@ -35,9 +35,9 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 
 “Unit” means deterministic parser/signing tests. “Public” means live public-read evidence recorded in the handoff. “Sandbox order” and “mainnet order” require credentialed evidence and are not implied by source code.
 
-| Venue | Markets / books | Funding | Account read | Sign + submit | Cancel | Leverage update | Terminal/restart reconciliation | Verification ceiling in repo | Strategy live entry |
-
 *"Strategy live entry" = the `live_entry_enabled` spatial canary path only (per-leg notional cap required); triangle/funding/spot entries remain refused regardless.*
+
+| Venue | Markets / books | Funding | Account read | Sign + submit | Cancel | Leverage update | Terminal/restart reconciliation | Verification ceiling in repo | Strategy live entry |
 |---|---|---|---|---|---|---|---|---|---|
 | Hyperliquid | Perpetual; spot suffix refused | Yes | Yes | Yes | Yes | No | Order-status poll + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
 | Lighter | Perpetual and exact `-SPOT` resolution | Yes | Yes | Yes, vendored signer | Yes | No | `accountOrders` poll by client order index + restart supervisor | Unit + public reads | **Canary-gated** (`live_entry_enabled` + cap) |
@@ -60,6 +60,8 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | Derive (DexPerpAdapter) | Perpetual (top-of-book only) | Yes | Yes (`X-Lyra*` headers) | Yes, EIP-712 action sigs | Yes (`private/cancel`) | No explicit implementation | Order read poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
 | Aevo (DexPerpAdapter) | Perpetual | Yes | Yes (`AEVO-KEY`/`AEVO-SECRET`) | Yes, EIP-712 `Order` | Yes | No explicit implementation | Order read poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
 | dYdX, Paradex, GMX V2, ApeX Omni, Extended, Helix, edgeX, QFEX (markets only), Vest, Antarctic, EVEDEX, BULK, Ostium, SoDEX, AlphaX, Nado, IO Trader, Niza, Astros, Gate DEX (DexPerpAdapter, market-data-only) | Verified or doc-shaped public reads; GMX V2 is prices-only (GLV AMM has no CLOB), Derive top-of-book only, QFEX books auth-gated → fail closed | Yes where the venue publishes it | **No — fails closed** | **No — fails closed** | **No — fails closed** | **No — fails closed** | None | Unit + live public reads where marked verified; doc-shaped venues degrade to per-entry errors | **No** |
+| Uniswap V3, Uniswap V2, PancakeSwap V2, PancakeSwap V3, SushiSwap, QuickSwap (EvmAmmAdapter, spot AMM — standard routers) | On-chain quoter/factory reads — probe-verified live; one-level book synthesized from real executable quotes (bid = exact-in 1 base, ask = exact-out cost of 1 base; both sides required, crossed/empty books fail) | N/A — spot pools | Yes — local EVM wallet account read | Yes — wallet-signed `swapExact*`/`exact*Single` txs; exact-in sells and exact-out buys; limit orders map to min-out/max-in bounds, post-only refused | Atomic swap — nothing rests to cancel | Spot pools — N/A | Submit returns tx hash as `New` immediately; `eth_getTransactionReceipt` polling is the authority — Filled/Rejected require BOTH input-spent and output-received `Transfer` proof; mined gas reported in native fee; restart reconciliation | Unit + live `eth_call` smoke test (`live_market_smoke`, `--ignored`); no credentialed swap evidence yet | **No — pending gas-aware profitability integration and credentialed venue evidence** (`live_strategy_entry_implemented` = false) |
+| Camelot V2, Aerodrome, Velodrome, Ramses (legacy), Pharaoh (legacy) (EvmAmmAdapter, spot AMM — market data only) | Live public market data — probe-verified factory/quoter reads; one-level book with real quoted depth (ask via reverse exact-in) | N/A — spot pools | Optional address-only account read — no private key requested or loaded | **No** — Camelot router uses a custom referrer ABI; Solidly routers lack exact-output buys | **No** | Spot pools — N/A | **No** — no order submission, cancel, or status polling | Unit + live `eth_call` smoke test (`live_market_smoke`, `--ignored`) | **No** |
 
 ## Live mode
 

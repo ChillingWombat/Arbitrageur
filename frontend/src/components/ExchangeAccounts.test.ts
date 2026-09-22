@@ -94,6 +94,7 @@ function makeMockAccount(overrides: Partial<AccountDto> = {}): AccountDto {
     hasAccountId: false,
     hasWalletAddress: false,
     hasPrivateKey: true,
+    hasBaseUrl: false,
     accountIndex: null,
     subaccountIndex: null,
     apiKeyIndex: null,

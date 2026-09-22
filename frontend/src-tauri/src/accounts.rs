@@ -134,6 +134,8 @@ pub struct AccountDto {
     pub subaccount_index: Option<u64>,
     pub api_key_index: Option<u64>,
     pub has_private_key: bool,
+    /// Whether a venue base-URL override (regional domain/testnet) is stored.
+    pub has_base_url: bool,
     /// "standard" | "plus" | "premium" — Lighter-family tier drives the
     /// venue's shared-IP rate budget and fee adjustments.
     pub account_tier: String,
@@ -164,33 +166,15 @@ pub struct AccountCredentialInput {
     pub api_key_index: Option<u64>,
     #[serde(default)]
     pub private_key: Option<String>,
+    /// Optional venue endpoint override — a REST entity domain
+    /// (e.g. OKX app.okx.com / eea.okx.com keys) or a JSON-RPC URL
+    /// (EVM AMM chains). URLs may embed secrets such as provider API
+    /// keys; treat the value as secret material.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 impl AccountCredentialInput {
-    fn has_material(&self) -> bool {
-        !self.api_key.trim().is_empty()
-            || !self.api_secret.trim().is_empty()
-            || self
-                .passphrase
-                .as_ref()
-                .is_some_and(|v| !v.trim().is_empty())
-            || self
-                .account_id
-                .as_ref()
-                .is_some_and(|v| !v.trim().is_empty())
-            || self
-                .wallet_address
-                .as_ref()
-                .is_some_and(|v| !v.trim().is_empty())
-            || self.account_index.is_some()
-            || self.subaccount_index.is_some()
-            || self.api_key_index.is_some()
-            || self
-                .private_key
-                .as_ref()
-                .is_some_and(|v| !v.trim().is_empty())
-    }
-
     fn into_record(self, venue: &str, profile_id: &str, enabled: bool) -> ExchangeCredentials {
         let trimmed_opt = |v: &Option<String>| {
             v.as_ref()
@@ -209,6 +193,10 @@ impl AccountCredentialInput {
             subaccount_index: self.subaccount_index,
             api_key_index: self.api_key_index,
             private_key: trimmed_opt(&self.private_key),
+            // Patch protocol: preserve presence (omitted stays `None`),
+            // trim, but do NOT filter empty — `Some("")` is the explicit
+            // clear sentinel the merge layer consumes.
+            base_url: self.base_url.map(|s| s.trim().to_string()),
             enabled,
         }
     }
@@ -419,6 +407,7 @@ fn account_dto(
         has_account_id: presence.is_some_and(|p| p.has_account_id),
         has_wallet_address: presence.is_some_and(|p| p.has_wallet_address),
         has_private_key: presence.is_some_and(|p| p.has_private_key),
+        has_base_url: presence.is_some_and(|p| p.has_base_url),
         account_index: presence.and_then(|p| p.account_index),
         subaccount_index: presence.and_then(|p| p.subaccount_index),
         api_key_index: presence.and_then(|p| p.api_key_index),
@@ -530,20 +519,20 @@ pub fn upsert_account_impl(
         }
     };
 
+    // `credentials: None` is the no-update signal; any `Some` payload is
+    // processed even when every value is empty — per-field merge semantics
+    // (empty string clears base_url, preserves secrets) decide the effect.
     let mut cred_error: Option<String> = None;
     if let Some(creds) = &input.credentials {
-        if creds.has_material() {
-            let mut vault = state.vault.write();
-            if !vault.is_unlocked() {
-                cred_error = Some("vault is locked".to_string());
-            } else {
-                let record =
-                    creds
-                        .clone()
-                        .into_record(&profile.venue, &profile.id, profile.enabled);
-                if let Err(e) = vault.upsert_profile_credentials(&profile.id, record) {
-                    cred_error = Some(e.to_string());
-                }
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            cred_error = Some("vault is locked".to_string());
+        } else {
+            let record = creds
+                .clone()
+                .into_record(&profile.venue, &profile.id, profile.enabled);
+            if let Err(e) = vault.upsert_profile_credentials(&profile.id, record) {
+                cred_error = Some(e.to_string());
             }
         }
     }
@@ -685,6 +674,7 @@ pub fn get_account_credential_field_impl(
             "accountId" => c.account_id.clone().unwrap_or_default(),
             "walletAddress" => c.wallet_address.clone().unwrap_or_default(),
             "privateKey" => c.private_key.clone().unwrap_or_default(),
+            "baseUrl" => c.base_url.clone().unwrap_or_default(),
             _ => return Err(format!("Unknown credential field '{field}'")),
         }),
         None => Err(format!(
@@ -1191,6 +1181,36 @@ pub async fn get_account_signer_address(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
     get_account_signer_address_impl(&account_id, &state)
+}
+
+/// The signer address the live adapter would sign with *right now* —
+/// derived from the in-memory provisioned key, not the vault record.
+/// Divergence from `get_account_signer_address` means provisioning is
+/// stale; equality with a rejected-order address confirms which key signed.
+pub fn get_active_signer_address_impl(
+    venue: &str,
+    state: &AppEngineState,
+) -> Result<Option<String>, String> {
+    let vid = venue.trim().to_lowercase();
+    if vid == "hyperliquid" || vid == "hl" {
+        return Ok(state.live_hl.active_signer_address());
+    }
+    if let Some(a) = state
+        .live_dex_perps
+        .iter()
+        .find(|a| a.venue_id_str().eq_ignore_ascii_case(&vid))
+    {
+        return Ok(a.active_signer_address());
+    }
+    Err(format!("no signer introspection for venue '{venue}'"))
+}
+
+#[tauri::command]
+pub async fn get_active_signer_address(
+    venue: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Option<String>, String> {
+    get_active_signer_address_impl(&venue, &state)
 }
 
 #[tauri::command]

@@ -80,7 +80,21 @@ export type ExchangeId =
   | "qfex"
   | "sodex"
   | "standx"
-  | "vest";
+  | "vest"
+  // EVM spot AMMs (shared EvmAmmAdapter; account-enabled only). All are
+  // live-capable via local-wallet signing; the account's optional baseUrl
+  // field is the JSON-RPC endpoint override.
+  | "uniswap"
+  | "uniswap_v2"
+  | "pancakeswap"
+  | "pancakeswap_v3"
+  | "sushiswap"
+  | "quickswap"
+  | "camelot"
+  | "aerodrome"
+  | "velodrome"
+  | "ramses"
+  | "pharaoh";
 
 export interface ExchangeMetadata {
   id: ExchangeId;
@@ -90,6 +104,7 @@ export interface ExchangeMetadata {
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
+  { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", feeBps: 30.0 },
   { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 3.0 },
   { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 3.0 },
@@ -99,6 +114,7 @@ export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
   { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 },
   { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
   { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 3.0 },
@@ -123,14 +139,23 @@ export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 2.5 },
   { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 },
+  { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", feeBps: 25.0 },
+  { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", feeBps: 25.0 },
   { id: "paradex", name: "Paradex", type: "Perp DEX (Market Data)", feeBps: 2.0 },
+  { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", feeBps: 30.0 },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
   { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 },
   { id: "qfex", name: "QFEX", type: "Perp DEX (Market Data)", feeBps: 4.0 },
+  { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", feeBps: 30.0 },
+  { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 },
   { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
   { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 4.0 },
+  { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 },
+  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 5.0 },
+  { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 },
   { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
+  { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", feeBps: 30.0 },
   { id: "vest", name: "Vest", type: "Perp DEX (Market Data)", feeBps: 3.0 },
 ];
 

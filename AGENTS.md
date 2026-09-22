@@ -26,6 +26,18 @@
 - When reporting "no X exists," state what was searched and what would have
   been found if it existed.
 
+## Venue quirks
+
+- **OKX regional entities.** OKX runs separate API-key namespaces per entity
+  domain: `www.okx.com` (global), `app.okx.com` / `us.okx.com` (US & AU),
+  `eea.okx.com` / `my.okx.com` (EEA), `tr.okx.com` (TR). A key issued on one
+  returns `50119 "API key doesn't exist"` on every other domain — check which
+  host the user's browser shows before debugging credentials. Per-account
+  `baseUrl` (Region / API Domain dropdown) overrides the adapter's host;
+  stored on `ExchangeCredentials.base_url`, applied to public and signed
+  calls alike. OKX demo keys additionally need `x-simulated-trading: 1` —
+  not implemented.
+
 ## Execution safety (standing)
 
 - Fail-closed on live paths: unverifiable order state → stop, don't stack

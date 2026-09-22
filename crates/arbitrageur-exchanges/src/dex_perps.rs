@@ -716,6 +716,18 @@ impl DexPerpAdapter {
         self.spec_id
     }
 
+    /// Venue id as a str for matching.
+    pub fn venue_id_str(&self) -> &str {
+        self.venue_id.as_str()
+    }
+
+    /// The address the currently-held key derives to — the identity the
+    /// venue will recover from our signatures. `None` when no usable EVM
+    /// key is held (Ed25519 venues like pacifica return None too).
+    pub fn active_signer_address(&self) -> Option<String> {
+        self.wallet.read().as_ref().map(|s| s.address_checksum())
+    }
+
     /// Static display name from the spec table.
     pub fn spec_name(&self) -> &'static str {
         spec_for(self.spec_id).map(|s| s.name).unwrap_or("DEX")

@@ -5,8 +5,17 @@
 > (`crates/arbitrageur-exchanges/src/dex_perps.rs`) — all serve market data;
 > six (Pacifica, StandX, Ondo Perps, GRVT, Derive, Aevo) additionally
 > implement authenticated order paths with venue-native signing, gated by
-> `has_live_credentials()` until credentialed venue evidence exists
-> (see `docs/VENUE_COVERAGE.md` for the vetting/dedup matrix).
+> `has_live_credentials()` until credentialed venue evidence exists.
+> Also 2026-09-22/23: 11 EVM spot AMMs admitted through the spec-driven
+> `EvmAmmAdapter` (`crates/arbitrageur-exchanges/src/evm_amm.rs`) — Uniswap
+> V3/V2, PancakeSwap V2/V3, SushiSwap, QuickSwap, Camelot V2, Aerodrome,
+> Velodrome, Ramses (legacy), Pharaoh (legacy) — all serve onchain quoter/
+> factory market data; only the six standard-router venues (Uniswap V3/V2,
+> PancakeSwap V2/V3, SushiSwap, QuickSwap) additionally implement local-
+> wallet swap submission with receipt/two-leg-Transfer verification.
+> Camelot V2 (custom referrer router ABI) and Aerodrome/Velodrome/
+> Ramses/Pharaoh (no exact-output buy primitive) are market-data-only.
+> (see `docs/VENUE_COVERAGE.md` §2b for the probe-verified spec table).
 > §6 transfer-rails / rebalance research. Re-check fee figures on venue
 > pages before moving size.
 
@@ -32,6 +41,17 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
   (prices only), ApeX Omni, Extended, Helix, edgeX, QFEX (markets only),
   Vest, Antarctic, EVEDEX, BULK, Ostium, SoDEX, AlphaX, Nado, IO Trader,
   Niza, Astros, Gate DEX
+- EVM spot AMMs via `EvmAmmAdapter` (account-enabled admission; onchain
+  quotes for all 11, local-wallet swap execution on the six standard
+  routers only): Uniswap V3/V2, PancakeSwap V2/V3, SushiSwap, QuickSwap
+  implement signed `swapExact*`/`exact*Single` wallet transactions;
+  Camelot V2, Aerodrome, Velodrome, Ramses (legacy), Pharaoh (legacy)
+  are **market-data-only** — Camelot's V2 router uses a custom referrer
+  ABI and the Solidly routers expose no exact-output buy primitive, so
+  buys via exact-in headroom could overfill the requested base quantity.
+  Market-data-only venues load no private key (an optional wallet
+  address enables balance reads). Blackhole is
+  spec'd but not admitted — its legacy deployment holds no live pools.
 - Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
 
 Submission transport is not terminal fill reconciliation. Every live-submission adapter now exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution (opt-in) and bounded cancel retry are implemented, but without venue sandbox/canary evidence no listed venue is live-strategy-entry ready.

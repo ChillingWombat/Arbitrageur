@@ -144,13 +144,13 @@ platforms**, of which ~10 dominate volume.
 | --- | --- | --- | --- | --- | --- |
 | **Uniswap** | 2,3,4,11,13,25,28,38,39,42,50,51,52,54,57,73,74,80,90,91,92,95 (≈22 rows) | ETH, Arb, Base, OP, Polygon, BSC, AVAX, Unichain, Robinhood-chain, Monad, Arc, xLayer | low | on-chain swap via Quoter/Router — agent wallet signs | added (`uniswap`, `uniswap_v2`) — UniV3 QuoterV2/SwapRouter02 + UniV2 Router; default chain Arbitrum, RPC injectable |
 | **PancakeSwap** | 1,16,17,32,47,62,91 | BSC, ETH, Arb, Base (Solana variant separate) | low | same UniV3/V2 interfaces | added (`pancakeswap`, `pancakeswap_v3`) — BSC + Base + Arb |
-| **Aerodrome** | 7,18,60,78 | Base | low | Slipstream quoter (UniV3-compatible) + classic Solidly router | added (`aerodrome`) |
-| **Velodrome** | 65 | Optimism | low | same family as Aerodrome | added (`velodrome`) |
+| **Aerodrome** | 7,18,60,78 | Base | low | Slipstream quoter (UniV3-compatible) + classic Solidly router | added (`aerodrome`) — market data only |
+| **Velodrome** | 65 | Optimism | low | same family as Aerodrome | added (`velodrome`) — market data only |
 | **Orca / Raydium / Meteora / PumpSwap / Humidifi / ZeroFi / Byreal / Manifest** | 5,10,19,8,37,35,45,41,15 | Solana | low | Solana tx signing — needs solana SDK integration | excluded-deferred (non-EVM; single biggest missing cluster — ~$1.4B/day combined) |
 | **Curve** | 12 | ETH | low | custom AMM math/router | excluded-custom-abi (v2: StableSwapNG quoter) |
 | **Fluid** | 14,72 | ETH, Arb | low | custom liquidity-layer ABI | excluded-custom-abi |
-| **Ramses** | 31,64,66 | Robinhood-chain, HyperEVM, Polygon | low | Solidly fork | added (`ramses`) |
-| **Pharaoh / Blackhole** | 21,27,79 | Avalanche | low | Solidly forks (same team/lineage) | added (`pharaoh`, `blackhole`) |
+| **Ramses** | 31,64,66 | Robinhood-chain, HyperEVM, Polygon | low | Solidly fork | added (`ramses`) — market data only |
+| **Pharaoh / Blackhole** | 21,27,79 | Avalanche | low | Solidly forks (same team/lineage) | added (`pharaoh` — market data only; `blackhole` spec'd, not admitted) |
 | **Dexalot** | 33 | Avalanche subnet CLOB | low | REST CLOB API exists | excluded-unverified (subnet RPC needed) |
 | **THORChain / Chainflip / Near Intents / Bron Intents** | 34,84,22,100 | cross-chain | low | swap intents, not orderbooks | excluded-model-mismatch |
 | **Kuru** | 23 | Monad CLOB | low | CLOB API | excluded-unverified |
@@ -159,7 +159,7 @@ platforms**, of which ~10 dominate volume.
 | **SunSwap** | 40 | Tron | low | Tron tx signing | excluded-deferred (non-EVM) |
 | **Cetus / Turbos / Bluefin / Aftermath** | 43,59,56,71 | Sui | low | Sui tx signing | excluded-deferred (non-EVM) |
 | **Ekubo** | 76 (Starknet), 89 (ETH) | Starknet/ETH | low | custom pool math | excluded-custom-abi |
-| **Camelot** | 86 | Arbitrum | low | UniV2-style router (V2) | added (`camelot`) |
+| **Camelot** | 86 | Arbitrum | low | UniV2-style router (V2) | added (`camelot`) — market data only |
 | **Quickswap** | 87 | Polygon | low | UniV2-style router | added (`quickswap`) |
 | **Sushiswap** | (below 100 cutoff) | multi | low | UniV2/V3-style | added (`sushiswap`) |
 | **LFJ (TraderJoe)** | 96 | Avalanche | low | Liquidity-Book bins — custom math | excluded-custom-abi |
@@ -176,106 +176,175 @@ platforms**, of which ~10 dominate volume.
 
 ### Spot DEX summary
 
-- **Target list** (`evm_amm.rs`, one generic adapter over venue specs,
-  EVM agent-key execution): `uniswap` (UniV3, default Arbitrum),
-  `uniswap_v2` (UniV2, Ethereum), `pancakeswap` (UniV2-style, BSC),
-  `pancakeswap_v3` (UniV3-style, BSC), `aerodrome` (Solidly-classic
-  routes, Base), `velodrome` (Solidly-classic, Optimism), `ramses`,
-  `pharaoh`, `blackhole`, `camelot` (Algebra), `quickswap` (UniV2,
-  Polygon), `sushiswap` (UniV2, Ethereum).
+- **Landed** (`evm_amm.rs`, one generic `EvmAmmAdapter` over a static
+  `AmmVenueSpec` table): `uniswap` (UniV3,
+  Ethereum), `uniswap_v2` (UniV2, Ethereum), `pancakeswap` (UniV2, BSC),
+  `pancakeswap_v3` (UniV3, BSC), `sushiswap` (UniV2, Ethereum),
+  `quickswap` (UniV2, Polygon), `camelot` (UniV2-compatible V2 pools,
+  Arbitrum), `aerodrome` (Solidly V2 4-field routes, Base), `velodrome`
+  (Solidly V2 4-field, Optimism), `ramses` (Solidly legacy 3-field,
+  Arbitrum), `pharaoh` (Solidly legacy 3-field, Avalanche). **11 admitted
+  for onchain market data.** Of these, the six standard-router venues —
+  `uniswap`, `uniswap_v2`, `pancakeswap`, `pancakeswap_v3`, `sushiswap`,
+  `quickswap` (`LIVE_EVM_AMM_VENUE_IDS`) — also implement local-wallet
+  swap submission; `camelot`, `aerodrome`, `velodrome`, `ramses`,
+  `pharaoh` are **market-data-only** (execution-gating rationale below)
+  and never load a private key — an optional wallet address enables
+  balance reads.
+  `blackhole` stays in the spec table with `admit = false` — its legacy
+  deployment holds no live major pools (verified on-chain); its Algebra
+  CL liquidity needs a dedicated ABI family.
 - **Deferred (documented)**: non-EVM clusters (Solana/Sui/Tron/Aptos/XRPL/
   Hedera/Stellar/NEAR/Injective) need per-chain signers; custom-ABI AMMs
-  (Curve, Fluid, DODO, LFJ, Ekubo) need per-venue quoter work.
+  (Curve, Fluid, DODO, LFJ, Ekubo) and Ramses-lineage/Algebra CL pools
+  need per-venue quoter work.
 - **Excluded**: aggregators/intents (no venue orderbook), RFQ venues, dead
   endpoints, non-venue entries.
 
-## 2b. `evm_amm` implementation spec
+## 2b. `evm_amm` implementation (LANDED)
 
-One `EvmAmmAdapter` struct driven by a per-venue `AmmSpec` table — same
-shape as `DexPerpAdapter`, but all I/O is on-chain JSON-RPC instead of
-venue REST.
+One `EvmAmmAdapter` struct driven by a per-venue `AmmVenueSpec` table —
+same shape as `DexPerpAdapter`, but all I/O is on-chain JSON-RPC instead
+of venue REST. Every address below was re-verified by live `eth_call`
+probes during implementation (factory lookup + a real quote) — see
+`live_market_smoke` test (`--ignored`).
 
-### ABI families
+### ABI families (all probe-verified)
 
 | Kind | Pool discovery | Quote | Swap entrypoint |
 | --- | --- | --- | --- |
-| `UniV2` | `factory.getPair(a,b)` | `router.getAmountsOut(amountIn,[a,b])` | `swapExactTokensForTokens` / `swapTokensForExactTokens` |
-| `UniV3` | `factory.getPool(a,b,fee)` | `quoter.quoteExactInputSingle(params)` | `SwapRouter02.exactInputSingle` / `exactOutputSingle` |
-| `Solidly` | `factory.getPool(a,b,stable)` | `router.getAmountsOut(amountIn,Route[])` | `swapExactTokensForTokens(...,Route[])` |
+| `UniV2` | `factory.getPair(a,b)` | `router.getAmountsOut(amountIn,[a,b])` / `getAmountsIn` | `swapExactTokensForTokens` / `swapTokensForExactTokens` |
+| `UniV3` | `factory.getPool(a,b,fee)` | `QuoterV2.quoteExact{Input,Output}Single` (params: `tokenIn,tokenOut,amount,fee,sqrtLimit`) | `SwapRouter.exact{Input,Output}Single` — deadline-in-params variant |
+| `Solidly` | `factory.getPool(a,b,stable)` (Aero/Velo) or `getPair(a,b,stable)` (Ramses/Pharaoh) | `router.getAmountsOut(amountIn,Route[])` | `swapExactTokensForTokens(...,Route[])` |
+
+Solidly `Route` has two encodings, probed live: `{from,to,stable}` (3-field,
+Ramses/Pharaoh legacy routers) and `{from,to,stable,factory}` (4-field,
+Aerodrome/Velodrome V2). The spec carries both flags.
 
 Ramses-lineage V3 pools are keyed by `tickSpacing` (not UniV3 `fee`), and
 Algebra pools (Blackhole CL, Camelot V3, QuickSwap V3) drop the fee param
 entirely — both need their own quoter/router ABI, so v1 of `evm_amm`
-supports the three uniform families above and reaches Ramses / Pharaoh /
-Blackhole through their verified **legacy Solidly** routers and Camelot
-through its UniV2-compatible V2 router. RamsesV3/Algebra CL liquidity is
-deferred to a follow-up adapter family.
+reaches Ramses / Pharaoh through their verified **legacy Solidly** routers
+and Camelot through its UniV2-compatible V2 router. RamsesV3/Algebra CL
+liquidity is deferred to a follow-up adapter family.
 
-### Interface contract (per venue)
+**Execution gating** — only the six standard-router venues
+(`LIVE_EVM_AMM_VENUE_IDS`: `uniswap`, `uniswap_v2`, `pancakeswap`,
+`pancakeswap_v3`, `sushiswap`, `quickswap`) may submit swaps. Solidly
+routers have no exact-output primitive (`getAmountsIn`/
+`swapTokensForExactTokens` absent — probed), so a buy could only run as an
+exact-in estimate with input headroom, which can overfill the requested
+base quantity; Camelot's V2 router uses a custom referrer ABI rather than
+the standard UniV2 swap signature. Camelot/Aerodrome/Velodrome/Ramses/
+Pharaoh are therefore market-data-only: `place_order` rejects them before
+any signer, chain, or quote work, and they never request or load a
+private key.
 
-- `base_url: Option<String>` carries the **RPC endpoint** override —
-  spec default is a public RPC for the venue's chain; Engine Settings can
-  point at an operator's node. Chain id is verified against the spec
-  before any signing (wrong-network RPC refuses).
-- `fetch_markets` resolves each spec pair's pool on-chain
-  (`getPool`/`getPair`/`poolByPair`/`getPool(stable)`) and returns only
+### Interface contract (per venue) — as implemented
+
+- `base_url: Option<String>` carries the **RPC endpoint** override
+  (account credential `baseUrl` field → `set_base_url`); spec default is a
+  public `publicnode.com` RPC. Endpoint URLs are secrets (provider API
+  keys can embed in them): the credential field is masked in Debug and
+  zeroized on drop/in adapter storage, and follows the patch protocol —
+  an omitted property preserves the stored endpoint, an explicit empty
+  string clears it back to the adapter's constructor endpoint, a
+  non-empty value sets it. Invalid (non-http(s)) values return `Err`,
+  keep the active endpoint, and withhold credentials. Chain id is
+  verified against the spec before any read or signing, cached per
+  endpoint URL so an endpoint change always re-verifies (wrong-network
+  RPC refuses).
+- `fetch_markets` resolves each spec pair's pool on-chain and returns only
   pools that resolve non-zero — markets are *proven*, never assumed.
-- `fetch_ticker` quotes one base unit through the venue's quoter
-  (`quoteExactInputSingle` / `getAmountsOut`) → `last`; the reverse quote
-  gives `bid`. AMM venues have no orderbook → `fetch_orderbook` fails
-  closed (prices-only, same honesty rule as GMX in `dex_perps`).
-- `fetch_account` reads ERC-20 `balanceOf` for the spec token list plus
-  native balance → `balances`; `positions` stays empty (spot).
+- `fetch_orderbook` synthesizes a documented one-level book from real
+  executable quotes (an AMM has no L2 depth): the bid is the exact-in
+  quote for one base unit; the ask is the exact-out cost of one base unit
+  on the six standard routers, or the reverse exact-in quote (price
+  `1/base_out`, ask quantity = the actual quoted `base_out` — never
+  normalized to 1) on the five market-data-only venues. Both sides are
+  required — a failed side, a zero/nonpositive quote, or a crossed book
+  (`ask < bid`) fails the read rather than fabricating a side.
+  `fetch_ticker` delegates to this book and uses `bid` as `last`; there
+  is no ask→bid fallback.
+- `fetch_account` reads native + configured ERC-20 `balanceOf`; `equity`
+  prices stables at face and other tokens via venue quotes — unquotable
+  holdings stay listed but excluded (no invented prices). `positions`
+  empty. Market-data-only venues hold only an optional public wallet
+  address for this read — no private key is requested or loaded.
 - `fetch_funding_rate` / `set_leverage` fail closed — spot venues have
   neither.
-- `place_order` — **market and limit-bound orders only**: a swap is
-  atomic, so `Limit`/`PostOnly` is honored as a price bound — the quoter
-  result must satisfy the limit or the order is refused *without
-  submitting* (never rests, never violates the bound). Sell = exact-in
-  base→quote; Buy = exact-out quote→base (`swapTokensForExactTokens` /
-  `exactOutputSingle`). Slippage bound = `minAmountOut`/`maxAmountIn`
-  derived from the limit price (or the quote for market orders with the
-  router tolerance). ERC-20 `approve(router)` is issued lazily per
-  (token, spender) when allowance is insufficient.
+- `place_order` — admitted only on the six standard-router venues
+  (`execution_supported()`); the Camelot/Solidly venues reject before any
+  signer, chain, or quote work. Market and limit-bound orders only: the
+  quoter result must satisfy the limit or the order is refused *without
+  submitting* (never rests). Sell = exact-in base→quote; Buy = exact-out
+  quote→base. Slippage bound =
+  limit price, or quote ±50bps for market orders. ERC-20 `approve(router)`
+  issues lazily at the exact needed amount (nonzero→nonzero reset handled
+  for USDT-style tokens; no unlimited grants). `estimate_gas` runs before
+  every send — a revert fails closed with no nonce burned. On broadcast
+  the call returns `New` immediately, keyed by the transaction hash, with
+  zero fill and full remaining — the durable order id reaches persisted
+  state before any receipt wait or process crash.
 - `cancel_order` fails closed — nothing rests on an AMM.
-- `fetch_order` maps `eth_getTransactionReceipt(hash)` →
-  `Filled` (status 1) / `Rejected` (status 0) / pending-missing → error
-  (never invents state). Order identity is the tx hash, durable by
-  construction.
-- Capabilities: `live_order_submission_implemented` /
-  `order_status_polling_implemented` true (atomic swap + receipt poll);
-  `has_live_credentials` requires the EVM agent key (`privateKey` field).
-  No API key exists — the agent key *is* the credential.
+- `fetch_order` is the sole status authority:
+  `eth_getTransactionReceipt(hash)` → `Filled` / `Rejected`, decoding
+  `Transfer` logs — BOTH the input token spent and the output token
+  received must be proven to the signer, and the mined gas fee
+  (`gas_used * effective_gas_price`) is reported in the chain's native
+  currency. The submit ack alone never counts. Missing receipt = pending
+  (error, so reconciliation keeps polling). Order identity is the tx
+  hash.
+- Capabilities: `supports_live_execution` /
+  `live_order_submission_implemented` /
+  `order_status_polling_implemented` = `execution_supported()` — true
+  only for the six standard-router venues; the five market-data-only
+  venues report false on all three.
+  `live_strategy_entry_implemented()` is **false for all EVM AMM
+  venues** — the submission transports are for explicit canaries only;
+  automated multi-leg strategy entry stays backend-refused pending
+  gas-aware profitability modeling and credentialed swap evidence.
+  `has_live_credentials` requires the
+  EVM wallet key (`privateKey` field) on live venues. No API key exists —
+  the wallet key *is* the credential.
 
-### Venue spec table (contract addresses — canonical deployments)
+### Venue spec table (contract addresses — all probe-verified 2026-09-22)
 
 | id | chain | kind | factory / quoter / router |
 | --- | --- | --- | --- |
-| `uniswap` | Arbitrum 42161 | UniV3 | F `0x1F98431c8aD98523631AE4a59f267346ea31F984` / Q `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` / R `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` |
+| `uniswap` | Ethereum 1 | UniV3 | F `0x1F98431c8aD98523631AE4a59f267346ea31F984` / Q `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` / R `0xE592427A0AEce92De3Edee1F18E0157C05861564` |
 | `uniswap_v2` | Ethereum 1 | UniV2 | F `0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f` / R `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` |
 | `pancakeswap` | BSC 56 | UniV2 | F `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73` / R `0x10ED43C718714eb63d5aA57B78B54704E256024E` |
 | `pancakeswap_v3` | BSC 56 | UniV3 | F `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` / Q `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` / R `0x1b81D678ffb9C0263b24A97847620C99d213eB14` |
-| `aerodrome` | Base 8453 | Solidly | F `0x420DD381b31aEf6683db6B902084cB0FFECe40Da` / R `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
-| `velodrome` | Optimism 10 | Solidly | F `0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a` / R `0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858` |
+| `aerodrome` | Base 8453 | Solidly-4 | F `0x420DD381b31aEf6683db6B902084cB0FFECe40Da` / R `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
+| `velodrome` | Optimism 10 | Solidly-4 | F `0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a` / R `0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858` |
 | `camelot` | Arbitrum 42161 | UniV2 (V2 pools) | F `0x6EcCab422D763aC031210895C81787E87B43A652` / R `0xc873fEcbd354f5A56E00E710B90EF4201db2448d` |
 | `quickswap` | Polygon 137 | UniV2 | F `0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32` / R `0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff` |
 | `sushiswap` | Ethereum 1 | UniV2 | F `0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac` / R `0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F` |
-| `ramses` | Arbitrum 42161 | Solidly (legacy) | F `0xADd32480630A16dfAcEe6eeFcB3ab2181449Dc3B` / R `0x1614a7e1fe63960B4684867a62080acd2404757f` |
-| `pharaoh` | Avalanche 43114 | Solidly (PairFactory+Router) | F `0x85448bF2F589ab1F56225DF5167c63f57758f8c1` / R `0x9CEE04bDcE127DA7E448A333f006DEFb3d5e38cC` |
-| `blackhole` | Avalanche 43114 | Solidly (PairFactory+RouterV2) | F `0xfE926062Fb99CA5653080d6C14fE945Ad68c265C` / R `0x9EED160D7D8253DeC1A2A512e504DE5E7ff3C111` |
+| `ramses` | Arbitrum 42161 | Solidly-3 (legacy) | F `0xADd32480630A16dfAcEe6eeFcB3ab2181449Dc3B` / R `0x1614a7e1fe63960B4684867a62080acd2404757f` |
+| `pharaoh` | Avalanche 43114 | Solidly-3 (legacy) | F `0x85448bF2F589ab1F56225DF5167c63f57758f8c1` / R `0x9CEE04bDcE127DA7E448A333f006DEFb3d5e38cC` |
+| `blackhole` | Avalanche 43114 | Solidly-3 (legacy, **not admitted**) | F `0xfE926062Fb99CA5653080d6C14fE945Ad68c265C` / R `0x9EED160D7D8253DeC1A2A512e504DE5E7ff3C111` |
 
-PancakeSwap V3 keeps `deadline` inside its params struct (old SwapRouter
-interface); Uniswap SwapRouter02 drops it — the spec carries a
-`deadline_in_params` flag and the adapter encodes the right shape.
+Both UniV3 venues use the original SwapRouter ABI (deadline inside
+params) — Uniswap's canonical `0xE592…` router and PancakeSwap's
+`0x1b81D678…` share it, so no per-venue deadline flag is needed.
 
-(Default public RPCs: `arb1.arbitrum.io/rpc`, `eth.llamarpc.com`,
-`bsc-dataseed.binance.org`, `mainnet.base.org`, `mainnet.optimism.io`,
-`polygon-rpc.com`, `api.avax.network/ext/bc/C/rpc` — all injectable.)
+(Default public RPCs: `*-rpc.publicnode.com` per chain — ethereum / bsc /
+polygon-bor / arbitrum-one / base / optimism / avalanche-c-chain — all
+overridable per account via the credential `baseUrl` field.)
 
 Market sets are the spec pair tables verified on-chain at
 `fetch_markets` — majors only per chain (WETH/WBTC/ARB/OP/BNB/AVAX/POL
 vs USDC/USDT where the pool exists). Adding a pair is a spec-row change,
 never new code.
+
+**Honest liquidity caveat**: legacy AMM deployments carry thin books where
+the venue migrated liquidity to CL pools — Ramses WETH/USDC quoted
+~$0.000061/ETH, Camelot V2 ~$313/ETH, Velodrome volatile ~$1,586/ETH at
+probe time (the 2026-09-23 live smoke reproduced the same pattern).
+The adapter reports those quotes faithfully. These dead/thin legacy pools
+are exactly why the Camelot/Solidly venues are gated market-data-only —
+the quotes explain the gating, they do not make execution safe.
 
 ## 3. What "added" means (capability contract)
 
