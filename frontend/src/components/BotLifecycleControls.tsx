@@ -1,5 +1,5 @@
 import React from "react";
-import { Play, Pause, TrendingDown, OctagonX } from "lucide-react";
+import { Play, Pause, ArrowDown, OctagonX } from "lucide-react";
 import { getBotControlAvailability } from "../hooks/useBotLifecycle";
 import type { BotPhase } from "../hooks/useBotLifecycle";
 
@@ -80,7 +80,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
                 : phase !== "running" && phase !== "paused"
                 ? "Reduce Only requires bot to be running or paused"
                 : "Exit-only mode — stops automatically once this strategy is flat",
-            icon: <TrendingDown className="w-3 h-3" />,
+            icon: <ArrowDown className="w-3 h-3" />,
             enabled: availability.reduceOnly,
             onClick: onReduceOnly ?? (() => {}),
             activeClass: "text-warn hover:bg-warn-dim border-warn-border",
