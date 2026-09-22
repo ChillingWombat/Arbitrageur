@@ -355,10 +355,23 @@ pub fn vanta_ws_url(account_id: &str) -> anyhow::Result<String> {
 }
 
 /// `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}`.
+///
+/// Prefer `vanta_subscribe_topic` with the venue-native `venue_symbol`:
+/// canonical bases are not guaranteed to be listed names on Orderly.
 pub fn vanta_subscribe_message(id: u64, base: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "topic": format!("PERP_{}_USDC@orderbook", base.trim().to_uppercase()),
+        "event": "subscribe",
+    })
+}
+
+/// `{"id","topic":"<native_symbol>@orderbook","event":"subscribe"}` where the
+/// topic carries the venue-native symbol verbatim (e.g. `PERP_kPEPE_USDC`).
+pub fn vanta_subscribe_topic(id: u64, topic: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "topic": topic.trim(),
         "event": "subscribe",
     })
 }
