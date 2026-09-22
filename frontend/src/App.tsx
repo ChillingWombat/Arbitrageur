@@ -886,8 +886,8 @@ export const App: React.FC = () => {
                 }`}
               >
                 {vaultStatus.auto_locked
-                  ? "Vault auto-locked — live trading continues on provisioned credentials; unlock to change API keys."
-                  : "Vault locked — live venue reads and order execution halted. Unlock to resume."}
+                  ? "Vault auto-locked — trading continues on provisioned credentials; unlock to change API keys."
+                  : "Vault locked — credentialed venue reads and order execution halted. Unlock to resume."}
               </span>
             </div>
             <button
