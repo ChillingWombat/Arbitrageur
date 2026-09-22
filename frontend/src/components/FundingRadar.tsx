@@ -101,6 +101,7 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
 }) => {
   const [trend, setTrend] = useState<FundingTrendDto | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mode, setMode] = useState<"gap" | "legs">("gap");
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -145,7 +146,42 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
       </div>
     );
   }
-  const fundVals = [...long.map((p) => p.v), ...short.map((p) => p.v)];
+  // Funding prints are standing rates: a print applies until the venue posts
+  // the next one, so missing samples are carried forward (LOCF), never
+  // zero-filled. `stepAt` reads the standing rate at any instant.
+  const stepAt = (pts: { t: number; v: number }[], t: number): number | undefined => {
+    let lo = 0;
+    let hi = pts.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (pts[m].t <= t) lo = m + 1;
+      else hi = m;
+    }
+    return lo > 0 ? pts[lo - 1].v : undefined;
+  };
+
+  const nowT = Date.now();
+  const startT = Math.min(long[0]?.t ?? nowT, short[0]?.t ?? nowT);
+  const endHist = Math.max(
+    long.length ? long[long.length - 1].t : startT,
+    short.length ? short[short.length - 1].t : startT,
+    nowT,
+  );
+
+  // Net gap on a uniform time grid — both legs carried forward, so the gap
+  // is defined wherever each leg has at least one earlier print.
+  const GRID_N = 160;
+  const netPts: { t: number; v: number }[] = [];
+  if (endHist > startT && long.length > 0 && short.length > 0) {
+    for (let i = 0; i <= GRID_N; i++) {
+      const t = startT + (i / GRID_N) * (endHist - startT);
+      const l = stepAt(long, t);
+      const s = stepAt(short, t);
+      if (l != null && s != null) netPts.push({ t, v: s - l });
+    }
+  }
+  const viewMode = mode === "gap" && netPts.length === 0 ? "legs" : mode;
+
   // APR = net_8h_frac * 1095 → threshold in %/8h for the min-APR exit line.
   const thrPct = Number.isFinite(minAprPct) && minAprPct > 0 ? minAprPct / 1095 : 0;
   const holdH =
@@ -155,10 +191,14 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
       ? Math.min(opp.expected_hold_hours, 168)
       : null;
   const curNet = opp.net_rate_8h_pct;
-  const projVals = holdH != null && Number.isFinite(curNet) ? [curNet, thrPct] : [];
-  const allFund = [...fundVals, thrPct, ...projVals];
-  let fMin = Math.min(...allFund);
-  let fMax = Math.max(...allFund);
+  const projVals = viewMode === "gap" && holdH != null && Number.isFinite(curNet) ? [curNet, thrPct] : [];
+  const fundVals =
+    viewMode === "gap"
+      ? netPts.map((p) => p.v)
+      : [...long.map((p) => p.v), ...short.map((p) => p.v)];
+  const allFund = [...fundVals, ...(viewMode === "gap" ? [thrPct] : []), ...projVals];
+  let fMin = allFund.length ? Math.min(...allFund) : 0;
+  let fMax = allFund.length ? Math.max(...allFund) : 1e-4;
   if (!(fMax > fMin)) {
     fMax = fMin + 1e-6;
   }
@@ -166,13 +206,7 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
   fMin -= fPad;
   fMax += fPad;
 
-  const nowT = Date.now();
-  const startT = Math.min(long[0]?.t ?? nowT, short[0]?.t ?? nowT);
-  const endHist = Math.max(
-    long.length ? long[long.length - 1].t : startT,
-    short.length ? short[short.length - 1].t : startT,
-  );
-  const projEndT = holdH != null ? nowT + holdH * 3_600_000 : null;
+  const projEndT = viewMode === "gap" && holdH != null ? nowT + holdH * 3_600_000 : null;
   const endT = Math.max(endHist, nowT, projEndT ?? 0);
   const xSpan = Math.max(endT - startT, 1);
   const xPos = (t: number) => PADL + ((t - startT) / xSpan) * (W - PADL - PADR);
@@ -196,14 +230,20 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
   const yPrice = (v: number) => PADT + (1 - (v - pMin) / (pMax - pMin)) * (H - PADT - PADB);
   const line = (pts: { t: number; v: number }[], y: (v: number) => number) =>
     pts.map((pt) => `${xPos(pt.t).toFixed(1)},${y(pt.v).toFixed(1)}`).join(" ");
+  // Step line (post): the standing rate holds flat until the next print.
+  const stepLine = (pts: { t: number; v: number }[], y: (v: number) => number) =>
+    pts
+      .flatMap((pt, i) =>
+        i === 0
+          ? [`${xPos(pt.t).toFixed(1)},${y(pt.v).toFixed(1)}`]
+          : [
+              `${xPos(pt.t).toFixed(1)},${y(pts[i - 1].v).toFixed(1)}`,
+              `${xPos(pt.t).toFixed(1)},${y(pt.v).toFixed(1)}`,
+            ],
+      )
+      .join(" ");
 
-  // Net gap on shared timestamps (both legs minute-bucketed): thin dashed.
-  const shortByT = new Map(short.map((pt) => [pt.t, pt.v]));
-  const netPts = long.flatMap((pt) => {
-    const s = shortByT.get(pt.t);
-    return s == null ? [] : [{ t: pt.t, v: s - pt.v }];
-  });
-  const showProjection = holdH != null && projEndT != null && Number.isFinite(curNet);
+  const showProjection = viewMode === "gap" && holdH != null && projEndT != null && Number.isFinite(curNet);
   const fmtT = (t: number) =>
     new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const mid = trend?.current_mid_usd;
@@ -218,12 +258,77 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
   const nowX = xPos(nowT);
   const lastLong = long.length ? long[long.length - 1] : null;
   const lastShort = short.length ? short[short.length - 1] : null;
-  const endLabelsOverlap =
-    lastLong != null && lastShort != null && Math.abs(yFund(lastLong.v) - yFund(lastShort.v)) < 14;
+  const lastNet = netPts.length ? netPts[netPts.length - 1] : null;
   const fmtEndPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
 
   return (
     <div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-1.5 text-[11px] font-sans text-slate-500">
+        {viewMode === "gap" ? (
+          <span className="inline-flex items-center gap-1 text-slate-600">
+            <span className="inline-block w-3 h-0.5 bg-slate-500" /> Net gap
+            {lastNet != null && (
+              <span className="font-semibold tabular-nums text-slate-700">{fmtEndPct(lastNet.v)}</span>
+            )}
+          </span>
+        ) : (
+          <>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-teal-600" /> Long ·
+              <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={12} /> {opp.long_venue}
+              {lastLong != null && (
+                <span className="font-semibold tabular-nums text-teal-700">{fmtEndPct(lastLong.v)}</span>
+              )}
+            </span>
+            <span className="inline-flex items-center gap-1">
+              <span className="inline-block w-3 h-0.5 bg-orange-600" /> Short ·
+              <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={12} /> {opp.short_venue}
+              {lastShort != null && (
+                <span className="font-semibold tabular-nums text-orange-700">{fmtEndPct(lastShort.v)}</span>
+              )}
+            </span>
+          </>
+        )}
+        {hasPrice && (
+          <span className="inline-flex items-center gap-1 text-blue-700">
+            — {opp.symbol} mid
+            {mid != null && Number.isFinite(mid) && (
+              <span className="font-semibold tabular-nums">
+                ${mid.toLocaleString(undefined, { maximumFractionDigits: 2 })}
+              </span>
+            )}
+          </span>
+        )}
+        {viewMode === "gap" && thrPct > 0 && (
+          <span className="inline-flex items-center gap-1 text-rose-600">
+            - - min APR <span className="font-semibold tabular-nums">{(thrPct * 1095).toFixed(1)}%</span>
+          </span>
+        )}
+        {showProjection && (
+          <span className="inline-flex items-center gap-1 text-green-700">
+            - - model exit → +{holdH != null ? holdH.toFixed(1) : "?"}h
+          </span>
+        )}
+        <span className="ml-auto inline-flex rounded-md border border-surface-border overflow-hidden">
+          {(
+            [
+              ["gap", "Net gap"],
+              ["legs", "Per-leg"],
+            ] as const
+          ).map(([m, label]) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={`px-2 py-0.5 text-[10px] font-semibold ${
+                viewMode === m ? "bg-slate-700 text-white" : "bg-surface-raised text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </span>
+      </div>
       <svg
         viewBox={`0 0 ${W} ${H}`}
         className="w-full rounded-lg border border-surface-border bg-surface-raised"
@@ -254,22 +359,17 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
             {fmtUsdAxis(v)}
           </text>
         ))}
-        {thrPct > 0 && (
-          <g>
-            <line
-              x1={PADL}
-              y1={yFund(thrPct)}
-              x2={W - PADR}
-              y2={yFund(thrPct)}
-              stroke="#f43f5e"
-              strokeWidth="1"
-              strokeDasharray="3 3"
-              opacity="0.7"
-            />
-            <text x={W - PADR - 4} y={yFund(thrPct) - 3} fontSize="9" fill="#f43f5e" fontFamily="Inter, sans-serif" textAnchor="end">
-              min APR
-            </text>
-          </g>
+        {viewMode === "gap" && thrPct > 0 && (
+          <line
+            x1={PADL}
+            y1={yFund(thrPct)}
+            x2={W - PADR}
+            y2={yFund(thrPct)}
+            stroke="#f43f5e"
+            strokeWidth="1"
+            strokeDasharray="3 3"
+            opacity="0.7"
+          />
         )}
         {hasPrice && (
           <polyline
@@ -282,18 +382,31 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
             opacity="0.45"
           />
         )}
-        {netPts.length > 1 && (
-          <polyline
-            points={line(netPts, yFund)}
-            fill="none"
-            stroke="#64748b"
-            strokeWidth="1.5"
-            strokeDasharray="5 3"
-            strokeLinejoin="round"
-          />
+        {viewMode === "gap" ? (
+          <>
+            {netPts.length > 1 && (
+              <polyline
+                points={line(netPts, yFund)}
+                fill="none"
+                stroke="#475569"
+                strokeWidth="2"
+                strokeLinejoin="round"
+              />
+            )}
+            {lastNet != null && <circle cx={xPos(lastNet.t)} cy={yFund(lastNet.v)} r="2.5" fill="#475569" />}
+          </>
+        ) : (
+          <>
+            {long.length > 0 && (
+              <polyline points={stepLine(long, yFund)} fill="none" stroke="#0d9488" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            )}
+            {short.length > 0 && (
+              <polyline points={stepLine(short, yFund)} fill="none" stroke="#ea580c" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+            )}
+            {lastLong != null && <circle cx={xPos(lastLong.t)} cy={yFund(lastLong.v)} r="2.5" fill="#0d9488" />}
+            {lastShort != null && <circle cx={xPos(lastShort.t)} cy={yFund(lastShort.v)} r="2.5" fill="#ea580c" />}
+          </>
         )}
-        <polyline points={line(long, yFund)} fill="none" stroke="#0d9488" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-        <polyline points={line(short, yFund)} fill="none" stroke="#ea580c" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
         {showProjection && (
           <g>
             <line x1={nowX} y1={PADT} x2={nowX} y2={H - PADB} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
@@ -310,38 +423,6 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
             <circle cx={nowX} cy={yFund(curNet)} r="3" fill="#16a34a" />
           </g>
         )}
-        {lastLong != null && (
-          <g>
-            <circle cx={xPos(lastLong.t)} cy={yFund(lastLong.v)} r="2.5" fill="#0d9488" />
-            <text
-              x={xPos(lastLong.t) - 6}
-              y={yFund(lastLong.v) - 6}
-              fontSize="9.5"
-              fontWeight="600"
-              fill="#0f766e"
-              fontFamily="Inter, sans-serif"
-              textAnchor="end"
-            >
-              {fmtEndPct(lastLong.v)}
-            </text>
-          </g>
-        )}
-        {lastShort != null && (
-          <g>
-            <circle cx={xPos(lastShort.t)} cy={yFund(lastShort.v)} r="2.5" fill="#ea580c" />
-            <text
-              x={xPos(lastShort.t) - 6}
-              y={endLabelsOverlap ? yFund(lastShort.v) + 13 : yFund(lastShort.v) - 6}
-              fontSize="9.5"
-              fontWeight="600"
-              fill="#c2410c"
-              fontFamily="Inter, sans-serif"
-              textAnchor="end"
-            >
-              {fmtEndPct(lastShort.v)}
-            </text>
-          </g>
-        )}
         {[0.25, 0.5, 0.75].map((f) => {
           const t = startT + f * xSpan;
           const x = xPos(t);
@@ -354,19 +435,6 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
             </g>
           );
         })}
-        {netPts.length > 1 && (
-          <text
-            x={xPos(netPts[netPts.length - 1].t) - 6}
-            y={yFund(netPts[netPts.length - 1].v) + 12}
-            fontSize="9.5"
-            fontWeight="600"
-            fill="#64748b"
-            fontFamily="Inter, sans-serif"
-            textAnchor="end"
-          >
-            gap {fmtEndPct(netPts[netPts.length - 1].v)}
-          </text>
-        )}
         <text x={PADL} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
           {fmtT(startT)}
         </text>
@@ -374,28 +442,6 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
           now{holdH != null ? ` → +${holdH.toFixed(1)}h` : ""}
         </text>
       </svg>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] font-sans text-slate-500">
-        <span className="inline-flex items-center gap-1">
-          <span className="inline-block w-3 h-0.5 bg-teal-600" /> Long ·
-          <VenueLogo venueId={opp.long_venue} name={opp.long_venue} size={12} /> {opp.long_venue}
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <span className="inline-block w-3 h-0.5 bg-orange-600" /> Short ·
-          <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={12} /> {opp.short_venue}
-        </span>
-        {netPts.length > 1 && (
-          <span className="inline-flex items-center gap-1">
-            <span className="inline-block w-3 border-t border-dashed border-slate-500" /> Net gap
-          </span>
-        )}
-        {hasPrice && <span className="inline-flex items-center gap-1 text-blue-700">— {opp.symbol} mid</span>}
-        {showProjection && (
-          <span className="inline-flex items-center gap-1 text-green-700">- - expected to min-APR exit</span>
-        )}
-        {mid != null && Number.isFinite(mid) && (
-          <span className="tabular-nums">ref ${mid.toLocaleString(undefined, { maximumFractionDigits: 2 })}</span>
-        )}
-      </div>
     </div>
   );
 };
@@ -752,7 +798,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
           <DetailSection
             title="Funding trend"
             gridClassName="block"
-            tip={`Solid lines: per-venue funding prints (%/8h, left axis). Blue: ${opp.symbol} mid (right axis). Dashed gray: net gap (short − long) on shared timestamps. Dashed green: model-expected path from the current net print decaying to the min-APR exit over the modelled hold. Dotted red: min-APR exit threshold.`}
+            tip={`Net gap view: the carry rate you earn (short print − long print, %/8h, left axis), resampled on a uniform grid — each venue's last print is carried forward as the standing rate until superseded, so missing samples are never zero-filled. Per-leg view: each venue's prints as step lines. Blue: ${opp.symbol} mid (right axis). Green dashed: model-expected path from the current net print decaying to the min-APR exit over the modelled hold. Red dotted: min-APR exit threshold.`}
           >
             <FundingTrendGraph opp={opp} minAprPct={minAprPct} />
           </DetailSection>
