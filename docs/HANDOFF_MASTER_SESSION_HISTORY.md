@@ -2284,3 +2284,27 @@ clippy+fmt clean, app restarted on the new binary.
 ### Pickup notes
 
 - Always build release with `--features custom-protocol`; a bare `cargo build --release` binary has a working backend but a dead UI.
+
+## Hyperliquid WS root cause found and fixed (3a4a952) — NOT fingerprinting
+
+**Diagnosis (final, reproduced):** the WS lane subscribed `l2Book` for *canonical* bases. `canonical_base` uppercases, so `kPEPE` became `KPEPE` — Hyperliquid RSTs the entire WS conn on the first unlisted-coin sub. Random HashMap ordering made the kill land at a random burst index (#9–51), which disguised it as network-level blocking. Proven by a standalone probe running the identical stack + 234-sub pattern surviving 102s while the app died ~1s in; then an explicit invalid-coin sub reproducing the RST on demand.
+
+**Earlier red herrings eliminated:** TLS fingerprint (bare Rust probe, same stack, passes), per-IP conn limit (24 held conns + WS upgrade fine), per-edge-IP (all 4 anycast IPs serve WS), sub burst pacing (identical 50ms-paced burst fine), REST+WS coexistence (hammered REST while WS lived).
+
+**Fixes shipped:**
+- `feed.rs`: `hyperliquid_coin_map`/`vanta_topic_map` subscribe `venue_symbol` verbatim -> canonical base for ingest. Regression tests pin `kPEPE`->`KPEPE` behavior.
+- `feed.rs`: stage-tagged lane errors (`venue_bases:`/`ws_connect:`/`sub_burst[i] coin:`) + peer-addr log.
+- `feed.rs`: vanta keepalive -> Orderly app-level `{"event":"ping"}` every 20s (protocol Ping doesn't count; server was closing at ~2min).
+- `monitor.rs`: per-venue in-flight REST book-fetch cap of 4 (`MAX_INFLIGHT_BOOK_FETCHES`) — HL edge is HTTP/1.1-only (no ALPN), so concurrent requests each hold a real TCP conn; bursts were holding ~30.
+- `feed.rs`/`ws.rs`: `vanta_subscribe_topic` for native-topic subs.
+
+**Verified live:** HL WS handshake -> 234 subs -> stable stream (first ever). Vanta flaps disabled<->connected as `account_id` availability follows vault cred sync — honest gating, self-heals.
+
+**Residual notes:**
+- "risk overview: hyperliquid read failed" + vanta `rate_limiter` #1 warnings are intermittent REST failures — worth watching whether conn cap reduced them.
+- "external equity delta on popdex" warns every ~5s — separate accounting-vs-venue mismatch signal, not a crash.
+- If vanta creds keep flapping, check which sync path clears `account_id` (settings-derived creds vs vault creds disagree).
+
+## Radar signal-detail modal: sections + tooltips (05c5433)
+
+- `OpportunityRadar.tsx`: flat 16-field grid -> **Spread state / Outcome evidence / Sizing & PnL** sections via `DetailSection`; complex metrics get `?` (existing `InfoTooltip`) with explanations; capacity ladder unchanged.
