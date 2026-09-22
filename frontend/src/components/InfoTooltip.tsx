@@ -81,7 +81,7 @@ export const InfoTooltip: React.FC<InfoTooltipProps> = ({
         setIsOpen((prev) => !prev);
       }}
     >
-      <HelpCircle className={`w-3.5 h-3.5 transition-colors cursor-help shrink-0 ${iconClassName}`} />
+      <HelpCircle className={`w-[0.85em] h-[0.85em] transition-colors cursor-help shrink-0 ${iconClassName}`} />
       {isOpen &&
         createPortal(
           <span

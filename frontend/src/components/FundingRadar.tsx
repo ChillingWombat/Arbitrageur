@@ -679,13 +679,22 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 tip="Marginal entry-cost gradient summed over both legs at trade size — how fast slippage grows per extra $1k (informational only)."
               />
               <DetailField
-                label="Opportunity capacity"
+                label="Optimal Opportunity Capacity"
                 value={
-                  opp.optimal_size_usd != null && opp.optimal_size_usd > 0
-                    ? `$${opp.optimal_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                  opp.optimal_capacity_usd != null && opp.optimal_capacity_usd > 0
+                    ? `$${opp.optimal_capacity_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
                     : "—"
                 }
-                tip="Depth-supported size from both legs' live orderbooks."
+                tip="Profit-maximizing size: the depth where the marginal unit's net turns non-positive — beyond it every added dollar shrinks total profit. Walked through both legs' live orderbooks; absent when book depth is unavailable."
+              />
+              <DetailField
+                label="Maximum Opportunity Capacity"
+                value={
+                  opp.max_capacity_usd != null && opp.max_capacity_usd > 0
+                    ? `$${opp.max_capacity_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                    : "—"
+                }
+                tip="Largest still-profitable size: the depth where the whole position's cumulative net crosses zero. Sizing beyond it loses money overall even if earlier units earned. Absent when book depth is unavailable."
               />
             </DetailSection>
 
@@ -787,10 +796,12 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
             {(opp.depth_curve?.length ?? 0) >= 2 ? (
               <CapacityChart
                 points={opp.depth_curve ?? []}
-                optimalSizeUsd={opp.optimal_size_usd}
+                optimalSizeUsd={opp.optimal_capacity_usd}
               />
             ) : (
-              <span className="text-slate-400 text-xs">no depth data</span>
+              <span className="text-slate-400 text-xs">
+                no live book depth — one or both legs' orderbooks were absent or stale at scan time
+              </span>
             )}
           </DetailSection>
 
