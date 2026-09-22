@@ -1205,7 +1205,8 @@ const OpportunityRadarInner: React.FC = () => {
     Number.isFinite(n) ? String(parseFloat(n.toFixed(2))) : "";
   const [minExpBps, setMinExpBps] = useState(() => to2dpStr(defaultRadarBotConfig().minExpectedProfitBps)); // default mirrors the bot entry hurdle (bot minExpectedProfitBps)
   const minExpTouched = useRef(false);
-  const [minPWin, setMinPWin] = useState("95"); // default mirrors the monitor ready floor (minWinProbability 0.95)
+  const [minPWin, setMinPWin] = useState(() => to2dpStr(defaultRadarBotConfig().minPWin * 100)); // default mirrors the bot entry hurdle (bot minPWin, shown as %)
+  const minPWinTouched = useRef(false);
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
 
@@ -1276,11 +1277,14 @@ const OpportunityRadarInner: React.FC = () => {
     api.getRadarBotConfig().then(setBotCfg).catch(() => {});
   }, []);
 
-  // Keep the table Min Exp display filter aligned with the bot's live
-  // minExpectedProfitBps until the user overrides it locally.
+  // Keep the table Min Exp / Min Win display filters aligned with the
+  // bot's live entry hurdles until the user overrides them locally.
   useEffect(() => {
     if (!minExpTouched.current && botCfg && Number.isFinite(botCfg.minExpectedProfitBps)) {
       setMinExpBps(to2dpStr(botCfg.minExpectedProfitBps));
+    }
+    if (!minPWinTouched.current && botCfg && Number.isFinite(botCfg.minPWin)) {
+      setMinPWin(to2dpStr(botCfg.minPWin * 100));
     }
   }, [botCfg]);
 
@@ -1431,13 +1435,6 @@ const OpportunityRadarInner: React.FC = () => {
           </span>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
-            title="Qualification window mode — edit via Configurator"
-          >
-            <span className="text-slate-400">Qualification</span>
-            <span className="font-bold text-slate-900">{cfg?.qualificationMode ?? "—"}</span>
-          </div>
-          <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Engine floor on directional trade win probability — the executable gate also requires the Wilson lower bound to clear a confidence floor. Edit via Configurator."
           >
             <span className="text-slate-400">Min Win</span>
@@ -1445,6 +1442,16 @@ const OpportunityRadarInner: React.FC = () => {
               {cfg ? `${(cfg.minWinProbability * 100).toFixed(0)}` : "—"}
             </span>
             <span className="text-slate-400">%</span>
+          </div>
+          <div
+            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
+            title="Bot entry hurdle — minimum probability-weighted expected profit (bps of notional) an opportunity must clear before the bot enters. Edit via Configurator → bot section."
+          >
+            <span className="text-slate-400">Min Exp</span>
+            <span className="font-bold text-slate-900">
+              {botCfg ? to2dpStr(botCfg.minExpectedProfitBps) : "—"}
+            </span>
+            <span className="text-slate-400">bps</span>
           </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
@@ -1707,7 +1714,10 @@ const OpportunityRadarInner: React.FC = () => {
             <span className="text-slate-400 font-medium">Min Win</span>
             <input
               value={minPWin}
-              onChange={(e) => setMinPWin(e.target.value)}
+              onChange={(e) => {
+                minPWinTouched.current = true;
+                setMinPWin(e.target.value);
+              }}
               placeholder="0"
               className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
             />
