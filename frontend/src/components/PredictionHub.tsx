@@ -36,7 +36,7 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
           if (e.target === e.currentTarget) onClose();
         }}
       >
-        <div className="bg-surface border border-surface-border rounded-2xl w-[600px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+        <div className="bg-surface border border-surface-border rounded-2xl w-[720px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm font-bold font-sans text-slate-900 truncate">{opp.market_title}</span>
@@ -85,10 +85,11 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
               />
             </DetailSection>
 
-            <div className="space-y-2">
-              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
-                Capacity curve
-              </div>
+            <DetailSection
+              title="Capacity curve"
+              gridClassName="block"
+              tip="Profit vs position size walked through the YES/NO orderbooks. Empty until the prediction scan resolves real book depth."
+            >
               {(opp.depth_curve?.length ?? 0) >= 2 ? (
                 <CapacityChart points={opp.depth_curve ?? []} />
               ) : (
@@ -96,7 +97,7 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
                   no depth data — prediction venue books are not wired yet
                 </span>
               )}
-            </div>
+            </DetailSection>
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">

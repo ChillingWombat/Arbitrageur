@@ -47,7 +47,6 @@ import { TickerLogMonitor } from "./TickerLogMonitor";
 import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
-import { InfoTooltip } from "./InfoTooltip";
 import { DetailField, DetailSection } from "./DetailBits";
 import { SignalTrendGadget } from "./SignalTrendGadget";
 import { TickerConfigModal } from "./TickerConfigModal";
@@ -265,7 +264,7 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
           if (e.target === e.currentTarget) onClose();
         }}
       >
-        <div className="bg-surface border border-surface-border rounded-2xl w-[640px] max-w-[94vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
+        <div className="bg-surface border border-surface-border rounded-2xl w-[800px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <VenueLogo venueId={(opp.buy_venue_id ?? opp.buy_venue ?? "").toLowerCase()} name={opp.buy_venue} size={16} />
@@ -382,7 +381,10 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
               />
             </DetailSection>
 
-            <DetailSection title="Capacity">
+            <DetailSection
+              title="Capacity"
+              tip="Profit vs position size walked through both leg orderbooks. Expected = win-probability-weighted; Net = raw capture. Cumulative = total at that size; Marginal = per-unit rate at that depth. X runs to the depth where marginal profit turns non-positive."
+            >
               <DetailField
                 label="Expected capacity"
                 value={fmtUsd(opp.expected_capacity_usd)}
@@ -398,26 +400,18 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
                 value={fmtUsd(opp.breakeven_size_usd)}
                 tip="Largest fillable size whose marginal level still clears the win-probability floor with positive expected net."
               />
-            </DetailSection>
-
-            <div className="space-y-2">
-              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
-                Capacity curve
-                <InfoTooltip
-                  text="Profit vs position size walked through both leg orderbooks. Expected = win-probability-weighted; Net = raw capture. Cumulative = total at that size; Marginal = per-unit rate at that depth. X runs to the depth where marginal profit turns non-positive."
-                  position="top"
-                />
+              <div className="col-span-full pt-1">
+                {(opp.depth_curve?.length ?? 0) >= 2 ? (
+                  <CapacityChart
+                    points={opp.depth_curve ?? []}
+                    optimalSizeUsd={opp.optimal_size_usd}
+                    breakevenSizeUsd={opp.breakeven_size_usd}
+                  />
+                ) : (
+                  <span className="text-slate-400 text-xs">no depth data</span>
+                )}
               </div>
-              {(opp.depth_curve?.length ?? 0) >= 2 ? (
-                <CapacityChart
-                  points={opp.depth_curve ?? []}
-                  optimalSizeUsd={opp.optimal_size_usd}
-                  breakevenSizeUsd={opp.breakeven_size_usd}
-                />
-              ) : (
-                <span className="text-slate-400 text-xs">no depth data</span>
-              )}
-            </div>
+            </DetailSection>
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
