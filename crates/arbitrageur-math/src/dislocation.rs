@@ -100,16 +100,26 @@ fn baseline_mid(
 /// Data-cleaning rules (these are what keep the chart honest):
 /// - **Median per bucket.** A venue's bucket value is the median of its
 ///   in-bucket mids, so a single bad tick inside the bucket cannot move it.
-/// - **Bounded carry-forward.** A venue with no in-bucket sample keeps its
-///   last mid while it is younger than `stale_ms` — its standing quote, not
-///   a fabricated one. Beyond the bound it becomes `None` (a real gap), never
-///   a zero. This also keeps the baseline's venue set stable instead of
-///   churning with per-venue update cadence (the old source of line bounce).
+/// - **Cadence-aware bounded carry-forward.** A venue with no in-bucket sample
+///   keeps its last mid while it is younger than its own staleness bound —
+///   its standing quote, not a fabricated one. The bound tracks the venue's
+///   observed sampling cadence (`2.5 x` median inter-sample gap, clamped to
+///   `[stale_ms, 5min]`) so a slow fair-share REST lane (~60-180s polls) is
+///   not churned out of the baseline between its own polls while a fast WS
+///   lane still expires quickly. Beyond the bound the venue becomes `None`
+///   (a real gap), never a zero.
+/// - **Carries never cross a dead window.** When the axis itself has a hole
+///   longer than `stale_ms` — zero samples from ANY venue, i.e. an engine
+///   restart or total feed outage — every pre-hole anchor is invalidated;
+///   a venue re-enters only on a fresh post-hole sample. Without this a
+///   long-cadence lane's pre-restart quote would carry across the shutdown
+///   and print a phantom deviation against post-restart mids.
 /// - **Comparison requires >= 2 venues.** A bucket where only one venue is
 ///   present is skipped entirely: a lone venue's deviation is trivially 0
 ///   and renders as a fake drop-to-zero touch.
 /// - `stale_ms` = `max(4 * bucket_ms, 30s)` — the 30s floor matches the
-///   pair-alignment window the rest of the system already treats as "in sync".
+///   pair-alignment window the rest of the system already treats as "in sync",
+///   and doubles as the dead-window detector threshold.
 pub fn compute_deviation_series(
     samples: &[MidSample],
     weights: &HashMap<String, f64>,
@@ -144,13 +154,43 @@ pub fn compute_deviation_series(
         .map(|v| per_venue.get(v).expect("venue key"))
         .collect();
 
+    // Per-venue staleness bound: 2.5x the lane's median inter-sample gap,
+    // clamped to [stale_ms, 5min]. The median ignores a restart-sized hole
+    // (one huge delta among many poll-interval deltas), and the cap turns a
+    // truly dead feed into a gap instead of an everlasting stale quote.
+    const MAX_CARRY_MS: i64 = 300_000;
+    let stale_bounds: Vec<i64> = venue_obs
+        .iter()
+        .map(|obs| {
+            let mut deltas: Vec<f64> = obs.windows(2).map(|w| (w[1].0 - w[0].0) as f64).collect();
+            let cadence_ms = if deltas.is_empty() {
+                0.0
+            } else {
+                median(&mut deltas)
+            };
+            ((cadence_ms * 2.5) as i64).clamp(stale_ms, MAX_CARRY_MS)
+        })
+        .collect();
+
     // For each axis bucket: consume each venue's in-bucket observations via
     // an ascending pointer (obs between axis keys cannot exist — their own
     // buckets would be on the axis), take the median, else carry the venue's
-    // last mid while it is within `stale_ms` of the bucket end.
+    // last mid while it is within its staleness bound of the bucket end AND
+    // anchored after the last axis-wide hole. `carry_floor` is the first
+    // bucket boundary following such a hole; a hole is any axis gap longer
+    // than `stale_ms`, which by construction no fast lane can survive — it
+    // marks an engine restart or total feed outage.
     let mut rows: Vec<(i64, HashMap<usize, f64>)> = Vec::with_capacity(axis.len());
     let mut pos = vec![0usize; venues.len()];
+    let mut carry_floor = i64::MIN;
+    let mut prev_bucket: Option<i64> = None;
     for &b in &axis {
+        if let Some(pb) = prev_bucket {
+            if b - pb > stale_ms {
+                carry_floor = pb.saturating_add(bucket_ms);
+            }
+        }
+        prev_bucket = Some(b);
         let b_end = b.saturating_add(bucket_ms);
         let mut mids: HashMap<usize, f64> = HashMap::new();
         for (j, obs) in venue_obs.iter().enumerate() {
@@ -163,7 +203,7 @@ pub fn compute_deviation_series(
                 Some(median(&mut in_bucket))
             } else if pos[j] > 0 {
                 let (ts, m) = obs[pos[j] - 1];
-                (b_end - ts <= stale_ms).then_some(m)
+                (ts >= carry_floor && b_end - ts <= stale_bounds[j]).then_some(m)
             } else {
                 None
             };
@@ -313,17 +353,18 @@ mod tests {
 
     #[test]
     fn gaps_beyond_staleness_stay_gaps() {
-        // bucket_ms=1000 -> stale bound 30s. b's last mid at t=60_000 is
-        // 40s stale at bucket 100_000 -> honest gap, bucket dropped (lone a).
-        // b at t=70_000 is 10s fresh at bucket 80_000 -> carried in.
-        let samples = vec![
-            s(0, "a", 100.0),
-            s(0, "b", 101.0),
-            s(60_000, "b", 101.5),
-            s(70_000, "b", 101.5),
-            s(80_000, "a", 100.5),
-            s(100_000, "a", 100.5),
-        ];
+        // bucket_ms=1000 -> stale floor 30s. Both lanes sample every 10s
+        // (cadence bound = floor 30s), then b dies at 70s: its t=70_000 mid
+        // is 31s stale at bucket 100_000 -> honest gap, bucket dropped
+        // (lone a). The same 70_000 mid is 11s fresh at bucket 80_000 and
+        // 21s at 90_000 -> carried in.
+        let mut samples = Vec::new();
+        for t in (0..=100_000).step_by(10_000) {
+            samples.push(s(t, "a", 100.5));
+        }
+        for t in (0..=70_000).step_by(10_000) {
+            samples.push(s(t, "b", 101.5));
+        }
         let series = compute_deviation_series(
             &samples,
             &HashMap::new(),
@@ -331,10 +372,136 @@ mod tests {
             1000,
             100,
         );
-        // Buckets 60_000 and 100_000 have a alone -> skipped; 70_000 has b
-        // alone -> skipped; 0 and 80_000 have both.
-        assert_eq!(series.ts_ms, vec![0, 80_000]);
-        assert!(series.dev_bps[1][1].is_some(), "b@70s carries into 80s");
+        assert!(
+            !series.ts_ms.contains(&100_000),
+            "b dead past its bound -> lone-a bucket is skipped"
+        );
+        assert_eq!(series.ts_ms.last().copied(), Some(90_000));
+        let i80 = series.ts_ms.iter().position(|&t| t == 80_000).unwrap();
+        assert!(series.dev_bps[i80][1].is_some(), "b@70s carries into 80s");
+    }
+
+    #[test]
+    fn slow_lane_carries_through_own_cadence() {
+        // A REST lane polling every ~60s must not fall out of the baseline
+        // between its polls: its carry bound tracks its cadence (~150s),
+        // while the global floor stays 30s. Pre-fix this dropped b at the
+        // 100s bucket (41s stale > 30s flat bound) and re-baselined everyone.
+        let mut samples = Vec::new();
+        for t in (0..=120_000).step_by(10_000) {
+            samples.push(s(t, "a", 100.0));
+        }
+        for t in [0i64, 60_000, 120_000] {
+            samples.push(s(t, "b", 101.0));
+        }
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            500,
+        );
+        let idx_b = series
+            .venues
+            .iter()
+            .position(|v| v == "b")
+            .expect("b venue");
+        let i = series
+            .ts_ms
+            .iter()
+            .position(|&t| t == 100_000)
+            .expect("100s bucket");
+        assert!(
+            series.dev_bps[i][idx_b].is_some(),
+            "b's standing quote must carry its own ~60s cadence"
+        );
+    }
+
+    #[test]
+    fn carry_never_crosses_dead_window() {
+        // Restart shape: fast lanes a+c at 10s, slow lane b at ~90s cadence
+        // (bound ~225s). A 150s all-silent hole (> 30s floor) invalidates
+        // every pre-hole anchor — b's 90s quote must NOT bridge into the
+        // post-hole buckets even though 181s is inside its 225s bound.
+        // Without the reset, b prints a phantom deviation vs post-restart
+        // mids — the distortion this fix removes.
+        let mut samples = Vec::new();
+        for t in (0..=120_000).step_by(10_000) {
+            samples.push(s(t, "a", 100.0));
+            samples.push(s(t, "c", 100.5));
+        }
+        samples.push(s(0, "b", 101.0));
+        samples.push(s(90_000, "b", 101.0));
+        for t in [270_000i64, 280_000] {
+            samples.push(s(t, "a", 100.0));
+            samples.push(s(t, "c", 100.5));
+        }
+        samples.push(s(300_000, "b", 101.2));
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            500,
+        );
+        let idx_b = series
+            .venues
+            .iter()
+            .position(|v| v == "b")
+            .expect("b venue");
+        let post = series
+            .ts_ms
+            .iter()
+            .position(|&t| t == 270_000)
+            .expect("first post-hole bucket");
+        assert_eq!(
+            series.dev_bps[post][idx_b], None,
+            "pre-hole anchor must not carry across the dead window"
+        );
+        // b re-enters only on its fresh post-hole sample.
+        let resumed = series
+            .ts_ms
+            .iter()
+            .position(|&t| t == 300_000)
+            .expect("b resumes");
+        assert!(series.dev_bps[resumed][idx_b].is_some());
+        // No emitted row may contain a b value between hole start and resume
+        // (the 120k bucket itself legitimately carries b@90k — the hole
+        // begins after it).
+        for (i, &t) in series.ts_ms.iter().enumerate() {
+            if t > 120_000 && t < 300_000 {
+                assert_eq!(series.dev_bps[i][idx_b], None, "b carried at {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn post_hole_rows_use_fresh_only() {
+        // After a dead window, rows emit as soon as >=2 venues have FRESH
+        // in-bucket samples — pre-hole carried mids never re-enter the
+        // baseline composition.
+        let mut samples = Vec::new();
+        for t in (0..=60_000).step_by(10_000) {
+            samples.push(s(t, "a", 100.0));
+            samples.push(s(t, "b", 101.0));
+        }
+        // 60s..160s: total silence (100s hole > 30s floor).
+        samples.push(s(160_000, "a", 102.0));
+        samples.push(s(170_000, "b", 102.5));
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            1000,
+            500,
+        );
+        // Bucket 160k has a alone (b's anchor is pre-hole) -> skipped;
+        // 170k has both fresh.
+        assert_eq!(series.ts_ms.last().copied(), Some(170_000));
+        assert!(
+            !series.ts_ms.contains(&160_000),
+            "lone-post-hole-venue bucket stays skipped"
+        );
     }
 
     #[test]
