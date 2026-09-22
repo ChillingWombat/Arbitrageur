@@ -494,10 +494,10 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
         ? (size * opp.entry_spread_bps) / 10000
         : 0;
     const net = expectedCarryUsd(opp);
-    // P(net >= model estimate): the target is this opportunity's own
+    // P(net >= projected): the target is this opportunity's own
     // projected net at scan time — never hand-entered. Empirical CDF over
     // the backtest deciles (linear interpolation, ≈ with 11 points); the
-    // probability-weighted mean itself is the "Backtest expected" field.
+    // probability-weighted mean itself is the "Historical Avg Net" field.
     const probTarget = useMemo(() => {
       const t = net;
       const raw = opp.backtest_deciles_usd;
@@ -657,7 +657,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               <DetailField
                 label="Round-trip fees"
                 value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)${spreadCost > 0 ? ` + spread $${spreadCost.toFixed(2)}` : ""}`}
-                tip="Entry friction: taker fees plus measured entry-spread cross (both deducted in Model Estimate)."
+                tip="Entry friction: taker fees plus measured entry-spread cross (both deducted in Projected Net)."
               />
               <DetailField
                 label="Entry spread"
@@ -708,11 +708,11 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 }
               />
               <DetailField
-                label="Model Estimate"
+                label="Projected Net"
                 value={
                   net != null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"
                 }
-                tip="Scenario point estimate along the expected (trend) gap path with linear decay to the min-APR exit, net of round-trip fees and entry spread. A model number, not a measurement — see Backtest rows for measured history."
+                tip="Projected net profit for THIS trade: scenario point estimate along the expected (trend) gap path with linear decay to the min-APR exit, net of round-trip fees and entry spread. A model projection, not a measurement — see the Historical rows for measured history."
               />
               <DetailField
                 label="Backtest win"
@@ -745,19 +745,19 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 } Unlike the Breakeven (model) heuristic this is estimated from actual gap lifetimes.`}
               />
               <DetailField
-                label="Backtest expected"
+                label="Historical Avg Net"
                 value={
                   opp.backtest_expected_usd != null
                     ? `${opp.backtest_expected_usd >= 0 ? "+" : "-"}$${Math.abs(opp.backtest_expected_usd).toFixed(2)}${opp.backtest_expected_usd_se != null ? ` ±${opp.backtest_expected_usd_se.toFixed(2)}` : ""}${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
                     : "—"
                 }
-                tip="Measured mean net per trailing-history entry ± 1 standard error across trials. Unmeasurable below 20 scoreable entries."
+                tip="Average net profit across similar trailing-history entries ± 1 standard error. Measured outcome, not a projection — compare with Projected Net. Unmeasurable below 20 scoreable entries."
               />
               <div className="space-y-0.5">
                 <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
-                  P(≥ model estimate)
+                  P(≥ projected net)
                   <InfoTooltip
-                    text="Empirical probability that a trailing-history entry nets at least THIS opportunity's model estimate — the target is the projected net at scan time, not hand-entered. Interpolated over the 11 backtest net-deciles; unmeasurable below 20 scoreable entries. The probability-weighted mean is 'Backtest expected'."
+                    text="Empirical probability that a trailing-history entry nets at least THIS opportunity's projected net — the target is the projected net at scan time, not hand-entered. Interpolated over the 11 backtest net-deciles; unmeasurable below 20 scoreable entries. The probability-weighted mean is 'Historical Avg Net'."
                     position="top"
                   />
                 </div>
