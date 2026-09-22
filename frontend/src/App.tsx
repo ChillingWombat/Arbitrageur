@@ -385,8 +385,17 @@ export const App: React.FC = () => {
           []
         ),
         withTimeoutFallback(
+          // Scan only the resolved visible list. While the strategy's
+          // auto-block list is still loading (null), pass [] rather than
+          // the unfiltered universe — otherwise the first paint flashes
+          // 100+ pairs that the $5M-volume/$0.50-price gates strip a
+          // second later. An empty array scans nothing; never pass
+          // undefined here (the backend's "" path scans its own full
+          // venue universe, bypassing the frontend filter set).
           api.scanFundingOpportunities(
-            availableTickers.length > 0 ? availableTickers.map((t) => t.symbol) : undefined,
+            filterStrategyId !== null && autoBlockedTickers === null
+              ? []
+              : availableTickers.map((t) => t.symbol),
             fundingTradeSize
           ),
           []
@@ -460,7 +469,7 @@ export const App: React.FC = () => {
     } finally {
       setRefreshing(false);
     }
-  }, [selectedSymbol, fundingTradeSize, availableTickers]);
+  }, [selectedSymbol, fundingTradeSize, availableTickers, autoBlockedTickers, filterStrategyId]);
 
   useEffect(() => {
     refreshAllData();
