@@ -300,7 +300,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
       {/* Column subheader */}
       <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[11px] font-sans text-slate-500 font-semibold uppercase tracking-wider">
         <span>Position</span>
-        <span className="text-right">Σ Long · Σ Short</span>
+        <span className="text-right">Σ Long · Σ Short · PnL</span>
       </div>
 
       {/* Position cards */}
@@ -351,12 +351,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300 shadow-2xs"
                 }`}
               >
-                {/* Left: strategy chip + symbol + PnL below */}
+                {/* Left: symbol on top; strategy chip below the name */}
                 <div className="flex flex-col min-w-0 pr-2">
                   <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
-                      {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
-                    </span>
                     <span className="font-bold text-xs font-sans tracking-tight text-slate-900 truncate">
                       {pos.symbol}
                     </span>
@@ -369,22 +366,14 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                       </span>
                     )}
                   </div>
-                  <span
-                    className="text-xs font-mono text-slate-500 tabular-nums mt-0.5"
-                    title={
-                      pos.unrealizedPnlUsd !== null
-                        ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
-                        : pos.expectedNetUsd !== null
-                        ? `Mark-to-market unavailable; entry-time expected net ${formatUsd(pos.expectedNetUsd)}`
-                        : "No mark-to-market data"
-                    }
-                  >
-                    PnL {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
+                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap mt-0.5 self-start">
+                    {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
                   </span>
                 </div>
 
                 {/* Right: system-triggered exposure summed across venues —
-                    total long (positive) and total short (negative). */}
+                    total long (positive) and total short (negative), with
+                    mark-to-market PnL under the position sizes. */}
                 <div className="flex flex-col items-end space-y-0.5 shrink-0 font-mono">
                   <div className="flex items-baseline space-x-1.5 text-xs">
                     <span className="text-slate-400 font-sans text-[10px] font-semibold">Long</span>
@@ -398,6 +387,18 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                       {formatQty(shortSum)}
                     </span>
                   </div>
+                  <span
+                    className="text-xs font-mono text-slate-500 tabular-nums"
+                    title={
+                      pos.unrealizedPnlUsd !== null
+                        ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
+                        : pos.expectedNetUsd !== null
+                        ? `Mark-to-market unavailable; entry-time expected net ${formatUsd(pos.expectedNetUsd)}`
+                        : "No mark-to-market data"
+                    }
+                  >
+                    PnL {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
+                  </span>
                 </div>
               </div>
             );
