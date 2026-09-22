@@ -853,13 +853,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   return (
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
       {/* Top Section Navigation Bar */}
-      <div className="border-b border-surface-border bg-slate-50/80 shrink-0 flex items-stretch justify-between select-none">
-        {/* Navigation Tabs with dividers: Execution, Exchanges, Network & VPS, About */}
-        <div className="flex flex-1 items-stretch divide-x divide-surface-border border-r border-surface-border">
+      <div className="border-b border-surface-border bg-slate-50/80 shrink-0 flex items-stretch select-none">
+        {/* Navigation Tabs with dividers — 5 equal columns spanning the full width */}
+        <div className="grid grid-cols-5 flex-1 items-stretch divide-x divide-surface-border">
           <button
             type="button"
             onClick={() => setActiveTab("execution")}
-            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "execution"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -879,7 +879,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("safety")}
-            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "safety"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -899,7 +899,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("exchanges")}
-            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "exchanges"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -920,7 +920,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("network")}
-            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "network"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -940,7 +940,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           <button
             type="button"
             onClick={() => setActiveTab("about")}
-            className={`relative h-10 flex flex-1 items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
               activeTab === "about"
                 ? "text-accent font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
@@ -959,11 +959,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         </div>
 
         {/* Vault lock/unlock is hoisted into the modal header via portal
-            (headerActionsEl); the tab row keeps only tab-scoped actions. */}
-        <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6">
-          {activeTab === "network" &&
-            !isVaultLocked &&
-            configuredVenues.includes("remote_hsm") && (
+            (headerActionsEl); tab-scoped actions render only when present
+            so the tabs keep the full row width otherwise. */}
+        {activeTab === "network" &&
+          !isVaultLocked &&
+          configuredVenues.includes("remote_hsm") && (
+            <div className="flex items-center space-x-2 py-2 pr-5 sm:pr-6 border-l border-surface-border">
               <button
                 type="button"
                 onClick={handleRemoveHsmToken}
@@ -973,8 +974,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <Trash2 className="w-3.5 h-3.5 text-loss" />
                 <span>Remove HSM Token</span>
               </button>
-            )}
-        </div>
+            </div>
+          )}
       </div>
 
       {/* Main Content Form Area */}
