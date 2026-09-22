@@ -528,8 +528,9 @@ the whole flow, so no sidecar was needed.
   `0xe7da2794b1d8af76532ed95f38bfdf1136abfd8ea3a240189971988a83101b7f`
   (chain id 2). Network is resolved from the adapter base URL (`testnet`
   substring → testnet package + testnet fullnode).
-- **Entry functions** (`<package>::dex_accounts_entry::…`, sender = owner
-  wallet, no agent keys):
+- **Entry functions** (`<package>::dex_accounts_entry::…`, sender = the
+  vault-held ed25519 signer — normally the API wallet delegated
+  `TradePerpsAllMarkets` on the owner's subaccount):
   `place_order_to_subaccount(subaccount, market, price:u64, size:u64,
   isBuy:bool, tif:u8, reduceOnly:bool, Option<String> clientId,
   Option<u64>×5 stops/TP/SL, Option<address> builder, Option<u64> fee)`,
@@ -545,6 +546,17 @@ the whole flow, so no sidecar was needed.
   the `GlobalSubaccountManager` deriver with seed
   `owner_bytes ++ BCS("primary_subaccount")` (mirrors
   `getPrimarySubaccountAddr`). Pure-Rust unit tests pin the mainnet vectors.
+- **Owner resolution** (2026-09-23): the configured Login Wallet Address may
+  be an Aptos account, an EVM/Sui address, or a Solana pubkey — Decibel's
+  SIWE login derives an Aptos *abstract account* per chain
+  (`0x1::{ethereum,sui,solana}_derivable_account::authenticate`, domain
+  `app.decibel.trade` / `testnet-app.decibel.trade`, EVM identity is the
+  EIP-55 checksummed string). `resolve_owner` probes `subaccounts?owner=`
+  for each shape-derived candidate (EVM-derived → zero-padded for 40-hex;
+  native → Sui-derived for 64-hex; Solana-derived otherwise) and caches the
+  first owner with a non-empty listing. Reads and writes share the
+  resolution; the derived address is invisible in Decibel's UI, so it must
+  be computed — the subaccount object address itself is never valid input.
 - **Scaling:** price/size chain units come from the LIVE `/api/v1/markets`
   row (`px_decimals`/`sz_decimals`); unresolvable markets fail closed.
   Prices side-safe tick-aligned (buy floor / sell ceil), sizes floored to the
