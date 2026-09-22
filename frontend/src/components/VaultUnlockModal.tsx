@@ -92,7 +92,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
         }
       }}
     >
-      <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-5 animate-in zoom-in-95 duration-150">
+      <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-lg w-full shadow-2xl space-y-5 animate-in zoom-in-95 duration-150">
         <div className="flex items-start justify-between">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
