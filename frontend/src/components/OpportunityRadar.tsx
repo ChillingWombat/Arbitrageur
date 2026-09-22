@@ -40,6 +40,7 @@ import { computeBotCycleStats } from "../services/botCycleStats";
 import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
+import { ExecuteButton } from "./ExecuteButton";
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers — missing data always renders as "—", never 0    */
@@ -971,14 +972,13 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               value={sizeValue ?? ""}
               onChange={(e) => onSizeChange(rowKey, Number(e.target.value))}
             />
-            <button
-              className="btn-primary px-2.5 py-2.5 text-xs rounded-lg shadow-2xs cursor-pointer"
-              disabled={!r.executable || executing}
+            <ExecuteButton
+              className="px-2.5 py-2.5 text-xs rounded-lg shadow-2xs cursor-pointer"
+              disabled={!r.executable}
+              executing={executing}
               title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
               onClick={() => onExecute(r)}
-            >
-              {executing ? "…" : "Exec"}
-            </button>
+            />
           </div>
         </div>
       </div>
@@ -1114,14 +1114,13 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 value={sizeValue ?? ""}
                 onChange={(e) => onSizeChange(k, Number(e.target.value))}
               />
-              <button
-                className="btn-primary px-2 py-2 text-xs rounded-lg shadow-2xs cursor-pointer"
-                disabled={!r.executable || executing}
+              <ExecuteButton
+                className="px-2 py-2 text-xs rounded-lg shadow-2xs cursor-pointer"
+                disabled={!r.executable}
+                executing={executing}
                 title={r.executable ? "execute paper trade" : r.blockReason ?? "blocked"}
                 onClick={() => onExecute(r)}
-              >
-                {executing ? "…" : "Exec"}
-              </button>
+              />
             </div>
           </td>
         </tr>

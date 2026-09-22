@@ -17,6 +17,7 @@ import type {
 } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
+import { ExecuteButton } from "./ExecuteButton";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface TriangularArbitrageProps {
@@ -182,14 +183,12 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
-            <button
-              type="button"
+            <ExecuteButton
+              executing={executing}
               onClick={() => onExecute(opp)}
-              disabled={executing}
-              className="btn-primary !text-xs !py-2.5 !px-2.5 font-sans cursor-pointer"
-            >
-              <span>{executing ? "Filling..." : "Fill Cycle"}</span>
-            </button>
+              title="execute triangular cycle"
+              className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
+            />
           </div>
         </div>
       </div>

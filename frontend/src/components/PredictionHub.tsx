@@ -3,6 +3,7 @@ import { Filter, SlidersHorizontal } from "lucide-react";
 import type { PredictionOpportunityDto } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
+import { ExecuteButton } from "./ExecuteButton";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 import { describeCommandError } from "../services/api";
 
@@ -244,19 +245,13 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   </span>
                 </div>
 
-                {lastExecuted === opp.id ? (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-profit-dim text-profit text-xs font-semibold">
-                    Executed
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => handleExecute(opp)}
-                    disabled={executingId === opp.id}
-                    className="btn-primary !px-2 !py-2 !text-xs font-mono transition flex items-center"
-                  >
-                    <span>{executingId === opp.id ? "Routing..." : "Execute Parity"}</span>
-                  </button>
-                )}
+                <ExecuteButton
+                  executed={lastExecuted === opp.id}
+                  executing={executingId === opp.id}
+                  onClick={() => handleExecute(opp)}
+                  title="execute parity trade"
+                  className="!px-2 !py-2 !text-xs"
+                />
               </div>
             </div>
           ))}
