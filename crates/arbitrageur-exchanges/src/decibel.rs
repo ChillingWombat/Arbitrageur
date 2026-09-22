@@ -110,9 +110,8 @@ fn create_object_address(creator: &[u8; 32], seed: &[u8]) -> [u8; 32] {
     out
 }
 
-/// BCS encoding of a Move `String`: ULEB128 length prefix + UTF-8 bytes.
-fn bcs_move_string_bytes(s: &str) -> Vec<u8> {
-    let b = s.as_bytes();
+/// BCS encoding of a `vector<u8>`/`String`: ULEB128 length prefix + bytes.
+fn bcs_len_prefixed(b: &[u8]) -> Vec<u8> {
     let mut n = b.len() as u64;
     let mut out = Vec::with_capacity(b.len() + 5);
     loop {
@@ -126,6 +125,11 @@ fn bcs_move_string_bytes(s: &str) -> Vec<u8> {
     }
     out.extend_from_slice(b);
     out
+}
+
+/// BCS encoding of a Move `String`: ULEB128 length prefix + UTF-8 bytes.
+fn bcs_move_string_bytes(s: &str) -> Vec<u8> {
+    bcs_len_prefixed(s.as_bytes())
 }
 
 /// Object address of the shared perp engine (`GlobalPerpEngine` named object
@@ -165,6 +169,137 @@ fn primary_subaccount_addr(owner_hex: &str, package_hex: &str) -> anyhow::Result
         "0x{}",
         hex::encode(create_object_address(&deriver, &seed))
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Derivable-account (SIWA) login translation — mirrors the official SDK's
+// `src/derivable-account.ts`. A wallet that connects at app.decibel.trade is
+// often not an Aptos account at all: EVM/Sui/Solana sign-ins derive an Aptos
+// account via `0x1::{ethereum,solana,sui}_derivable_account::authenticate`,
+// and that derived address — not the connected wallet — owns the subaccount.
+// ---------------------------------------------------------------------------
+
+/// SIWA domain the Decibel app signs login messages under; the derived
+/// account is domain-scoped, so testnet derives under its own hostname.
+const SIWA_DOMAIN_MAINNET: &str = "app.decibel.trade";
+const SIWA_DOMAIN_TESTNET: &str = "testnet-app.decibel.trade";
+
+/// Aptos `DerivableAbstractedAccount::computeAccountAddress`:
+/// `sha3_256(bcs(FunctionInfo 0x1::{module}::{name}) || bcs_bytes(
+/// AbstractPublicKey{ bcs_str(identity), bcs_str(domain) }) || 0x05)`.
+fn derivable_account_address(
+    module_name: &str,
+    fn_name: &str,
+    identity: &str,
+    domain: &str,
+) -> String {
+    let mut function_info = vec![0u8; 31];
+    function_info.push(1); // module address 0x1, BCS-serialized address = 32 bytes
+    function_info.extend_from_slice(&bcs_move_string_bytes(module_name));
+    function_info.extend_from_slice(&bcs_move_string_bytes(fn_name));
+    let mut public_key = bcs_move_string_bytes(identity);
+    public_key.extend_from_slice(&bcs_move_string_bytes(domain));
+    let mut h = Sha3_256::new();
+    h.update(&function_info);
+    h.update(bcs_len_prefixed(&public_key));
+    h.update([0x05u8]);
+    format!("0x{}", hex::encode(h.finalize()))
+}
+
+/// Aptos account an EVM wallet's Decibel login derives to. The identity is
+/// the EIP-55 checksummed address string — input case is normalized.
+fn evm_login_account(evm_addr: &str, domain: &str) -> anyhow::Result<String> {
+    let a = alloy::primitives::Address::from_str(evm_addr.trim())
+        .map_err(|e| anyhow::anyhow!("'{evm_addr}' is not an EVM address: {e}"))?;
+    Ok(derivable_account_address(
+        "ethereum_derivable_account",
+        "authenticate",
+        &a.to_checksum(None),
+        domain,
+    ))
+}
+
+/// Aptos account a Sui wallet's Decibel login derives to. The identity is the
+/// `0x`-prefixed lowercase 64-hex address exactly as Sui wallets report it.
+fn sui_login_account(sui_addr: &str, domain: &str) -> anyhow::Result<String> {
+    let h = sui_addr.trim().to_lowercase();
+    let h = h.strip_prefix("0x").unwrap_or(&h).to_string();
+    if h.len() != 64 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("'{sui_addr}' is not a Sui address");
+    }
+    Ok(derivable_account_address(
+        "sui_derivable_account",
+        "authenticate",
+        &format!("0x{h}"),
+        domain,
+    ))
+}
+
+/// Aptos account a Solana wallet's Decibel login derives to. The identity is
+/// the base58 pubkey string as-is.
+fn solana_login_account(sol_addr: &str, domain: &str) -> anyhow::Result<String> {
+    let s = sol_addr.trim();
+    let raw = bs58::decode(s)
+        .into_vec()
+        .map_err(|_| anyhow::anyhow!("'{sol_addr}' is not a base58 Solana address"))?;
+    if raw.len() != 32 {
+        anyhow::bail!("'{sol_addr}' is not a Solana pubkey");
+    }
+    Ok(derivable_account_address(
+        "solana_derivable_account",
+        "authenticate",
+        s,
+        domain,
+    ))
+}
+
+/// Candidate on-chain owner addresses for a configured login wallet string,
+/// most likely first. A 40-hex EVM address maps to its derivable Aptos
+/// account; a 64-hex value is tried as a native Aptos account then as a Sui
+/// login; non-hex input is tried as a Solana pubkey. Probing the live
+/// subaccounts listing picks whichever candidate actually owns one.
+fn owner_candidates(configured: &str, testnet: bool) -> Vec<String> {
+    let t = configured.trim();
+    let domain = if testnet {
+        SIWA_DOMAIN_TESTNET
+    } else {
+        SIWA_DOMAIN_MAINNET
+    };
+    let hex_part = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
+    let is_hex = !hex_part.is_empty() && hex_part.chars().all(|c| c.is_ascii_hexdigit());
+    let mut out: Vec<String> = Vec::new();
+    if is_hex && hex_part.len() == 40 {
+        if let Ok(d) = evm_login_account(t, domain) {
+            out.push(d);
+        }
+    }
+    if is_hex && hex_part.len() <= 64 {
+        if let Ok(c) = canonical_address(t) {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+        if hex_part.len() == 64 {
+            if let Ok(d) = sui_login_account(t, domain) {
+                if !out.contains(&d) {
+                    out.push(d);
+                }
+            }
+        }
+    }
+    if !(is_hex && hex_part.len() == 64) {
+        // Anything that isn't already a full-width Aptos address may still be
+        // a base58 Solana pubkey (short all-digit strings are valid base58).
+        if let Ok(d) = solana_login_account(t, domain) {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        }
+    }
+    out
 }
 
 /// Map an Arbitrageur venue symbol to a Decibel perp market name.
@@ -247,6 +382,10 @@ pub struct DecibelAdapter {
     node_api_key: RwLock<Option<Zeroizing<String>>>,
     wallet_address: RwLock<Option<String>>,
     private_key: RwLock<Option<Zeroizing<String>>>,
+    /// On-chain owner resolved from the configured login wallet via the live
+    /// subaccounts listing (cross-chain wallets derive an Aptos account).
+    /// Cached for the credential lifetime; cleared on `update_credentials`.
+    resolved_owner: RwLock<Option<String>>,
     rate_limiter: AccountRequestCoordinator,
     /// Serialises sequence-number fetch → sign → submit so concurrent orders
     /// never reuse an account sequence number.
@@ -284,6 +423,7 @@ impl DecibelAdapter {
             node_api_key: RwLock::new(api_secret.map(Zeroizing::new)),
             wallet_address: RwLock::new(None),
             private_key: RwLock::new(None::<Zeroizing<String>>),
+            resolved_owner: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("decibel", 100, 2000, 500, 10000),
             order_lock: tokio::sync::Mutex::new(()),
         }
@@ -300,6 +440,7 @@ impl DecibelAdapter {
         *self.node_api_key.write() = node_api_key.map(Zeroizing::new);
         *self.wallet_address.write() = wallet_address;
         *self.private_key.write() = private_key.map(Zeroizing::new);
+        *self.resolved_owner.write() = None;
     }
 
     fn is_testnet(&self) -> bool {
@@ -344,15 +485,60 @@ impl DecibelAdapter {
             .map_err(|e| anyhow::anyhow!("Decibel private key is not a valid Ed25519 key: {e}"))
     }
 
-    /// Owner wallet address: explicit setting wins, otherwise derived from
-    /// the signing key (the key's own account).
-    fn owner_address(&self, account: &Ed25519Account) -> anyhow::Result<String> {
+    /// The configured login wallet exactly as entered (any chain's address
+    /// format), falling back to the signing key's own Aptos account when
+    /// unset. Shape translation + on-chain verification happen in
+    /// `resolve_owner` — this value is NOT canonicalized so an EVM wallet
+    /// keeps its 40-hex shape.
+    fn configured_owner(&self, account: &Ed25519Account) -> String {
         if let Some(w) = self.wallet_address.read().clone() {
             if !w.trim().is_empty() {
-                return canonical_address(w.trim());
+                return w.trim().to_string();
             }
         }
-        Ok(account.address().to_string())
+        account.address().to_string()
+    }
+
+    /// Resolve a configured login wallet string to the on-chain owner that
+    /// actually holds a subaccount. The wallet a user connects at
+    /// app.decibel.trade may be EVM/Sui/Solana — those derive an Aptos
+    /// account under the deployment's SIWA domain — so every candidate shape
+    /// is probed against `subaccounts?owner=` and the first non-empty wins.
+    /// The result is cached for the credential lifetime.
+    async fn resolve_owner(&self, configured: &str) -> anyhow::Result<String> {
+        let configured = configured.trim();
+        if let Some(o) = self.resolved_owner.read().clone() {
+            return Ok(o);
+        }
+        let candidates = owner_candidates(configured, self.is_testnet());
+        if candidates.is_empty() {
+            anyhow::bail!(
+                "Decibel login wallet '{configured}' is not a recognizable Aptos, EVM, Sui, or Solana address"
+            );
+        }
+        let mut last_err = String::new();
+        for cand in &candidates {
+            match self.subaccount_rows(cand).await {
+                Ok(rows) if !rows.is_empty() => {
+                    *self.resolved_owner.write() = Some(cand.clone());
+                    return Ok(cand.clone());
+                }
+                Ok(_) => {}
+                Err(e) => last_err = e.to_string(),
+            }
+        }
+        if !last_err.is_empty() {
+            anyhow::bail!("Decibel subaccounts lookup failed for '{configured}': {last_err}");
+        }
+        let canonical = canonical_address(configured).unwrap_or_default();
+        let detail = candidates
+            .iter()
+            .find(|c| **c != canonical)
+            .map(|c| format!(" (its Aptos login account is {c})"))
+            .unwrap_or_default();
+        anyhow::bail!(
+            "Decibel login wallet {configured}{detail} has no trading account yet — create one at https://app.decibel.trade, then re-read"
+        );
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -471,28 +657,31 @@ impl DecibelAdapter {
         )
     }
 
-    /// Resolve the owner's primary subaccount object address via the
-    /// official `GET {trading}/api/v1/subaccounts?owner=` listing (primary
-    /// first, else first active, else first row). Fails closed when the owner
-    /// has no subaccount — the fix is creating one in the Decibel app, not
-    /// guessing an address.
-    async fn primary_subaccount(&self, owner: &str) -> anyhow::Result<String> {
+    /// Raw `GET {trading}/api/v1/subaccounts?owner=` rows for an owner.
+    /// Checksum-cased wallets have been observed to miss; retry lowercase.
+    /// An owner with no subaccounts returns an empty vec (not an error).
+    async fn subaccount_rows(&self, owner: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let owner = owner.trim();
-        let mut rows: Vec<serde_json::Value> = Vec::new();
-        // Checksum-cased wallets have been observed to miss; retry lowercase.
         for candidate in [owner.to_string(), owner.to_lowercase()] {
             let val = self
                 .get_json(&format!("/api/v1/subaccounts?owner={candidate}"))
                 .await?;
-            rows = as_array(&val)
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Decibel subaccounts response has no list for owner {owner}")
-                })?
-                .clone();
+            let rows = as_array(&val).ok_or_else(|| {
+                anyhow::anyhow!("Decibel subaccounts response has no list for owner {owner}")
+            })?;
             if !rows.is_empty() {
-                break;
+                return Ok(rows.clone());
             }
         }
+        Ok(Vec::new())
+    }
+
+    /// Resolve the owner's primary subaccount object address via the official
+    /// subaccounts listing (primary first, else first active, else first
+    /// row). Fails closed when the owner has no subaccount — the fix is
+    /// creating one in the Decibel app, not guessing an address.
+    async fn primary_subaccount(&self, owner: &str) -> anyhow::Result<String> {
+        let rows = self.subaccount_rows(owner).await?;
         if rows.is_empty() {
             anyhow::bail!(
                 "Decibel owner {owner} has no subaccount yet — create one at https://app.decibel.trade, then re-read"
@@ -1114,12 +1303,25 @@ impl ExchangeAdapter for DecibelAdapter {
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
         let wallet = self.wallet_address.read().clone();
-        let Some(w) = wallet.filter(|s| !s.trim().is_empty()) else {
-            anyhow::bail!("Decibel account query requires an Aptos wallet address. Please set the Login Wallet Address in Settings > Exchange Accounts.");
+        let configured = match wallet.filter(|s| !s.trim().is_empty()) {
+            Some(w) => w.trim().to_string(),
+            // No login wallet configured: a native-Aptos login's API key can
+            // be the account key itself — fall back to the signer's address.
+            None if self
+                .private_key
+                .read()
+                .as_ref()
+                .is_some_and(|k| !k.trim().is_empty()) =>
+            {
+                self.wallet_key()?.address().to_string()
+            }
+            None => anyhow::bail!(
+                "Decibel account query requires a wallet address — set Login Wallet Address in Settings > Exchange Accounts to the Aptos account, or the EVM/Sui/Solana wallet you signed in with"
+            ),
         };
-        let owner = w.trim().to_string();
 
         // 1. Owner -> primary subaccount (official `/api/v1/subaccounts`).
+        let owner = self.resolve_owner(&configured).await?;
         let subaccount = self.primary_subaccount(&owner).await?;
 
         // 2. Balances via the official `/api/v1/account_overviews`.
@@ -1362,7 +1564,7 @@ impl ExchangeAdapter for DecibelAdapter {
         } else {
             canonical_address(row.market_addr.trim())?
         };
-        let owner = self.owner_address(&signer)?;
+        let owner = self.resolve_owner(&self.configured_owner(&signer)).await?;
         let subaccount = primary_subaccount_addr(&owner, package)?;
         let sub_addr = AccountAddress::from_str(&subaccount)
             .map_err(|e| anyhow::anyhow!("Decibel subaccount address invalid: {e}"))?;
@@ -1469,7 +1671,7 @@ impl ExchangeAdapter for DecibelAdapter {
             );
         }
         let signer = self.wallet_key()?;
-        let owner = self.owner_address(&signer)?;
+        let owner = self.resolve_owner(&self.configured_owner(&signer)).await?;
         let subaccount = primary_subaccount_addr(&owner, self.deployment_package())?;
         let url = format!("{}/transactions/by_hash/{hash}", self.fullnode_url());
         let resp = self.client.get(&url).send().await?;
@@ -1640,7 +1842,7 @@ impl ExchangeAdapter for DecibelAdapter {
         let engine = perp_engine_global_addr(package)?;
         let market_name = resolve_market_name(&req.symbol)?;
         let market_addr = market_addr_for(&engine, &market_name)?;
-        let owner = self.owner_address(&signer)?;
+        let owner = self.resolve_owner(&self.configured_owner(&signer)).await?;
         let subaccount = primary_subaccount_addr(&owner, package)?;
         let sub_addr = AccountAddress::from_str(&subaccount)
             .map_err(|e| anyhow::anyhow!("Decibel subaccount address invalid: {e}"))?;
@@ -1760,6 +1962,90 @@ mod tests {
         let m2 = market_addr_for(&engine, "BTC-PERP").unwrap();
         assert_eq!(m1, m2);
         assert_ne!(m1, market_addr_for(&engine, "ETH-PERP").unwrap());
+    }
+
+    #[test]
+    fn test_decibel_derivable_accounts() {
+        // Verified live: the app.decibel.trade SIWE login for this Arbitrum
+        // wallet owns primary subaccount 0x00fa32…1cf0 under this derived
+        // account (ObjectCore.owner + primary_subaccount() view agree).
+        assert_eq!(
+            evm_login_account(
+                "0x2b9B8dE0bd391F364e595010C4ce70073467b04D",
+                SIWA_DOMAIN_MAINNET
+            )
+            .unwrap(),
+            "0xd97b59b49cf58faf09ef2810dbea539a3ed6c949c6efe256dcd2d2f13d776da0"
+        );
+        // EIP-55 normalization: input case must not change the result.
+        assert_eq!(
+            evm_login_account(
+                "0x2b9b8de0bd391f364e595010c4ce70073467b04d",
+                SIWA_DOMAIN_MAINNET
+            )
+            .unwrap(),
+            "0xd97b59b49cf58faf09ef2810dbea539a3ed6c949c6efe256dcd2d2f13d776da0"
+        );
+        // Official SDK vector (derivable-account.test.ts): domain-scoped.
+        assert_eq!(
+            evm_login_account(
+                "0x55BcEcf60eED4e66CF6515C92B386A993140339f",
+                SIWA_DOMAIN_TESTNET
+            )
+            .unwrap(),
+            "0xbb42ddec781413ce1bb7334be5df2061f232ad821da96d41706ab7d0934127d8"
+        );
+        // Official SDK vector: a Sui login derives a different account.
+        assert_eq!(
+            sui_login_account(
+                "0x7cf81ab1c5752b8f430a2839a4b9034f8133c489cfbfe3f5f541d4d787f87915",
+                SIWA_DOMAIN_MAINNET
+            )
+            .unwrap(),
+            "0x686d2ddf7e7c531ce525856816cdc5e6783e3f5830a708f49126cd48413cb1ae"
+        );
+        // Solana pubkey → a 66-char Aptos address; non-base58 input fails.
+        let sol =
+            solana_login_account("11111111111111111111111111111111", SIWA_DOMAIN_MAINNET).unwrap();
+        assert!(sol.starts_with("0x") && sol.len() == 66);
+        assert!(solana_login_account(
+            "0x2b9B8dE0bd391F364e595010C4ce70073467b04D",
+            SIWA_DOMAIN_MAINNET
+        )
+        .is_err()); // '0' is not in the base58 alphabet
+    }
+
+    #[test]
+    fn test_decibel_owner_candidates() {
+        // 40-hex EVM wallet → derived Aptos account first, zero-padded
+        // reading as last-ditch fallback.
+        let c = owner_candidates("0x2b9B8dE0bd391F364e595010C4ce70073467b04D", false);
+        assert_eq!(
+            c[0],
+            "0xd97b59b49cf58faf09ef2810dbea539a3ed6c949c6efe256dcd2d2f13d776da0"
+        );
+        assert!(c.contains(
+            &"0x0000000000000000000000002b9b8de0bd391f364e595010c4ce70073467b04d".to_string()
+        ));
+        // 64-hex → native Aptos first, then the Sui-login derivation.
+        let c = owner_candidates(
+            "0x7cf81ab1c5752b8f430a2839a4b9034f8133c489cfbfe3f5f541d4d787f87915",
+            false,
+        );
+        assert_eq!(
+            c[0],
+            "0x7cf81ab1c5752b8f430a2839a4b9034f8133c489cfbfe3f5f541d4d787f87915"
+        );
+        assert_eq!(
+            c[1],
+            "0x686d2ddf7e7c531ce525856816cdc5e6783e3f5830a708f49126cd48413cb1ae"
+        );
+        // A real Solana pubkey (non-hex letters) → Solana-derived only.
+        let c = owner_candidates("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", false);
+        assert_eq!(c.len(), 1);
+        assert!(c[0].starts_with("0x") && c[0].len() == 66);
+        // Garbage → no candidates.
+        assert!(owner_candidates("not-an-address", false).is_empty());
     }
 
     #[test]
