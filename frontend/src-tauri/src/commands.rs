@@ -93,6 +93,9 @@ pub(crate) fn live_entry_notional_guard(
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SystemStatusDto {
     pub is_live_mode: bool,
+    /// Selected trading environment (`testnet` or `live`) — the
+    /// authoritative env label for the UI; `is_live_mode` derives from it.
+    pub environment: String,
     pub is_paused: bool,
     pub total_realized_pnl: f64,
     pub total_trades_count: usize,
@@ -1161,6 +1164,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
 
     Ok(SystemStatusDto {
         is_live_mode: is_live,
+        environment: state.env().as_str().to_string(),
         is_paused: *state.is_paused.read(),
         total_realized_pnl: total_pnl,
         total_trades_count: total_trades,
@@ -2133,11 +2137,37 @@ pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLo
     get_execution_logs_by_mode_impl(state, None)
 }
 
-pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool, String> {
-    if enabled {
+/// Shared environment transition used by the mode toggle and the settings
+/// save path — identical guards apply whichever surface initiates the
+/// switch. Returns Ok(true) when the resulting env is Live.
+fn transition_environment(
+    state: &AppEngineState,
+    target: crate::state::TradingEnvironment,
+) -> Result<bool, String> {
+    // Refuse an environment switch while any signal still needs
+    // reconciliation — its legs belong to the *current* env's adapters and
+    // would poll the wrong venue endpoints (or no adapter at all) after the
+    // flip, stranding real exposure as 'unresolved' until switched back.
+    if target != state.env() {
+        if let Ok(pending) = state.state_store.list_pending_order_legs() {
+            if !pending.is_empty() {
+                let ids: Vec<String> = pending
+                    .iter()
+                    .map(|(exec, _)| format!("{}:{}", exec.symbol, exec.status.as_str()))
+                    .collect();
+                return Err(format!(
+                    "Cannot switch trading environment while {} signal(s) await reconciliation ({}). Let them settle or resolve the exposure first.",
+                    pending.len(),
+                    ids.join(", ")
+                ));
+            }
+        }
+    }
+    if target == crate::state::TradingEnvironment::Live {
         let is_unlocked = state.vault.write().is_unlocked();
         if !is_unlocked {
             state.set_environment(crate::state::TradingEnvironment::Testnet);
+            state.market_data_hub.clear();
             return Err("Cannot enable Live Trading while the secure credential vault is locked. Unlock the vault first.".into());
         }
         state.sync_vault_credentials_to_adapters();
@@ -2152,27 +2182,40 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
         let ready_count = ready_venues.len();
         if ready_count < 2 {
             state.set_environment(crate::state::TradingEnvironment::Testnet);
+            state.market_data_hub.clear();
             return Err(format!(
                 "Live Trading requires at least two venues with authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
                 if ready_venues.is_empty() { "none".to_string() } else { ready_venues.join(", ") }
             ));
         }
-        state.set_environment(crate::state::TradingEnvironment::Live);
-        {
-            let mut s = state.settings.write();
-            s.trading_mode = "live".to_string();
-        }
-        let _ = state.state_store.kv_set("engine.trading_mode", "live");
-        Ok(true)
-    } else {
-        state.set_environment(crate::state::TradingEnvironment::Testnet);
-        {
-            let mut s = state.settings.write();
-            s.trading_mode = "testnet".to_string();
-        }
-        let _ = state.state_store.kv_set("engine.trading_mode", "testnet");
-        Ok(false)
     }
+    let changed = target != state.env();
+    state.set_environment(target);
+    {
+        let mut s = state.settings.write();
+        s.trading_mode = target.as_str().to_string();
+    }
+    let _ = state
+        .state_store
+        .kv_set("engine.trading_mode", target.as_str());
+    if changed {
+        // Books cached under the previous env must not survive the switch —
+        // mainnet prices are not executable on testnet venues and vice
+        // versa. Feeds re-populate from the newly admitted adapter set.
+        state.market_data_hub.clear();
+    }
+    Ok(target == crate::state::TradingEnvironment::Live)
+}
+
+pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool, String> {
+    transition_environment(
+        state,
+        if enabled {
+            crate::state::TradingEnvironment::Live
+        } else {
+            crate::state::TradingEnvironment::Testnet
+        },
+    )
 }
 
 pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bool, String> {
@@ -2201,31 +2244,15 @@ pub fn save_engine_settings_impl(
     }
     let target_env = crate::state::TradingEnvironment::from_mode(&normalized_mode);
 
-    if target_env == crate::state::TradingEnvironment::Live {
-        let is_unlocked = state.vault.write().is_unlocked();
-        if !is_unlocked {
-            return Err("Cannot switch to Live trading while the secure credential vault is locked. Unlock the vault first.".into());
-        }
-        state.sync_vault_credentials_to_adapters();
-        let ready_venues: Vec<String> = state
-            .venues_for_env(crate::state::TradingEnvironment::Live)
-            .into_iter()
-            .filter(|(_, _, adapter)| {
-                adapter.live_order_submission_implemented() && adapter.has_live_credentials()
-            })
-            .map(|(vid, _, _)| vid.to_string())
-            .collect();
-        let ready_count = ready_venues.len();
-        if ready_count < 2 {
-            return Err(format!(
-                "Cannot switch to Live trading: At least two venues must have authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
-                if ready_venues.is_empty() { "none".to_string() } else { ready_venues.join(", ") }
-            ));
-        }
+    // Same transition contract as the mode toggle: pending-signal guard,
+    // live credential/vault checks, hub invalidation on change. When the
+    // target equals the active env this is a no-op so routine settings
+    // saves with a locked vault are not blocked by the live check.
+    if target_env != state.env() {
+        transition_environment(state, target_env)?;
     }
     // Normalize legacy values before persisting.
     settings.trading_mode = target_env.as_str().to_string();
-    state.set_environment(target_env);
     settings.spread_samples_max_days = match settings.spread_samples_max_days {
         None => None,
         Some(0) => None,

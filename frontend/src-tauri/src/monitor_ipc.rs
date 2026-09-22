@@ -117,8 +117,9 @@ pub async fn reveal_all_tickers(state: State<'_, Arc<AppEngineState>>) -> Result
 
 /// Per-row Execute: re-validates the opportunity against the latest
 /// snapshot (must still be qualified and unblocked), converts the USD size
-/// to base quantity on the live book, then dispatches the existing guarded
-/// paper execution path.
+/// to base quantity on the live book, then dispatches the guarded
+/// execution path (env-aware adapters; live additionally gated by
+/// `live_entry_gate`).
 #[tauri::command]
 pub async fn execute_monitor_opportunity(
     symbol: String,

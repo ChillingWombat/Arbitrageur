@@ -303,6 +303,10 @@ impl ExchangeAdapter for LighterAdapter {
         "Lighter"
     }
 
+    fn rest_base_url(&self) -> Option<String> {
+        Some(self.base_url.clone())
+    }
+
     async fn ping(&self) -> anyhow::Result<()> {
         // Bypass the single-flight cache (get_json) and any CDN edge cache:
         // a unique query param forces the request to reach origin so the

@@ -1,5 +1,6 @@
 export interface SystemStatusDto {
   is_live_mode: boolean;
+  environment: string;
   is_paused?: boolean;
   total_realized_pnl: number;
   total_trades_count: number;

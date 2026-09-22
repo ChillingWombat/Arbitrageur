@@ -3,19 +3,22 @@
 ## Live mode is the product
 
 - **Every feature request means live mode first.** Real venues, real orders,
-  real money. Paper mode is secondary and its existence never counts as the
-  feature being "done."
-- Never ship a capability that works in paper but not live unless the user
-  explicitly scoped it that way. If a live path is unsafe or blocked, say so
-  and gate it — don't silently deliver paper-only.
-- Paper mode is slated to move to **venue testnets** (real order flow against
-  testnet endpoints). Keep the mode abstraction clean for this: `is_live_mode`
-  will eventually become a venue-environment selection, not a boolean. Every
-  exchange adapter already accepts `base_url: Option<String>` — preserve that
-  injection point; do not hardcode mainnet URLs into new code.
+  real money. Live mode is the primary product path.
+- Never ship a capability that works only in testnet while claiming live
+  support. If a live path is unsafe or blocked, say so and gate it — don't
+  silently deliver testnet-only.
+- The environment model is `TradingEnvironment::{Testnet, Live}`
+  (`state.env()`), persisted as `trading_mode = testnet|live` (legacy
+  `paper`→testnet, `real`→live). Every environment-sensitive read routes
+  through `get_venues()`/`get_adapter()` — both are env-scoped. Testnet
+  adapters (`tn_*`) use venue demo endpoints; Live adapters (`live_*`) use
+  mainnet. `rest_base_url()` exposes an adapter's configured endpoint —
+  feed lanes derive WS URLs from it so env never crosses.
 - Testnet availability per venue is uneven (Binance/Hyperliquid/Lighter/OKX
-  have public testnets; Robinhood crypto does not). Venue-specific gaps are
-  acceptable — silent simulation in place of testnet is not.
+  demo-mode/Vanta-Orderly/Decibel/PopDEX have public testnets; Robinhood,
+  Coinbase, Aster, the DexPerp long-tail, and EVM AMMs do not). Venue gaps
+  are acceptable — silent local simulation in place of testnet is not.
+  Simulated exchanges exist only under `#[cfg(test)]` (`test_sims`).
 
 ## Audit discipline
 
@@ -36,7 +39,8 @@
   `baseUrl` (Region / API Domain dropdown) overrides the adapter's host;
   stored on `ExchangeCredentials.base_url`, applied to public and signed
   calls alike. OKX demo keys additionally need `x-simulated-trading: 1` —
-  not implemented.
+  implemented via `OkxAdapter::for_testnet` (the `tn_okx` adapter); a demo
+  key only works on a demo-minted credential pair, never a mainnet key.
 
 ## Execution safety (standing)
 

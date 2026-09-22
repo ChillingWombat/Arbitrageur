@@ -12,6 +12,30 @@ pub const HYPERLIQUID_WS_URL: &str = "wss://api.hyperliquid.xyz/ws";
 
 /// Orderly EVM WS host backing the Vanta feed.
 pub const VANTA_WS_HOST: &str = "ws-evm.orderly.org";
+/// Orderly EVM testnet WS host (pairs with `testnet-api.orderly.org`).
+pub const VANTA_TESTNET_WS_HOST: &str = "testnet-ws-evm.orderly.org";
+
+/// Derive the Hyperliquid WS endpoint from the adapter's REST base URL
+/// (`https://api.hyperliquid-testnet.xyz` -> `wss://api.hyperliquid-testnet.xyz/ws`).
+/// Fails closed on a missing scheme or empty host — a mainnet fallback would
+/// silently cross environments.
+pub fn hyperliquid_ws_url(base_url: &str) -> anyhow::Result<String> {
+    let base = base_url.trim().trim_end_matches('/');
+    let (secure, rest) = match base
+        .strip_prefix("https://")
+        .map(|r| (true, r))
+        .or_else(|| base.strip_prefix("http://").map(|r| (false, r)))
+    {
+        Some(v) => v,
+        None => anyhow::bail!(
+            "Hyperliquid base_url '{base_url}' has no http(s) scheme; refusing to derive a WS URL"
+        ),
+    };
+    if rest.is_empty() {
+        anyhow::bail!("Hyperliquid base_url '{base_url}' has an empty host");
+    }
+    Ok(format!("{}://{rest}/ws", if secure { "wss" } else { "ws" }))
+}
 
 /// How often a Lighter WS lane must emit a client frame (spec: 2 min).
 pub const LIGHTER_KEEPALIVE_SECS: u64 = 110;
@@ -344,14 +368,21 @@ pub fn lighter_book_from_sides(
 /* Vanta (Orderly)                                                           */
 /* ------------------------------------------------------------------------ */
 
-/// `wss://ws-evm.orderly.org/ws/stream/{account_id}`. An empty account id
-/// means WS is skipped for Vanta (REST only) — never a fabricated id.
-pub fn vanta_ws_url(account_id: &str) -> anyhow::Result<String> {
+/// `wss://<ws-host>/ws/stream/{account_id}`. The WS host is derived from
+/// the adapter's REST base (`api.orderly.org` -> `ws-evm.orderly.org`,
+/// `testnet-api.orderly.org` -> `testnet-ws-evm.orderly.org`) so a testnet
+/// adapter never dials the mainnet stream. An empty account id means WS is
+/// skipped for Vanta (REST only) — never a fabricated id.
+pub fn vanta_ws_url(account_id: &str, rest_base_url: Option<&str>) -> anyhow::Result<String> {
     let id = account_id.trim();
     if id.is_empty() {
         anyhow::bail!("Vanta WS requires an account_id; none configured — WS skipped, REST only");
     }
-    Ok(format!("wss://{VANTA_WS_HOST}/ws/stream/{id}"))
+    let host = match rest_base_url {
+        Some(base) if base.contains("testnet") => VANTA_TESTNET_WS_HOST,
+        _ => VANTA_WS_HOST,
+    };
+    Ok(format!("wss://{host}/ws/stream/{id}"))
 }
 
 /// `{"id","topic":"PERP_<BASE>_USDC@orderbook","event":"subscribe"}`.
@@ -648,11 +679,37 @@ mod tests {
     #[test]
     fn vanta_ws_url_requires_account_id() {
         assert_eq!(
-            vanta_ws_url("abc123").unwrap(),
+            vanta_ws_url("abc123", None).unwrap(),
             "wss://ws-evm.orderly.org/ws/stream/abc123"
         );
-        assert!(vanta_ws_url("").is_err());
-        assert!(vanta_ws_url("   ").is_err());
+        assert!(vanta_ws_url("", None).is_err());
+        assert!(vanta_ws_url("   ", None).is_err());
+    }
+
+    #[test]
+    fn vanta_ws_url_follows_rest_env() {
+        assert_eq!(
+            vanta_ws_url("abc123", Some("https://testnet-api.orderly.org")).unwrap(),
+            "wss://testnet-ws-evm.orderly.org/ws/stream/abc123"
+        );
+        assert_eq!(
+            vanta_ws_url("abc123", Some("https://api.orderly.org")).unwrap(),
+            "wss://ws-evm.orderly.org/ws/stream/abc123"
+        );
+    }
+
+    #[test]
+    fn hyperliquid_ws_url_derives_from_rest_base() {
+        assert_eq!(
+            hyperliquid_ws_url("https://api.hyperliquid-testnet.xyz").unwrap(),
+            "wss://api.hyperliquid-testnet.xyz/ws"
+        );
+        assert_eq!(
+            hyperliquid_ws_url("https://api.hyperliquid.xyz").unwrap(),
+            "wss://api.hyperliquid.xyz/ws"
+        );
+        assert!(hyperliquid_ws_url("api.hyperliquid.xyz").is_err());
+        assert!(hyperliquid_ws_url("https://").is_err());
     }
 
     #[test]

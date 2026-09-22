@@ -24,6 +24,14 @@ pub trait ExchangeAdapter: Send + Sync {
         None
     }
 
+    /// The adapter's configured REST base URL — the authoritative endpoint
+    /// this instance talks to. Feed lanes derive WS URLs from it so a
+    /// testnet-scoped adapter never leaks mainnet books into the hub.
+    /// Default `None` for adapters without a single REST base.
+    fn rest_base_url(&self) -> Option<String> {
+        None
+    }
+
     /// List available markets and instrument metadata.
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>>;
 
