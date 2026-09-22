@@ -51,7 +51,36 @@ export type ExchangeId =
   | "polymarket"
   | "popdex"
   | "robinhood"
-  | "vanta";
+  | "vanta"
+  // Long-tail perp venues (shared DexPerpAdapter; account-enabled only —
+  // no engine-settings flags). Live-trading subset: aevo, derive, grvt,
+  // ondoperps, pacifica, standx — the rest are market-data only.
+  | "aevo"
+  | "alphax"
+  | "antarctic"
+  | "apex"
+  | "astros"
+  | "bulk"
+  | "derive"
+  | "dydx"
+  | "edgex"
+  | "evedex"
+  | "extended"
+  | "gatedex"
+  | "gmx"
+  | "grvt"
+  | "helix"
+  | "iotrader"
+  | "nado"
+  | "niza"
+  | "ondoperps"
+  | "ostium"
+  | "pacifica"
+  | "paradex"
+  | "qfex"
+  | "sodex"
+  | "standx"
+  | "vest";
 
 export interface ExchangeMetadata {
   id: ExchangeId;
@@ -61,22 +90,48 @@ export interface ExchangeMetadata {
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
+  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 3.0 },
+  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 2.0 },
   { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 },
   { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 },
+  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 },
+  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 },
   { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 },
+  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 3.0 },
+  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Market Data)", feeBps: 2.0 },
+  { id: "edgex", name: "edgeX", type: "Perp DEX (Market Data)", feeBps: 3.8 },
+  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "extended", name: "Extended", type: "Perp DEX (Market Data)", feeBps: 2.0 },
+  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", feeBps: 5.0 },
+  { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", feeBps: 5.0 },
+  { id: "helix", name: "Helix", type: "Perp DEX (Market Data)", feeBps: 0.01 },
   { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 },
   { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 },
   { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 },
+  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 },
   { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 },
   { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 },
+  { id: "nado", name: "Nado", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 3.0 },
   { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 },
+  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 2.5 },
+  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 },
+  { id: "paradex", name: "Paradex", type: "Perp DEX (Market Data)", feeBps: 2.0 },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 },
   { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 },
+  { id: "qfex", name: "QFEX", type: "Perp DEX (Market Data)", feeBps: 4.0 },
   { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 },
+  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 },
+  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 4.0 },
   { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 },
+  { id: "vest", name: "Vest", type: "Perp DEX (Market Data)", feeBps: 3.0 },
 ];
 
 interface EngineSettingsProps {

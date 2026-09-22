@@ -170,6 +170,66 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "API Key Name", placeholder: "organizations/{org}/apiKeys/{keyId}" },
     { key: "apiSecret", label: "Private Key (EC PEM)", secret: true, placeholder: "-----BEGIN EC PRIVATE KEY-----" },
   ],
+  /* ---------------- Long-tail perp venues (DexPerpAdapter) ---------------- */
+  // LIVE-TRADING VENUES — credentials below are what each adapter's
+  // has_live_credentials() requires; nothing else gates order paths.
+  // Aevo: REST key pair + EIP-712 order signer key.
+  aevo: [
+    { key: "apiKey", label: "API Key", secret: true },
+    { key: "apiSecret", label: "API Secret", secret: true },
+    { key: "privateKey", label: "Signing Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM key that signs EIP-712 orders; must match the API key's account." },
+    { key: "walletAddress", label: "Account Address", optional: true, placeholder: "0x..." },
+  ],
+  // Derive: session key auth — wallet address + EVM signer.
+  derive: [
+    { key: "walletAddress", label: "Wallet Address", placeholder: "0x..." },
+    { key: "privateKey", label: "Session/Signer Private Key", secret: true, placeholder: "0x...", evmSigner: true },
+    { key: "accountId", label: "Subaccount ID", optional: true, numeric: true, placeholder: "Optional Derive subaccount" },
+  ],
+  // GRVT: API key → gravity session cookie; EVM key signs EIP-712 orders.
+  grvt: [
+    { key: "apiKey", label: "API Key", secret: true },
+    { key: "privateKey", label: "Signing Private Key", secret: true, placeholder: "0x...", evmSigner: true },
+    { key: "accountId", label: "Sub-Account ID", optional: true, placeholder: "GRVT sub-account id" },
+  ],
+  // Ondo Perps: SIWE wallet login → JWT; wallet key signs orders.
+  ondoperps: [
+    { key: "walletAddress", label: "Wallet Address", placeholder: "0x..." },
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true },
+  ],
+  // Pacifica: Solana-native — base58 account + Ed25519 keypair (bs58).
+  pacifica: [
+    { key: "walletAddress", label: "Account Address (Solana)", placeholder: "base58 pubkey" },
+    { key: "privateKey", label: "Ed25519 Private Key", secret: true, placeholder: "base58 (64B keypair or 32B seed)", hint: "Solana-format base58 key — not an EVM 0x key." },
+  ],
+  // StandX: wallet sign-in → JWT + ephemeral Ed25519 request key.
+  standx: [
+    { key: "walletAddress", label: "Wallet Address", placeholder: "0x... or base58" },
+    { key: "privateKey", label: "Ed25519 Private Key", secret: true, placeholder: "base58 keypair/seed" },
+  ],
+  // MARKET-DATA-ONLY VENUES — no credentials needed; an enabled account
+  // admits the venue for markets/books/funding, and order paths stay
+  // fail-closed regardless of what is stored here.
+  alphax: [],
+  antarctic: [],
+  apex: [],
+  astros: [],
+  bulk: [],
+  dydx: [],
+  edgex: [],
+  evedex: [],
+  extended: [],
+  gatedex: [],
+  gmx: [],
+  helix: [],
+  iotrader: [],
+  nado: [],
+  niza: [],
+  ostium: [],
+  paradex: [],
+  qfex: [],
+  sodex: [],
+  vest: [],
 };
 
 export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
@@ -190,6 +250,33 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   okx: "OKX",
   aster: "Aster",
   coinbase: "Coinbase",
+  // Long-tail perp venues (DexPerpAdapter ids — must match the spec table).
+  aevo: "Aevo",
+  alphax: "AlphaX",
+  antarctic: "Antarctic",
+  apex: "ApeX Omni",
+  astros: "Astros",
+  bulk: "BULK",
+  derive: "Derive",
+  dydx: "dYdX Chain",
+  edgex: "edgeX",
+  evedex: "EVEDEX",
+  extended: "Extended",
+  gatedex: "Gate DEX",
+  gmx: "GMX V2",
+  grvt: "GRVT",
+  helix: "Helix",
+  iotrader: "IO Trader",
+  nado: "Nado",
+  niza: "Niza",
+  ondoperps: "Ondo Perps",
+  ostium: "Ostium",
+  pacifica: "Pacifica",
+  paradex: "Paradex",
+  qfex: "QFEX",
+  sodex: "SoDEX",
+  standx: "StandX",
+  vest: "Vest",
 };
 
 const venueDisplay = (v: string) => ACCOUNT_VENUE_DISPLAY[v] ?? v;

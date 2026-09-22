@@ -150,6 +150,14 @@ const LIVE_CAPABLE_VENUES = new Set([
   "okx",
   "coinbase",
   "kraken",
+  // DexPerpAdapter venues with implemented order paths — the backend
+  // still requires has_live_credentials() before any submission.
+  "aevo",
+  "derive",
+  "grvt",
+  "ondoperps",
+  "pacifica",
+  "standx",
 ]);
 const isLiveCapableRoute = (v1: string, v2: string): boolean =>
   LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());

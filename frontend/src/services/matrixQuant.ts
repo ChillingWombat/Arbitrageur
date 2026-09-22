@@ -213,6 +213,34 @@ export const globalSpreadTracker = new RollingSpreadTracker();
  */
 export function getVenueFeeBps(venueIdOrName: string): number {
   const v = venueIdOrName.toLowerCase();
+  // Long-tail perp venues — exact-id matches mirror the DexPerpAdapter
+  // spec table (docs/VENUE_COVERAGE.md).
+  if (v === "aevo") return 3.0;
+  if (v === "alphax") return 3.0;
+  if (v === "antarctic") return 3.0;
+  if (v === "apex") return 2.0;
+  if (v === "astros") return 3.0;
+  if (v === "bulk") return 3.0;
+  if (v === "derive") return 3.0;
+  if (v === "dydx") return 2.0;
+  if (v === "edgex") return 3.8;
+  if (v === "evedex") return 3.0;
+  if (v === "extended") return 2.0;
+  if (v === "gatedex") return 3.0;
+  if (v === "gmx") return 5.0;
+  if (v === "grvt") return 5.0;
+  if (v === "helix") return 0.01;
+  if (v === "iotrader") return 3.0;
+  if (v === "nado") return 3.0;
+  if (v === "niza") return 3.0;
+  if (v === "ondoperps") return 2.5;
+  if (v === "ostium") return 3.0;
+  if (v === "pacifica") return 2.0;
+  if (v === "paradex") return 2.0;
+  if (v === "qfex") return 4.0;
+  if (v === "sodex") return 3.0;
+  if (v === "standx") return 4.0;
+  if (v === "vest") return 3.0;
   if (v.includes("lighter") || v.includes("lgt")) return 1.5;
   if (v.includes("hyperliquid") || v.includes("hl")) return 2.0;
   if (v.includes("vanta") || v.includes("vnt")) return 3.0;
