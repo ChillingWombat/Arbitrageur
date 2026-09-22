@@ -30,6 +30,7 @@ use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side};
 use arbitrageur_execution::passive_unwind::execute_passive_reduce_live;
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::FromPrimitive;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,6 +49,12 @@ const MAX_CANCEL_ATTEMPTS: u32 = 3;
 /// Maximum flatten children auto-dispatched for one imbalanced signal —
 /// beyond this the residual is left for the operator.
 const MAX_RESIDUAL_ATTEMPTS: usize = 3;
+/// Minimum gap between residual dispatches — one attempt per poll pass
+/// would spam a child row every 5s through a persistent venue error.
+/// Never-submitted children are bounded by this throttle alone, not a
+/// hard cap: once venue readiness returns the residual must always be
+/// retryable.
+const RESIDUAL_RETRY_SECS: i64 = 30;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,8 +221,14 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             .or_insert_with(|| (exec.strategy_id.clone(), exec.legs.len(), age));
         let legs_out = outcomes.entry(exec.id.clone()).or_default();
 
-        let Some(order_id) = leg.venue_order_id.as_deref() else {
-            legs_out.push(LegPoll::Unknown);
+        let Some(order_id) = leg.venue_order_id.as_deref().filter(|s| !s.is_empty()) else {
+            // Order identity is persisted at submission. On post-submission
+            // signals (imbalanced/unresolved — the only states whose no-id
+            // legs the query returns) a missing id means the venue rejected
+            // the order outright: terminally empty, not merely unverifiable.
+            // Counting it as terminal-empty lets a filled sibling surface as
+            // Imbalanced so residual auto-flatten covers the naked leg.
+            legs_out.push(LegPoll::CancelledEmpty);
             continue;
         };
         // A leg already fully recorded needs no venue call.
@@ -430,17 +443,23 @@ fn resolve_flattened_parent(state: &AppEngineState, parent_id: &str) {
     let Ok(signals) = state.state_store.list_signals(None, None) else {
         return;
     };
-    let children: Vec<_> = signals
-        .iter()
+    let children: Vec<SignalExecution> = signals
+        .into_iter()
         .filter(|s| crate::state_store::is_flatten_child_id(&s.id, parent_id))
         .collect();
-    if children.is_empty() || !children.iter().all(|c| c.status == SignalStatus::Closed) {
+    // The parent closes when the residual is provably covered: no child
+    // still open and no uncovered residual quantity. A child that failed
+    // before submitting covers nothing — and blocks nothing.
+    if children.is_empty()
+        || children.iter().any(|c| c.status.counts_as_open())
+        || !residual_leg_quantities(&parent, &children).is_empty()
+    {
         return;
     }
     if let Err(e) = state.state_store.update_signal_status(
         parent_id,
         SignalStatus::Closed,
-        Some("All flatten orders resolved terminal-filled via venue poll"),
+        Some("Residual exposure covered — flatten children resolved"),
     ) {
         tracing::warn!("reconcile: failed to close flattened parent {parent_id}: {e}");
     } else {
@@ -541,13 +560,47 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
         .into_iter()
         .filter(|s| crate::state_store::is_flatten_child_id(&s.id, signal_id))
         .collect();
-    // A still-open child is already working the residual — never double-submit.
+    // The newest child's age throttles redispatch cadence — no cap on
+    // total children: a vault lock or venue outage must never permanently
+    // bar the residual from flattening once readiness returns.
+    let newest_child_age_secs = children
+        .iter()
+        .filter_map(|c| chrono::DateTime::parse_from_rfc3339(&c.created_at).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+        .min();
+    // A child whose dispatch produced no order ids and no fills never
+    // reached a venue — it is failed, not "open": it must neither block
+    // re-dispatch nor consume an attempt slot.
+    let mut kept: Vec<SignalExecution> = Vec::with_capacity(children.len());
+    for c in children {
+        let submitted = c.legs.iter().any(|l| {
+            l.venue_order_id
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+                || l.filled_qty > 0.0
+        });
+        if !submitted {
+            if c.status.counts_as_open() {
+                let _ = state.state_store.update_signal_status(
+                    &c.id,
+                    SignalStatus::Failed,
+                    Some("residual flatten never dispatched an order"),
+                );
+            }
+            continue;
+        }
+        kept.push(c);
+    }
+    let children = kept;
+    // A still-open submitted child is already working the residual —
+    // never double-submit.
     if children.iter().any(|c| c.status.counts_as_open()) {
         return;
     }
     if children.len() >= MAX_RESIDUAL_ATTEMPTS {
         tracing::error!(
-            "reconcile: {signal_id} residual persists after {MAX_RESIDUAL_ATTEMPTS} flatten attempts — manual resolution required"
+            "reconcile: {signal_id} residual persists after {MAX_RESIDUAL_ATTEMPTS} submitted flatten attempts — manual resolution required"
         );
         let _ = state.state_store.update_signal_status(
             signal_id,
@@ -556,9 +609,32 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
         );
         return;
     }
+    if let Some(age) = newest_child_age_secs {
+        if age < RESIDUAL_RETRY_SECS {
+            return;
+        }
+    }
     let residuals = residual_leg_quantities(&exec, &children);
     if residuals.is_empty() {
         return;
+    }
+
+    // Pre-flight: every residual leg must be dispatchable BEFORE the child
+    // is persisted — a vault lock or missing adapter must not create a
+    // child that can never submit. Retried next pass when readiness returns.
+    for (leg, _) in &residuals {
+        let ready = !leg.symbol.is_empty()
+            && state
+                .get_adapter(&leg.venue)
+                .map(|a| a.live_order_submission_implemented() && a.has_live_credentials())
+                .unwrap_or(false);
+        if !ready {
+            tracing::warn!(
+                "reconcile: {signal_id} residual on {} not dispatchable (symbol/submission/credentials) — retrying next pass",
+                leg.venue
+            );
+            return;
+        }
     }
 
     let close_id = format!("flat-{}-{:04x}", signal_id, rand::random::<u16>());
@@ -624,7 +700,14 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             );
             continue;
         }
-        let Some(qty_dec) = Decimal::from_f64_retain(*qty).filter(|q| *q > dec!(0)) else {
+        // Residuals are f64 arithmetic — from_f64_retain preserves binary
+        // noise (0.005 → 0.0050000000000000001040834086) that venue wire
+        // scales reject. Shortest round-trip + an 8dp bound (finer than any
+        // admitted venue's size step) keeps the quantity representable.
+        let Some(qty_dec) = Decimal::from_f64(*qty)
+            .map(|d| d.round_dp(8).normalize())
+            .filter(|q| *q > dec!(0))
+        else {
             continue;
         };
         let order_side = match leg.side {
@@ -713,6 +796,26 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                     .state_store
                     .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
             }
+        }
+    }
+
+    // A child whose dispatch produced no order ids and no fills never
+    // reached a venue — mark it failed so it neither blocks re-dispatch
+    // on the next pass nor consumes the attempt bound.
+    if let Ok(Some(child)) = state.state_store.get_signal(&close_id) {
+        let submitted = child.legs.iter().any(|l| {
+            l.venue_order_id
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+                || l.filled_qty > 0.0
+        });
+        if !submitted {
+            let _ = state.state_store.update_signal_status(
+                &close_id,
+                SignalStatus::Failed,
+                Some("residual flatten never dispatched an order"),
+            );
         }
     }
 }
@@ -1428,5 +1531,199 @@ mod tests {
         assert_eq!(child.status, SignalStatus::Closed);
         let parent = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(parent.status, SignalStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn e2e_rejected_leg_without_order_id_resolves_imbalanced_and_flattens() {
+        // The canary-shaped failure: leg A rejected at submit time (no
+        // venue order id exists — identity is persisted at submission, so a
+        // post-submission leg with no id is terminally empty); leg B
+        // accepted and later polled filled. The signal must surface
+        // Imbalanced — not park Unresolved forever — so residual
+        // auto-flatten covers the naked leg.
+        let state = AppEngineState::new();
+        state.settings.write().passive_unwind.timeout_secs = 0;
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: sid.clone(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USD".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(), // the rejected leg — no order id
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "aster".into(), // accepted, fills via poll
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    },
+                ],
+            })
+            .unwrap();
+        // Only the accepted leg carries an order id; the coordinator has
+        // already finished and parked the signal at unresolved.
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Short, "oid-aster", Some("cid-aster"))
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(
+                &sid,
+                SignalStatus::Unresolved,
+                Some("leg rejected; sibling working"),
+            )
+            .unwrap();
+        // The aster poll lands the fill (as the reconciler records it).
+        state
+            .state_store
+            .apply_leg_order_state(&sid, LegSide::Short, 1.0, Some(100.0), 0.5)
+            .unwrap();
+
+        let aster = Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())]));
+        let mut place = mock_filled();
+        place.order_id = "flat-oid-x".into();
+        *aster.place_response.lock().unwrap() = Some(place);
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("aster".into(), aster.clone());
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), Arc::new(MockVenue::new("kraken", vec![])));
+
+        reconcile_pending_orders(&state).await;
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Imbalanced);
+        // Residual = aster short → reduce-only BUY flatten on aster.
+        let placed = aster.placed.lock().unwrap().clone();
+        assert_eq!(placed.len(), 1);
+        assert!(placed[0].reduce_only);
+        assert_eq!(placed[0].side, Side::Buy);
+        assert_eq!(placed[0].quantity, dec!(1));
+    }
+
+    #[tokio::test]
+    async fn e2e_stuck_flatten_child_without_order_id_fails_and_redispatches() {
+        // Restart-after-lockout shape: a flat-* child persisted but never
+        // dispatched (vault locked at submit time) sits in_flight with no
+        // order id. It must fail out — not count as open, not burn the
+        // attempt bound — and the pass must dispatch a real child that
+        // carries the parent to closed once it fills.
+        let state = AppEngineState::new();
+        state.settings.write().passive_unwind.timeout_secs = 0;
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: sid.clone(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USD".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "aster".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    },
+                ],
+            })
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Short, "oid-aster", Some("cid-aster"))
+            .unwrap();
+        state
+            .state_store
+            .apply_leg_order_state(&sid, LegSide::Short, 1.0, Some(100.0), 0.5)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(&sid, SignalStatus::Imbalanced, None)
+            .unwrap();
+        // The stuck child: persisted in_flight, never dispatched.
+        let stuck_id = format!("flat-{}-dead", sid);
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: stuck_id.clone(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USD".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: Some(format!("auto residual flatten of {sid}")),
+                legs: vec![crate::state_store::NewSignalLeg {
+                    account_id: None,
+                    venue: "aster".into(),
+                    side: LegSide::Long,
+                    symbol: Some("BTC-USD".into()),
+                    intended_qty: 1.0,
+                    intended_price: None,
+                }],
+            })
+            .unwrap();
+        // Backdate past the residual-retry throttle so this pass redispatches.
+        state.state_store.force_signal_age_for_test(
+            &stuck_id,
+            &(Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
+        );
+
+        let aster = Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())]));
+        let mut place = mock_filled();
+        place.order_id = "flat-oid-y".into();
+        *aster.place_response.lock().unwrap() = Some(place);
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("aster".into(), aster.clone());
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), Arc::new(MockVenue::new("kraken", vec![])));
+
+        // Pass 1: stuck child fails out, a fresh child dispatches.
+        reconcile_pending_orders(&state).await;
+        let stuck = state.state_store.get_signal(&stuck_id).unwrap().unwrap();
+        assert_eq!(stuck.status, SignalStatus::Failed);
+        let placed = aster.placed.lock().unwrap().clone();
+        assert_eq!(placed.len(), 1);
+        assert!(placed[0].reduce_only);
+        assert_eq!(placed[0].side, Side::Buy);
+
+        // Pass 2: the fresh child's poll lands the fill; parent closes.
+        reconcile_pending_orders(&state).await;
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Closed);
     }
 }

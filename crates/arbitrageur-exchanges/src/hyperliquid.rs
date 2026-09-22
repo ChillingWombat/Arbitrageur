@@ -230,8 +230,9 @@ impl HyperliquidAdapter {
         Ok(json_val)
     }
 
-    /// Resolve coin name to integer asset index in Hyperliquid perpetual universe.
-    pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
+    /// Resolve coin name to (asset index, szDecimals) in the Hyperliquid
+    /// perpetual universe — both needed to wire-format order fields.
+    pub async fn resolve_asset_meta(&self, coin: &str) -> anyhow::Result<(u32, u32)> {
         let res = self.post_info(json!({"type": "meta"})).await?;
         let universe = res
             .get("universe")
@@ -242,11 +243,41 @@ impl HyperliquidAdapter {
         for (idx, item) in universe.iter().enumerate() {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                 if name.eq_ignore_ascii_case(coin) {
-                    return Ok(idx as u32);
+                    let sz_decimals =
+                        item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
+                    return Ok((idx as u32, sz_decimals));
                 }
             }
         }
         anyhow::bail!("Asset '{coin}' not found in Hyperliquid perpetual universe");
+    }
+
+    pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
+        Ok(self.resolve_asset_meta(coin).await?.0)
+    }
+}
+
+/// Hyperliquid wire price rules ("Tick and lot size"): perp prices allow at
+/// most 5 significant figures and at most `6 - szDecimals` decimal places;
+/// integer prices always pass. The rounding direction never crosses the
+/// caller's protective bound — buy caps floor (pay less), sell caps ceil
+/// (receive more) — by at most one tick.
+fn hl_wire_price(price: Decimal, sz_decimals: u32, side: Side) -> Decimal {
+    if price <= dec!(0) || price.fract().is_zero() {
+        return price; // invalid or already integral — pass through
+    }
+    let f: f64 = price.to_string().parse().unwrap_or(0.0);
+    if !f.is_finite() || f <= 0.0 {
+        return price;
+    }
+    let digits_before = f.log10().floor() as i32 + 1;
+    let sig_decimals = (5 - digits_before).max(0) as u32;
+    let decimals = sig_decimals.min(6u32.saturating_sub(sz_decimals));
+    let truncated = price.trunc_with_scale(decimals);
+    if side == Side::Sell && truncated < price {
+        truncated + Decimal::new(1, decimals)
+    } else {
+        truncated
     }
 }
 
@@ -818,18 +849,26 @@ impl ExchangeAdapter for HyperliquidAdapter {
         })?;
 
         let coin = perp_coin(&order.symbol)?;
-        let asset_index = self.resolve_asset_index(&coin).await?;
+        let (asset_index, sz_decimals) = self.resolve_asset_meta(&coin).await?;
 
-        let price = match order.price {
+        let raw_price = match order.price {
             Some(p) => p,
             None => {
                 let ticker = self.fetch_ticker(&order.symbol).await?;
                 match order.side {
-                    Side::Buy => (ticker.ask * dec!(1.05)).round_dp(5),
-                    Side::Sell => (ticker.bid * dec!(0.95)).round_dp(5),
+                    Side::Buy => ticker.ask * dec!(1.05),
+                    Side::Sell => ticker.bid * dec!(0.95),
                 }
             }
         };
+        let price = hl_wire_price(raw_price, sz_decimals, order.side);
+        let quantity = order.quantity.trunc_with_scale(sz_decimals);
+        if quantity <= dec!(0) {
+            anyhow::bail!(
+                "Hyperliquid order quantity {} truncates to zero at szDecimals={sz_decimals}",
+                order.quantity
+            );
+        }
 
         let tif = if order.post_only {
             "Alo"
@@ -845,7 +884,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             a: asset_index,
             b: order.side == Side::Buy,
             p: price.to_string(),
-            s: order.quantity.to_string(),
+            s: quantity.to_string(),
             r: order.reduce_only,
             t: HlOrderTypeWire {
                 limit: HlLimitWire {
@@ -1124,6 +1163,27 @@ mod tests {
         assert!(perp_coin("BTC-USDT").is_err());
         assert!(perp_coin("BTC-SOL").is_err());
         assert!(perp_coin("BTC-ETH").is_err());
+    }
+
+    #[test]
+    fn hl_wire_price_respects_sigfigs_and_szdecimals() {
+        // ETH perp szDecimals=4 → ≤2 decimals AND ≤5 sig figs → 1 decimal.
+        // The canary failure: 2726.1 * 1.003 = 2734.2783 was rejected.
+        assert_eq!(hl_wire_price(dec!(2734.2783), 4, Side::Buy), dec!(2734.2));
+        // Sell bound rounds UP one tick — never below the caller's cap.
+        assert_eq!(hl_wire_price(dec!(2734.2783), 4, Side::Sell), dec!(2734.3));
+        // BTC perp szDecimals=5 → 5 sig figs → integer for 5-digit prices.
+        assert_eq!(hl_wire_price(dec!(97123.456), 5, Side::Buy), dec!(97123));
+        // Integers always pass untouched.
+        assert_eq!(hl_wire_price(dec!(123456), 4, Side::Buy), dec!(123456));
+        // Sub-dollar: szDecimals=1 → ≤5 decimals AND ≤5 sig figs → 5 dec.
+        assert_eq!(hl_wire_price(dec!(0.01234567), 1, Side::Buy), dec!(0.01234));
+        // szDecimals=0 → perp cap is 6 decimal places (decimal limit binds
+        // before sig figs): 0.000012345678 → 0.000012.
+        assert_eq!(
+            hl_wire_price(dec!(0.000012345678), 0, Side::Buy),
+            dec!(0.000012)
+        );
     }
 
     #[tokio::test]
