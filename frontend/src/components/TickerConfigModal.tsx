@@ -89,7 +89,7 @@ const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "p
     { id: "hurdle", label: "Signal Trigger", tooltip: "Configure target profit, historical baseline window, percentile trigger, and execution behavior.", icon: TrendingUp },
     { id: "sizing", label: "Execution & Sizing", tooltip: "Configure notional per leg, grid capacity, accumulated units, and cross-venue lot compatibility.", icon: Layers },
     { id: "leverage", label: "Leverage & Margin", tooltip: "Review target leverage, effective safe leverage, margin requirements, and liquidation buffer.", icon: ShieldCheck },
-    { id: "unwind", label: "Passive Unwind", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
+    { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
@@ -97,14 +97,14 @@ const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "p
     { id: "carry", label: "Carry Parameters", tooltip: "Configure funding-carry trade size and minimum net APR.", icon: Coins },
     { id: "execution", label: "Execution & Slippage", tooltip: "Configure orderbook slippage tolerance, maximum entry spread, and auto-exit threshold.", icon: Activity },
     { id: "risk", label: "Risk & Rebalance", tooltip: "Configure liquidation-distance trim, drift auto-rebalance, and rotation hurdle threshold.", icon: Scale },
-    { id: "unwind", label: "Passive Unwind", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
+    { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
   spot: [
     { id: "spatial", label: "Spatial Parameters", tooltip: "Configure spot trade size, minimum net spread, and orderbook slippage tolerance limit.", icon: Layers },
     { id: "risk", label: "Risk & Safety", tooltip: "Configure liquidation-distance trim protection.", icon: ShieldCheck },
-    { id: "unwind", label: "Passive Unwind", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
+    { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
@@ -638,7 +638,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </SettingRow>
   );
 
-  /** Shared Passive Limit Unwind block — per-strategy mode selects the
+  /** Shared Auto Position Exit block — per-strategy mode selects the
    *  config source: inherit the global policy, a custom override, or off. */
   const renderPassiveBlock = (
     value: PassiveUnwindDto,
@@ -652,8 +652,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         <div className="flex items-center justify-between gap-3 pb-2 border-b border-surface-border/60">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <span className="text-xs font-semibold font-sans text-slate-800">Passive Limit Unwind</span>
-              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. Inherit uses the global Engine Settings → Execution policy; Custom uses the params below; Off = market exits." />
+              <span className="text-xs font-semibold font-sans text-slate-800">Auto Position Exit</span>
+              <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. Inherit uses the global Engine Settings → Execution → Auto Position Exit policy; Custom uses the params below; Off = market exits." />
             </div>
             <p className="text-[11px] font-sans text-slate-400 font-normal mt-0.5 leading-normal">
               timeout-bound · market fallback · emergency exits always market
@@ -682,7 +682,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
         {mode === "inherit" && (
           <p className="text-[11px] font-sans text-slate-400 leading-normal">
-            Follows the global policy in Engine Settings → Execution → Passive Limit Unwind.
+            Follows the global policy in Engine Settings → Execution → Auto Position Exit.
           </p>
         )}
         {mode === "off" && (
@@ -698,7 +698,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <SwitchToggle
             size="sm"
             checked={value.enabled}
-            ariaLabel="Passive limit unwind enabled"
+            ariaLabel="Auto position exit enabled"
             onChange={(on) => set({ enabled: on })}
           />
         </div>
@@ -1643,7 +1643,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             ) : activeSection === "unwind" ? (
               <div className="space-y-3">
                 <div className="pb-1 border-b border-surface-border/60">
-                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Passive Unwind Execution</h3>
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Auto Position Exit</h3>
                   <p className="text-[11px] font-sans text-slate-400 mt-0.5">Pegged limit order execution with market fallbacks</p>
                 </div>
                 {activeStrategyTab === "futures" && renderPassiveBlock(futuresPassive, setFuturesPassive, futuresPassiveMode, setFuturesPassiveMode)}

@@ -2481,17 +2481,9 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
-    // Execution-policy toggles persist too — an operator who disables the
-    // default-on passive unwind or residual auto-resolution must not have
-    // the choice silently revert on restart.
-    let _ = state.state_store.kv_set(
-        "engine.auto_resolve_residual",
-        if sanitized.auto_resolve_residual_exposure {
-            "true"
-        } else {
-            "false"
-        },
-    );
+    // The passive-unwind policy persists — an operator who disables the
+    // default-on limit exits must not have the choice silently revert on
+    // restart. (Residual auto-flatten is unconditional — no flag.)
     match serde_json::to_string(&sanitized.passive_unwind) {
         Ok(json) => {
             let _ = state.state_store.kv_set("engine.passive_unwind", &json);

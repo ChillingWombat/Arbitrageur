@@ -388,15 +388,13 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 } else {
                     summary.resolved += 1;
                 }
-                // Opt-in auto-compensation: an ENTRY signal that lands
-                // imbalanced holds naked one-sided exposure. When the
-                // operator enabled it, submit reduce-only flattens for the
-                // residual — persisted as `flat-{id}-*` children this same
-                // supervisor then reconciles to terminal state.
-                if status == SignalStatus::Imbalanced
-                    && !is_close_signal
-                    && state.settings.read().auto_resolve_residual_exposure
-                {
+                // Auto-compensation (unconditional): an ENTRY signal that
+                // lands imbalanced holds naked one-sided exposure — submit
+                // reduce-only flattens for the residual, persisted as
+                // `flat-{id}-*` children this same supervisor reconciles to
+                // terminal state. Exit manner follows the resolved passive
+                // unwind policy (limit-first with market fallback).
+                if status == SignalStatus::Imbalanced && !is_close_signal {
                     dispatch_residual_flatten(state, signal_id).await;
                 }
                 // A `flat-{parent}-*` close that just resolved filled means
@@ -1212,13 +1210,13 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_fill_plus_cancel_empty_is_imbalanced() {
-        // Scope is imbalance detection, not the auto-flatten — disable it
-        // explicitly so the pass cannot dispatch (default is now on).
+        // Scope is imbalance detection: the parent stays Imbalanced after
+        // pass 1 even though the residual flatten dispatches (it resolves
+        // only once the flat-* child reaches a terminal state).
         let (state, sid) = seeded_state(
             "futures",
             vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
         );
-        state.settings.write().auto_resolve_residual_exposure = false;
         state.test_adapters.write().unwrap().insert(
             "kraken".into(),
             Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
@@ -1381,14 +1379,13 @@ mod tests {
     #[tokio::test]
     async fn e2e_imbalanced_dispatches_residual_flatten_and_parent_closes() {
         // Entry: kraken long fills, aster short ends cancelled-empty →
-        // imbalanced. With auto-resolve on, the reconciler submits a
-        // reduce-only flatten for the kraken residual; when that child
-        // resolves filled, the parent closes.
+        // imbalanced. The reconciler submits a reduce-only flatten for the
+        // kraken residual; when that child resolves filled, the parent
+        // closes.
         let (state, sid) = seeded_state(
             "futures",
             vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
         );
-        state.settings.write().auto_resolve_residual_exposure = true;
 
         let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
         let mut place = mock_filled();
@@ -1431,34 +1428,5 @@ mod tests {
         assert_eq!(child.status, SignalStatus::Closed);
         let parent = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(parent.status, SignalStatus::Closed);
-    }
-
-    #[tokio::test]
-    async fn e2e_residual_flatten_respects_disable_flag() {
-        // With the flag explicitly off an imbalanced entry stays imbalanced —
-        // no order is dispatched. (The flag defaults on; this pins the
-        // disable path.)
-        let (state, sid) = seeded_state(
-            "futures",
-            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
-        );
-        state.settings.write().auto_resolve_residual_exposure = false;
-        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
-        state
-            .test_adapters
-            .write()
-            .unwrap()
-            .insert("kraken".into(), kraken.clone());
-        state.test_adapters.write().unwrap().insert(
-            "aster".into(),
-            Arc::new(MockVenue::new(
-                "aster",
-                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
-            )),
-        );
-        reconcile_pending_orders(&state).await;
-        assert!(kraken.placed.lock().unwrap().is_empty());
-        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
-        assert_eq!(sig.status, SignalStatus::Imbalanced);
     }
 }

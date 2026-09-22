@@ -2411,3 +2411,11 @@ The earlier "group metrics into sections" request had only landed on the radar/s
 - **Modal header consistency**: funding modal header shows **APR** (was APY — matches the card headline convention; APY lives in Rates & Income with a compounded note).
 - **Funding trend graph refinement**: 3 mid-axis time gridlines + labels (was start/end only), net-gap endpoint value label, chart captions converted to `?` affordances.
 - Verified: tsc, 210/210 frontend tests, vite build — all green.
+
+### Residual-flatten de-toggled + unwind policy renamed (2026-09-22)
+
+- **`auto_resolve_residual_exposure` removed entirely** — the Safety-tab checkbox, `EngineSettingsDto` field, KV load/save (`engine.auto_resolve_residual`), and the reconciliation gate are all gone. Residual auto-flatten is now **unconditional**: an imbalanced entry always dispatches reduce-only `flat-*` children (still routed through the resolved exit policy — limit-first with market fallback). Rationale: a hidden persisted `false` with no UI would silently disable a safety mechanism; and "detect-but-don't-act" was never a safe live posture — imbalance detection + ticker blocking were never optional.
+- **"Passive Limit Unwind" renamed → "Auto Position Exit"** across all user-facing labels: Engine Settings → Execution section header, TickerConfigModal section chips + block header + "follows global policy" hint, ExternalPositionsGadget Auto Limit tooltip. Internal names unchanged (`passive_unwind` DTO field, `unwind` section id, `renderPassiveBlock`) — no persistence churn.
+- Docs synced: SPEC.md, ARCHITECTURE.md, CAPABILITIES.md, RUNBOOK.md.
+- Tests: `e2e_residual_flatten_respects_disable_flag` deleted (no flag to disable); `e2e_fill_plus_cancel_empty_is_imbalanced` now documents that the parent stays `Imbalanced` while the dispatched flatten is in-flight.
+- Verified: 372 desktop tests, clippy/fmt/tsc, 210 frontend tests, vite build — all green.

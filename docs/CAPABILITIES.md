@@ -83,7 +83,7 @@ A venue/strategy pair can move to live entry only after all of these have eviden
 - Leverage/margin-mode confirmation or an explicit no-change invariant
 - Durable accepted-order record before submission
 - Restart recovery and reconciliation (implemented via the reconciliation supervisor)
-- Automated residual-exposure resolution: implemented behind opt-in `auto_resolve_residual_exposure` — an imbalanced entry auto-submits reduce-only flattens (max 3 attempts) persisted as `flat-*` children the supervisor reconciles; requires venue evidence before it can be trusted live
+- Automated residual-exposure resolution: implemented unconditionally — an imbalanced entry auto-submits reduce-only flattens (max 3 attempts) persisted as `flat-*` children the supervisor reconciles; requires venue evidence before it can be trusted live
 - Cancel-failure retry: implemented — orders working past the 15-minute deadline get up to 3 cancel attempts (kv-persisted across restarts) before escalation; needs venue evidence
 - Operator opt-in: implemented — `live_entry_enabled` + `live_entry_max_notional_usd` gate the spatial entry path (vault unlocked, per-venue submission+polling+credentials, per-leg notional refusal — never clamped); a Safety-tab canary panel submits one minimal pair with a bounded loss acceptance
 - Sandbox tests for success, partial fill, one-leg failure, timeout, cancel race, and process restart
