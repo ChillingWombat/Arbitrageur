@@ -70,14 +70,14 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// Computes the authentic EIP-712 signature for a Hyperliquid L1 action.
-pub fn sign_hyperliquid_l1_action<T: Serialize>(
+/// The exact EIP-712 digest a Hyperliquid L1 action signs — extracted so
+/// tests can ecrecover our signatures and verify round-trip correctness.
+pub fn hyperliquid_l1_digest<T: Serialize>(
     action: &T,
     nonce: u64,
     vault_address: Option<&[u8; 20]>,
     is_mainnet: bool,
-    private_key_hex: &str,
-) -> anyhow::Result<(String, String, u8)> {
+) -> anyhow::Result<[u8; 32]> {
     let action_bytes = rmp_serde::to_vec_named(action)
         .map_err(|e| anyhow::anyhow!("Failed to serialize action with MessagePack: {e}"))?;
     let mut hash_input = action_bytes;
@@ -133,7 +133,18 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
     digest_buf.extend_from_slice(b"\x19\x01");
     digest_buf.extend_from_slice(&domain_separator);
     digest_buf.extend_from_slice(&struct_hash);
-    let digest = keccak256(&digest_buf);
+    Ok(keccak256(&digest_buf))
+}
+
+/// Computes the authentic EIP-712 signature for a Hyperliquid L1 action.
+pub fn sign_hyperliquid_l1_action<T: Serialize>(
+    action: &T,
+    nonce: u64,
+    vault_address: Option<&[u8; 20]>,
+    is_mainnet: bool,
+    private_key_hex: &str,
+) -> anyhow::Result<(String, String, u8)> {
+    let digest = hyperliquid_l1_digest(action, nonce, vault_address, is_mainnet)?;
 
     let key_clean = private_key_hex
         .trim()
@@ -1239,6 +1250,60 @@ mod tests {
         assert!(r.starts_with("0x") && r.len() == 66);
         assert!(s.starts_with("0x") && s.len() == 66);
         assert!(v == 27 || v == 28);
+    }
+
+    #[test]
+    fn test_hyperliquid_l1_signature_ecrecovers_to_signer() {
+        // Round-trip: sign an order action with the well-known dev key
+        // 0x…01 (address 0x7e5f4552…5bdf), then ecrecover (r,s,v,digest)
+        // exactly as Hyperliquid's API does — the recovered address must be
+        // the signer's, or HL rejects with "User or API Wallet does not
+        // exist" carrying a random-looking address per message.
+        let order = HlOrderWire {
+            a: 0,
+            b: true,
+            p: "3000.5".to_string(),
+            s: "0.1".to_string(),
+            r: false,
+            t: HlOrderTypeWire {
+                limit: HlLimitWire {
+                    tif: "Ioc".to_string(),
+                },
+            },
+            c: None,
+        };
+        let action = HlActionWire::Order {
+            orders: vec![order],
+            grouping: "na".to_string(),
+        };
+        let pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let nonce = 1234567890u64;
+        let digest = hyperliquid_l1_digest(&action, nonce, None, true).unwrap();
+        let (r_hex, s_hex, v) = sign_hyperliquid_l1_action(&action, nonce, None, true, pk).unwrap();
+
+        let r_bytes: [u8; 32] = hex::decode(r_hex.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let s_bytes: [u8; 32] = hex::decode(s_hex.trim_start_matches("0x"))
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes[..32].copy_from_slice(&r_bytes);
+        sig_bytes[32..].copy_from_slice(&s_bytes);
+        let sig = k256::ecdsa::Signature::from_slice(&sig_bytes).unwrap();
+        let recid = k256::ecdsa::RecoveryId::new(v == 28, false);
+        let vk = k256::ecdsa::VerifyingKey::recover_from_prehash(&digest, &sig, recid)
+            .expect("signature must recover");
+        let pk_point = vk.to_sec1_point(false);
+        let addr_hash = keccak256(&pk_point.as_bytes()[1..]);
+        let recovered = format!("0x{}", hex::encode(&addr_hash[12..]));
+        assert_eq!(
+            recovered.to_lowercase(),
+            "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+            "ecrecover must yield the signer's address; got {recovered}"
+        );
     }
 
     #[test]

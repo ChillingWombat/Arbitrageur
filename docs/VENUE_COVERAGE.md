@@ -117,15 +117,20 @@ out of scope (this engine's strategy venues are DEX/hybrid first).
 
 - **Already supported**: Hyperliquid, Lighter (+Robinhood deployment), Aster,
   Vanta/Orderly, PopDEX, Decibel, Arcus (scaffold).
-- **Added this pass** (`dex_perps.rs`): `pacifica`, `ondoperps`, `standx`,
-  `derive`, `grvt`, `aevo` (full REST trading implemented);
-  `edgex`, `extended`, `paradex`, `apex`, `dydx`, `helix`, `qfex`
+- **Added this pass** (`dex_perps.rs`, wired into `state.rs` via account
+  enablement): `pacifica`, `ondoperps`, `standx`, `derive`, `grvt`, `aevo`
+  (full REST trading implemented — credentials still required before
+  `has_live_credentials()` opens order paths);
+  `edgex`, `extended`, `paradex`, `apex`, `dydx`, `helix`, `gmx`,
+  `qfex`, `vest`, `antarctic`, `evedex`, `bulk`, `ostium`, `sodex`,
+  `alphax`, `nado`, `iotrader`, `niza`, `astros`, `gatedex`
   (market data live; order paths fail closed — see CAPABILITIES.md for the
   exact per-venue capability bits).
 - **Excluded**: every centralized futures venue (custody + out of scope),
-  Variational (RFQ/no orderbook), GMX (no orderbook by design), KiloEx /
-  SynFutures / SparkDEX (contract-only swap UX, no CLOB REST), Ostium
-  (exploit), and a dozen dead/parked/unverifiable venues.
+  Variational (RFQ/no orderbook), KiloEx / SynFutures / SparkDEX
+  (contract-only swap UX, no CLOB REST), Orderly-derivative listings
+  (same rails as Vanta), RISEx (no live mainnet), and a dozen
+  dead/parked/unverifiable venues.
 
 ## 2. Spot DEX review (CoinGecko decentralized exchanges, top 100, deduplicated)
 
@@ -171,17 +176,106 @@ platforms**, of which ~10 dominate volume.
 
 ### Spot DEX summary
 
-- **Added** (`evm_amm.rs`, one generic adapter over venue specs):
-  `uniswap` (UniV3, default Arbitrum — configurable RPC), `uniswap_v2`,
-  `pancakeswap` (UniV2-style, BSC), `pancakeswap_v3` (UniV3-style, BSC),
-  `aerodrome` (Slipstream CL + classic router, Base), `velodrome` (Optimism),
-  `ramses`, `pharaoh`, `blackhole`, `camelot`, `quickswap`, `sushiswap`.
-  All trade via the local EVM agent key — true agent-wallet execution.
+- **Target list** (`evm_amm.rs`, one generic adapter over venue specs,
+  EVM agent-key execution): `uniswap` (UniV3, default Arbitrum),
+  `uniswap_v2` (UniV2, Ethereum), `pancakeswap` (UniV2-style, BSC),
+  `pancakeswap_v3` (UniV3-style, BSC), `aerodrome` (Solidly-classic
+  routes, Base), `velodrome` (Solidly-classic, Optimism), `ramses`,
+  `pharaoh`, `blackhole`, `camelot` (Algebra), `quickswap` (UniV2,
+  Polygon), `sushiswap` (UniV2, Ethereum).
 - **Deferred (documented)**: non-EVM clusters (Solana/Sui/Tron/Aptos/XRPL/
   Hedera/Stellar/NEAR/Injective) need per-chain signers; custom-ABI AMMs
   (Curve, Fluid, DODO, LFJ, Ekubo) need per-venue quoter work.
 - **Excluded**: aggregators/intents (no venue orderbook), RFQ venues, dead
   endpoints, non-venue entries.
+
+## 2b. `evm_amm` implementation spec
+
+One `EvmAmmAdapter` struct driven by a per-venue `AmmSpec` table — same
+shape as `DexPerpAdapter`, but all I/O is on-chain JSON-RPC instead of
+venue REST.
+
+### ABI families
+
+| Kind | Pool discovery | Quote | Swap entrypoint |
+| --- | --- | --- | --- |
+| `UniV2` | `factory.getPair(a,b)` | `router.getAmountsOut(amountIn,[a,b])` | `swapExactTokensForTokens` / `swapTokensForExactTokens` |
+| `UniV3` | `factory.getPool(a,b,fee)` | `quoter.quoteExactInputSingle(params)` | `SwapRouter02.exactInputSingle` / `exactOutputSingle` |
+| `Solidly` | `factory.getPool(a,b,stable)` | `router.getAmountsOut(amountIn,Route[])` | `swapExactTokensForTokens(...,Route[])` |
+
+Ramses-lineage V3 pools are keyed by `tickSpacing` (not UniV3 `fee`), and
+Algebra pools (Blackhole CL, Camelot V3, QuickSwap V3) drop the fee param
+entirely — both need their own quoter/router ABI, so v1 of `evm_amm`
+supports the three uniform families above and reaches Ramses / Pharaoh /
+Blackhole through their verified **legacy Solidly** routers and Camelot
+through its UniV2-compatible V2 router. RamsesV3/Algebra CL liquidity is
+deferred to a follow-up adapter family.
+
+### Interface contract (per venue)
+
+- `base_url: Option<String>` carries the **RPC endpoint** override —
+  spec default is a public RPC for the venue's chain; Engine Settings can
+  point at an operator's node. Chain id is verified against the spec
+  before any signing (wrong-network RPC refuses).
+- `fetch_markets` resolves each spec pair's pool on-chain
+  (`getPool`/`getPair`/`poolByPair`/`getPool(stable)`) and returns only
+  pools that resolve non-zero — markets are *proven*, never assumed.
+- `fetch_ticker` quotes one base unit through the venue's quoter
+  (`quoteExactInputSingle` / `getAmountsOut`) → `last`; the reverse quote
+  gives `bid`. AMM venues have no orderbook → `fetch_orderbook` fails
+  closed (prices-only, same honesty rule as GMX in `dex_perps`).
+- `fetch_account` reads ERC-20 `balanceOf` for the spec token list plus
+  native balance → `balances`; `positions` stays empty (spot).
+- `fetch_funding_rate` / `set_leverage` fail closed — spot venues have
+  neither.
+- `place_order` — **market and limit-bound orders only**: a swap is
+  atomic, so `Limit`/`PostOnly` is honored as a price bound — the quoter
+  result must satisfy the limit or the order is refused *without
+  submitting* (never rests, never violates the bound). Sell = exact-in
+  base→quote; Buy = exact-out quote→base (`swapTokensForExactTokens` /
+  `exactOutputSingle`). Slippage bound = `minAmountOut`/`maxAmountIn`
+  derived from the limit price (or the quote for market orders with the
+  router tolerance). ERC-20 `approve(router)` is issued lazily per
+  (token, spender) when allowance is insufficient.
+- `cancel_order` fails closed — nothing rests on an AMM.
+- `fetch_order` maps `eth_getTransactionReceipt(hash)` →
+  `Filled` (status 1) / `Rejected` (status 0) / pending-missing → error
+  (never invents state). Order identity is the tx hash, durable by
+  construction.
+- Capabilities: `live_order_submission_implemented` /
+  `order_status_polling_implemented` true (atomic swap + receipt poll);
+  `has_live_credentials` requires the EVM agent key (`privateKey` field).
+  No API key exists — the agent key *is* the credential.
+
+### Venue spec table (contract addresses — canonical deployments)
+
+| id | chain | kind | factory / quoter / router |
+| --- | --- | --- | --- |
+| `uniswap` | Arbitrum 42161 | UniV3 | F `0x1F98431c8aD98523631AE4a59f267346ea31F984` / Q `0x61fFE014bA17989E743c5F6cB21bF9697530B21e` / R `0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45` |
+| `uniswap_v2` | Ethereum 1 | UniV2 | F `0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f` / R `0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D` |
+| `pancakeswap` | BSC 56 | UniV2 | F `0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73` / R `0x10ED43C718714eb63d5aA57B78B54704E256024E` |
+| `pancakeswap_v3` | BSC 56 | UniV3 | F `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865` / Q `0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997` / R `0x1b81D678ffb9C0263b24A97847620C99d213eB14` |
+| `aerodrome` | Base 8453 | Solidly | F `0x420DD381b31aEf6683db6B902084cB0FFECe40Da` / R `0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43` |
+| `velodrome` | Optimism 10 | Solidly | F `0xF1046053aa5682b4F9a81b5481394DA16BE5FF5a` / R `0xa062aE8A9c5e11aaA026fc2670B0D65cCc8B2858` |
+| `camelot` | Arbitrum 42161 | UniV2 (V2 pools) | F `0x6EcCab422D763aC031210895C81787E87B43A652` / R `0xc873fEcbd354f5A56E00E710B90EF4201db2448d` |
+| `quickswap` | Polygon 137 | UniV2 | F `0x5757371414417b8C6CAad45bAeF941aBc7d3Ab32` / R `0xa5E0829CaCEd8fFDD4De3c43696c57F7D7A678ff` |
+| `sushiswap` | Ethereum 1 | UniV2 | F `0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac` / R `0xd9e1cE17f2641f24aE83637ab66a2cca9C378B9F` |
+| `ramses` | Arbitrum 42161 | Solidly (legacy) | F `0xADd32480630A16dfAcEe6eeFcB3ab2181449Dc3B` / R `0x1614a7e1fe63960B4684867a62080acd2404757f` |
+| `pharaoh` | Avalanche 43114 | Solidly (PairFactory+Router) | F `0x85448bF2F589ab1F56225DF5167c63f57758f8c1` / R `0x9CEE04bDcE127DA7E448A333f006DEFb3d5e38cC` |
+| `blackhole` | Avalanche 43114 | Solidly (PairFactory+RouterV2) | F `0xfE926062Fb99CA5653080d6C14fE945Ad68c265C` / R `0x9EED160D7D8253DeC1A2A512e504DE5E7ff3C111` |
+
+PancakeSwap V3 keeps `deadline` inside its params struct (old SwapRouter
+interface); Uniswap SwapRouter02 drops it — the spec carries a
+`deadline_in_params` flag and the adapter encodes the right shape.
+
+(Default public RPCs: `arb1.arbitrum.io/rpc`, `eth.llamarpc.com`,
+`bsc-dataseed.binance.org`, `mainnet.base.org`, `mainnet.optimism.io`,
+`polygon-rpc.com`, `api.avax.network/ext/bc/C/rpc` — all injectable.)
+
+Market sets are the spec pair tables verified on-chain at
+`fetch_markets` — majors only per chain (WETH/WBTC/ARB/OP/BNB/AVAX/POL
+vs USDC/USDT where the pool exists). Adding a pair is a spec-row change,
+never new code.
 
 ## 3. What "added" means (capability contract)
 

@@ -1,10 +1,14 @@
 # Exchange Integrations Guide
 
-> Living venue reference — native-API venues only (2026-09-19 cleanup removed all
-> venues without native trading-API support: Variational RFQ-only, edgeX, GRVT,
-> Ondo Perps and the 23 long-tail paper venues; PopDEX was re-admitted 2026-09-20
-> on its newly published native API — contracts + REST, §11). §6 transfer-rails /
-> rebalance research. Re-check fee figures on venue pages before moving size.
+> Living venue reference — native-API venues only. 2026-09-22: 26 long-tail
+> perp venues re-admitted through the spec-driven `DexPerpAdapter`
+> (`crates/arbitrageur-exchanges/src/dex_perps.rs`) — all serve market data;
+> six (Pacifica, StandX, Ondo Perps, GRVT, Derive, Aevo) additionally
+> implement authenticated order paths with venue-native signing, gated by
+> `has_live_credentials()` until credentialed venue evidence exists
+> (see `docs/VENUE_COVERAGE.md` for the vetting/dedup matrix).
+> §6 transfer-rails / rebalance research. Re-check fee figures on venue
+> pages before moving size.
 
 > NOTE: `docs/CAPABILITIES.md` is the authoritative runtime matrix. Sections
 > below mentioning Variational / edgeX / GRVT / Ondo Perps / dYdX / Paradex /
@@ -22,6 +26,12 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
 
 - Hyperliquid, Lighter, Robinhood Lighter, Vanta/Orderly
 - Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel
+- Long-tail perp venues via `DexPerpAdapter` (account-enabled admission;
+  market data for all, implemented signed order paths on Pacifica /
+  StandX / Ondo Perps / GRVT / Derive / Aevo): dYdX, Paradex, GMX V2
+  (prices only), ApeX Omni, Extended, Helix, edgeX, QFEX (markets only),
+  Vest, Antarctic, EVEDEX, BULK, Ostium, SoDEX, AlphaX, Nado, IO Trader,
+  Niza, Astros, Gate DEX
 - Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
 
 Submission transport is not terminal fill reconciliation. Every live-submission adapter now exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution (opt-in) and bounded cancel retry are implemented, but without venue sandbox/canary evidence no listed venue is live-strategy-entry ready.

@@ -1,6 +1,6 @@
 # Capability Matrix
 
-**Status date:** 2026-09-20
+**Status date:** 2026-09-22
 **Authority:** This file and `README.md` define current runtime capability. Historical handoffs describe what was attempted at the time and are not capability guarantees.
 
 ## Capability vocabulary
@@ -53,6 +53,13 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | Arcus | Adapter scaffold, not admitted | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable | None | Scaffold only | **No** |
 | Polymarket | Separate prediction research adapter | N/A | Not an admitted portfolio venue | No integrated execution | No integrated execution | N/A | None | Research parser | **No** |
 | Kalshi | Separate prediction research adapter | N/A | Not an admitted portfolio venue | No integrated execution | No integrated execution | N/A | None | Research parser | **No** |
+| Pacifica (DexPerpAdapter) | Perpetual | Yes | Yes (Ed25519 session) | Yes, Ed25519 signed ops | Yes | Yes | `orders` read + restart supervisor | Unit + live public reads; signing implemented, no credentialed order evidence yet | **No — pending venue evidence** |
+| StandX (DexPerpAdapter) | Perpetual | Yes | Yes (JWT session) | Yes, Ed25519 signed bodies | Yes (async; WS confirm) | Yes | `query_order` poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
+| Ondo Perps (DexPerpAdapter) | Perpetual | Yes | Yes (SIWE → JWT) | Yes, wallet-signed | Yes | No explicit implementation | `GET /v1/perps/orders` poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
+| GRVT (DexPerpAdapter) | Perpetual | Yes | Yes (`gravity` cookie session) | Yes, EIP-712 legs | Yes | No explicit implementation | Order read poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
+| Derive (DexPerpAdapter) | Perpetual (top-of-book only) | Yes | Yes (`X-Lyra*` headers) | Yes, EIP-712 action sigs | Yes (`private/cancel`) | No explicit implementation | Order read poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
+| Aevo (DexPerpAdapter) | Perpetual | Yes | Yes (`AEVO-KEY`/`AEVO-SECRET`) | Yes, EIP-712 `Order` | Yes | No explicit implementation | Order read poll + restart supervisor | Unit + live public reads; no credentialed order evidence yet | **No — pending venue evidence** |
+| dYdX, Paradex, GMX V2, ApeX Omni, Extended, Helix, edgeX, QFEX (markets only), Vest, Antarctic, EVEDEX, BULK, Ostium, SoDEX, AlphaX, Nado, IO Trader, Niza, Astros, Gate DEX (DexPerpAdapter, market-data-only) | Verified or doc-shaped public reads; GMX V2 is prices-only (GLV AMM has no CLOB), Derive top-of-book only, QFEX books auth-gated → fail closed | Yes where the venue publishes it | **No — fails closed** | **No — fails closed** | **No — fails closed** | **No — fails closed** | None | Unit + live public reads where marked verified; doc-shaped venues degrade to per-entry errors | **No** |
 
 ## Live mode
 
