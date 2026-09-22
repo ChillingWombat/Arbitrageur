@@ -830,13 +830,18 @@ pub async fn get_venue_balances_impl(
                 // the same as nothing configured (an enabled venue with a
                 // saved account is configured — it just can't be read now).
                 let locked = !state.vault.write().is_unlocked();
+                // `configured_venues` needs the decrypted vault, so a locked
+                // vault always reports false there — fall back to the durable
+                // account table, which knows a credential profile exists even
+                // when its secrets are unreadable.
                 let configured = state
                     .vault
                     .write()
                     .configured_venues()
                     .unwrap_or_default()
                     .iter()
-                    .any(|v| v.eq_ignore_ascii_case(vid));
+                    .any(|v| v.eq_ignore_ascii_case(vid))
+                    || def_acc_id.is_some();
                 let (status, action) = if locked && configured {
                     (
                         "LOCKED".to_string(),

@@ -1622,21 +1622,38 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         // A venue whose read fails keeps contributing its last-known-good
         // figures: a connectivity blip is not a loss of funds and must not
         // move the portfolio total or trip the drawdown breaker.
+        let manual_locked = {
+            let mut vault = state.vault.write();
+            vault.is_initialized() && !vault.is_unlocked() && !vault.is_auto_locked()
+        };
         for (vid, _name, adapter) in state.get_venues() {
             match live_account_or_cached(state, vid, &adapter).await {
                 Ok((acc, stale_age)) => {
                     if let Some(age) = stale_age {
-                        tracing::warn!(
-                            "risk overview: {vid} read failed, using last-known figures ({}s old)",
-                            age / 1000
-                        );
+                        if manual_locked {
+                            tracing::warn!(
+                                "risk overview: {vid} read paused (vault locked), showing last-known figures ({}s old)",
+                                age / 1000
+                            );
+                        } else {
+                            tracing::warn!(
+                                "risk overview: {vid} read failed, using last-known figures ({}s old)",
+                                age / 1000
+                            );
+                        }
                     }
                     accounts.push(acc);
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "risk overview: live account read failed for {vid} (no cache): {e}"
-                    );
+                    if manual_locked {
+                        tracing::warn!(
+                            "risk overview: {vid} read paused (vault locked, no cached figures)"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "risk overview: live account read failed for {vid} (no cache): {e}"
+                        );
+                    }
                 }
             }
         }

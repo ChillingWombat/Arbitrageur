@@ -7,6 +7,7 @@ use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
+use arbitrageur_exchanges::dex_perps::{DexPerpAdapter, ADMITTED_DEX_PERP_VENUE_IDS};
 use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
@@ -1067,6 +1068,7 @@ pub struct AppEngineState {
     pub live_kraken: Arc<KrakenAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
+    pub live_dex_perps: Vec<Arc<DexPerpAdapter>>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -1186,6 +1188,25 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
+        // Long-tail perp venues: common display/alias spellings first, then
+        // every canonical spec id resolves to itself.
+        "edge x" | "edgex exchange" | "edgex perps" => Some("edgex"),
+        "ondo" | "ondo perpetuals" | "ondo finance" => Some("ondoperps"),
+        "gravity" | "grvt exchange" => Some("grvt"),
+        "lyra" | "derive (lyra)" => Some("derive"),
+        "apex omni" | "apex pro" => Some("apex"),
+        "x10" | "extended exchange" => Some("extended"),
+        "dydx chain" | "dydx v4" => Some("dydx"),
+        "helix (injective)" | "injective helix" => Some("helix"),
+        "alpha x" => Some("alphax"),
+        "antarctic exchange" => Some("antarctic"),
+        "eve dex" => Some("evedex"),
+        "gate dex" => Some("gatedex"),
+        "io trader" => Some("iotrader"),
+        id if ADMITTED_DEX_PERP_VENUE_IDS.contains(&id) => ADMITTED_DEX_PERP_VENUE_IDS
+            .iter()
+            .copied()
+            .find(|v| *v == id),
         _ => None,
     }
 }
@@ -1512,6 +1533,14 @@ impl AppEngineState {
             None,
         ));
         let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
+        // Long-tail perp venues share one spec-driven adapter. No
+        // endpoint overrides exist for these yet — `None` keeps each
+        // spec's default base URL; the `base_url` injection point stays
+        // open for future venue-testnet endpoints.
+        let live_dex_perps: Vec<Arc<DexPerpAdapter>> = ADMITTED_DEX_PERP_VENUE_IDS
+            .iter()
+            .filter_map(|id| DexPerpAdapter::for_venue(id, None).map(Arc::new))
+            .collect();
         let live_polymarket = Arc::new(PolymarketAdapter::new(
             endpoint(&initial_settings.polymarket_url),
             None,
@@ -1582,6 +1611,7 @@ impl AppEngineState {
             live_coinbase,
             live_kraken,
             live_decibel,
+            live_dex_perps,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1630,10 +1660,15 @@ impl AppEngineState {
     }
 
     /// Synchronize credentials from the secure vault to live exchange adapters.
-    /// Clears credentials if vault is locked.
+    /// An explicit operator lock clears adapter credentials (panic-halt).
+    /// Timer-based auto-lock only forgets vault secrets — provisioned
+    /// credentials keep working so an unattended deployment stays live.
     pub fn sync_vault_credentials_to_adapters(&self) {
         let mut vault = self.vault.write();
         if !vault.is_unlocked() {
+            if vault.is_auto_locked() {
+                return;
+            }
             self.live_aster.update_credentials(None, None);
             let _ = self.live_popdex.update_credentials(None, None, None);
             self.live_hl.update_credentials(None, None);
@@ -1647,6 +1682,9 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
+            for adapter in &self.live_dex_perps {
+                let _ = adapter.update_credentials(None, None, None, None, None, None);
+            }
             return;
         }
 
@@ -1867,6 +1905,26 @@ impl AppEngineState {
                 decibel_wallet,
                 decibel_pk,
             );
+            // Long-tail perp venues share the generic credential mapping;
+            // each adapter interprets the fields per its own auth model and
+            // refuses incomplete material (fail-closed).
+            for adapter in &self.live_dex_perps {
+                let vid = adapter.spec_id();
+                let cred = get_active_cred(&[vid]);
+                let nonempty = |s: &String| (!s.trim().is_empty()).then(|| s.clone());
+                let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
+                let res = adapter.update_credentials(
+                    cred.and_then(|c| nonempty(&c.api_key)),
+                    cred.and_then(|c| nonempty(&c.api_secret)),
+                    cred.and_then(|c| nonopt(&c.passphrase)),
+                    cred.and_then(|c| nonopt(&c.account_id)),
+                    cred.and_then(|c| nonopt(&c.wallet_address)),
+                    cred.and_then(|c| nonopt(&c.private_key)),
+                );
+                if let Err(e) = res {
+                    tracing::warn!("{vid} credential sync refused: {e}");
+                }
+            }
         } else {
             self.live_aster.update_credentials(None, None);
             let _ = self.live_popdex.update_credentials(None, None, None);
@@ -1881,14 +1939,18 @@ impl AppEngineState {
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
+            for adapter in &self.live_dex_perps {
+                let _ = adapter.update_credentials(None, None, None, None, None, None);
+            }
         }
     }
 
     /// Returns admitted venue adapters. Hyperliquid, Lighter, Robinhood
     /// Lighter, Vanta (Orderly), Aster, PopDEX, Binance, OKX, Coinbase,
     /// Kraken, and Decibel can be enabled for their implemented market/account
-    /// paths. Admission is a read/submit boundary only — it never implies
-    /// live strategy-entry readiness.
+    /// paths, and the long-tail perp venues (`live_dex_perps`) admit when
+    /// they own an enabled account. Admission is a read/submit boundary only —
+    /// it never implies live strategy-entry readiness.
     pub fn get_venues(
         &self,
     ) -> Vec<(
@@ -1946,6 +2008,14 @@ impl AppEngineState {
         }
         if s.decibel_enabled || account_enabled("decibel") {
             list.push(("decibel", "Decibel", self.live_decibel.clone()));
+        }
+        // Long-tail perp venues have no engine-settings flags — an enabled
+        // account is the only admission switch. Capability flags on the
+        // adapter still gate every downstream live path.
+        for adapter in &self.live_dex_perps {
+            if account_enabled(adapter.spec_id()) {
+                list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+            }
         }
         // Tests may inject simulated/scripted adapters per venue — route
         // every consumer (scans, dispatch, monitors) through them so seeded

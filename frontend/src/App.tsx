@@ -16,6 +16,7 @@ import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api, withTimeoutFallback } from "./services/api";
 import { scheduleVaultLock } from "./services/vaultLock";
+import { Lock, Unlock, ShieldCheck } from "lucide-react";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
@@ -843,6 +844,47 @@ export const App: React.FC = () => {
         triangleCount={triangleOpps.filter((t) => t.is_executable).length}
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}
       />
+
+      {/* Vault lock banner — auto-lock (timer) keeps provisioned venue
+          credentials working; a manual lock wipes them and halts all live
+          venue access until re-unlock. */}
+      {api.isTauri &&
+        vaultStatus &&
+        vaultStatus.is_initialized &&
+        !vaultStatus.is_unlocked && (
+          <div
+            className={`shrink-0 px-4 py-2 flex items-center justify-between border-b ${
+              vaultStatus.auto_locked
+                ? "bg-amber-500/10 border-amber-500/30"
+                : "bg-loss-dim border-loss-border"
+            }`}
+          >
+            <div className="flex items-center space-x-2.5">
+              {vaultStatus.auto_locked ? (
+                <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+              ) : (
+                <Lock className="w-4 h-4 text-loss shrink-0" />
+              )}
+              <span
+                className={`text-[11px] font-mono ${
+                  vaultStatus.auto_locked ? "text-amber-700" : "text-loss"
+                }`}
+              >
+                {vaultStatus.auto_locked
+                  ? "Vault auto-locked — live trading continues on provisioned credentials; unlock to change API keys."
+                  : "Vault locked — live venue reads and order execution halted. Unlock to resume."}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowVaultModal(true)}
+              className="btn-accent px-2.5 py-1 text-[11px] font-mono font-bold flex items-center space-x-1.5 shrink-0 cursor-pointer"
+            >
+              <Unlock className="w-3 h-3" />
+              <span>Unlock Vault</span>
+            </button>
+          </div>
+        )}
 
       {/* Main Workspace Body */}
       <div className="relative flex flex-1 overflow-hidden">
