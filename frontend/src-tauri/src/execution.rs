@@ -566,6 +566,17 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             }
         ));
     }
+    // Toxic-fill ceiling: a net edge beyond the configured divergence cap is
+    // not alpha — it's a symbol collision or a corrupt quote (observed in
+    // production: SPX500 quoting ~147M bps across HL/Vanta). Real cross-venue
+    // dislocations are a fraction of this; refuse outright.
+    let max_net_bps = state.settings.read().cb_max_spread_divergence_bps;
+    if max_net_bps.is_finite() && max_net_bps > 0.0 && econ.expected_net_bps > max_net_bps {
+        return Err(format!(
+            "Expected net spread {} BPS exceeds the {} BPS plausibility ceiling — likely a mismatched symbol or corrupt quote",
+            econ.expected_net_bps, max_net_bps
+        ));
+    }
     let net_bps_f = econ.expected_net_bps;
     let expected_net_usd = econ.estimated_profit_usd;
 
@@ -882,7 +893,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 .unwrap_or(0.0);
             let expected_capture_f = expected_net_usd;
 
-            let cycle_id = format!("paper-spatial-{}", cycle);
+            let cycle_id = format!("spatial-{}", cycle);
             state.virtual_ledger.write().open_cycle(
                 cycle_id,
                 crate::attribution::ledger_strategy_id(strategy_id),
@@ -1457,7 +1468,7 @@ pub async fn execute_prediction_arbitrage_impl(
 /// Re-anchor the breaker after a test-simulator account reset. Production
 /// has no simulated accounts, so this exists only for `cfg(test)` callers.
 #[cfg(test)]
-pub(crate) fn cb_reanchor_to_paper(state: &AppEngineState, total: Decimal) {
+pub(crate) fn cb_reanchor_to_sims(state: &AppEngineState, total: Decimal) {
     state.circuit_breaker.reanchor_baseline(total);
     *state.last_risk_live_universe.write() = Some(state.is_live());
 }
@@ -2399,7 +2410,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         };
 
         if targets.is_empty() {
-            close_family(&format!("flatten {}: no residual paper position", sig.id))?;
+            close_family(&format!("flatten {}: no residual venue position", sig.id))?;
             out.signals_closed += 1;
             close_flattened_spatial_lot(state, &sig, &family);
             continue;

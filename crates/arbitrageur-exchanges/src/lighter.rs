@@ -1168,8 +1168,15 @@ pub fn scale_lighter_amount(
         anyhow::bail!("Lighter size scale {} is absurd", size_decimals);
     }
     const MAX_BASE_AMOUNT: i64 = (1 << 48) - 1;
-    let scaled = human * Decimal::from(10u64.pow(size_decimals));
-    if !scaled.fract().is_zero() {
+    // f64→Decimal round trips leave ~1e-19 binary-expansion dust
+    // (0.005 → 0.0050000000000000001040834086). Tolerate noise within
+    // ~1e-13 of the quantity (≈50× f64 epsilon at practical sizes) by
+    // rounding onto the wire grid; genuine sub-wire dust still bails —
+    // silently flooring a hedge or close can leave residual exposure
+    // while the local ledger believes the full quantity was submitted.
+    let grid = human.round_dp(size_decimals);
+    let tol = (human.abs() * dec!(0.0000000000001)).max(dec!(0.000000000001));
+    if (human - grid).abs() > tol {
         anyhow::bail!(
             "Lighter quantity {} for '{}' is not representable at size scale {} without rounding",
             human,
@@ -1177,6 +1184,7 @@ pub fn scale_lighter_amount(
             size_decimals
         );
     }
+    let scaled = grid * Decimal::from(10u64.pow(size_decimals));
     if scaled < dec!(1) || scaled > Decimal::from(MAX_BASE_AMOUNT) {
         anyhow::bail!("Lighter quantity {} for '{}' out of range", human, symbol);
     }
@@ -1579,6 +1587,19 @@ mod tests {
         assert!(scale_lighter_amount(dec!(1.2349), 3, "T").is_err());
         assert!(scale_lighter_amount(dec!(0.0001), 3, "T").is_err());
         assert!(scale_lighter_amount(dec!(0), 3, "T").is_err());
+    }
+
+    #[test]
+    fn scale_amount_tolerates_f64_roundtrip_noise() {
+        // Production incident 2026-09-22: a 0.005 ETH residual flatten
+        // failed ~50 dispatches because Decimal::from_f64(0.005) expands to
+        // 0.0050000000000000001040834086 — sub-integer dust at wire scale 4.
+        // Noise within ~1e-13 relative snaps onto the wire grid; real
+        // sub-wire dust still rejects.
+        let noisy = rust_decimal::prelude::FromPrimitive::from_f64(0.005f64).unwrap();
+        assert_eq!(scale_lighter_amount(noisy, 4, "ETH-USDC").unwrap(), 50);
+        // A genuinely off-grid quantity must still fail closed.
+        assert!(scale_lighter_amount(dec!(0.0050000005), 4, "ETH-USDC").is_err());
     }
 
     #[test]

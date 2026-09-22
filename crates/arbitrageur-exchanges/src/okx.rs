@@ -305,12 +305,17 @@ impl OkxAdapter {
     /// Engine base-unit quantity into whole OKX contracts. Pure and
     /// fail-closed: silently rounding down could leave an intended close or
     /// hedge partially open, so only exact contract multiples are accepted.
+    /// f64→Decimal binary-expansion dust (~1e-19 relative) within ~1e-13 of
+    /// the count is snapped onto the contract grid; larger deviations still
+    /// reject.
     fn contracts_for_qty(qty: Decimal, ct_val: Decimal) -> Option<Decimal> {
         if qty <= dec!(0) || ct_val <= dec!(0) {
             return None;
         }
         let contracts = qty / ct_val;
-        (contracts >= dec!(1) && contracts.fract().is_zero()).then_some(contracts)
+        let rounded = contracts.round();
+        let tol = (contracts.abs() * dec!(0.0000000000001)).max(dec!(0.000000001));
+        (rounded >= dec!(1) && (contracts - rounded).abs() <= tol).then_some(rounded)
     }
 
     /// Pure parse of a `/trade/order` response envelope.
