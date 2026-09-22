@@ -1304,9 +1304,9 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 }`}
               />
               <span>Execution History</span>
-              {(executionLogs?.length || 0) > 0 && (
+              {tickerLogsCount > 0 && (
               <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
-                {executionLogs?.length || 0}
+                {tickerLogsCount}
               </span>
               )}
               {bottomTab === "history" && (
