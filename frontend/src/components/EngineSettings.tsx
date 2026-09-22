@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -226,13 +226,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
   // Risk Control sub-category anchors (scroll-to-section pills).
-  const cbRef = useRef<HTMLDivElement>(null);
-  const dgRef = useRef<HTMLDivElement>(null);
-  const mmRef = useRef<HTMLDivElement>(null);
-  const levRef = useRef<HTMLDivElement>(null);
-  const scrollRiskTo = (r: { current: HTMLDivElement | null }) => {
-    r.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-  };
   const [selectedExchange, setSelectedExchange] = useState<ExchangeId>("arcus");
   // Favorite exchanges: a pure UI preference (localStorage, per machine) —
   // starring never touches strategy state. The selector filter below narrows
@@ -1525,25 +1518,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              {([
-                ["Circuit Breaker", cbRef],
-                ["DeltaGuard", dgRef],
-                ["Margin Monitor", mmRef],
-                ["Leverage", levRef],
-              ] as Array<[string, { current: HTMLDivElement | null }]>).map(([label, r]) => (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => scrollRiskTo(r)}
-                  className="px-3 py-1 rounded-full border border-surface-border bg-surface text-[11px] font-mono text-slate-600 hover:text-slate-900 hover:border-accent transition cursor-pointer"
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <div ref={cbRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="text-slate-800 font-bold text-xs">Circuit Breaker — Halt Limits</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1581,7 +1556,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
-            <div ref={dgRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="text-slate-800 font-bold text-xs">DeltaGuard — Net Exposure Guardrail</div>
               <div className="flex items-center justify-between gap-3">
                 <label className="text-slate-600 block text-xs" title="Per-asset signed net exposure tolerance across venues">
@@ -1596,7 +1571,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div ref={mmRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="text-slate-800 font-bold text-xs">Margin Monitor — Warning Thresholds</div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 <div className="flex items-center justify-between gap-3">
@@ -1640,7 +1615,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div ref={levRef} className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3 scroll-mt-2">
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="text-slate-800 font-bold text-xs">Leverage — Global Max</div>
               <div className="flex items-center justify-between gap-3">
                 <label className="text-slate-600 block text-xs" title="Hard ceiling on every position: effective leverage is min(strategy target, account max, venue max, this)">
