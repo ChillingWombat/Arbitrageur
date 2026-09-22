@@ -8,6 +8,7 @@ import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
+import { ExecuteButton } from "./ExecuteButton";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface FundingRadarProps {
@@ -696,20 +697,13 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
-            {executed ? (
-              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-profit-dim text-profit text-xs font-semibold">
-                Carry Active
-              </span>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onExecute(opp)}
-                disabled={executing}
-                className="btn-primary !text-xs !py-2.5 !px-2.5 font-sans cursor-pointer"
-              >
-                <span>{executing ? "Opening..." : "Open Carry"}</span>
-              </button>
-            )}
+            <ExecuteButton
+              executed={executed}
+              executing={executing}
+              onClick={() => onExecute(opp)}
+              title={executed ? "position active" : "execute carry trade"}
+              className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
+            />
           </div>
         </div>
       </div>
@@ -1229,8 +1223,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           {opp.symbol}
                         </span>
                       </div>
-                      <span className="text-[10px] font-sans font-bold text-accent tabular-nums shrink-0">
-                        {opp.net_apy_pct.toFixed(1)}%
+                      <span
+                        className="text-[10px] font-sans font-bold text-accent tabular-nums shrink-0"
+                        title={`Net APR — annualized rate after fees & slippage (compounded: ${opp.net_apy_pct.toFixed(1)}% APY)`}
+                      >
+                        {opp.net_apr_pct.toFixed(1)}%<span className="text-[8px] font-medium text-accent/70 ml-0.5">APR</span>
                       </span>
                     </div>
 
@@ -1291,23 +1288,18 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                   </div>
 
                   <div className="pt-2 border-t border-surface-border flex items-center justify-between font-sans text-[10px]">
-                    <span className="font-semibold text-slate-800 tabular-nums">{opp.net_apr_pct.toFixed(1)}% APR</span>
-                    {lastExecuted === opp.id ? (
-                      <span className="inline-flex items-center px-1.5 py-0.5 rounded-md bg-profit-dim text-profit text-[10px] font-semibold">
-                        Active
-                      </span>
-                    ) : (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleExecute(opp);
-                        }}
-                        disabled={executingId === opp.id}
-                        className="btn-primary !text-[10px] !py-2 !px-2 font-sans cursor-pointer"
-                      >
-                        <span>{executingId === opp.id ? "Opening..." : "Open Carry"}</span>
-                      </button>
-                    )}
+                    <span className="font-semibold text-slate-500 tabular-nums" title="Compounded annual yield">
+                      {opp.net_apy_pct.toFixed(1)}% APY
+                    </span>
+                    <span onClick={(e) => e.stopPropagation()}>
+                      <ExecuteButton
+                        executed={lastExecuted === opp.id}
+                        executing={executingId === opp.id}
+                        onClick={() => handleExecute(opp)}
+                        title="execute carry trade"
+                        className="!text-[10px] !py-2 !px-2 cursor-pointer"
+                      />
+                    </span>
                   </div>
                 </div>
               ))}

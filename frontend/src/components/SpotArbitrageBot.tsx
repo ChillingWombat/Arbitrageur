@@ -12,6 +12,7 @@ import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from 
 import type { SpotStrategyParams } from "./TickerConfigModal";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
+import { ExecuteButton } from "./ExecuteButton";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface SpotArbitrageBotProps {
@@ -519,18 +520,12 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                   </div>
                 )}
 
-                <button
+                <ExecuteButton
                   onClick={handleDeployBot}
-                  disabled={botStatus === "verifying" || botStatus === "dispatching"}
-                  className="btn-primary w-full !py-2.5 font-mono text-xs font-bold transition flex items-center justify-center space-x-2 disabled:opacity-50"
-                >
-                  <Zap className="w-4 h-4" />
-                  <span>
-                    {botStatus === "verifying" || botStatus === "dispatching"
-                      ? "Executing Bot..."
-                      : "Deploy Execution Bot (Atomic Fill)"}
-                  </span>
-                </button>
+                  executing={botStatus === "verifying" || botStatus === "dispatching"}
+                  title="dispatch atomic dual-leg orders"
+                  className="w-full !py-2.5 text-xs"
+                />
               </div>
             ) : (
               <EmptyState

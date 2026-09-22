@@ -44,6 +44,7 @@ import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerTelemetryGadget } from "./TickerTelemetryGadget";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
+import { ExecuteButton } from "./ExecuteButton";
 import { SignalTrendGadget } from "./SignalTrendGadget";
 import { TickerConfigModal } from "./TickerConfigModal";
 import { EmptyState } from "./EmptyState";
@@ -216,18 +217,12 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
           {formatCurrencyPnl(opp.estimated_profit_usd)}
         </td>
         <td className="py-2.5 px-3 text-right">
-          <button
+          <ExecuteButton
             onClick={() => onExecute(opp)}
             disabled={disabled}
             title={title}
-            className={`px-2 py-2 rounded-lg text-xs font-mono font-medium transition shadow-2xs ${
-              isExec && !blocked && entriesOpen
-                ? "bg-accent hover:bg-accent-hover text-white cursor-pointer"
-                : "bg-surface-raised text-slate-400 cursor-not-allowed border border-surface-border"
-            }`}
-          >
-            Execute
-          </button>
+            className="px-2 py-2 text-xs shadow-2xs"
+          />
         </td>
       </tr>
     );
