@@ -168,7 +168,11 @@ pub fn compute_deviation_series(
             } else {
                 median(&mut deltas)
             };
-            ((cadence_ms * 2.5) as i64).clamp(stale_ms, MAX_CARRY_MS)
+            // The 5min cap exists to bound carries at FINE buckets; when
+            // buckets are so coarse that stale_ms itself exceeds it (e.g.
+            // multi-day windows with >75s buckets), the floor is the
+            // intended bound — never clamp with min > max (panics).
+            ((cadence_ms * 2.5) as i64).clamp(stale_ms, stale_ms.max(MAX_CARRY_MS))
         })
         .collect();
 
@@ -415,6 +419,27 @@ mod tests {
             series.dev_bps[i][idx_b].is_some(),
             "b's standing quote must carry its own ~60s cadence"
         );
+    }
+
+    #[test]
+    fn coarse_buckets_never_panic_clamp() {
+        // Multi-day windows produce bucket_ms > 75s -> stale floor
+        // (4×bucket) exceeds the 5min carry cap. The clamp must widen
+        // the cap to the floor rather than panic on min > max.
+        let mut samples = Vec::new();
+        for t in (0..=600_000i64).step_by(60_000) {
+            samples.push(s(t, "a", 100.0));
+            samples.push(s(t, "b", 100.1));
+        }
+        // bucket_ms = 120s -> stale_ms = 480s > MAX_CARRY_MS (300s).
+        let series = compute_deviation_series(
+            &samples,
+            &HashMap::new(),
+            BaselineMode::Consensus,
+            120_000,
+            100,
+        );
+        assert!(!series.ts_ms.is_empty());
     }
 
     #[test]
