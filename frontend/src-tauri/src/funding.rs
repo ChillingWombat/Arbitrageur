@@ -171,10 +171,44 @@ pub struct FundingOpportunityDto {
     /// purely through the entry cross. Empty when either book is missing.
     #[serde(default)]
     pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
+    /// Profit-maximizing size (USD): depth where the marginal unit's net
+    /// turns non-positive — beyond it every added dollar shrinks total
+    /// profit. `None` when no book depth exists.
+    #[serde(default)]
+    pub optimal_capacity_usd: Option<f64>,
+    /// Largest still-profitable size (USD): depth where the whole
+    /// position's cumulative net crosses zero. `None` when no book depth
+    /// exists.
+    #[serde(default)]
+    pub max_capacity_usd: Option<f64>,
 }
 
 fn default_funding_opp_kind() -> String {
     "carry".to_string()
+}
+
+/// Capacity bounds from a depth curve: `(optimal, maximum)` USD.
+/// Optimal = deepest point whose marginal net is still positive (the
+/// profit peak — deeper sizing only shrinks the total). Maximum =
+/// deepest point while the whole position's cumulative net stays
+/// positive (the breakeven bound). Marginal cost is monotone worsening
+/// in depth, so `take_while` lands on the true boundaries; an empty or
+/// instantly-unprofitable curve yields `None`.
+fn capacity_bounds(curve: &[crate::monitor::DepthCurvePointDto]) -> (Option<f64>, Option<f64>) {
+    if curve.is_empty() {
+        return (None, None);
+    }
+    let optimal = curve
+        .iter()
+        .take_while(|p| p.marg_net_bps > 0.0)
+        .map(|p| p.cum_usd)
+        .last();
+    let maximum = curve
+        .iter()
+        .take_while(|p| p.cum_net_bps > 0.0)
+        .map(|p| p.cum_usd)
+        .last();
+    (optimal, maximum)
 }
 
 /// Deterministic carry income per unit over the modelled hold, bps.
@@ -637,6 +671,7 @@ async fn scan_funding_opportunities_for_symbol(
                     }
                     _ => Vec::new(),
                 };
+                let (optimal_capacity_usd, max_capacity_usd) = capacity_bounds(&depth_curve);
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -697,6 +732,8 @@ async fn scan_funding_opportunities_for_symbol(
                     hold_confidence: hold_estimate.as_ref().map(|h| h.confidence),
                     expected_return_usd,
                     depth_curve,
+                    optimal_capacity_usd,
+                    max_capacity_usd,
                     backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
                     backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
                     backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),
@@ -972,6 +1009,7 @@ async fn scan_funding_opportunities_for_symbol(
                             .collect(),
                             None => Vec::new(),
                         };
+                    let (optimal_capacity_usd, max_capacity_usd) = capacity_bounds(&depth_curve);
                     opps.push(FundingOpportunityDto {
                         id: format!("{symbol}-{venue_label}-BASIS"),
                         symbol: symbol.to_string(),
@@ -1052,6 +1090,8 @@ async fn scan_funding_opportunities_for_symbol(
                         hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
                         expected_return_usd,
                         depth_curve,
+                        optimal_capacity_usd,
+                        max_capacity_usd,
                         backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
                         backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
                         backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),

@@ -526,6 +526,12 @@ export interface FundingOpportunityDto {
    * missing. Income is depth-invariant; the curve degrades through the
    * entry cross only. (snake_case field, camelCase point fields.) */
   depth_curve?: DepthCurvePointDto[];
+  /** Profit-maximizing size in USD — depth where marginal net turns
+   * non-positive. Absent when no live book depth exists. */
+  optimal_capacity_usd?: number;
+  /** Largest still-profitable size in USD — cumulative net breakeven
+   * bound. Absent when no live book depth exists. */
+  max_capacity_usd?: number;
 }
 
 export interface FundingTrendPointDto {
