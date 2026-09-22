@@ -2695,6 +2695,9 @@ pub struct SignalSeriesDto {
     pub venues: Vec<String>,
     /// venue_id -> display name for legend labels.
     pub venue_names: HashMap<String, String>,
+    /// venue_id -> timestamp (epoch ms) of that venue's newest raw sample in
+    /// the fetched range — lets the legend badge stale/cold lanes honestly.
+    pub venue_last_ts_ms: HashMap<String, i64>,
     pub dev_bps: Vec<Vec<Option<f64>>>,
     /// Max/min deviation across venues present in each bucket; their
     /// difference is the gross pairwise spread.
@@ -2736,6 +2739,7 @@ pub async fn get_signal_series_impl(
 
     let mut samples = Vec::with_capacity(raw.len());
     let mut sample_count = 0u64;
+    let mut venue_last_ts_ms: HashMap<String, i64> = HashMap::new();
     for row in &raw {
         samples.push(MidSample {
             ts_ms: row.ts_ms,
@@ -2743,6 +2747,12 @@ pub async fn get_signal_series_impl(
             mid: row.mid,
         });
         sample_count += 1;
+        let e = venue_last_ts_ms
+            .entry(row.venue_id.clone())
+            .or_insert(row.ts_ms);
+        if row.ts_ms > *e {
+            *e = row.ts_ms;
+        }
     }
 
     // Volume weights: venue_id -> this asset's reported 24h notional USD.
@@ -2780,6 +2790,7 @@ pub async fn get_signal_series_impl(
         ts_ms: series.ts_ms,
         venues: series.venues,
         venue_names,
+        venue_last_ts_ms,
         dev_bps: series.dev_bps,
         band_max_bps: series.band_max_bps,
         band_min_bps: series.band_min_bps,
