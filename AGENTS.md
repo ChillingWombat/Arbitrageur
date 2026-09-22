@@ -37,4 +37,6 @@
 
 - Frontend tests: `cd frontend && npm test` (node --test + scripts/test-components.mjs). NOT vitest.
 - Backend: `cargo test -p arbitrageur-desktop`, `cargo clippy`, `cargo fmt --check`.
-- Release binary: `cargo build --release --bin arbitrageur-desktop`; restart via `setsid nohup`.
+- Release binary: `cargo build --release --bin arbitrageur-desktop --features custom-protocol`; restart via `setsid nohup`.
+  Without `custom-protocol`, Tauri compiles a dev-mode binary whose webview loads
+  `devUrl` (localhost:1420) → "Could not connect to localhost" unless vite is running.
