@@ -114,9 +114,9 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   decibel: [
     {
       key: "walletAddress",
-      label: "Login Wallet Address (Aptos)",
+      label: "Login Wallet Address",
       placeholder: "0x...",
-      hint: "Your Aptos account / wallet address.",
+      hint: "The wallet you connect at app.decibel.trade — Aptos account, or EVM/Sui/Solana wallet (its Aptos account is derived automatically).",
     },
     {
       key: "privateKey",
@@ -382,6 +382,7 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   ibkr: "ibkr_enabled",
   ig: "ig_enabled",
   kalshi: "kalshi_enabled",
+  kraken: "kraken_enabled",
   kraken_futures: "kraken_futures_enabled",
   kraken_spot: "kraken_spot_enabled",
   lighter: "lighter_enabled",
@@ -1614,7 +1615,11 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               Cancel
             </button>
           )}
-          {onFallbackChange && (
+          {/* The fallback venue-flag toggle only exists where the venue has
+              an engine-settings flag — flag-less venues (long-tail perps,
+              EVM AMMs) admit purely via an enabled account, so the toggle
+              would be a dead control. */}
+          {onFallbackChange && VENUE_SETTINGS_FLAG[venue] !== undefined && (
             <ToggleSwitch
               size="sm"
               checked={fallbackEnabled ?? true}
@@ -1725,6 +1730,14 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
       {loadError && (
         <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
           {loadError}
+        </div>
+      )}
+
+      {accounts === null && !loadError && (
+        <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs animate-pulse">
+          <div className="h-4 w-40 rounded bg-slate-100" />
+          <div className="h-9 w-full rounded-lg bg-slate-100" />
+          <div className="h-9 w-full rounded-lg bg-slate-100" />
         </div>
       )}
 
@@ -2058,8 +2071,12 @@ export const VenueAccountToggle: React.FC<{
   const toggleRequiredFilled =
     !account ||
     toggleFields.every((f) => f.optional || fieldIsSet(account, f.key));
+  // Flag-less venues (long-tail perps, EVM AMMs) admit purely via an
+  // enabled account — with no account there is nothing to switch, so the
+  // toggle stays inert with an explanation rather than silently no-op.
+  const flaglessNoAccount = !account && VENUE_SETTINGS_FLAG[venue] === undefined;
   const toggleDisabled =
-    busy || locked || (!enabled && !toggleRequiredFilled);
+    busy || locked || flaglessNoAccount || (!enabled && !toggleRequiredFilled);
 
   return (
     <ToggleSwitch
@@ -2068,9 +2085,11 @@ export const VenueAccountToggle: React.FC<{
       disabled={toggleDisabled}
       ariaLabel={`${venueDisplay(venue)} enabled`}
       title={
-        !enabled && !toggleRequiredFilled
-          ? "Fill required credential fields to enable"
-          : `${venueDisplay(venue)} enabled`
+        flaglessNoAccount
+          ? "This venue is enabled by adding an account — it has no settings flag"
+          : !enabled && !toggleRequiredFilled
+            ? "Fill required credential fields to enable"
+            : `${venueDisplay(venue)} enabled`
       }
       onChange={() => {
         const next = !enabled;
