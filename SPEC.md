@@ -103,7 +103,7 @@ A modular, high-performance cross-market arbitrage engine and desktop terminal b
     - **2026-09-20 status:** superseded by the encrypted vault design. Credentials now live in `~/.arbitrageur/vault.enc` (AES-256-GCM + Argon2id); reveal is field-scoped only and no whole-account credential-read IPC is registered.
 
 #### Multi-Ticker Funding Rate Arbitrage Monitor
-39. As a quantitative carry trader, I want the Funding Rate tab to continuously monitor and rank delta-neutral carry opportunities across all shared, non-hidden tickers simultaneously, rather than being locked to the single spread strategy's active ticker.
+39. As a quantitative carry trader, I want the Funding Rate tab to continuously monitor and rank delta-neutral carry opportunities across all shared, non-hidden tickers simultaneously, rather than being locked to the Simple Spread strategy's active ticker.
 40. As an operator, I want each ranked opportunity card to clearly display its contract symbol (e.g. `[BTC-USDC]`, `[ETH-USDC]`), so that I know exactly which instrument is targeted.
 41. As a trader, I want in-tab asset filter pills (`ALL`, `BTC`, `ETH`, `SOL`, etc.) above the carry cards, so that I can focus on opportunities for a specific asset with one click.
 42. As a carry trader, I want clicking any opportunity card to select and project it in the Carry Yield Amortization Simulator, so that I can visualize break-even hours, trading fees, and projected net carry over 1 to 90 days.
@@ -186,7 +186,7 @@ pub struct TickerStrategyConfigDto {
 4. **App Termination**: A `beforeunload` event handler invokes `api.lockVault()` synchronously or via fire-and-forget, guaranteeing that memory is wiped when the process ends.
 
 #### Multi-Ticker Funding Rate Radar & Execution Engine
-1. **Decoupled Architecture**: `FundingRadar.tsx` does not bind to the single spread strategy's `selectedSymbol`. Instead, it accepts `availableTickers` and periodically scans all shared non-hidden tickers simultaneously.
+1. **Decoupled Architecture**: `FundingRadar.tsx` does not bind to the Simple Spread strategy's `selectedSymbol`. Instead, it accepts `availableTickers` and periodically scans all shared non-hidden tickers simultaneously.
 2. **Batch IPC Scanning**:
    - `scan_funding_opportunities` accepts `symbol: Option<String>`, `symbols: Option<Vec<String>>`, and `trade_size_usd: f64`.
    - `scan_funding_opportunities_batch_impl` iterates across target tickers, queries cached funding rates from `MarketDataHub`, aggregates cross-venue carry permutations via `evaluate_funding_carry`, and sorts descending by `net_apy_pct`.
@@ -269,6 +269,17 @@ pub struct TickerStrategyConfigDto {
    - **Endpoint overrides wired**: Engine Settings → Network & VPS URL fields were round-tripped through the UI but never reached adapter constructors. They now persist under `endpoints.*` kv keys (only non-default values — UI display-prefills differ from adapter base paths, so persisting unconditionally would silently rewrite every endpoint on any unrelated Save), restore at boot, and feed `HyperliquidAdapter`/`LighterAdapter`/`VantaAdapter`/`ArcusAdapter`/`KrakenAdapter`/`PolymarketAdapter`/`KalshiAdapter`/`PopDexAdapter` construction. Adapters build once at startup — an edited endpoint applies on the NEXT app start. `robinhood_rpc_url` is intentionally unwired: it is a chain RPC endpoint (`rpc.robinhood.network`), not the Lighter-protocol REST base the Robinhood adapter consumes, and no code path reads a chain RPC today.
    - **Lighter submit truthfulness**: `LighterAdapter::place_order` returns `status=New, filled_qty=0` unconditionally after `sendTx` accept — Lighter's submit response carries only a tx hash, so a fill that lands at commit reports zero-fill. This is why the first canary's filled leg was recorded empty (the real 0.005 ETH long orphaned on venue until closed externally). Mitigated by the `UnresolvedExposure` path above: every `New` response now enters order-id-persisted polling where `fetch_order` discovers the true fill.
    - **Hub symbol-key normalization (2026-09-21 follow-up)**: the market-data hub exact-matched `(venue, symbol)` while WS lanes publish bare bases (`ETH`) and account/execution readers ask canonical (`ETH-USDC`) — every WS-fed book was invisible to canonical readers, so reads fell to REST (extra Lighter edge pressure) and the external-position close path could not find a live book at all. `MarketDataHub` now keys on `normalize_symbol_key` (uppercase base, quote/class suffixes stripped, `-SPOT` preserved, index aliases folded) at every boundary; `validate_adapter_book`/`validate_monitor_book`/`validate_feed_book` compare canonical bases. The close path additionally falls back to a one-shot adapter REST fetch (seeded into the hub) and reports the real failure reason when nothing is fresh. `feed.rs` gained `info`-level lane lifecycle logging plus a 10s `ws_connect` timeout (a stalled upgrade previously wedged a lane forever, silently). DeltaGuard's status column is now three-state: `Delta Neutral` only when net qty is ~zero, `Residual` for nonzero exposure within tolerance, `Exposure Skew` over the limit.
+15. **UI consistency & capacity instrumentation pass (2026-09-22)**:
+   - **Strategy rename**: the `futures` strategy's display name is **Simple Spread** (was "Single Spread") — nav tab, configurator, log monitor label, `STRATEGY_DISPLAY_NAMES`. The persisted strategy id stays `"futures"`; nothing keys on the label.
+   - **Opportunity history (durable)**: the monitor engine has always persisted every detected signal to `monitor_signal_events` (status transitions + minute-bucketed heartbeats with edge/dev bps, p_win, economics snapshot, trigger). `get_monitor_signal_events` IPC + the new **Opportunities** tab in the Simple Spread bottom dock (Execution History / Opportunities / Log Monitor) expose it — per-ticker by default with an all-tickers toggle and a "Detected only" lifecycle filter. `recent_monitor_signal_events` resolves `spread_symbol_aliases`, so `BTC-USDC` queries match canonical `BTC` rows.
+   - **Ticker selector "Running" tag**: rows show a green pulsing `Running` badge after the PERP tag when `tickerBotStatus(symbol) === "running"` — driven by the shared bot-phase registry, updates live.
+   - **Shared action components**: `SaveButton` (+`useSaveButton`) renders the one save lifecycle everywhere — `Save Changes` → `Saving…` → `Saved!`/`Failed!` — across Engine Settings, radar config, ticker configurator, and both ExchangeAccounts cards (the latter keeps saved-until-dirty). `ExecuteButton` renders the one entry action — `Execute` → `Executing…` → `Executed` — across funding cards/modal, radar rows, parity cards, triangle modal, spatial rows, and the spot-bot deploy. Failure states are visible everywhere now (ExchangeAccounts previously had none).
+   - **Venue logos**: `VenueLogo` round brand marks (`public/logos/{venue}.png`, initials-badge fallback) now precede venue names on funding cards, both detail modals, chart legends, position legs, and the radar route cell.
+   - **Funding card headline**: net **APR** is the top-right headline figure (was compounded APY); APY moved to the secondary bottom slot next to the Execute button.
+   - **Capacity instrumentation (spread radar detail)**: `CapacityReport` gains `expected_capacity_usd` — Σ `notional × P(win)` over book levels whose marginal expected net (`p·dev⁺ − friction`) is positive — and `bps_capacity_ladder` — fillable USD while marginal expected net ≥ {10,5,2,1,0.5} bps floors (`BPS_CAPACITY_LEVELS`). The modal's Capacity section shows both as inverse views: "Depth → expected net" (USD tiers) and "Net floor → capacity" (bps floors). Both are `None`/empty without a win-rate curve — never fabricated.
+   - **Detail-modal grouping**: radar SignalDetailModal and funding detail modal group metrics into labeled sections (Spread state / Outcome evidence / Sizing & PnL / Capacity) with `?` InfoTooltip explanations on complex metrics (CI bounds, deciles, censored counts preserved in tooltip text).
+   - **Feed reliability**: WS lanes subscribe **venue-native** symbols (`venue_symbol`), not canonicalized names — Hyperliquid RSTs the whole connection on an unlisted-coin sub (`kPEPE`→`KPEPE` was the multi-day "fingerprinting" red herring). Per-venue REST book-fetch concurrency capped at 4 (HL edge is HTTP/1.1-only: no ALPN → one TCP conn per in-flight request). Vanta uses Orderly's application-level `{"event":"ping"}` every 20s; protocol pings don't count.
+   - **Build requirement**: release binaries need `cargo build --release --features custom-protocol` (or `npx tauri build`) — without it `tauri-build` emits `cfg(dev)` and the webview loads `devUrl` instead of the bundled dist (backend still runs — the deceptive failure mode that hid this for weeks).
 14. **External-close popup rework (2026-09-21)** — the External Positions close dialog is now a single fixed layout with one action button: the mode switch (`Auto Limit`/`Limit`/`Market`), `LIMIT PRICE`, and `CLOSE %` always render in the same slots (inputs disable rather than unmount, so nothing reflows between modes); the taker fee is no longer hand-entered — `recommend_external_close` derives it server-side via `effective_venue_fee_bps` (per-venue table + Lighter/Robinhood plus-tier), the same source strategy economics use. Scheduling is an opt-in `SCHEDULE AT` checkbox with a `datetime-local` input plus `+15m`/`+1h`/`next :00` presets; when armed, the single **Close Positions** button persists the one-shot exit (same mode/pct/limit, fresh account read at fire) instead of dispatching — no separate Schedule button, and Close % applies to scheduled exits too.
 13. **Configurator consistency & modularity pass (2026-09-21)** — repository-wide audit of every config surface (StrategyParamsDto, EngineSettingsDto, MonitorConfigDto, ticker modal, popup controls) for naming drift and duplicated methods:
    - **Shared modules extracted**: symbol normalization (`canonical_base`/`canonical_index_alias`) moved to `arbitrageur_core::symbol` — one implementation behind the market-data hub, monitor lanes, spread-sample store, and execution readers (re-exported through `state_store` so call sites are unchanged). Decimal conversion helpers (`dec_opt_f64`/`dec_f64`/`f64_dec`) consolidated into `crate::num` — previously re-implemented in commands/monitor/external_positions.
@@ -813,6 +824,8 @@ pub struct MonitorRowDto {
     pub optimal_size_usd: Option<f64>,     // argmax expected USD (capped)
     pub breakeven_size_usd: Option<f64>,   // largest size: E>0 ∧ marginal p ≥ p_min
     pub capacity_ladder: Vec<CapacityTierDto>, // {sizeUsd,filledUsd,netBps,expectedNetBps,marginalPWin}
+    pub expected_capacity_usd: Option<f64>,    // Σ notional·p_win over levels with marginal E[net]>0
+    pub bps_capacity_ladder: Vec<BpsCapacityTierDto>, // {minNetBps,capacityUsd} — fillable USD per marginal-E floor
     pub funding_carry_bps: Option<f64>,    // signed; null => funding_unknown
     pub funding_unknown: bool,
     pub first_seen_ms: Option<i64>,        // signal discovery (durable)
@@ -831,19 +844,24 @@ pub struct MonitorRowDto {
 `OpportunityRadar.tsx` mounts under `activeTab === "radar"`: self-polls
 `get_monitor_snapshot` every 5s while mounted; filter bar (ticker search,
 buy/sell venue selects, min-E[bps], min-P%); status chips with
-qualification-progress % on `collecting`; per-row expandable capacity
-ladder (mini bar chart over tiers + optimal/breakeven callouts); per-row
-size input + Execute button (disabled with `blockReason` tooltip).
-A config drawer edits every `MonitorConfigDto` knob. Missing values render
-as "—", funding-unknown as "?".
+qualification-progress % on `collecting`; per-row size input + shared
+`ExecuteButton` (disabled with `blockReason` tooltip). Clicking a row opens
+the sectioned detail modal (Spread state / Outcome evidence / Sizing & PnL /
+Capacity — `?` InfoTooltips on complex metrics) which carries the capacity
+ladders: "Depth → expected net" (USD tiers) beside "Net floor → capacity"
+(bps floors), plus the `expected_capacity_usd` headline. A config drawer
+edits every `MonitorConfigDto` knob. Missing values render as "—",
+funding-unknown as "?".
 
 **Capacity column** — the profit-vs-size curve, shown intuitively:
 
 - Cell headline: `net_bps@optimal` over `optimal_size` (e.g. `9.1bp / $25k`),
   with `breakeven_size` as a subtle sub-line (`max $84k`).
-- Hover/expand reveals the full ladder as a compact tier table or mini
-  bar-chart (`$10k→12.4 · $25k→9.1 · $50k→4.7 · $100k→−1.2`) — the decaying
-  bars make "profit shrinks as you size up" legible at a glance.
+- The detail modal's **Capacity** section shows the full ladder as mini
+  bar-chart (`$10k→12.4 · $25k→9.1 · $50k→4.7 · $100k→−1.2`) beside the
+  inverse **Net floor → capacity** view (`≥10bps→$3.4k · ≥5bps→$8k …`) and
+  the `expected_capacity_usd` headline — the decaying bars make "profit
+  shrinks as you size up" legible at a glance.
 - **Funding** shown as a signed chip on the expected-return cell
   (`carry −2.3bp`) — visually distinguished when positive (carry works for
   us) vs negative (drag); `funding_unknown` rows show a `?` marker so the
@@ -864,7 +882,11 @@ unrankable.
   `execute_spatial_arbitrage_impl`.
 - `monitor_signals` (lifecycle persistence: status + first/last-seen +
   last edge/dev per pair) landed with v1 so discovery/duration survive
-  restarts; a signal-event audit log still lands with the bot.
+  restarts; the `monitor_signal_events` audit log (status transitions +
+  minute-bucketed heartbeats, edge/dev/p_win/economics/trigger per row)
+  landed later and feeds the Simple Spread page's **Opportunities** dock
+  tab via `get_monitor_signal_events` (symbol + venue-pair filters,
+  newest-first, ≤10k rows).
 
 ---
 

@@ -2308,3 +2308,51 @@ clippy+fmt clean, app restarted on the new binary.
 ## Radar signal-detail modal: sections + tooltips (05c5433)
 
 - `OpportunityRadar.tsx`: flat 16-field grid -> **Spread state / Outcome evidence / Sizing & PnL** sections via `DetailSection`; complex metrics get `?` (existing `InfoTooltip`) with explanations; capacity ladder unchanged.
+
+## UI consistency + capacity instrumentation batch (2026-09-22, commits 2ce9ee2 → b54e201)
+
+### Funding/position detail graphs (2ce9ee2)
+
+- `FundingTrendGraph`: rounded joins/caps, real y-axis (nice-rounded ticks + gridlines), right-side price axis, "now" divider + shaded projection zone, labeled min-APR exit line, endpoint value labels with collision nudge. Projection drawn only from backend `expectedNetUsd` — no fabricated forecast.
+- Position PnL chart: area fill + now-divider + projected-endpoint dotted segment.
+
+### Venue logos (bdda43b)
+
+- Existing `VenueLogo` (`public/logos/{venue}.png`, deterministic initials-badge fallback) wired in front of venue names on: funding cards, carry/radar detail modal headers + leg fields, chart legend, position legs, radar route cells. New venues just need a PNG dropped in `public/logos/`.
+
+### Vault button hoist (4b0cab9)
+
+- Unlock/Lock Vault portals into the System Settings header (left of ✕) via `headerActionsEl` passed to `EngineSettings`. Now visible on every settings tab — vault state is global. `headerActionsEl` added to the memo comparator (portal target mounts on second render — without it the portal never mounts).
+
+### Simple Spread + opportunity history + Running tag (b8ef764)
+
+- `futures` display name → **Simple Spread** everywhere user-visible; persisted id unchanged.
+- New `TickerOpportunityHistory` gadget: **Opportunities** tab in the bottom dock (Execution History / Opportunities / Log Monitor), consuming the pre-existing `monitor_signal_events` table via `get_monitor_signal_events` (was registered but unconsumed — 675k rows already persisted). 5s poll, per-ticker default + all-tickers toggle, "Detected only" lifecycle filter, search, newest-first.
+- **Bug found**: `recent_monitor_signal_events` symbol filter didn't resolve `spread_symbol_aliases` — `BTC-USDC` queries matched nothing against canonical `BTC` rows. Fixed + regression test.
+- Ticker selector: pulsing **Running** badge after the PERP tag when `tickerBotStatus(symbol) === "running"` (shared bot-phase registry, live-reactive).
+
+### Shared action buttons (478e06a, 6d6b45f)
+
+- `SaveButton` + `useSaveButton` hook: `Save Changes` → `Saving…` → `Saved!`/`Failed!`. All five save sites converted (Engine Settings, radar config, ticker configurator, ExchangeAccounts ×2 — the latter keeps saved-until-dirty via `persistSaved`). Save handlers must **rethrow** after setting error text or the button shows a false success.
+- `ExecuteButton`: `Execute` → `Executing…` → `Executed`. Replaced "Open Carry", "Exec", "Execute Parity", "Fill Cycle", "Deploy Execution Bot" across FundingRadar (×2), OpportunityRadar (×3 incl. modal footer), PredictionHub, TriangularArbitrage, LiveMatrix spatial row, SpotArbitrageBot. Clickable-card sites need `stopPropagation` wrapper.
+- Funding card headline: **net APR** top-right (was compounded APY); APY demoted to secondary bottom slot.
+- Radar rows: decorative `>` chevron column removed (row itself is clickable).
+
+### Capacity depth profile + expected capacity (b54e201)
+
+- `pair_monitor::capacity_ladder` now also emits, per `CapacityReport`:
+  - `expected_capacity_usd` — Σ `notional·p_win` over book levels where marginal expected net (`p·dev⁺ − friction`) > 0. The probability-weighted capacity of the whole opportunity (prices the entire visible book, unlike optimal size).
+  - `bps_capacity_ladder` — fillable USD while marginal expected net ≥ each `BPS_CAPACITY_LEVELS` floor {10,5,2,1,0.5} bps.
+  - Both `None`/empty without a p-win curve — fail-honest.
+- `MonitorRowDto`: `expectedCapacityUsd`, `bpsCapacityLadder`. Modal Capacity section: expected capacity + optimal/breakeven (moved from Sizing & PnL) + dual ladders ("Depth → expected net" USD view vs "Net floor → capacity" bps view).
+- 3 new math tests pin the weighting/summation/no-curve behavior.
+
+### Verification
+
+- 372 desktop + 118 math + 210 frontend tests; clippy/fmt clean; release builds with `--features custom-protocol`; all commits pushed to main.
+
+### Pickup notes
+
+- The opportunities gadget is ticker-scoped by default because the dock lives inside the ticker page; the backend already supports `symbol: null` for a strategy-wide view (the UI toggle uses it).
+- `monitor_signal_events` grows unboundedly (minute heartbeats per live pair) — a retention pass may be worth adding if DB size becomes an issue.
+- Spot bot deploy is now labeled "Execute" like everything else — its semantics (atomic dual-leg dispatch) are unchanged, but if a persistent-bot mode is ever added the label distinction should return.
