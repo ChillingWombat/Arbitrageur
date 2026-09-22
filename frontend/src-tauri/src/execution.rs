@@ -1602,10 +1602,10 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
 
     // Feed observed equity into the breaker, then re-read its state so a
-    // drawdown trip is reflected in this same snapshot. A paper<->live
+    // drawdown trip is reflected in this same snapshot. A testnet<->live
     // universe switch is NOT a loss: re-anchor the baseline instead of
-    // tripping (fixes the recurring false halt where a $200k paper baseline
-    // vs ~$3.5k live funds reads as a -$196k "drawdown" on a flat book).
+    // tripping (the two envs hold separate credential sets and separate
+    // account equities, so cross-env equity deltas are never real losses).
     {
         let mut universe = state.last_risk_live_universe.write();
         if *universe != Some(is_live) {

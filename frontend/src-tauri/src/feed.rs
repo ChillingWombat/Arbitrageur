@@ -5,11 +5,11 @@ use std::time::Duration;
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{Decimal, VenueId};
 use arbitrageur_exchanges::ws::{
-    apply_lighter_delta, hyperliquid_subscribe_message, lighter_book_from_sides,
-    lighter_default_market_symbol_map, lighter_delta_continuous, lighter_market_symbol_map,
-    lighter_subscribe_message, lighter_ws_url, parse_hyperliquid_l2book_data, parse_lighter_delta,
-    parse_lighter_snapshot_book, parse_vanta_ws_book, vanta_subscribe_topic, vanta_ws_url,
-    HYPERLIQUID_WS_URL, LIGHTER_KEEPALIVE_SECS,
+    apply_lighter_delta, hyperliquid_subscribe_message, hyperliquid_ws_url,
+    lighter_book_from_sides, lighter_default_market_symbol_map, lighter_delta_continuous,
+    lighter_market_symbol_map, lighter_subscribe_message, lighter_ws_url,
+    parse_hyperliquid_l2book_data, parse_lighter_delta, parse_lighter_snapshot_book,
+    parse_vanta_ws_book, vanta_subscribe_topic, vanta_ws_url, LIGHTER_KEEPALIVE_SECS,
 };
 use chrono::Utc;
 use futures::{Sink, SinkExt, StreamExt};
@@ -72,20 +72,12 @@ async fn ws_connect(
 }
 
 fn venue_ws_enabled(state: &AppEngineState, venue: &str) -> bool {
-    let flag = {
-        let s = state.settings.read();
-        match venue {
-            "hyperliquid" => s.hyperliquid_enabled,
-            "lighter" => s.lighter_enabled,
-            "robinhood" => s.robinhood_enabled,
-            "vanta" => s.vanta_enabled,
-            _ => false,
-        }
-    };
-    flag || state
-        .state_store
-        .has_enabled_account(venue, state.env().as_str())
-        .unwrap_or(false)
+    // An admitted env-scoped adapter is the definitive "venue is on" check:
+    // it folds in the engine flag OR an enabled account, AND refuses venues
+    // the active environment does not support (e.g. Robinhood under
+    // Testnet — feeding mainnet books into a testnet session would poison
+    // the hub with prices the env's adapters cannot trade on).
+    state.get_adapter(venue).is_some()
 }
 
 async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
@@ -274,7 +266,15 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     if coin_map.is_empty() {
         anyhow::bail!("hyperliquid lists no subscribable markets");
     }
-    let ws = ws_connect(HYPERLIQUID_WS_URL)
+    // Derive the WS endpoint from the admitted adapter's REST base so a
+    // testnet adapter connects to the testnet socket — connecting mainnet
+    // while orders route to testnet would poison the hub cross-env.
+    let ws_url = hyperliquid_ws_url(
+        &adapter
+            .rest_base_url()
+            .unwrap_or_else(|| "https://api.hyperliquid.xyz".to_string()),
+    )?;
+    let ws = ws_connect(&ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("ws_connect: {e}"))?;
     {
@@ -355,9 +355,17 @@ struct LighterLaneBook {
 async fn run_lighter_protocol(
     state: &AppEngineState,
     venue: &'static str,
-    base_url: &str,
+    fallback_base_url: &str,
 ) -> anyhow::Result<FeedOutcome> {
     let venue_id = VenueId::new(venue);
+    // The admitted adapter's own base URL is authoritative — under Testnet
+    // the `tn_*` adapter points at the venue's demo host and the feed must
+    // follow it, otherwise the hub mixes mainnet books with testnet orders.
+    let base_url = state
+        .get_adapter(venue)
+        .and_then(|a| a.rest_base_url())
+        .unwrap_or_else(|| fallback_base_url.to_string());
+    let base_url = base_url.as_str();
     let ws_url = lighter_ws_url(base_url)?;
     let trimmed = base_url.trim().trim_end_matches('/');
     let client = {
@@ -514,29 +522,29 @@ where
 }
 
 async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
+    let venue_id = VenueId::new("vanta");
+    let adapter = state
+        .get_adapter("vanta")
+        .ok_or_else(|| anyhow::anyhow!("vanta is not admitted; skipping WS lane"))?;
     // The Orderly account_id provisioned into the adapter from vault
     // credentials is authoritative; the settings field is a legacy override.
-    let account_id: Option<String> = state
-        .get_adapter("vanta")
-        .and_then(|a| a.ws_account_id())
-        .or_else(|| {
-            let s = state.settings.read().vanta_account_id.trim().to_string();
-            (!s.is_empty()).then_some(s)
-        });
+    let account_id: Option<String> = adapter.ws_account_id().or_else(|| {
+        let s = state.settings.read().vanta_account_id.trim().to_string();
+        (!s.is_empty()).then_some(s)
+    });
     // Orderly closes `/ws/stream/public` and unregistered account ids with a
     // 1000 right after upgrade — no account_id means this lane cannot run
-    // (REST polling still covers the venue).
-    let ws_url = match account_id.and_then(|id| vanta_ws_url(&id).ok()) {
+    // (REST polling still covers the venue). The WS host follows the
+    // adapter's REST base so testnet adapters reach the testnet stream.
+    let ws_url = match account_id
+        .and_then(|id| vanta_ws_url(&id, adapter.rest_base_url().as_deref()).ok())
+    {
         Some(url) => url,
         None => {
             tracing::info!("feed: vanta WS disabled: no registered Orderly account_id configured");
             return Ok(FeedOutcome::Disabled);
         }
     };
-    let venue_id = VenueId::new("vanta");
-    let adapter = state
-        .get_adapter("vanta")
-        .ok_or_else(|| anyhow::anyhow!("vanta is not admitted; skipping WS lane"))?;
     // Subscribe with the venue-native symbol (`venue_symbol`), not the
     // canonical base — canonicalization can produce names the venue does
     // not list, and Orderly-family edges close conns on invalid topics.

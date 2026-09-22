@@ -744,6 +744,10 @@ impl ExchangeAdapter for VantaAdapter {
         VantaAdapter::ws_account_id(self)
     }
 
+    fn rest_base_url(&self) -> Option<String> {
+        Some(self.base_url.clone())
+    }
+
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         let data = self
             .public_query(serde_json::json!({"type": "marketSummary"}))

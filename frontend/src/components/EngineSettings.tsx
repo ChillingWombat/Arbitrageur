@@ -257,7 +257,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [maxStorageGb, setMaxStorageGb] = useState("");
   const [storageStats, setStorageStats] = useState<StorageStatsDto | null>(null);
   const [tradingMode, setTradingMode] = useState<"testnet" | "live">("testnet");
-  const [paperStartingBalance, setPaperStartingBalance] = useState(100000);
 
   // Safety: overall circuit-breaker + safety-net limits
   const [cbMaxDdUsd, setCbMaxDdUsd] = useState(25000);
@@ -559,7 +558,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
 
         setTradingMode(s.trading_mode === "live" ? "live" : "testnet");
-        setPaperStartingBalance(s.paper_starting_balance_usd ?? 100000);
         setCbMaxDdUsd(s.cb_max_daily_drawdown_usd ?? 25000);
         setCbMaxDdPct(s.cb_max_daily_drawdown_pct ?? 5);
         setCbMaxErrors(s.cb_max_consecutive_errors ?? 5);
@@ -727,7 +725,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           engine_ws_port: 8789, // reserved — no desktop listener consumes it
           bind_address: "127.0.0.1", // reserved — no desktop listener consumes it
           trading_mode: tradingMode,
-          paper_starting_balance_usd: paperStartingBalance,
           fast_warmup_enabled: true, // reserved — warm-up reuse not implemented
           cb_max_daily_drawdown_usd: Number(cbMaxDdUsd) || 0,
           cb_max_daily_drawdown_pct: Number(cbMaxDdPct) || 0,

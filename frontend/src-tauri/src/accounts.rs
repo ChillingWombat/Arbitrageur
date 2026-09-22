@@ -53,6 +53,9 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
             .count();
         if ready_count >= 2 {
             *state.environment.write() = crate::state::TradingEnvironment::Live;
+            // Drop books cached under the previous env — cross-environment
+            // prices are never executable.
+            state.market_data_hub.clear();
         }
     }
     Ok(status)

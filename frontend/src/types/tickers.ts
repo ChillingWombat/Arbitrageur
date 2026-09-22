@@ -200,11 +200,13 @@ export function getEnabledConnectedVenueCodes(
   isLiveMode?: boolean
 ): Set<string> {
   const active = new Set<string>();
+  // Fail closed on any mode other than an explicit "testnet" — this helper
+  // only speaks for testnet admission; live, legacy, or unrecognized values
+  // return empty (the backend's admission report is authoritative anyway).
   if (
     !settings ||
     isLiveMode === true ||
-    settings.trading_mode === "live" ||
-    settings.trading_mode === "real"
+    settings.trading_mode !== "testnet"
   ) {
     return active;
   }
