@@ -2,7 +2,6 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
   SlidersHorizontal,
   X,
-  Check,
   RotateCcw,
   EyeOff,
   ShieldCheck,
@@ -45,6 +44,7 @@ import {
 import { api } from "../services/api";
 import { parseOptThreshold, validateStrategyParams } from "../services/strategyParamsValidate";
 import { InfoTooltip } from "./InfoTooltip";
+import { SaveButton, useSaveButton } from "./SaveButton";
 import { SessionProfileCard } from "./SessionProfileCard";
 import { SwitchToggle } from "./SwitchToggle";
 import { AutotunePreviewModal } from "./AutotunePreviewModal";
@@ -317,8 +317,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const [revealBusy, setRevealBusy] = useState(false);
 
   // UI status
-  const [isSaving, setIsSaving] = useState(false);
-  const [saveSuccess, setSaveSuccess] = useState(false);
+  const saveBtn = useSaveButton();
   const [saveError, setSaveError] = useState<string | null>(null);
 
   // Strategy Account Routing state
@@ -1436,10 +1435,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   );
 
   const handleSave = async () => {
-    setIsSaving(true);
-    setSaveSuccess(false);
     setSaveError(null);
-
+    const ok = await saveBtn.run(async () => {
     const canonicalWindow = formatDuration(manualWindowSecs);
     const currentRecord = await api.getStrategyParams(activeStrategyTab).catch(() => null);
     const updatedParams: StrategyParamsDto = {
@@ -1496,8 +1493,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     const validationErrors = validateStrategyParams(updatedParams);
     if (validationErrors.length > 0) {
       setSaveError(validationErrors[0]);
-      setIsSaving(false);
-      return;
+      throw new Error(validationErrors[0]); // lands the save button on "Failed!"
     }
 
     try {
@@ -1522,11 +1518,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       if (onSaveConfig) {
         await onSaveConfig(updatedParams);
       }
-      setSaveSuccess(true);
-      setTimeout(() => {
-        setSaveSuccess(false);
-        onClose();
-      }, 400);
     } catch (err) {
       console.error("Failed to save strategy params:", err);
       // Tauri command rejections arrive as plain strings (not Error
@@ -1540,9 +1531,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             ? err
             : "Save failed — parameters were not written."
       );
-    } finally {
-      setIsSaving(false);
+      throw err; // rethrow so the save button lands on "Failed!"
     }
+    });
+    if (ok) setTimeout(onClose, 400);
   };
 
   return (
@@ -1732,25 +1724,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               Cancel
             </button>
 
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={isSaving}
-              className={`flex items-center space-x-1.5 px-2.5 py-2.5 rounded-lg font-semibold transition shadow-2xs cursor-pointer ${
-                saveSuccess
-                  ? "bg-profit text-white border border-profit-border"
-                  : "bg-accent hover:bg-blue-600 text-white"
-              }`}
-            >
-              {saveSuccess ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  <span>Saved!</span>
-                </>
-              ) : (
-                <span>{isSaving ? "Saving..." : "Save & Apply"}</span>
-              )}
-            </button>
+            <SaveButton state={saveBtn.state} onClick={handleSave} />
           </div>
         </div>
 

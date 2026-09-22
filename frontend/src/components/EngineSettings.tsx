@@ -28,6 +28,7 @@ import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, V
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
+import { SaveButton, useSaveButton } from "./SaveButton";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
 import { VenueLogo } from "./VenueLogo";
 import { VenueAccountsSection } from "./ExchangeAccounts";
@@ -268,8 +269,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     }
   }, [exchangeFilter, favoriteExchanges]); // eslint-disable-line react-hooks/exhaustive-deps
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const saveBtn = useSaveButton();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Vault state
@@ -569,125 +569,122 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    setSaving(true);
-    try {
-      const payload: EngineSettingsDto = {
-        hsm_url: hsmUrl,
-        hmac_token: hmacToken,
-        min_depth_ratio: minDepthRatio,
-        engine_rpc_port: 8787, // reserved — no desktop listener consumes it
-        engine_ws_port: 8789, // reserved — no desktop listener consumes it
-        bind_address: "127.0.0.1", // reserved — no desktop listener consumes it
-        trading_mode: tradingMode,
-        paper_starting_balance_usd: paperStartingBalance,
-        fast_warmup_enabled: true, // reserved — warm-up reuse not implemented
-        cb_max_daily_drawdown_usd: Number(cbMaxDdUsd) || 0,
-        cb_max_daily_drawdown_pct: Number(cbMaxDdPct) || 0,
-        cb_max_consecutive_errors: Math.trunc(Number(cbMaxErrors)) || 0,
-        cb_max_spread_divergence_bps: Number(cbMaxSpreadBps) || 0,
-        delta_max_unhedged_usd_per_asset: Number(deltaMaxUnhedged) || 0,
-        margin_warning_usage_pct: Number(marginWarnPct) || 0,
-        margin_critical_usage_pct: Number(marginCritPct) || 0,
-        margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
-        max_leverage: Math.trunc(Number(maxLeverage)) || 0,
-        auto_resolve_residual_exposure: autoResolveResidual,
-        live_entry_enabled: liveEntryEnabled,
-        live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
-        passive_unwind: {
-          enabled: passiveUnwind.enabled,
-          spreadPercentile: Number(passiveUnwind.spreadPercentile) || 0,
-          timeoutSecs: Math.trunc(Number(passiveUnwind.timeoutSecs)) || 0,
-          maxTries: Math.trunc(Number(passiveUnwind.maxTries)) || 0,
-          maxSpreadBps: Number(passiveUnwind.maxSpreadBps) || 0,
-          maxFastVolBps: Number(passiveUnwind.maxFastVolBps) || 0,
-        },
-        balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
-        spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
-        spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
-        configured_venues: configuredVenues,
-        hyperliquid_enabled: hlEnabled,
-        lighter_enabled: lighterEnabled,
-        vanta_enabled: vantaEnabled,
-        robinhood_enabled: robinhoodEnabled,
-        arcus_enabled: arcusEnabled,
-        kraken_enabled: krakenEnabled,
-        kraken_spot_enabled: krakenSpotEnabled,
-        kraken_futures_enabled: krakenFuturesEnabled,
-        polymarket_enabled: polymarketEnabled,
-        kalshi_enabled: kalshiEnabled,
-        decibel_enabled: decibelEnabled,
-        ibkr_enabled: ibkrEnabled,
-        ig_enabled: igEnabled,
-        binance_enabled: binanceEnabled,
-        okx_enabled: okxEnabled,
-        aster_enabled: asterEnabled,
-        popdex_enabled: popdexEnabled,
-        popdex_network: popdexNetwork,
-        coinbase_enabled: coinbaseEnabled,
-        arcus_api_key: arcusApiKey.trim(),
-        arcus_secret: arcusSecret.trim(),
-        arcus_url: arcusUrl.trim(),
-        kraken_spot_api_key: krakenSpotApiKey.trim(),
-        kraken_spot_secret: krakenSpotSecret.trim(),
-        kraken_spot_url: krakenSpotUrl.trim(),
-        kraken_futures_api_key: krakenFuturesApiKey.trim(),
-        kraken_futures_secret: krakenFuturesSecret.trim(),
-        kraken_futures_url: krakenFuturesUrl.trim(),
-        hyperliquid_wallet: hyperliquidWallet.trim(),
-        hyperliquid_private_key: hyperliquidPrivateKey.trim(),
-        hyperliquid_url: hyperliquidUrl.trim(),
-        hyperliquid_account_index: hyperliquidAccountIndex ? parseInt(hyperliquidAccountIndex, 10) : undefined,
-        hyperliquid_subaccount_index: hyperliquidSubaccountIndex ? parseInt(hyperliquidSubaccountIndex, 10) : undefined,
-        lighter_account_index: lighterAccountIndex.trim(),
-        lighter_api_key: lighterApiKey.trim(),
-        lighter_url: lighterUrl.trim(),
-        lighter_subaccount_index: lighterSubaccountIndex ? parseInt(lighterSubaccountIndex, 10) : undefined,
-        vanta_account_id: vantaAccountId.trim(),
-        vanta_orderly_key: vantaOrderlyKey.trim(),
-        vanta_orderly_secret: vantaOrderlySecret.trim(),
-        vanta_url: vantaUrl.trim(),
-        vanta_subaccount_index: vantaSubaccountIndex ? parseInt(vantaSubaccountIndex, 10) : undefined,
-        robinhood_wallet: robinhoodWallet.trim(),
-        robinhood_private_key: robinhoodPrivateKey.trim(),
-        robinhood_rpc_url: "https://rpc.robinhood.network", // reserved — chain RPC unused
-        robinhood_router: robinhoodRouter.trim(),
-        robinhood_subaccount_index: robinhoodSubaccountIndex ? parseInt(robinhoodSubaccountIndex, 10) : undefined,
-        polymarket_api_key: polymarketApiKey.trim(),
-        polymarket_secret: polymarketSecret.trim(),
-        polymarket_passphrase: polymarketPassphrase.trim(),
-        polymarket_url: polymarketUrl.trim(),
-        kalshi_api_key_id: kalshiApiKeyId.trim(),
-        kalshi_private_key: kalshiPrivateKey.trim(),
-        kalshi_url: kalshiUrl.trim(),
-        referral_lighter: "https://app.lighter.xyz/?referral=SOLO&source=none",
-        referral_robinhood: "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none",
-        sponsor_link: sponsorLink,
-        version: version,
-        git_repo: gitRepo,
-      };
+    await saveBtn.run(async () => {
+      try {
+        const payload: EngineSettingsDto = {
+          hsm_url: hsmUrl,
+          hmac_token: hmacToken,
+          min_depth_ratio: minDepthRatio,
+          engine_rpc_port: 8787, // reserved — no desktop listener consumes it
+          engine_ws_port: 8789, // reserved — no desktop listener consumes it
+          bind_address: "127.0.0.1", // reserved — no desktop listener consumes it
+          trading_mode: tradingMode,
+          paper_starting_balance_usd: paperStartingBalance,
+          fast_warmup_enabled: true, // reserved — warm-up reuse not implemented
+          cb_max_daily_drawdown_usd: Number(cbMaxDdUsd) || 0,
+          cb_max_daily_drawdown_pct: Number(cbMaxDdPct) || 0,
+          cb_max_consecutive_errors: Math.trunc(Number(cbMaxErrors)) || 0,
+          cb_max_spread_divergence_bps: Number(cbMaxSpreadBps) || 0,
+          delta_max_unhedged_usd_per_asset: Number(deltaMaxUnhedged) || 0,
+          margin_warning_usage_pct: Number(marginWarnPct) || 0,
+          margin_critical_usage_pct: Number(marginCritPct) || 0,
+          margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
+          max_leverage: Math.trunc(Number(maxLeverage)) || 0,
+          auto_resolve_residual_exposure: autoResolveResidual,
+          live_entry_enabled: liveEntryEnabled,
+          live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
+          passive_unwind: {
+            enabled: passiveUnwind.enabled,
+            spreadPercentile: Number(passiveUnwind.spreadPercentile) || 0,
+            timeoutSecs: Math.trunc(Number(passiveUnwind.timeoutSecs)) || 0,
+            maxTries: Math.trunc(Number(passiveUnwind.maxTries)) || 0,
+            maxSpreadBps: Number(passiveUnwind.maxSpreadBps) || 0,
+            maxFastVolBps: Number(passiveUnwind.maxFastVolBps) || 0,
+          },
+          balance_stale_warn_secs: Math.trunc(Number(staleWarnSecs)) || 0,
+          spread_samples_max_days: normalizeRetentionDays(maxHistoryDays),
+          spread_samples_max_gb: normalizeRetentionGb(maxStorageGb),
+          configured_venues: configuredVenues,
+          hyperliquid_enabled: hlEnabled,
+          lighter_enabled: lighterEnabled,
+          vanta_enabled: vantaEnabled,
+          robinhood_enabled: robinhoodEnabled,
+          arcus_enabled: arcusEnabled,
+          kraken_enabled: krakenEnabled,
+          kraken_spot_enabled: krakenSpotEnabled,
+          kraken_futures_enabled: krakenFuturesEnabled,
+          polymarket_enabled: polymarketEnabled,
+          kalshi_enabled: kalshiEnabled,
+          decibel_enabled: decibelEnabled,
+          ibkr_enabled: ibkrEnabled,
+          ig_enabled: igEnabled,
+          binance_enabled: binanceEnabled,
+          okx_enabled: okxEnabled,
+          aster_enabled: asterEnabled,
+          popdex_enabled: popdexEnabled,
+          popdex_network: popdexNetwork,
+          coinbase_enabled: coinbaseEnabled,
+          arcus_api_key: arcusApiKey.trim(),
+          arcus_secret: arcusSecret.trim(),
+          arcus_url: arcusUrl.trim(),
+          kraken_spot_api_key: krakenSpotApiKey.trim(),
+          kraken_spot_secret: krakenSpotSecret.trim(),
+          kraken_spot_url: krakenSpotUrl.trim(),
+          kraken_futures_api_key: krakenFuturesApiKey.trim(),
+          kraken_futures_secret: krakenFuturesSecret.trim(),
+          kraken_futures_url: krakenFuturesUrl.trim(),
+          hyperliquid_wallet: hyperliquidWallet.trim(),
+          hyperliquid_private_key: hyperliquidPrivateKey.trim(),
+          hyperliquid_url: hyperliquidUrl.trim(),
+          hyperliquid_account_index: hyperliquidAccountIndex ? parseInt(hyperliquidAccountIndex, 10) : undefined,
+          hyperliquid_subaccount_index: hyperliquidSubaccountIndex ? parseInt(hyperliquidSubaccountIndex, 10) : undefined,
+          lighter_account_index: lighterAccountIndex.trim(),
+          lighter_api_key: lighterApiKey.trim(),
+          lighter_url: lighterUrl.trim(),
+          lighter_subaccount_index: lighterSubaccountIndex ? parseInt(lighterSubaccountIndex, 10) : undefined,
+          vanta_account_id: vantaAccountId.trim(),
+          vanta_orderly_key: vantaOrderlyKey.trim(),
+          vanta_orderly_secret: vantaOrderlySecret.trim(),
+          vanta_url: vantaUrl.trim(),
+          vanta_subaccount_index: vantaSubaccountIndex ? parseInt(vantaSubaccountIndex, 10) : undefined,
+          robinhood_wallet: robinhoodWallet.trim(),
+          robinhood_private_key: robinhoodPrivateKey.trim(),
+          robinhood_rpc_url: "https://rpc.robinhood.network", // reserved — chain RPC unused
+          robinhood_router: robinhoodRouter.trim(),
+          robinhood_subaccount_index: robinhoodSubaccountIndex ? parseInt(robinhoodSubaccountIndex, 10) : undefined,
+          polymarket_api_key: polymarketApiKey.trim(),
+          polymarket_secret: polymarketSecret.trim(),
+          polymarket_passphrase: polymarketPassphrase.trim(),
+          polymarket_url: polymarketUrl.trim(),
+          kalshi_api_key_id: kalshiApiKeyId.trim(),
+          kalshi_private_key: kalshiPrivateKey.trim(),
+          kalshi_url: kalshiUrl.trim(),
+          referral_lighter: "https://app.lighter.xyz/?referral=SOLO&source=none",
+          referral_robinhood: "https://robinhoodchain.lighter.xyz/?referral=SOLO&source=none",
+          sponsor_link: sponsorLink,
+          version: version,
+          git_repo: gitRepo,
+        };
 
-      await api.saveEngineSettings(payload);
+        await api.saveEngineSettings(payload);
 
-      // Ensure live mode state reflects selected mode
-      await api.setLiveMode(tradingMode === "real");
+        // Ensure live mode state reflects selected mode
+        await api.setLiveMode(tradingMode === "real");
 
-      const sanitized = await api.getEngineSettings();
-      setConfiguredVenues(sanitized.configured_venues || []);
-      clearCredentialInputs();
+        const sanitized = await api.getEngineSettings();
+        setConfiguredVenues(sanitized.configured_venues || []);
+        clearCredentialInputs();
 
-      // Refresh balances for the newly active trading mode
-      await loadVenueBalances();
+        // Refresh balances for the newly active trading mode
+        await loadVenueBalances();
 
-      onSettingsSaved?.(sanitized);
-
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorMsg(msg);
-    } finally {
-      setSaving(false);
-    }
+        onSettingsSaved?.(sanitized);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setErrorMsg(msg);
+        throw err; // rethrow so the save button lands on "Failed!"
+      }
+    });
   };
 
   const clearCredentialInputs = () => {
@@ -732,7 +729,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   };
 
   /** Reloads everything an account-level save affects so the card's own
-   *  Save Account button is sufficient — no overall Save Changes needed:
+   *  Save Changes button is sufficient — no overall save needed:
    *  account lists, venue credential-presence, balances, and live statuses. */
   const handleAccountsChanged = () => {
     setAccountsEpoch((e) => e + 1);
@@ -1911,22 +1908,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               Cancel
             </button>
           )}
-          <button
+          <SaveButton
             type="submit"
-            disabled={loading || saving}
-            className="btn-accent font-mono font-medium flex items-center justify-center space-x-2 disabled:opacity-50 w-36"
-          >
-            {saving ? (
-              <span>Saving...</span>
-            ) : saved ? (
-              <>
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>Succeed!</span>
-              </>
-            ) : (
-              <span>Save Changes</span>
-            )}
-          </button>
+            state={saveBtn.state}
+            disabled={loading}
+            className="w-36 font-mono font-medium"
+          />
         </div>
       </div>
     </form>
