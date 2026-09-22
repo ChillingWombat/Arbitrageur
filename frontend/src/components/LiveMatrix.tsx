@@ -1334,7 +1334,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   bottomTab === "opps" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
                 }`}
               />
-              <span>Opportunities</span>
+              <span>Opportunity History</span>
               {bottomTab === "opps" && (
                 <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
               )}
