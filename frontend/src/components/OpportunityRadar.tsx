@@ -40,6 +40,8 @@ import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
+import { DetailField, DetailSection } from "./DetailBits";
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers — missing data always renders as "—", never 0    */
@@ -377,6 +379,27 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("historyWindowSecs", num(e.target.value, 24) * 3600)}
                   />
                 </div>
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Capacity tiers ($)
+                      <InfoTooltip text="Comma-separated notional tiers used to build the per-row capacity ladder, in USD." />
+                    </span>
+                  </label>
+                  <input
+                    className={SELECT_INLINE_CLS}
+                    value={draft.capacityTiersUsd.join(",")}
+                    onChange={(e) =>
+                      set(
+                        "capacityTiersUsd",
+                        e.target.value
+                          .split(",")
+                          .map((s) => Number(s.trim()))
+                          .filter((n) => Number.isFinite(n) && n > 0),
+                      )
+                    }
+                  />
+                </div>
               </div>
             )}
 
@@ -463,27 +486,6 @@ const ConfigPanel: React.FC<{
                     min={0.1}
                     value={draft.frictionCoverMult}
                     onChange={(e) => set("frictionCoverMult", num(e.target.value, 1))}
-                  />
-                </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      Capacity tiers ($)
-                      <InfoTooltip text="Comma-separated notional tiers used to build the per-row capacity ladder, in USD." />
-                    </span>
-                  </label>
-                  <input
-                    className={SELECT_INLINE_CLS}
-                    value={draft.capacityTiersUsd.join(",")}
-                    onChange={(e) =>
-                      set(
-                        "capacityTiersUsd",
-                        e.target.value
-                          .split(",")
-                          .map((s) => Number(s.trim()))
-                          .filter((n) => Number.isFinite(n) && n > 0),
-                      )
-                    }
                   />
                 </div>
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
@@ -698,103 +700,7 @@ const ConfigPanel: React.FC<{
 /* Signal detail popup (capacity ladder + full signal fields)            */
 /* ------------------------------------------------------------------ */
 
-const CapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => (
-  <div className="flex items-end gap-3">
-    {row.capacityLadder.length === 0 && (
-      <span className="text-slate-400">no depth data</span>
-    )}
-    {row.capacityLadder.map((t) => {
-      const h = Math.max(
-        8,
-        Math.min(48, ((t.expectedNetBps ?? 0) / 15) * 48 + 8),
-      );
-      const good = (t.expectedNetBps ?? -1) > 0;
-      return (
-        <div key={t.sizeUsd} className="flex flex-col items-center gap-1">
-          <div
-            className={`w-10 rounded-lg ${good ? "bg-accent/70" : "bg-slate-300"}`}
-            style={{ height: `${h}px` }}
-            title={`net ${fmtBps(t.netBps)}bp · signed E ${fmtBps(t.expectedNetBps)}bp · reversion p ${fmtPct(t.marginalPWin)}`}
-          />
-          <span className="text-xs text-slate-500">{fmtUsd(t.sizeUsd)}</span>
-          <span className={`text-xs ${good ? "text-accent" : "text-slate-400"}`}>
-            {t.filledUsd < t.sizeUsd - 0.5
-              ? `${fmtUsd(t.filledUsd)} fill`
-              : fmtBps(t.expectedNetBps)}
-          </span>
-        </div>
-      );
-    })}
-    <div className="ml-4 text-xs text-slate-500 leading-4">
-      <div>
-        optimal <span className="text-slate-700 font-semibold">{fmtUsd(row.optimalSizeUsd)}</span>
-      </div>
-      <div>
-        breakeven <span className="text-slate-700 font-semibold">{fmtUsd(row.breakevenSizeUsd)}</span>
-      </div>
-    </div>
-  </div>
-));
 
-/* Depth capacity by marginal expected-net floor: "you can fill $X while
-   every unit still earns ≥ Y bps expected net". Inverse view of the USD
-   ladder — answers "how much can I size if I demand N bps per unit?" */
-const BpsCapacityLadder: React.FC<{ row: MonitorRowDto }> = React.memo(({ row }) => {
-  const tiers = row.bpsCapacityLadder ?? [];
-  if (tiers.length === 0) {
-    return <span className="text-slate-400">no win-rate curve — floors unmeasurable</span>;
-  }
-  const maxCap = Math.max(...tiers.map((t) => t.capacityUsd), 1);
-  return (
-    <div className="space-y-1">
-      {tiers.map((t) => (
-        <div key={t.minNetBps} className="flex items-center gap-2">
-          <span className="w-16 shrink-0 text-xs text-slate-500 font-mono tabular-nums">
-            ≥{t.minNetBps} bps
-          </span>
-          <div className="flex-1 h-3.5 rounded-md bg-surface-raised border border-surface-border overflow-hidden">
-            <div
-              className={`h-full rounded-md ${t.capacityUsd > 0 ? "bg-accent/60" : "bg-slate-200"}`}
-              style={{ width: `${Math.min(100, (t.capacityUsd / maxCap) * 100)}%` }}
-            />
-          </div>
-          <span
-            className={`w-16 shrink-0 text-right text-xs font-mono font-semibold tabular-nums ${t.capacityUsd > 0 ? "text-slate-800" : "text-slate-400"}`}
-          >
-            {fmtUsd(t.capacityUsd)}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-});
-
-const DetailField: React.FC<{
-  label: string;
-  value: React.ReactNode;
-  title?: string;
-  tip?: string;
-}> = ({ label, value, title, tip }) => (
-  <div className="space-y-0.5" title={title}>
-    <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
-      {label}
-      {tip && <InfoTooltip text={tip} position="top" />}
-    </div>
-    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
-  </div>
-);
-
-const DetailSection: React.FC<{ title: string; children: React.ReactNode }> = ({
-  title,
-  children,
-}) => (
-  <div className="space-y-2">
-    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400">
-      {title}
-    </div>
-    <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">{children}</div>
-  </div>
-);
 
 interface SignalDetailModalProps {
   row: MonitorRowDto;
@@ -999,27 +905,23 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
               />
             </DetailSection>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-4">
-              <div className="space-y-2">
-                <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
-                  Depth → expected net
-                  <InfoTooltip
-                    text="Each bar is a fixed notional tier: height/label = expected net bps if you fill that much of both books. Greyed = negative expectation at that size. 'fill' suffix = book shallower than the tier."
-                    position="top"
-                  />
-                </div>
-                <CapacityLadder row={r} />
+            <div className="space-y-2">
+              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
+                Capacity curve
+                <InfoTooltip
+                  text="Profit vs position size walked through both orderbooks. Expected = win-probability-weighted; Net = raw capture. Cumulative = total at that size; Marginal = per-unit rate at that depth (per $1k in $ view). X runs to the depth where marginal profit turns non-positive. Dashed markers: optimal (max expected $) and breakeven (probability-gated) sizes."
+                  position="top"
+                />
               </div>
-              <div className="space-y-2">
-                <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
-                  Net floor → capacity
-                  <InfoTooltip
-                    text="Inverse view: for each marginal expected-net floor (bps/unit), how much notional both books can fill while every consumed unit still earns at least that much. Floors the whole book fails show $0."
-                    position="top"
-                  />
-                </div>
-                <BpsCapacityLadder row={r} />
-              </div>
+              {(r.depthCurve?.length ?? 0) >= 2 ? (
+                <CapacityChart
+                  points={r.depthCurve ?? []}
+                  optimalSizeUsd={r.optimalSizeUsd}
+                  breakevenSizeUsd={r.breakevenSizeUsd}
+                />
+              ) : (
+                <span className="text-slate-400 text-xs">no depth data</span>
+              )}
             </div>
           </div>
 

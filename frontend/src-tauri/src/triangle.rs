@@ -46,6 +46,11 @@ pub struct TriangleOpportunityDto {
     pub trade_size_usd: f64,
     pub estimated_latency_ms: u64,
     pub is_executable: bool,
+    /// Per-size capacity curve from the depth-aware cycle evaluation.
+    /// `net` fields only — atomic cycles carry no win-rate model, so
+    /// expected fields are `None` by construction.
+    #[serde(default)]
+    pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -233,6 +238,88 @@ pub(crate) async fn resolve_triangle_books(
     Some([out.remove(0), out.remove(0), out.remove(0)])
 }
 
+/// Capacity curve for one triangle cycle: evaluate the atomic cycle at a
+/// geometric notional ladder (leg-1 is always `BuyBase`, so its ask-side
+/// notional caps the start size). Each rung's cumulative net bps comes
+/// from the evaluator directly; marginal bps are finite differences
+/// between consecutive rungs (first rung uses its own cumulative rate).
+/// Expected fields stay `None` — atomic cycles have no win-rate model.
+/// Stops at the first unfillable size (depth is monotonic).
+fn triangle_depth_curve(
+    books: &[OrderBook; 3],
+    sides: [TriLegSide; 3],
+    fee_bps: f64,
+    ref_size_usd: f64,
+) -> Vec<crate::monitor::DepthCurvePointDto> {
+    const N: usize = 24;
+    let Some(fee) = Decimal::from_f64_retain(fee_bps).filter(|f| *f >= dec!(0)) else {
+        return Vec::new();
+    };
+    // Start-notional ceiling: leg-1 lifts asks, so the spend cannot exceed
+    // that side's visible quote notional.
+    let depth_cap: f64 = books[0]
+        .asks
+        .iter()
+        .filter_map(|l| {
+            let p = l.price.to_string().parse::<f64>().ok()?;
+            let q = l.size.to_string().parse::<f64>().ok()?;
+            (p.is_finite() && p > 0.0 && q.is_finite() && q > 0.0).then_some(p * q)
+        })
+        .sum();
+    let lo = (ref_size_usd / 32.0).max(25.0).min(depth_cap);
+    let hi = (ref_size_usd * 64.0).min(depth_cap);
+    if !(lo.is_finite() && hi.is_finite() && hi > lo && lo > 0.0) {
+        return Vec::new();
+    }
+    let ratio = (hi / lo).powf(1.0 / (N - 1) as f64);
+    let mut sizes: Vec<f64> = (0..N).map(|i| lo * ratio.powi(i as i32)).collect();
+    // Always include the configured size so the curve is exact there.
+    if ref_size_usd.is_finite() && ref_size_usd > lo && ref_size_usd < hi {
+        sizes.push(ref_size_usd);
+        sizes.sort_by(f64::total_cmp);
+    }
+    let mut points = Vec::with_capacity(N);
+    let mut prev: Option<(f64, f64)> = None; // (size, profit_usd)
+    for s in sizes {
+        let Some(n) = Decimal::from_f64_retain(s).filter(|v| *v > dec!(0)) else {
+            continue;
+        };
+        let Some(res) =
+            evaluate_triangular_cycle([&books[0], &books[1], &books[2]], sides, [fee, fee, fee], n)
+        else {
+            break; // depth exhausted — deeper sizes cannot fill either
+        };
+        let profit = res
+            .estimated_profit
+            .to_string()
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite());
+        let net_bps = res
+            .net_bps
+            .to_string()
+            .parse::<f64>()
+            .ok()
+            .filter(|p| p.is_finite());
+        let (Some(profit), Some(cum_net)) = (profit, net_bps) else {
+            continue;
+        };
+        let marg = prev
+            .map(|(ps, pp)| (profit - pp) / (s - ps) * 10_000.0)
+            .filter(|m| m.is_finite())
+            .unwrap_or(cum_net);
+        points.push(crate::monitor::DepthCurvePointDto {
+            cum_usd: s,
+            cum_net_bps: cum_net,
+            cum_exp_bps: None,
+            marg_net_bps: marg,
+            marg_exp_bps: None,
+        });
+        prev = Some((s, profit));
+    }
+    points
+}
+
 fn triangle_target_profit_bps(state: &AppEngineState) -> f64 {
     let params = state.strategy_params.read();
     params
@@ -339,6 +426,7 @@ pub async fn scan_triangular_opportunities_impl(
                     trade_size_usd: trade_size,
                     estimated_latency_ms: latency_ms,
                     is_executable: eval.net_bps >= hurdle,
+                    depth_curve: triangle_depth_curve(&books, plan.leg_sides, fee, trade_size),
                 });
             }
         }

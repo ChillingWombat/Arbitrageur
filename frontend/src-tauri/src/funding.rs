@@ -165,10 +165,39 @@ pub struct FundingOpportunityDto {
     /// `None` on stale backends that predate the field.
     #[serde(default)]
     pub short_rate_8h_pct: Option<f64>,
+    /// Depth curve: cumulative/marginal net & expected carry profit per
+    /// unit while walking both leg books in lockstep. Income is
+    /// depth-invariant (net rate × modelled hold); the curve degrades
+    /// purely through the entry cross. Empty when either book is missing.
+    #[serde(default)]
+    pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
 }
 
 fn default_funding_opp_kind() -> String {
     "carry".to_string()
+}
+
+/// Deterministic carry income per unit over the modelled hold, bps.
+/// Prefers the expected-return back-out — `expected_return = income −
+/// (fees + entry cross)·size/1e4` — so the curve's income matches the
+/// displayed expected return exactly. Falls back to raw accrual
+/// `net_8h·hold/8`, else a single funding period: the cost side of the
+/// curve stays identical either way, so a conservative income floor never
+/// overstates economics.
+fn carry_income_bps(
+    expected_return_usd: Option<f64>,
+    trade_size_usd: f64,
+    fee_bps: f64,
+    spread_cost_bps: Option<f64>,
+    net_8h_pct: f64,
+    hold_hours: Option<f64>,
+) -> Option<f64> {
+    let v = if let Some(e) = expected_return_usd {
+        e / trade_size_usd * 10_000.0 + fee_bps + spread_cost_bps.unwrap_or(0.0)
+    } else {
+        net_8h_pct * 100.0 * (hold_hours.unwrap_or(8.0) / 8.0)
+    };
+    v.is_finite().then_some(v)
 }
 
 /// Build the net funding-gap history for the CURRENT carry direction:
@@ -514,6 +543,76 @@ async fn scan_funding_opportunities_for_symbol(
                 else {
                     continue;
                 };
+                // Informational only: the edge direction (which leg is
+                // short) is set by current hourly rates; agreement holds
+                // when both venues' PREDICTED hourly rates point the same
+                // way. Absent predictions -> None (no adjustment).
+                let win_probability = {
+                    let hourly =
+                        |rate: Decimal, interval: u32| rate / Decimal::from(interval.max(1));
+                    let agrees = match (r_a.predicted_rate, r_b.predicted_rate) {
+                        (Some(pa), Some(pb)) => {
+                            let pa_h = hourly(pa, r_a.interval_hours);
+                            let pb_h = hourly(pb, r_b.interval_hours);
+                            Some(
+                                if hourly(r_a.rate, r_a.interval_hours)
+                                    >= hourly(r_b.rate, r_b.interval_hours)
+                                {
+                                    pa_h >= pb_h
+                                } else {
+                                    pb_h >= pa_h
+                                },
+                            )
+                        }
+                        _ => None,
+                    };
+                    funding_win_probability(
+                        opp.net_rate_8h,
+                        opp.round_trip_fee_bps,
+                        None,
+                        agrees,
+                        hold_estimate.as_ref().map(|h| WinHoldContext {
+                            hold_hours: h.hours,
+                            min_apr_pct: Some(funding_min_apr(state)),
+                            entry_spread_bps: spread_cost_f,
+                        }),
+                    )
+                };
+                let expected_return_usd = expected_carry_return_usd(
+                    net_8h_f,
+                    fee_bps_f,
+                    spread_cost_f,
+                    hold_estimate.as_ref().map(|h| h.hours),
+                    Some(funding_min_apr(state)),
+                    trade_size_usd,
+                );
+                // Capacity curve: long leg lifts asks, short leg hits bids.
+                let depth_curve: Vec<crate::monitor::DepthCurvePointDto> = match (
+                    perp_books.get(long_vid),
+                    perp_books.get(short_vid),
+                    carry_income_bps(
+                        expected_return_usd,
+                        trade_size_usd,
+                        fee_bps_f,
+                        spread_cost_f,
+                        net_8h_f,
+                        hold_estimate.as_ref().map(|h| h.hours),
+                    ),
+                ) {
+                    (Some((long_asks, _)), Some((_, short_bids)), Some(inc)) => {
+                        arbitrageur_math::funding_carry::funding_depth_curve(
+                            long_asks,
+                            short_bids,
+                            inc,
+                            fee_bps_f,
+                            win_probability,
+                        )
+                        .iter()
+                        .map(crate::monitor::DepthCurvePointDto::from)
+                        .collect()
+                    }
+                    _ => Vec::new(),
+                };
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -568,52 +667,12 @@ async fn scan_funding_opportunities_for_symbol(
                     basis_bps: None,
                     spot_price: None,
                     perp_price: None,
-                    // Informational only: the edge direction (which leg is
-                    // short) is set by current hourly rates; agreement holds
-                    // when both venues' PREDICTED hourly rates point the same
-                    // way. Absent predictions -> None (no adjustment).
-                    win_probability: {
-                        let hourly =
-                            |rate: Decimal, interval: u32| rate / Decimal::from(interval.max(1));
-                        let agrees = match (r_a.predicted_rate, r_b.predicted_rate) {
-                            (Some(pa), Some(pb)) => {
-                                let pa_h = hourly(pa, r_a.interval_hours);
-                                let pb_h = hourly(pb, r_b.interval_hours);
-                                Some(
-                                    if hourly(r_a.rate, r_a.interval_hours)
-                                        >= hourly(r_b.rate, r_b.interval_hours)
-                                    {
-                                        pa_h >= pb_h
-                                    } else {
-                                        pb_h >= pa_h
-                                    },
-                                )
-                            }
-                            _ => None,
-                        };
-                        funding_win_probability(
-                            opp.net_rate_8h,
-                            opp.round_trip_fee_bps,
-                            None,
-                            agrees,
-                            hold_estimate.as_ref().map(|h| WinHoldContext {
-                                hold_hours: h.hours,
-                                min_apr_pct: Some(funding_min_apr(state)),
-                                entry_spread_bps: spread_cost_f,
-                            }),
-                        )
-                    },
+                    win_probability,
                     expected_hold_hours: hold_estimate.as_ref().map(|h| h.hours),
                     hold_reason: hold_estimate.as_ref().map(|h| h.reason.clone()),
                     hold_confidence: hold_estimate.as_ref().map(|h| h.confidence),
-                    expected_return_usd: expected_carry_return_usd(
-                        net_8h_f,
-                        fee_bps_f,
-                        spread_cost_f,
-                        hold_estimate.as_ref().map(|h| h.hours),
-                        Some(funding_min_apr(state)),
-                        trade_size_usd,
-                    ),
+                    expected_return_usd,
+                    depth_curve,
                     backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
                     backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
                     backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),
@@ -840,6 +899,55 @@ async fn scan_funding_opportunities_for_symbol(
                     let Some(spot_exact) = spot_key_used.clone() else {
                         continue;
                     };
+                    // Informational only: positive entry basis is an
+                    // expected exit tailwind (convergence), and a
+                    // positive predicted perp rate confirms the carry.
+                    let win_probability = funding_win_probability(
+                        eval.carry.net_rate_8h,
+                        eval.carry.round_trip_fee_bps,
+                        if eval.basis_bps > dec!(0) {
+                            Some(eval.basis_bps)
+                        } else {
+                            None
+                        },
+                        funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
+                        basis_hold.as_ref().map(|h| WinHoldContext {
+                            hold_hours: h.hours,
+                            min_apr_pct: Some(funding_min_apr(state)),
+                            entry_spread_bps: spread_cost_f,
+                        }),
+                    );
+                    let expected_return_usd = expected_carry_return_usd(
+                        net_8h_f,
+                        fee_bps_f,
+                        spread_cost_f,
+                        basis_hold.as_ref().map(|h| h.hours),
+                        Some(funding_min_apr(state)),
+                        trade_size_usd,
+                    );
+                    // Capacity curve: long leg lifts spot asks, short leg
+                    // hits perp bids.
+                    let depth_curve: Vec<crate::monitor::DepthCurvePointDto> =
+                        match carry_income_bps(
+                            expected_return_usd,
+                            trade_size_usd,
+                            fee_bps_f,
+                            spread_cost_f,
+                            net_8h_f,
+                            basis_hold.as_ref().map(|h| h.hours),
+                        ) {
+                            Some(inc) => arbitrageur_math::funding_carry::funding_depth_curve(
+                                &spot_asks,
+                                &perp_bids,
+                                inc,
+                                fee_bps_f,
+                                win_probability,
+                            )
+                            .iter()
+                            .map(crate::monitor::DepthCurvePointDto::from)
+                            .collect(),
+                            None => Vec::new(),
+                        };
                     opps.push(FundingOpportunityDto {
                         id: format!("{symbol}-{venue_label}-BASIS"),
                         symbol: symbol.to_string(),
@@ -914,27 +1022,12 @@ async fn scan_funding_opportunities_for_symbol(
                                 v / f64::from(funding_rate.interval_hours.max(1)) * 8.0 * 100.0;
                             pct.is_finite().then_some(pct)
                         },
-                        // Informational only: positive entry basis is an
-                        // expected exit tailwind (convergence), and a
-                        // positive predicted perp rate confirms the carry.
-                        win_probability: funding_win_probability(
-                            eval.carry.net_rate_8h,
-                            eval.carry.round_trip_fee_bps,
-                            if eval.basis_bps > dec!(0) {
-                                Some(eval.basis_bps)
-                            } else {
-                                None
-                            },
-                            funding_rate.predicted_rate.map(|pr| pr > dec!(0)),
-                            basis_hold.as_ref().map(|h| WinHoldContext {
-                                hold_hours: h.hours,
-                                min_apr_pct: Some(funding_min_apr(state)),
-                                entry_spread_bps: spread_cost_f,
-                            }),
-                        ),
+                        win_probability,
                         expected_hold_hours: basis_hold.as_ref().map(|h| h.hours),
                         hold_reason: basis_hold.as_ref().map(|h| h.reason.clone()),
                         hold_confidence: basis_hold.as_ref().map(|h| h.confidence),
+                        expected_return_usd,
+                        depth_curve,
                         backtest_win_rate: bt.as_ref().map(|b| b.win_rate),
                         backtest_win_rate_lower: bt.as_ref().and_then(|b| b.win_rate_lower),
                         backtest_win_rate_upper: bt.as_ref().and_then(|b| b.win_rate_upper),
@@ -947,14 +1040,6 @@ async fn scan_funding_opportunities_for_symbol(
                         backtest_expected_usd_se: bt.as_ref().and_then(|b| b.expected_usd_se),
                         backtest_trials: bt.as_ref().map(|b| b.trials),
                         backtest_deciles_usd: bt.as_ref().map(|b| b.deciles_usd.clone()),
-                        expected_return_usd: expected_carry_return_usd(
-                            net_8h_f,
-                            fee_bps_f,
-                            spread_cost_f,
-                            basis_hold.as_ref().map(|h| h.hours),
-                            Some(funding_min_apr(state)),
-                            trade_size_usd,
-                        ),
                     });
                 }
             }

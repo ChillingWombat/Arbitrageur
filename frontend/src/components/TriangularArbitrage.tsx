@@ -18,6 +18,7 @@ import type {
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
+import { CapacityChart } from "./CapacityChart";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface TriangularArbitrageProps {
@@ -179,6 +180,20 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
                   {opp.net_spread_bps >= 0 ? "+" : ""}{formatBps(opp.net_spread_bps)} BPS
                 </span>
               </span>
+            </div>
+
+            <div>
+              <div
+                className="text-[11px] font-sans font-medium text-slate-400 mb-1.5"
+                title="Net cycle profit vs start notional, evaluated at a size ladder through all three leg books (VWAP per leg). Atomic cycles have no win-rate model — only the Net series is meaningful; Expected is unavailable by construction."
+              >
+                Capacity curve — net profit vs cycle size (3-leg VWAP)
+              </div>
+              {(opp.depth_curve?.length ?? 0) >= 2 ? (
+                <CapacityChart points={opp.depth_curve ?? []} />
+              ) : (
+                <span className="text-slate-400 text-xs">no depth data</span>
+              )}
             </div>
           </div>
 

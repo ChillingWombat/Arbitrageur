@@ -236,13 +236,42 @@ pub struct CapacityTierDto {
     pub marginal_p_win: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BpsCapacityTierDto {
     /// Marginal expected-net floor (bps/unit).
     pub min_net_bps: f64,
     /// Book notional fillable while marginal expected net >= floor.
     pub capacity_usd: f64,
+}
+
+/// One capacity-curve sample: capture state after consuming a book chunk.
+/// USD values derive client-side as `bps · cumUsd / 1e4`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepthCurvePointDto {
+    /// Cumulative fillable notional through this chunk, USD (x-axis).
+    pub cum_usd: f64,
+    /// Cumulative raw net capture per unit, bps.
+    pub cum_net_bps: f64,
+    /// Cumulative probability-weighted expected net per unit, bps.
+    pub cum_exp_bps: Option<f64>,
+    /// Marginal raw net per unit at this depth, bps.
+    pub marg_net_bps: f64,
+    /// Marginal expected net per unit at this depth, bps.
+    pub marg_exp_bps: Option<f64>,
+}
+
+impl From<&arbitrageur_math::pair_monitor::DepthCurvePoint> for DepthCurvePointDto {
+    fn from(p: &arbitrageur_math::pair_monitor::DepthCurvePoint) -> Self {
+        Self {
+            cum_usd: p.cum_usd,
+            cum_net_bps: p.cum_net_bps,
+            cum_exp_bps: p.cum_exp_bps,
+            marg_net_bps: p.marg_net_bps,
+            marg_exp_bps: p.marg_exp_bps,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,6 +361,8 @@ pub struct MonitorRowDto {
     pub expected_capacity_usd: Option<f64>,
     /// Fillable notional at each marginal expected-net floor (bps).
     pub bps_capacity_ladder: Vec<BpsCapacityTierDto>,
+    /// Per-chunk capacity curve for the detail-modal chart.
+    pub depth_curve: Vec<DepthCurvePointDto>,
     /// Signed funding carry over the conservative horizon, bps.
     /// Positive = cost, negative = gain.
     pub funding_carry_bps: Option<f64>,
@@ -721,23 +752,18 @@ pub(crate) struct PairWinEstimate {
     pub from_model: bool,
 }
 
-/// Uncertainty-aware form of [`pair_win_probability`]: same episode curve
-/// and OU fallback, but returns [`PairWinEstimate`] with a shrunken point
-/// estimate and Wilson bounds. `half_life_secs` recency-weights episodes
-/// (`0.5^(age/half_life)` on resolution time); `None`/`0` disables.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn pair_win_probability_ex(
+/// Shared PWinCurve construction for a pair series: the same μ/σ episode
+/// bucketing `pair_win_probability_ex` evaluates a scalar against, lifted
+/// so capacity walks (`capacity_ladder`) can reuse the identical win-rate
+/// model rather than re-deriving statistics. Returns `(curve, mu, sigma)`;
+/// `None` fail-closed on unusable inputs.
+pub(crate) fn pair_pwin_curve(
     series: &[PairObservation],
-    current_spread_bps: f64,
     friction_bps: f64,
-    min_episodes: usize,
     half_life_secs: Option<f64>,
     now_ms: i64,
-) -> Option<PairWinEstimate> {
-    if !current_spread_bps.is_finite() || !friction_bps.is_finite() {
-        return None;
-    }
-    if series.len() < 2 {
+) -> Option<(arbitrageur_math::pair_monitor::PWinCurve, f64, f64)> {
+    if !friction_bps.is_finite() || series.len() < 2 {
         return None;
     }
     let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
@@ -770,6 +796,27 @@ pub(crate) fn pair_win_probability_ex(
         half_life_secs,
         now_ms,
     );
+    Some((curve, mu, sigma))
+}
+
+/// Uncertainty-aware form of [`pair_win_probability`]: same episode curve
+/// and OU fallback, but returns [`PairWinEstimate`] with a shrunken point
+/// estimate and Wilson bounds. `half_life_secs` recency-weights episodes
+/// (`0.5^(age/half_life)` on resolution time); `None`/`0` disables.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pair_win_probability_ex(
+    series: &[PairObservation],
+    current_spread_bps: f64,
+    friction_bps: f64,
+    min_episodes: usize,
+    half_life_secs: Option<f64>,
+    now_ms: i64,
+) -> Option<PairWinEstimate> {
+    if !current_spread_bps.is_finite() || !friction_bps.is_finite() {
+        return None;
+    }
+    let (curve, mu, _sigma) = pair_pwin_curve(series, friction_bps, half_life_secs, now_ms)?;
+    let band_bps = friction_bps.max(2.0);
     if curve.episodes >= min_episodes {
         let dev_abs = (current_spread_bps - mu).abs();
         // Ready episode count but no historical evidence at this
@@ -794,6 +841,7 @@ pub(crate) fn pair_win_probability_ex(
             from_model: false,
         });
     }
+    let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
     ou_fallback_p_win(&vals, series, mu, current_spread_bps, band_bps).map(|p| PairWinEstimate {
         p,
         lower: p,
@@ -2246,7 +2294,7 @@ impl SpreadMonitorEngine {
 
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
-        let (ladder, optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder) =
+        let (ladder, optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder, depth_curve) =
             match (&buy_book, &sell_book, mu) {
                 (Some(bk), Some(sk), Some(m)) => {
                     let asks: Vec<(f64, f64)> = bk
@@ -2329,9 +2377,22 @@ impl SpreadMonitorEngine {
                                 capacity_usd: t.capacity_usd,
                             })
                             .collect(),
+                        rep.depth_curve
+                            .iter()
+                            .map(DepthCurvePointDto::from)
+                            .collect(),
                     )
                 }
-                _ => (Vec::new(), None, None, None, None, None, Vec::new()),
+                _ => (
+                    Vec::new(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Vec::new(),
+                ),
             };
 
         let dev_abs_bps = dev_bps.map(|d| d.abs());
@@ -2697,6 +2758,7 @@ impl SpreadMonitorEngine {
             capacity_ladder: ladder,
             expected_capacity_usd: exp_capacity,
             bps_capacity_ladder: bps_ladder,
+            depth_curve,
             funding_carry_bps: carry,
             funding_unknown,
             first_seen_ms: rt.first_seen_ms,
