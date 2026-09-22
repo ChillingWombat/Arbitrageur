@@ -2161,6 +2161,27 @@ impl SpreadMonitorEngine {
         );
         let books_ok = buy_book.is_some() && sell_book.is_some();
 
+        // Symbol-collision guard: venues quoting irreconcilably different
+        // mids for one canonical symbol are different instruments under a
+        // shared ticker (e.g. an index perp vs a same-named memecoin), not a
+        // dislocation. Real cross-venue spreads are basis points — >2x can
+        // never be a tradeable divergence, so the pair is refused outright.
+        if books_ok {
+            let mid_of = |b: &OrderBook| -> Option<f64> {
+                b.mid_price()
+                    .and_then(|m| m.to_string().parse::<f64>().ok())
+                    .filter(|m| m.is_finite() && *m > 0.0)
+            };
+            if let (Some(bm), Some(sm)) = (
+                mid_of(buy_book.as_ref().expect("books_ok")),
+                mid_of(sell_book.as_ref().expect("books_ok")),
+            ) {
+                if (bm / sm).max(sm / bm) > 2.0 {
+                    return None;
+                }
+            }
+        }
+
         // --- history ----------------------------------------------------
         let series = match (mids_by_venue.get(buy_v), mids_by_venue.get(sell_v)) {
             (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => build_pair_series(a, b, 30_000),

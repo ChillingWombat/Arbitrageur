@@ -1622,6 +1622,22 @@ pub fn spread_symbol_aliases(raw: &str) -> Vec<String> {
             out.push(key);
         }
     }
+    // Index-family siblings are proven-identical instruments: a `SPX500`
+    // read must also see rows a venue recorded under `US500`/`SP500`
+    // (and their quoted forms). Only unambiguous spellings merge —
+    // `index_alias_siblings` excludes collision-prone tickers like `SPX`.
+    for sib in arbitrageur_core::symbol::index_alias_siblings(&base) {
+        for key in [
+            sib.to_string(),
+            format!("{sib}-USDC"),
+            format!("{sib}-USD"),
+            format!("{sib}-USDT"),
+        ] {
+            if !out.contains(&key) {
+                out.push(key);
+            }
+        }
+    }
     out
 }
 

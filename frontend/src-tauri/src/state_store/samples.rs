@@ -20,6 +20,11 @@ impl StateStore {
             return Ok(());
         }
         let mut conn = self.conn.lock();
+        // Same-instrument gate: once a key has an established scale, rows
+        // irreconcilable with it are a symbol collision at the source —
+        // refuse to persist them at all. A fresh key has no incumbent yet,
+        // so its first cells still bind the instrument freely.
+        let anchor = incumbent_anchor(&conn, &spread_symbol_aliases(&symbol))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
@@ -37,6 +42,15 @@ impl StateStore {
                 // already reject crossed books; this is the last line).
                 if e.best_ask.is_finite() && e.best_bid.is_finite() && e.best_ask < e.best_bid {
                     continue;
+                }
+                if let Some(a) = anchor {
+                    if !within_consensus(e.mid, a) {
+                        tracing::warn!(
+                            "spread_samples: dropping {symbol} row for {venue_id} — mid {} vs incumbent {a} (symbol collision)",
+                            e.mid
+                        );
+                        continue;
+                    }
                 }
                 stmt.execute(params![
                     symbol,
@@ -57,6 +71,12 @@ impl StateStore {
     /// Samples for a symbol in `[from_ts_ms, to_ts_ms]`, ordered by time then venue.
     /// Matches every storage alias for the asset (canonical base plus
     /// quoted UI forms) so background and UI recording paths read as one.
+    ///
+    /// Every read passes through [`filter_symbol_consistency`]: a canonical
+    /// key must represent ONE instrument, so samples that are irreconcilable
+    /// with the cross-venue consensus (ticker collisions like an index perp
+    /// vs a same-named memecoin, or a corrupted feed) are dropped here —
+    /// once, for every chart, baseline, and pair evaluation downstream.
     pub fn spread_samples(
         &self,
         symbol: &str,
@@ -90,7 +110,13 @@ impl StateStore {
                 ask_depth: r.get(7).ok().flatten(),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        // One anchor source for every read: the scale the canonical key was
+        // first bound to. A window of pure intruder data reads self-
+        // consistent at the wrong scale, so the incumbent must arbitrate
+        // even when nothing inside the window looks split.
+        let anchor = incumbent_anchor(&conn, &keys)?;
+        Ok(filter_symbol_consistency(rows, anchor))
     }
 
     /// Earliest recorded sample timestamp for a symbol (history depth indicator).
@@ -359,4 +385,163 @@ impl StateStore {
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
     }
+}
+
+/* ------------------------------------------------------------------------ */
+/* Cross-venue sample consistency                                            */
+/* ------------------------------------------------------------------------ */
+
+/// A canonical symbol must price within this ratio across venues to be the
+/// same instrument. Real cross-venue dislocations are basis points; a 3x
+/// divergence means the venues are quoting different instruments under one
+/// key (e.g. an index perp and a same-named memecoin) or a feed is corrupt.
+const CONSISTENCY_MAX_RATIO: f64 = 3.0;
+/// Consensus arbitration granularity — coarse enough that every REST lane
+/// contributes, fine enough to not smear genuine repricing.
+const CONSISTENCY_BUCKET_MS: i64 = 600_000;
+
+fn median_f64(vals: &mut [f64]) -> Option<f64> {
+    if vals.is_empty() {
+        return None;
+    }
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = vals.len();
+    Some(if n % 2 == 1 {
+        vals[n / 2]
+    } else {
+        (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+    })
+}
+
+fn within_consensus(mid: f64, consensus: f64) -> bool {
+    let r = (mid / consensus).max(consensus / mid);
+    r <= CONSISTENCY_MAX_RATIO
+}
+
+fn valid_sample(r: &SpreadSample) -> bool {
+    r.mid.is_finite() && r.mid > 0.0 && r.ts_ms >= 0
+}
+
+/// Per-`(bucket, venue)` medians — one vote per venue per bucket. A hot
+/// corrupt feed cannot out-sample the instrument's real scale, and a lane
+/// that flipped instruments mid-window (observed: a venue whose `SPX500`
+/// binding moved to a same-ticker memecoin, leaving interleaved ~$0.5 and
+/// ~$7,700 rows) votes per bucket instead of being smeared into one window
+/// median, so its on-scale cells still corroborate the instrument while
+/// the collided ones lose.
+fn cell_medians<'a>(rows: impl Iterator<Item = (i64, &'a str, f64)>) -> Vec<(f64, usize)> {
+    let mut cells: HashMap<(i64, &'a str), Vec<f64>> = HashMap::new();
+    for (ts, venue, mid) in rows {
+        if mid.is_finite() && mid > 0.0 && ts >= 0 {
+            cells
+                .entry((ts / CONSISTENCY_BUCKET_MS, venue))
+                .or_default()
+                .push(mid);
+        }
+    }
+    cells
+        .values()
+        .filter_map(|ms| median_f64(&mut ms.clone()).map(|m| (m, ms.len())))
+        .collect()
+}
+
+/// Majority-cluster anchor over cell medians: the scale corroborated by
+/// the most cells wins; ties break on covered row count, then the smaller
+/// median — deterministic; quote frequency inside a bucket never votes
+/// twice.
+fn consensus_anchor(cells: &[(f64, usize)]) -> Option<f64> {
+    let mut anchor: Option<f64> = None;
+    let mut best = (0usize, 0usize);
+    for (med, _) in cells {
+        let mut supporters = 0usize;
+        let mut support_rows = 0usize;
+        for (other, n) in cells {
+            if within_consensus(*other, *med) {
+                supporters += 1;
+                support_rows += n;
+            }
+        }
+        let score = (supporters, support_rows);
+        let better = match anchor {
+            None => true,
+            Some(a) => score > best || (score == best && *med < a),
+        };
+        if better {
+            anchor = Some(*med);
+            best = score;
+        }
+    }
+    anchor
+}
+
+/// Instrument identity is first-bound: a canonical key belongs to the
+/// instrument it was created for. Every read anchors on the symbol's
+/// earliest `(bucket, venue)` cells — enough to cover the first few
+/// buckets across several venues, so one bad first row cannot misbind the
+/// key and a later intruder can never accumulate enough samples to steal
+/// it. A key born ambiguous still resolves deterministically (earliest
+/// majority wins); retention prunes naturally rebind a key only once its
+/// original history is gone.
+const INCUMBENT_CELL_CAP: usize = 6;
+const INCUMBENT_ROW_CAP: i64 = 16_384;
+
+fn incumbent_anchor(conn: &Connection, keys: &[String]) -> rusqlite::Result<Option<f64>> {
+    let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT venue_id, ts_ms, mid FROM spread_samples
+         WHERE symbol IN ({placeholders})
+         ORDER BY ts_ms ASC, venue_id ASC LIMIT {INCUMBENT_ROW_CAP}"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params: Vec<&dyn rusqlite::ToSql> =
+        keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+    let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, f64>(2)?,
+        ))
+    })?;
+    let mut cells: HashMap<(i64, String), Vec<f64>> = HashMap::new();
+    for row in rows {
+        let (venue, ts, mid) = row?;
+        if mid.is_finite() && mid > 0.0 && ts >= 0 {
+            cells
+                .entry((ts / CONSISTENCY_BUCKET_MS, venue))
+                .or_default()
+                .push(mid);
+            if cells.len() >= INCUMBENT_CELL_CAP {
+                break;
+            }
+        }
+    }
+    let meds: Vec<(f64, usize)> = cells
+        .values()
+        .filter_map(|ms| median_f64(&mut ms.clone()).map(|m| (m, ms.len())))
+        .collect();
+    Ok(consensus_anchor(&meds))
+}
+
+/// Apply the arbitrated anchor: every surviving row must sit within 3x of
+/// it, so a bucket whose only quoters are off-scale collapses to an honest
+/// gap rather than emitting a fabricated mid. `anchor = None` falls back
+/// to the window's own majority (no stored history — the window's earliest
+/// cells are the incumbent). The validity gate runs unconditionally: a
+/// lone sample must still be a real positive mid at a real timestamp.
+fn filter_symbol_consistency(rows: Vec<SpreadSample>, anchor: Option<f64>) -> Vec<SpreadSample> {
+    let anchor = anchor.or_else(|| {
+        (rows.len() >= 2)
+            .then(|| {
+                consensus_anchor(&cell_medians(
+                    rows.iter().map(|r| (r.ts_ms, r.venue_id.as_str(), r.mid)),
+                ))
+            })
+            .flatten()
+    });
+    rows.into_iter()
+        .filter(|r| match anchor {
+            Some(a) => valid_sample(r) && within_consensus(r.mid, a),
+            None => valid_sample(r),
+        })
+        .collect()
 }
