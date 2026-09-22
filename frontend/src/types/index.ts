@@ -1245,6 +1245,12 @@ export interface CapacityTierDto {
   marginalPWin: number | null;
 }
 
+/** Fillable notional while marginal expected net stays >= `minNetBps`. */
+export interface BpsCapacityTierDto {
+  minNetBps: number;
+  capacityUsd: number;
+}
+
 export interface MonitorRowDto {
   symbol: string;
   buyVenue: string;
@@ -1299,6 +1305,11 @@ export interface MonitorRowDto {
   optimalSizeUsd: number | null;
   breakevenSizeUsd: number | null;
   capacityLadder: CapacityTierDto[];
+  /** Total expected capacity — probability-weighted fillable notional
+   * over book levels with positive marginal expected net (backend). */
+  expectedCapacityUsd?: number | null;
+  /** Depth capacity at each marginal expected-net floor (bps). */
+  bpsCapacityLadder?: BpsCapacityTierDto[];
   fundingCarryBps: number | null;
   fundingUnknown: boolean;
   firstSeenMs: number | null;

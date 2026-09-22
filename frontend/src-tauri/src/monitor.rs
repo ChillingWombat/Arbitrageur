@@ -238,6 +238,15 @@ pub struct CapacityTierDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct BpsCapacityTierDto {
+    /// Marginal expected-net floor (bps/unit).
+    pub min_net_bps: f64,
+    /// Book notional fillable while marginal expected net >= floor.
+    pub capacity_usd: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MonitorRowDto {
     pub symbol: String,
     pub buy_venue: String,
@@ -317,6 +326,12 @@ pub struct MonitorRowDto {
     /// Probability-aware capacity boundary (marginal p >= p_min).
     pub breakeven_size_usd: Option<f64>,
     pub capacity_ladder: Vec<CapacityTierDto>,
+    /// Total expected capacity: probability-weighted fillable notional over
+    /// all book levels with positive marginal expected net. `None` when no
+    /// win-rate curve exists.
+    pub expected_capacity_usd: Option<f64>,
+    /// Fillable notional at each marginal expected-net floor (bps).
+    pub bps_capacity_ladder: Vec<BpsCapacityTierDto>,
     /// Signed funding carry over the conservative horizon, bps.
     /// Positive = cost, negative = gain.
     pub funding_carry_bps: Option<f64>,
@@ -2231,82 +2246,93 @@ impl SpreadMonitorEngine {
 
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
-        let (ladder, optimal, breakeven, exp_usd, exp_bps) = match (&buy_book, &sell_book, mu) {
-            (Some(bk), Some(sk), Some(m)) => {
-                let asks: Vec<(f64, f64)> = bk
-                    .asks
-                    .iter()
-                    .filter_map(|l| {
-                        let p = l.price.to_string().parse::<f64>().ok()?;
-                        let s = l.size.to_string().parse::<f64>().ok()?;
-                        (p.is_finite() && s.is_finite() && p > 0.0 && s > 0.0).then_some((p, s))
-                    })
-                    .collect();
-                let bids: Vec<(f64, f64)> = sk
-                    .bids
-                    .iter()
-                    .filter_map(|l| {
-                        let p = l.price.to_string().parse::<f64>().ok()?;
-                        let s = l.size.to_string().parse::<f64>().ok()?;
-                        (p.is_finite() && s.is_finite() && p > 0.0 && s > 0.0).then_some((p, s))
-                    })
-                    .collect();
-                // Participation cap: shrink the deepest tier to the smaller
-                // venue's 24h-volume allowance so the boundary is honest.
-                let cap_usd = volumes
-                    .get(buy_v)
-                    .and_then(|m| m.get(symbol))
-                    .zip(volumes.get(sell_v).and_then(|m| m.get(symbol)))
-                    .map(|(a, b)| a.min(*b) * cfg.participation_cap);
-                let mut tiers = cfg.capacity_tiers_usd.clone();
-                if let Some(cap) = cap_usd {
-                    if cap.is_finite() && cap > 0.0 {
-                        tiers.push(cap);
-                        tiers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        tiers.dedup();
+        let (ladder, optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder) =
+            match (&buy_book, &sell_book, mu) {
+                (Some(bk), Some(sk), Some(m)) => {
+                    let asks: Vec<(f64, f64)> = bk
+                        .asks
+                        .iter()
+                        .filter_map(|l| {
+                            let p = l.price.to_string().parse::<f64>().ok()?;
+                            let s = l.size.to_string().parse::<f64>().ok()?;
+                            (p.is_finite() && s.is_finite() && p > 0.0 && s > 0.0).then_some((p, s))
+                        })
+                        .collect();
+                    let bids: Vec<(f64, f64)> = sk
+                        .bids
+                        .iter()
+                        .filter_map(|l| {
+                            let p = l.price.to_string().parse::<f64>().ok()?;
+                            let s = l.size.to_string().parse::<f64>().ok()?;
+                            (p.is_finite() && s.is_finite() && p > 0.0 && s > 0.0).then_some((p, s))
+                        })
+                        .collect();
+                    // Participation cap: shrink the deepest tier to the smaller
+                    // venue's 24h-volume allowance so the boundary is honest.
+                    let cap_usd = volumes
+                        .get(buy_v)
+                        .and_then(|m| m.get(symbol))
+                        .zip(volumes.get(sell_v).and_then(|m| m.get(symbol)))
+                        .map(|(a, b)| a.min(*b) * cfg.participation_cap);
+                    let mut tiers = cfg.capacity_tiers_usd.clone();
+                    if let Some(cap) = cap_usd {
+                        if cap.is_finite() && cap > 0.0 {
+                            tiers.push(cap);
+                            tiers.sort_by(|a, b| {
+                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            tiers.dedup();
+                        }
                     }
-                }
-                let rep = capacity_ladder(
-                    &asks,
-                    &bids,
-                    m,
-                    friction_bps,
-                    &tiers,
-                    &pwin_curve,
-                    cfg.min_win_probability,
-                    // Marginal tier gate on the shrunken rate (thin
-                    // buckets pull toward 0.5) — sizing already scales
-                    // by p, so the row-level lower bound stays the
-                    // strict gate.
-                    None,
-                    WIN_PRIOR_STRENGTH,
-                );
-                let ladder: Vec<CapacityTierDto> = rep
-                    .tiers
-                    .iter()
-                    .map(|t| CapacityTierDto {
-                        size_usd: t.size_usd,
-                        filled_usd: t.filled_usd,
-                        net_bps: t.net_bps,
-                        expected_net_bps: t.expected_net_bps,
-                        marginal_p_win: t.marginal_p_win,
-                    })
-                    .collect();
-                (
-                    ladder,
-                    rep.optimal_size_usd,
-                    rep.breakeven_size_usd,
-                    rep.expected_profit_usd,
-                    rep.optimal_size_usd.and_then(|s| {
-                        rep.tiers
+                    let rep = capacity_ladder(
+                        &asks,
+                        &bids,
+                        m,
+                        friction_bps,
+                        &tiers,
+                        &pwin_curve,
+                        cfg.min_win_probability,
+                        // Marginal tier gate on the shrunken rate (thin
+                        // buckets pull toward 0.5) — sizing already scales
+                        // by p, so the row-level lower bound stays the
+                        // strict gate.
+                        None,
+                        WIN_PRIOR_STRENGTH,
+                    );
+                    let ladder: Vec<CapacityTierDto> = rep
+                        .tiers
+                        .iter()
+                        .map(|t| CapacityTierDto {
+                            size_usd: t.size_usd,
+                            filled_usd: t.filled_usd,
+                            net_bps: t.net_bps,
+                            expected_net_bps: t.expected_net_bps,
+                            marginal_p_win: t.marginal_p_win,
+                        })
+                        .collect();
+                    (
+                        ladder,
+                        rep.optimal_size_usd,
+                        rep.breakeven_size_usd,
+                        rep.expected_profit_usd,
+                        rep.optimal_size_usd.and_then(|s| {
+                            rep.tiers
+                                .iter()
+                                .find(|t| (t.filled_usd - s).abs() < 1e-6)
+                                .and_then(|t| t.expected_net_bps)
+                        }),
+                        rep.expected_capacity_usd,
+                        rep.bps_capacity_ladder
                             .iter()
-                            .find(|t| (t.filled_usd - s).abs() < 1e-6)
-                            .and_then(|t| t.expected_net_bps)
-                    }),
-                )
-            }
-            _ => (Vec::new(), None, None, None, None),
-        };
+                            .map(|t| BpsCapacityTierDto {
+                                min_net_bps: t.min_net_bps,
+                                capacity_usd: t.capacity_usd,
+                            })
+                            .collect(),
+                    )
+                }
+                _ => (Vec::new(), None, None, None, None, None, Vec::new()),
+            };
 
         let dev_abs_bps = dev_bps.map(|d| d.abs());
         // Net-P&L outcome distribution for a fresh entry at the current
@@ -2669,6 +2695,8 @@ impl SpreadMonitorEngine {
             optimal_size_usd: optimal,
             breakeven_size_usd: breakeven,
             capacity_ladder: ladder,
+            expected_capacity_usd: exp_capacity,
+            bps_capacity_ladder: bps_ladder,
             funding_carry_bps: carry,
             funding_unknown,
             first_seen_ms: rt.first_seen_ms,

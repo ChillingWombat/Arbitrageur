@@ -1207,6 +1207,8 @@ mod tests {
                 expected_net_bps: Some(5.7),
                 marginal_p_win: Some(0.95),
             }],
+            expected_capacity_usd: None,
+            bps_capacity_ladder: Vec::new(),
             funding_carry_bps: Some(0.1),
             funding_unknown: false,
             first_seen_ms: Some(1),
