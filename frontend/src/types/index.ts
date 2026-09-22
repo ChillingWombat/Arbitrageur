@@ -782,6 +782,10 @@ export interface EngineSettingsDto {
    * `*PassiveMode = "inherit"` use this; the popup's Auto Limit mode runs
    * it too. Serialized camelCase like PassiveUnwindDto. */
   passive_unwind?: PassiveUnwindDto;
+  /** Hold deadline (seconds) before the auto-exit supervisor unwinds a
+   * still-open futures pair position, regardless of the live edge.
+   * Backend-validated 60–604800; default 86400 (24h). */
+  auto_exit_max_hold_secs?: number;
   balance_stale_warn_secs?: number;
 
   // Subaccount mappings

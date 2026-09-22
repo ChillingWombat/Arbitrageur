@@ -374,6 +374,9 @@ fn default_balance_stale_warn_secs() -> u64 {
 fn default_max_leverage() -> u32 {
     10
 }
+fn default_auto_exit_max_hold_secs() -> u64 {
+    86_400
+}
 fn default_referral_lighter() -> String {
     "https://app.lighter.xyz/?referral=SOLO&source=none".into()
 }
@@ -534,6 +537,13 @@ pub struct EngineSettingsDto {
     /// what decide limit vs market per attempt, not the toggle.
     #[serde(default = "default_passive_unwind_policy")]
     pub passive_unwind: PassiveUnwindConfig,
+    /// Global auto-exit hold deadline for strategy-managed pair positions
+    /// (System Settings → Auto Position Exit): the futures convergence
+    /// supervisor unwinds a still-open pair once it has been held this long,
+    /// regardless of the live edge. Seconds; SpatialExitConfig requires
+    /// >= 60. Radar-bot positions keep their own per-bot `holdTimeoutMult`.
+    #[serde(default = "default_auto_exit_max_hold_secs")]
+    pub auto_exit_max_hold_secs: u64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -711,6 +721,7 @@ impl Default for EngineSettingsDto {
             live_entry_enabled: false,
             live_entry_max_notional_usd: 0.0,
             passive_unwind: default_passive_unwind_policy(),
+            auto_exit_max_hold_secs: default_auto_exit_max_hold_secs(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -1472,6 +1483,11 @@ impl AppEngineState {
             if let Some(v) = get_u("risk.max_leverage") {
                 if (1..=100).contains(&v) {
                     initial_settings.max_leverage = v;
+                }
+            }
+            if let Some(v) = get_u("engine.auto_exit_max_hold_secs") {
+                if (60..=604_800).contains(&v) {
+                    initial_settings.auto_exit_max_hold_secs = v as u64;
                 }
             }
             for (key, slot) in [
