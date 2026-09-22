@@ -1152,6 +1152,11 @@ pub struct AppEngineState {
     /// In-flight dedup for orderbook REST fetches, keyed by
     /// (venue, symbol). Concurrent callers share one request.
     pub orderbook_flights: Arc<crate::ws_primary::OrderbookSingleFlight>,
+    /// Per-venue async fetch lock for live account reads — concurrent
+    /// pollers (venue balances, risk overview, external positions) share
+    /// one REST call instead of each hammering e.g. Orderly's
+    /// /v1/positions (429s at a few req/3s).
+    pub account_fetch_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented
@@ -1614,6 +1619,7 @@ impl AppEngineState {
             monitor: Mutex::new(None),
             radar_bot: Mutex::new(None),
             orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
+            account_fetch_locks: Mutex::new(std::collections::HashMap::new()),
         }
     }
 

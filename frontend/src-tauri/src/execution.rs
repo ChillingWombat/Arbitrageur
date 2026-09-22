@@ -1532,6 +1532,36 @@ pub(crate) async fn live_account_or_cached(
     vid: &str,
     adapter: &Arc<dyn ExchangeAdapter>,
 ) -> Result<(AccountSnapshot, Option<i64>), String> {
+    // Freshness window: independent pollers (venue balances, risk overview,
+    // external positions, reconciler) each firing fetch_account would
+    // multiply a venue's account-endpoint rate — Orderly's /v1/positions
+    // 429s at just a few req/3s. Within the window the last snapshot is
+    // served as fresh (it IS fresh — `Some(age)` is reserved for reads that
+    // actually failed, which callers surface as STALE/ERROR).
+    const ACCOUNT_FRESH_MS: i64 = 2_500;
+    let now_ms = Utc::now().timestamp_millis();
+    if let Some((acc, ts)) = state.last_good_accounts.lock().get(vid).cloned() {
+        if now_ms.saturating_sub(ts) < ACCOUNT_FRESH_MS {
+            return Ok((acc, None));
+        }
+    }
+    // Singleflight: concurrent stale reads share one in-flight fetch.
+    let lock = state
+        .account_fetch_locks
+        .lock()
+        .entry(vid.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _permit = lock.lock().await;
+    // A waiter may find a fresh snapshot the leader just wrote.
+    let now_ms = Utc::now().timestamp_millis();
+    if let Some((acc, ts)) = state.last_good_accounts.lock().get(vid).cloned() {
+        let age = now_ms.saturating_sub(ts);
+        if age < ACCOUNT_FRESH_MS {
+            tracing::debug!("{vid}: account read coalesced with in-flight fetch ({age}ms old)");
+            return Ok((acc, None));
+        }
+    }
     match adapter.fetch_account().await {
         Ok(mut acc) => {
             acc.venue = vid.into();
@@ -3573,4 +3603,171 @@ pub async fn check_spatial_convergence_impl(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod account_read_tests {
+    use super::*;
+    use arbitrageur_core::position::AccountSnapshot;
+    use arbitrageur_core::types::VenueId;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingAccountAdapter {
+        calls: AtomicUsize,
+        delay_ms: u64,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for CountingAccountAdapter {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new("mock")
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            unimplemented!()
+        }
+        async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+            unimplemented!()
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            unimplemented!()
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            unimplemented!()
+        }
+        async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            }
+            if self.fail {
+                anyhow::bail!("venue account endpoint down in fixture");
+            }
+            Ok(AccountSnapshot {
+                venue: VenueId::new("mock"),
+                equity: dec!(1000),
+                free_margin: dec!(900),
+                maintenance_margin: dec!(100),
+                margin_usage_pct: dec!(10),
+                balances: vec![],
+                positions: vec![],
+                timestamp: Utc::now(),
+            })
+        }
+        async fn place_order(
+            &self,
+            _o: arbitrageur_core::order::OrderRequest,
+        ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+            unimplemented!()
+        }
+        async fn cancel_order(
+            &self,
+            _r: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn live_account_reads_coalesce_within_fresh_window() {
+        // Three pollers arriving inside the fresh window must produce ONE
+        // venue REST call — the shape that 429'd Orderly /v1/positions.
+        let state = AppEngineState::new();
+        let inner = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: false,
+        });
+        let adapter: Arc<dyn ExchangeAdapter> = inner.clone();
+        for _ in 0..3 {
+            let (acc, stale_age) = live_account_or_cached(&state, "mock", &adapter)
+                .await
+                .expect("account read");
+            assert_eq!(acc.equity, dec!(1000));
+            // A TTL-window hit is fresh truth, not a degraded read.
+            assert!(stale_age.is_none());
+        }
+        assert_eq!(
+            inner.calls.load(Ordering::SeqCst),
+            1,
+            "coalesced reads must share one venue call"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_live_account_reads_share_one_fetch() {
+        // Two callers arriving while the first fetch is still in flight
+        // must both await the same call (singleflight), not fire a second.
+        let state = Arc::new(AppEngineState::new());
+        let inner = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 150,
+            fail: false,
+        });
+        let adapter: Arc<dyn ExchangeAdapter> = inner.clone();
+        let s2 = state.clone();
+        let a2 = adapter.clone();
+        let h = tokio::spawn(async move { live_account_or_cached(&s2, "mock", &a2).await });
+        let r1 = live_account_or_cached(&state, "mock", &adapter).await;
+        let r2 = h.await.expect("join");
+        assert!(r1.is_ok() && r2.is_ok());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn live_account_failure_falls_back_to_last_known_good() {
+        // Seed a good snapshot, then fail: callers get cached figures with
+        // the real age — never fabricated zeros and never an Err while a
+        // cached value exists.
+        let state = AppEngineState::new();
+        let good = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: false,
+        });
+        live_account_or_cached(&state, "mock", &(good.clone() as Arc<dyn ExchangeAdapter>))
+            .await
+            .expect("seed read");
+        // Age the cache past the fresh window so the next call re-fetches.
+        {
+            let mut map = state.last_good_accounts.lock();
+            if let Some(entry) = map.get_mut("mock") {
+                entry.1 -= 10_000;
+            }
+        }
+        let bad: Arc<dyn ExchangeAdapter> = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: true,
+        });
+        let (acc, stale_age) = live_account_or_cached(&state, "mock", &bad)
+            .await
+            .expect("cached fallback");
+        assert_eq!(acc.equity, dec!(1000));
+        assert!(
+            stale_age.expect("failed read must report cache age") >= 10_000,
+            "age must reflect the real snapshot timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_account_failure_without_cache_errors() {
+        // Fail-closed: a venue that has never read successfully yields Err —
+        // callers must not see fabricated account figures.
+        let state = AppEngineState::new();
+        let bad: Arc<dyn ExchangeAdapter> = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: true,
+        });
+        assert!(live_account_or_cached(&state, "mock", &bad).await.is_err());
+    }
 }

@@ -14,9 +14,13 @@
 /// note instead of attributing the move.
 pub const EQUITY_POLL_GAP_MAX_MS: i64 = 300_000;
 
-/// Dust threshold: absolute deltas at or below this are rounding noise, not
-/// external flows.
-pub const EQUITY_DELTA_EPS_USD: f64 = 1e-6;
+/// Noise deadband: absolute deltas at or below this are reporting noise, not
+/// external flows. Venue equity readouts wobble — observed symmetric
+/// oscillation of ±$0.02–0.21 across consecutive polls on flat accounts —
+/// and classifying that as deposit/withdrawal floods `account_equity_events`
+/// with phantom flows (thousands observed). Real external flows are
+/// dollars-scale, so a quarter of deadband loses no information.
+pub const EQUITY_DELTA_EPS_USD: f64 = 0.25;
 
 /// Absolute deltas at or below this with open positions are classified as
 /// funding settlements rather than manual transfers.
@@ -94,10 +98,14 @@ pub fn check_equity_delta(
     }
     let delta = actual - exp;
     if delta.abs() <= EQUITY_DELTA_EPS_USD {
+        // Noise band: no event, but DO rebase to actual. Pinning the
+        // baseline to the last noise reading keeps the next comparison
+        // honest — otherwise symmetric wobble could random-walk the stored
+        // expectation and eventually surface as one phantom large delta.
         return EquityCheckOutcome {
             delta: 0.0,
             event_kind: None,
-            rebased: false,
+            rebased: true,
             note: None,
         };
     }
@@ -125,9 +133,11 @@ mod tests {
 
     #[test]
     fn fills_only_equity_produces_no_event() {
+        // Zero delta: no event; the baseline silently re-pins to actual so
+        // reporting noise can't random-walk the stored expectation.
         let out = check_equity_delta(Some(100_000.0), 100_000.0, false, false, Some(1000));
         assert_eq!(out.event_kind, None);
-        assert!(!out.rebased);
+        assert!(out.rebased);
         assert_eq!(out.note, None);
     }
 
@@ -177,5 +187,21 @@ mod tests {
         let out = check_equity_delta(Some(100.0), f64::NAN, false, false, Some(1));
         assert_eq!(out.event_kind, None);
         assert!(!out.rebased);
+    }
+
+    #[test]
+    fn reporting_noise_produces_no_event_but_rebases() {
+        // Venue equity readouts wobble (±$0.02–0.21 observed); a sub-band
+        // oscillation must not be written as a deposit/withdrawal, but the
+        // baseline silently re-pins to actual so noise can't accumulate.
+        for actual in [516.10, 516.14, 516.09, 516.32] {
+            let out = check_equity_delta(Some(516.11), actual, false, false, Some(1000));
+            assert_eq!(out.event_kind, None, "actual={actual}");
+            assert!(out.rebased, "sub-band reads rebase silently");
+        }
+        // A real move above the band still classifies and rebases.
+        let out = check_equity_delta(Some(516.11), 516.40, false, false, Some(1000));
+        assert_eq!(out.event_kind.as_deref(), Some("deposit"));
+        assert!(out.rebased);
     }
 }
