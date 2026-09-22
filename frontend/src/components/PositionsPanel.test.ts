@@ -24,7 +24,7 @@ const position: OpenPositionDto = {
 const baseProps = {
   positions: [position],
   currentStrategyId: "futures" as string | null,
-  currentStrategyLabel: "Single Spread",
+  currentStrategyLabel: "Simple Spread",
   selectedPositionKey: null as string | null,
   onSelectPosition: () => {},
   onOpenTickerExplorer: () => {},

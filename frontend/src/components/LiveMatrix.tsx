@@ -7,6 +7,7 @@ import {
   Terminal,
   SlidersHorizontal,
   LayoutGrid,
+  Radar,
   Table,
 } from "lucide-react";
 import type {
@@ -42,6 +43,7 @@ import { useBotLifecycle } from "../hooks/useBotLifecycle";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerTelemetryGadget } from "./TickerTelemetryGadget";
 import { TickerLogMonitor } from "./TickerLogMonitor";
+import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
 import { SignalTrendGadget } from "./SignalTrendGadget";
 import { TickerConfigModal } from "./TickerConfigModal";
 import { EmptyState } from "./EmptyState";
@@ -292,7 +294,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   const lastAutoExecTimeRef = React.useRef<number>(0);
   const handleInternalConfigClose = useCallback(() => setInternalConfigModalOpen(false), []);
 
-  // Universal Single Spread strategy params (shared across all tickers) +
+  // Universal Simple Spread strategy params (shared across all tickers) +
   // per-ticker runtime grid state (accumulated units) keyed by symbol.
   const [loadedFuturesParams, setLoadedFuturesParams] = useState<StrategyParamsDto | null>(null);
   const [strategyConfigs, setStrategyConfigs] = useState<Map<string, TickerStrategyConfigDto>>(() => new Map());
@@ -662,7 +664,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   }, [orderbooks]);
 
 
-  const [bottomTab, setBottomTab] = useState<"history" | "logs">("history");
+  const [bottomTab, setBottomTab] = useState<"history" | "opps" | "logs">("history");
   const [stageTab, setStageTab] = useState<"matrix" | "quotes" | "opportunities">("matrix");
 
   const tickerLogsCount = useMemo(() => {
@@ -740,7 +742,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
             type="button"
             onClick={handleOpenConfig}
             className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
-            title="Configure Single Spread strategy parameters (applies to all tickers)"
+            title="Configure Simple Spread strategy parameters (applies to all tickers)"
           >
             <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
             <span>Configurator</span>
@@ -1089,7 +1091,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
       <div className="bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
         {/* Tab Switcher with dividers — three equal tabs */}
         <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-2 flex-1 divide-x divide-surface-border">
+          <div className="grid grid-cols-3 flex-1 divide-x divide-surface-border">
             <button
               type="button"
               onClick={() => setBottomTab("history")}
@@ -1111,6 +1113,26 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               </span>
               )}
               {bottomTab === "history" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setBottomTab("opps")}
+              className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+                bottomTab === "opps"
+                  ? "text-accent font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <Radar
+                className={`w-3 h-3 transition shrink-0 ${
+                  bottomTab === "opps" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                }`}
+              />
+              <span>Opportunities</span>
+              {bottomTab === "opps" && (
                 <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
               )}
             </button>
@@ -1153,11 +1175,15 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 onRefresh={handleHistoryRefresh}
               />
             </div>
+          ) : bottomTab === "opps" ? (
+            <div className="max-h-96 overflow-y-auto">
+              <TickerOpportunityHistory symbol={sym} />
+            </div>
           ) : (
             <div className="overflow-y-auto">
               <TickerLogMonitor
                 symbol={sym}
-                strategyName="Single Spread"
+                strategyName="Simple Spread"
                 config={currentStrategyConfig}
                 executionLogs={executionLogs || []}
                 orderbooks={orderbooks}

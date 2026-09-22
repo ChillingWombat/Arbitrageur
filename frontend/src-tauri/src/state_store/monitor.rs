@@ -387,8 +387,18 @@ impl StateStore {
         );
         let mut binds: Vec<String> = Vec::new();
         if let Some(s) = symbol {
-            sql.push_str(" AND symbol = ?");
-            binds.push(normalize_symbol(s)?);
+            // Monitor rows key on the canonical base ("BTC"); callers pass
+            // full UI symbols ("BTC-USDC"). Match the whole alias family so
+            // either spelling returns the same events.
+            let aliases = crate::state_store::spread_symbol_aliases(s);
+            if aliases.is_empty() {
+                anyhow::bail!("invalid symbol filter");
+            }
+            sql.push_str(&format!(
+                " AND symbol IN ({})",
+                aliases.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+            ));
+            binds.extend(aliases);
         }
         if let Some(b) = buy_venue {
             sql.push_str(" AND buy_venue = ?");

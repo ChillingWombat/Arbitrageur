@@ -1,7 +1,7 @@
 import React from "react";
 
 /* Lucide-compatible stroke icon: two vertical venue rails with a
-   double-headed arrow between them — the Single Spread strategy mark. */
+   double-headed arrow between them — the Simple Spread strategy mark. */
 export const SpreadGapIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg
     xmlns="http://www.w3.org/2000/svg"

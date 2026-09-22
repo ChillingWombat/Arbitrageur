@@ -1,4 +1,4 @@
-//! AutoTune for Single Spread futures: walk-forward parameter
+//! AutoTune for Simple Spread futures: walk-forward parameter
 //! recommendations, operator/scheduled apply with audit trail, and
 //! per-ticker tuning modes (manual / periodic / continuous).
 //!
@@ -22,7 +22,7 @@ use std::sync::Arc;
 use tauri::State;
 
 // ---------------------------------------------------------------------------
-// Auto-tune Phase 1 (recommend-only) — Single Spread futures
+// Auto-tune Phase 1 (recommend-only) — Simple Spread futures
 // ---------------------------------------------------------------------------
 
 /// One validated recommendation row. `recommended` is `None` exactly when
@@ -81,7 +81,7 @@ pub struct AutotuneReadinessDto {
     pub blockers: Vec<String>,
 }
 
-/// Recommend-only preview for one symbol's Single Spread futures params.
+/// Recommend-only preview for one symbol's Simple Spread futures params.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AutotuneRecommendationDto {
     pub symbol: String,

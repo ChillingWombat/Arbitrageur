@@ -107,7 +107,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           type="button"
           onClick={handleOpenModal}
           className="btn-secondary flex items-center gap-2 text-xs font-sans"
-          title="Configure Single Spread strategy parameters (applies to all tickers)"
+          title="Configure Simple Spread strategy parameters (applies to all tickers)"
         >
           <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
           <span>Configurator</span>

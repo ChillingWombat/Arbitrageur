@@ -55,6 +55,7 @@ import type {
   FlattenResultDto,
   CalibrationReportDto,
   MonitorSnapshotDto,
+  MonitorSignalEventDto,
   MonitorConfigDto,
   RadarBotConfigDto,
   RadarBotStatusDto,
@@ -195,6 +196,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "flatten_ticker_positions",
   "execute_spatial_candidates",
   "get_monitor_snapshot",
+  "get_monitor_signal_events",
   "get_monitor_config",
   "set_monitor_config",
   "set_ticker_exempted",
@@ -1053,6 +1055,20 @@ export const api = {
   // ---- Spread Range Monitor (Opportunity Radar) ----
   async getMonitorSnapshot(): Promise<MonitorSnapshotDto | null> {
     return invokeDesktop<MonitorSnapshotDto | null>("get_monitor_snapshot");
+  },
+
+  /** Durable opportunity-detection audit: pair lifecycle transitions +
+   * minute heartbeats from the monitor engine, newest first. */
+  async getMonitorSignalEvents(
+    symbol?: string,
+    limit: number = 200
+  ): Promise<MonitorSignalEventDto[]> {
+    return invokeDesktop<MonitorSignalEventDto[]>("get_monitor_signal_events", {
+      symbol: symbol ?? null,
+      buyVenue: null,
+      sellVenue: null,
+      limit,
+    });
   },
 
   async getMonitorConfig(): Promise<MonitorConfigDto> {

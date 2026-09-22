@@ -198,7 +198,7 @@ export function getMinCompatibleSize(
 }
 
 /**
- * Single Spread step-sizing parameters (authored once per strategy).
+ * Simple Spread step-sizing parameters (authored once per strategy).
  * Session fields are display/execution multipliers from the session
  * profile (Phase 1): each defaults to neutral 1.0 when the aggregate is
  * provisional or unknown — never a fabricated value.
@@ -247,7 +247,7 @@ export function resolveTotalPaperEquity(
 }
 
 /**
- * Canonical Single Spread step sizing. Single helper consumed by BOTH the
+ * Canonical Simple Spread step sizing. Single helper consumed by BOTH the
  * LiveMatrix orderQty derivation AND the App refreshAllData scan qty so
  * scan/execute cannot diverge.
  */

@@ -74,7 +74,7 @@ fn main() {
         tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
     }
 
-    // Spawn periodic convergence supervisor for Single Spread ("futures") strategy.
+    // Spawn periodic convergence supervisor for Simple Spread ("futures") strategy.
     // Automatically monitors open manual/automated futures positions every 5s and
     // unwinds them upon convergence into the friction band or on timeout/stop.
     {

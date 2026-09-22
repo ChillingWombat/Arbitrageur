@@ -13,7 +13,7 @@ Use Paper Trading, collect venue-specific history, review AutoTune's held-out re
 5. **Do not infer live readiness from a backtest.** Venue order handling and restart reconciliation are separate release gates.
 6. **Treat annualized carry as a comparison, not a forecast.** Funding can change or invert before costs are recovered.
 
-## Single Spread
+## Simple Spread
 
 ### Target Profit (BPS)
 

@@ -51,7 +51,7 @@ use crate::state_store::BotPositionRow;
 
 /// Ledger strategy id the bot trades under. Shared with the manual
 /// row-Execute button so the Spread Radar page scopes bot and manual fills
-/// together, apart from Single Spread ("futures").
+/// together, apart from Simple Spread ("futures").
 pub const BOT_STRATEGY_ID: &str = "radar";
 /// Skip audits are deduped per pair within this window to bound the log;
 /// enters and exits are always recorded.

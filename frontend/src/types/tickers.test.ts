@@ -485,7 +485,7 @@ test("applyTickerVisibility applies manual AFTER auto and manages them separatel
   assert.deepStrictEqual(applyTickerVisibility(universe, new Set(["BTC", "ETH", "SOL"]), new Set()).length, 0);
 });
 
-test("manual hide UI lives in the Single Spread configurator, not EngineSettings", async () => {
+test("manual hide UI lives in the Simple Spread configurator, not EngineSettings", async () => {
   const { readFile } = await import("node:fs/promises");
   const modal = await readFile(new URL("../components/TickerConfigModal.tsx", import.meta.url), "utf8");
   const settings = await readFile(new URL("../components/EngineSettings.tsx", import.meta.url), "utf8");

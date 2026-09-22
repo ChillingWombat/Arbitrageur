@@ -1,5 +1,5 @@
 //! Per-ticker strategy configuration and universal per-strategy parameters
-//! for Single Spread futures: KV-backed ticker configs (unit sizing,
+//! for Simple Spread futures: KV-backed ticker configs (unit sizing,
 //! leverage, auto-filters) plus the shared `StrategyParamsDto` records that
 //! AutoTune mutates. Split out of `commands.rs`.
 

@@ -29,7 +29,7 @@ interface PositionsPanelProps {
   /** Strategy id backing the active tab (e.g. "futures"), null when the tab
    *  has no single-strategy scope (portfolio monitor, triangle). */
   currentStrategyId: string | null;
-  /** Display label for the current-strategy scope (e.g. "Single Spread"). */
+  /** Display label for the current-strategy scope (e.g. "Simple Spread"). */
   currentStrategyLabel: string;
   selectedPositionKey: string | null;
   onSelectPosition: (position: OpenPositionDto) => void;
