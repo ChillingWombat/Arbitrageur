@@ -36,28 +36,38 @@ pub fn build_pair_series(
         while j < mids_sell.len() && mids_sell[j].0 < ts_a - max_gap_ms {
             j += 1;
         }
-        let mut best: Option<(i64, f64)> = None;
-        let mut best_offset: usize = 0;
-        for (offset, (ts_b, mid_b)) in mids_sell.iter().skip(j).take(2).copied().enumerate() {
-            if ts_b > ts_a + max_gap_ms {
-                break;
-            }
+        // Nearest-in-time match inside [ts_a-gap, ts_a+gap], not first-in-
+        // window: picking the window's oldest sell injects up to `gap` of
+        // staleness into the spread. |Δt| is V-shaped over the sorted sell
+        // series, so once past ts_a the first worsening candidate ends the
+        // scan.
+        let mut best: Option<(usize, i64, f64)> = None;
+        let mut best_dt = i64::MAX;
+        let mut k = j;
+        while k < mids_sell.len() && mids_sell[k].0 <= ts_a + max_gap_ms {
+            let (ts_b, mid_b) = mids_sell[k];
             if mid_b.is_finite() && mid_b > 0.0 {
-                best = Some((ts_b, mid_b));
-                best_offset = offset;
-                break;
+                let dt = (ts_b - ts_a).abs();
+                if dt < best_dt {
+                    best = Some((k, ts_b, mid_b));
+                    best_dt = dt;
+                } else if ts_b > ts_a {
+                    break;
+                }
             }
+            k += 1;
         }
-        if let Some((ts_b, mid_b)) = best {
+        if let Some((best_idx, ts_b, mid_b)) = best {
             let spread_bps = (mid_b - mid_a) / mid_a * 10_000.0;
             if spread_bps.is_finite() {
                 out.push(PairObservation {
                     ts_ms: ts_a.max(ts_b),
                     spread_bps,
                 });
-                // Advance past the consumed sample (and any skipped invalid
-                // sample before it) so the next buy cannot reuse it.
-                j += best_offset + 1;
+                // Advance past the consumed sample (and any skipped or
+                // nearer-losing candidates before it) so the next buy
+                // cannot reuse it — each sell feeds at most one pair.
+                j = best_idx + 1;
             }
         }
     }
@@ -981,6 +991,19 @@ mod tests {
         let s = build_pair_series(&a, &b, 5);
         assert_eq!(s.len(), 1);
         assert_eq!(s[0].ts_ms, 1);
+    }
+
+    #[test]
+    fn pair_series_picks_nearest_sell_not_oldest() {
+        // Buy at t=10_000 with gap=30s: sells at t=-15_000 (25s stale, still
+        // in window) and t=11_000 (1s fresh). First-in-window would take the
+        // stale one; nearest-match takes the fresh print.
+        let a = vec![(10_000, 100.0)];
+        let b = vec![(-15_000, 105.0), (11_000, 101.0)];
+        let s = build_pair_series(&a, &b, 30_000);
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].ts_ms, 11_000, "nearest sell wins over oldest");
+        assert!((s[0].spread_bps - 100.0).abs() < 1e-9);
     }
 
     #[test]

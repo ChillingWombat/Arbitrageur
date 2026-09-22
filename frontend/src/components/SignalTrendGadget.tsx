@@ -332,7 +332,7 @@ function SignalTrendGadgetInner({
             Venue deviation from baseline
             <InfoTooltip
               position="bottom"
-              text="Each line is a venue's mid-price deviation from the baseline, in basis points. Above 0 = expensive (sell candidate); below 0 = cheap (buy candidate). The shaded band spans the cheapest-to-richest gap — its height is the gross pairwise spread and it tints green when it exceeds the hurdle. Computed in Rust over persisted samples; gaps are real gaps."
+              text="Each line is a venue's mid-price deviation from the baseline, in basis points. Above 0 = expensive (sell candidate); below 0 = cheap (buy candidate). The shaded band spans the cheapest-to-richest gap — its height is the gross pairwise spread and it tints green when it exceeds the hurdle. Each bucket uses the venue's median in-window mid; a venue's last quote carries forward while fresh (up to ~30s or 4× the bucket), then becomes a real gap — never a zero. Buckets where fewer than two venues are quotable are skipped."
             />
           </span>
         </div>
