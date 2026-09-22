@@ -2274,3 +2274,13 @@ clippy+fmt clean, app restarted on the new binary.
 - `frontend/src-tauri/src/state_store.rs` (7817 lines) renamed to `state_store/mod.rs` (1967 lines: types, table/migration constants V1–V28, lifecycle `open`/`init`/`migrate`).
 - Ten domain modules each hold their own `impl StateStore` block — descendant modules see the parent's private fields/helpers, so no visibility or call-site changes: `accounts.rs` (credential profiles + strategy routes), `signals.rs` (signal lifecycle, legs, durable order identity, predictions, `legs_for`), `config.rs` (KV, strategy params, monitor/radar config JSON, ticker exemptions, venue tiers), `samples.rs` (spread/volume/funding-rate samples + retention), `seasonality.rs` (session profiles/hour bins/HAR anchors/promotion state), `autotune.rs` (apply-event audit), `logs.rs` (execution logs + db size), `equity.rs` (margin snapshots + equity expectations/events), `monitor.rs` (bot positions/decisions, spatial baselines, monitor signal history), `exits.rs` (scheduled-exit queue). Tests moved to `tests.rs` (2897 lines, `#[cfg(test)] mod tests;`).
 - Verified: 371 desktop tests pass, clippy clean, fmt clean, release build green. Pure structural move — zero behavior change.
+
+## Fix: release binary was dev-mode — UI showed "Could not connect to localhost"
+
+- `frontend/src-tauri/Cargo.toml` never defined the standard `custom-protocol` feature, so every `cargo build` (debug OR release) compiled with `rustc-cfg=dev` → the webview loaded `devUrl` (localhost:1420) instead of the bundled `frontendDist`. The backend runs regardless, which masked it — feeds/DB were healthy while the UI was dead. Previously only `tauri dev` (vite on :1420) rendered the UI.
+- Added `[features] custom-protocol = ["tauri/custom-protocol"]`; production binary now built via `cargo build --release --bin arbitrageur-desktop --features custom-protocol` (equivalently `npx tauri build`). Verified: build-script output no longer emits `cfg(dev)`, dist assets embedded in binary.
+- AGENTS.md updated with the required build flag.
+
+### Pickup notes
+
+- Always build release with `--features custom-protocol`; a bare `cargo build --release` binary has a working backend but a dead UI.

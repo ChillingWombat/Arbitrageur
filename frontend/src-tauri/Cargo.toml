@@ -43,5 +43,13 @@ reqwest = { workspace = true }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
+[features]
+# Standard Tauri production switch: enables `tauri/custom-protocol` so the
+# webview serves the bundled `frontendDist` instead of `devUrl`. Plain
+# `cargo build` (no features) compiles a dev-mode binary that expects the
+# vite dev server on localhost:1420 — release binaries must be built with
+# `--features custom-protocol` (or via `tauri build`, which sets it).
+custom-protocol = ["tauri/custom-protocol"]
+
 [dev-dependencies]
 tauri = { version = "2.1", features = ["test"] }
