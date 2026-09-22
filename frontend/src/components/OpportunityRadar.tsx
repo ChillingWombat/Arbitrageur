@@ -6,7 +6,6 @@ import {
   Search,
   SlidersHorizontal,
   ChevronDown,
-  ChevronRight,
   Clock,
   EyeOff,
   Layers,
@@ -1006,9 +1005,6 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
           onClick={() => onOpenDetail(k)}
           title="Open signal details"
         >
-          <td className="px-2 py-2 text-slate-400">
-            <ChevronRight size={12} />
-          </td>
           <td className="px-2 py-2 font-bold font-sans text-xs text-slate-900">
             {r.symbol}
             {held && (
@@ -1669,7 +1665,6 @@ const OpportunityRadarInner: React.FC = () => {
           <table className="w-full text-xs">
             <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-xs text-slate-500 font-sans text-[11px] uppercase tracking-wider font-semibold">
               <tr className="border-b border-surface-border text-left">
-                <th className="px-2 py-2 w-6" />
                 <th className="px-2 py-2">Symbol</th>
                 <th className="px-2 py-2" title="Buy venue → sell venue">Route</th>
               <th
@@ -1727,7 +1722,7 @@ const OpportunityRadarInner: React.FC = () => {
           <tbody>
             {rows.length === 0 && (
               <tr>
-                <td colSpan={18}>
+                <td colSpan={17}>
                   {snap == null ? (
                     <EmptyState pulse icon={Activity} title="Monitor Warming Up" hint="Collecting spread samples…" />
                   ) : snap.watchlist.length === 0 ? (
