@@ -87,6 +87,21 @@ interface CarryDetailModalProps {
  *  min-APR exit threshold over the popup's expected hold. Empty series =
  *  "no history yet" (sampling just started) — current prints above still hold.
  *  Never interpolates or fabricates: only persisted samples are drawn. */
+/** Evenly-rounded axis ticks: picks a 1/2/5×10ⁿ step so ~`count` ticks land
+ * inside [lo, hi], then returns every multiple of the step in range. */
+function niceTicks(lo: number, hi: number, count = 4): number[] {
+  if (!(hi > lo) || !Number.isFinite(lo) || !Number.isFinite(hi)) return [];
+  const step0 = (hi - lo) / count;
+  const mag = 10 ** Math.floor(Math.log10(step0));
+  const norm = step0 / mag;
+  const step = (norm >= 5 ? 5 : norm >= 2 ? 2 : 1) * mag;
+  const ticks: number[] = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + step * 1e-9; v += step) {
+    ticks.push(Math.abs(v) < step * 1e-9 ? 0 : v);
+  }
+  return ticks;
+}
+
 const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: number }> = ({
   opp,
   minAprPct,
@@ -115,9 +130,9 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
 
   const W = 600;
   const H = 220;
-  const PADL = 52;
-  const PADR = 56;
-  const PADT = 10;
+  const PADL = 56;
+  const PADR = 60;
+  const PADT = 14;
   const PADB = 20;
 
   if (loading) {
@@ -200,6 +215,20 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
     new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const mid = trend?.current_mid_usd;
 
+  const fundTicks = niceTicks(fMin, fMax, 4);
+  const tickStep = fundTicks.length > 1 ? Math.abs(fundTicks[1] - fundTicks[0]) : Math.abs(fMax - fMin) || 1;
+  const tickDec = Math.min(4, Math.max(0, -Math.floor(Math.log10(tickStep))));
+  const fmtPct = (v: number) => `${v.toFixed(tickDec)}%`;
+  const fmtUsdAxis = (v: number) =>
+    `$${v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toPrecision(3)}`;
+  const priceTicks = hasPrice ? niceTicks(pMin, pMax, 3) : [];
+  const nowX = xPos(nowT);
+  const lastLong = long.length ? long[long.length - 1] : null;
+  const lastShort = short.length ? short[short.length - 1] : null;
+  const endLabelsOverlap =
+    lastLong != null && lastShort != null && Math.abs(yFund(lastLong.v) - yFund(lastShort.v)) < 14;
+  const fmtEndPct = (v: number) => `${v >= 0 ? "+" : ""}${v.toFixed(3)}%`;
+
   return (
     <div>
       <svg
@@ -208,56 +237,124 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
         role="img"
         aria-label={`Funding trend for ${opp.symbol}`}
       >
-        <line x1={PADL} y1={yFund(0)} x2={W - PADR} y2={yFund(0)} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="2 3" />
+        {showProjection && (
+          <rect x={nowX} y={PADT} width={Math.max(0, W - PADR - nowX)} height={H - PADT - PADB} fill="#f0fdf4" />
+        )}
+        {fundTicks.map((v) => (
+          <g key={v}>
+            <line
+              x1={PADL}
+              y1={yFund(v)}
+              x2={W - PADR}
+              y2={yFund(v)}
+              stroke={v === 0 ? "#94a3b8" : "#e2e8f0"}
+              strokeWidth="1"
+              strokeDasharray={v === 0 ? "2 3" : undefined}
+            />
+            <text x={PADL - 6} y={yFund(v) + 3} fontSize="9.5" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
+              {fmtPct(v)}
+            </text>
+          </g>
+        ))}
+        {priceTicks.map((v) => (
+          <text key={v} x={W - PADR + 6} y={yPrice(v) + 3} fontSize="9.5" fill="#93c5fd" fontFamily="Inter, sans-serif">
+            {fmtUsdAxis(v)}
+          </text>
+        ))}
         {thrPct > 0 && (
-          <line
-            x1={PADL}
-            y1={yFund(thrPct)}
-            x2={W - PADR}
-            y2={yFund(thrPct)}
-            stroke="#f43f5e"
-            strokeWidth="1"
-            strokeDasharray="3 3"
-            opacity="0.7"
-          />
+          <g>
+            <line
+              x1={PADL}
+              y1={yFund(thrPct)}
+              x2={W - PADR}
+              y2={yFund(thrPct)}
+              stroke="#f43f5e"
+              strokeWidth="1"
+              strokeDasharray="3 3"
+              opacity="0.7"
+            />
+            <text x={W - PADR - 4} y={yFund(thrPct) - 3} fontSize="9" fill="#f43f5e" fontFamily="Inter, sans-serif" textAnchor="end">
+              min APR
+            </text>
+          </g>
         )}
         {hasPrice && (
-          <polyline points={line(price, yPrice)} fill="none" stroke="#2563eb" strokeWidth="1.5" opacity="0.55" />
-        )}
-        {netPts.length > 1 && (
-          <polyline points={line(netPts, yFund)} fill="none" stroke="#64748b" strokeWidth="1.5" strokeDasharray="5 3" />
-        )}
-        <polyline points={line(long, yFund)} fill="none" stroke="#0d9488" strokeWidth="2" />
-        <polyline points={line(short, yFund)} fill="none" stroke="#ea580c" strokeWidth="2" />
-        {showProjection && (
-          <line
-            x1={xPos(nowT)}
-            y1={yFund(curNet)}
-            x2={xPos(projEndT as number)}
-            y2={yFund(thrPct)}
-            stroke="#16a34a"
-            strokeWidth="2"
-            strokeDasharray="6 4"
+          <polyline
+            points={line(price, yPrice)}
+            fill="none"
+            stroke="#2563eb"
+            strokeWidth="1.25"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity="0.45"
           />
         )}
-        <circle cx={xPos(nowT)} cy={yFund(curNet)} r="3" fill="#16a34a" />
+        {netPts.length > 1 && (
+          <polyline
+            points={line(netPts, yFund)}
+            fill="none"
+            stroke="#64748b"
+            strokeWidth="1.5"
+            strokeDasharray="5 3"
+            strokeLinejoin="round"
+          />
+        )}
+        <polyline points={line(long, yFund)} fill="none" stroke="#0d9488" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        <polyline points={line(short, yFund)} fill="none" stroke="#ea580c" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+        {showProjection && (
+          <g>
+            <line x1={nowX} y1={PADT} x2={nowX} y2={H - PADB} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.8" />
+            <line
+              x1={nowX}
+              y1={yFund(curNet)}
+              x2={xPos(projEndT as number)}
+              y2={yFund(thrPct)}
+              stroke="#16a34a"
+              strokeWidth="2"
+              strokeDasharray="6 4"
+              strokeLinecap="round"
+            />
+            <circle cx={nowX} cy={yFund(curNet)} r="3" fill="#16a34a" />
+          </g>
+        )}
+        {lastLong != null && (
+          <g>
+            <circle cx={xPos(lastLong.t)} cy={yFund(lastLong.v)} r="2.5" fill="#0d9488" />
+            <text
+              x={xPos(lastLong.t) - 6}
+              y={yFund(lastLong.v) - 6}
+              fontSize="9.5"
+              fontWeight="600"
+              fill="#0f766e"
+              fontFamily="Inter, sans-serif"
+              textAnchor="end"
+            >
+              {fmtEndPct(lastLong.v)}
+            </text>
+          </g>
+        )}
+        {lastShort != null && (
+          <g>
+            <circle cx={xPos(lastShort.t)} cy={yFund(lastShort.v)} r="2.5" fill="#ea580c" />
+            <text
+              x={xPos(lastShort.t) - 6}
+              y={endLabelsOverlap ? yFund(lastShort.v) + 13 : yFund(lastShort.v) - 6}
+              fontSize="9.5"
+              fontWeight="600"
+              fill="#c2410c"
+              fontFamily="Inter, sans-serif"
+              textAnchor="end"
+            >
+              {fmtEndPct(lastShort.v)}
+            </text>
+          </g>
+        )}
         <text x={PADL} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
           {fmtT(startT)}
         </text>
         <text x={W - PADR} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
           now{holdH != null ? ` → +${holdH.toFixed(1)}h` : ""}
         </text>
-        <text x={4} y={14} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
-          {`${fMax.toFixed(4)}%`}
-        </text>
-        <text x={4} y={H - PADB} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
-          {`${fMin.toFixed(4)}%`}
-        </text>
-        {hasPrice && (
-          <text x={W - 4} y={14} fontSize="10" fill="#2563eb" fontFamily="Inter, sans-serif" textAnchor="end">
-            {`$${pMax.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-          </text>
-        )}
       </svg>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5 text-[11px] font-sans text-slate-500">
         <span className="inline-flex items-center gap-1">
@@ -694,12 +791,24 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
               Net PnL since entry — solid: realized · dashed: illustrative 24h projection
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border border-surface-border bg-surface-raised" role="img">
-              <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#cbd5e1" strokeWidth="1" strokeDasharray="2 3" />
+              {hasProjection && (
+                <rect x={xPos(t1)} y={PAD * 0.5} width={W - PAD - xPos(t1)} height={H - PAD * 1.5} fill="#f8fafc" />
+              )}
+              <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 3" />
+              {hasProjection && (
+                <line x1={xPos(t1)} y1={PAD * 0.5} x2={xPos(t1)} y2={H - PAD * 0.5} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.7" />
+              )}
+              <polygon
+                points={`${xPos(t0safe)},${zeroY} ${xPos(t0safe)},${yPos(entryPnl)} ${xPos(t1)},${yPos(nowPnl)} ${xPos(t1)},${zeroY}`}
+                fill={nowPnl >= 0 ? "#16a34a" : "#dc2626"}
+                opacity="0.08"
+              />
               <polyline
                 points={`${xPos(t0safe)},${yPos(entryPnl)} ${xPos(t1)},${yPos(nowPnl)}`}
                 fill="none"
                 stroke={nowPnl >= 0 ? "#15803d" : "#b91c1c"}
                 strokeWidth="2.5"
+                strokeLinecap="round"
               />
               {hasProjection && (
                 <polyline
@@ -708,14 +817,27 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
                   stroke="#64748b"
                   strokeWidth="2"
                   strokeDasharray="6 4"
+                  strokeLinecap="round"
                 />
               )}
               <circle cx={xPos(t0safe)} cy={yPos(entryPnl)} r="3.5" fill="#64748b" />
               <circle cx={xPos(t1)} cy={yPos(nowPnl)} r="3.5" fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"} />
+              {hasProjection && <circle cx={xPos(t2)} cy={yPos(yEnd)} r="3" fill="#64748b" opacity="0.6" />}
+              <text
+                x={xPos(t1) - 8}
+                y={yPos(nowPnl) + (nowPnl >= entryPnl ? -8 : 16)}
+                fontSize="10"
+                fontWeight="600"
+                fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"}
+                fontFamily="Inter, sans-serif"
+                textAnchor="end"
+              >
+                {`${nowPnl >= 0 ? "+" : "-"}$${Math.abs(nowPnl).toFixed(2)}`}
+              </text>
               <text x={PAD} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">{fmtT(t0safe)}</text>
               <text x={W - PAD} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">now{hasProjection ? " → +24h" : ""}</text>
               <text x={PAD} y={14} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
-                {`entry -$${Math.abs(entryPnl).toFixed(0)} fees · now ${nowPnl >= 0 ? "+" : "-"}$${Math.abs(nowPnl).toFixed(0)}`}
+                {`entry -$${Math.abs(entryPnl).toFixed(0)} fees`}
               </text>
             </svg>
             {!hasProjection && (
