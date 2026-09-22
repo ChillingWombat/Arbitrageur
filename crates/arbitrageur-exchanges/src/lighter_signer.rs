@@ -471,11 +471,28 @@ pub fn create_auth_token(
 }
 
 impl LoadedLib {
-    fn load_from_hint(_hint: Option<&str>) -> anyhow::Result<Self> {
+    fn load_from_hint(_hint: Option<&str>) -> anyhow::Result<&'static Self> {
         // Reserved for per-account library selection; the standard search
         // order applies for now.
-        Self::load()
+        shared_lib()
     }
+}
+
+/// Process-wide shared signer handle.
+///
+/// A Go `-buildmode=c-shared` library must never be `dlclose`d: its runtime
+/// threads, timers, and async-preemption signal handlers keep executing on
+/// unmapped code after unload, corrupting the host heap — observed here as
+/// delayed `corrupted double-linked list` aborts minutes after the last
+/// signing call (the previous implementation `dlopen`ed per call and let
+/// `libloading::Library` drop/unload at scope end). The handle is loaded
+/// once and intentionally leaked: the Go runtime stays mapped for the
+/// process lifetime.
+fn shared_lib() -> anyhow::Result<&'static LoadedLib> {
+    static LIB: OnceLock<anyhow::Result<LoadedLib>> = OnceLock::new();
+    LIB.get_or_init(LoadedLib::load)
+        .as_ref()
+        .map_err(|e| anyhow::anyhow!("{e:#}"))
 }
 
 #[cfg(test)]
@@ -484,7 +501,9 @@ mod tests {
 
     #[test]
     fn signer_lib_loads_from_vendored_copy() {
-        let lib = LoadedLib::load().expect("vendored liblighter_signer.so must load");
+        // Route through the process-wide handle: a Go c-shared lib must
+        // never be dlclosed (orphaned runtime threads corrupt the heap).
+        let lib = shared_lib().expect("vendored liblighter_signer.so must load");
         // GenerateAPIKey exercises the library without any credentials.
         unsafe {
             let gen: libloading::Symbol<unsafe extern "C" fn() -> ApiKeyResponse> = lib
