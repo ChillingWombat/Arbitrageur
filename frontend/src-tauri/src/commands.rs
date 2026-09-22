@@ -5398,6 +5398,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_account_signer_address_derives_without_secret() {
+        let (state, dir) = test_state_with_vault("signer-addr");
+
+        // Locked vault -> fail closed; no account -> fail closed.
+        assert!(get_account_signer_address_impl("nope", &state).is_err());
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        let a1 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    // dev key 0x…01 -> 0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf
+                    private_key: Some(format!("0x{}", "0".repeat(63) + "1")),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a1");
+        let a2 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "aster".into(),
+                label: "NoKey".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput::default()),
+            },
+            &state,
+        )
+        .expect("create a2");
+
+        // Only the checksummed address crosses out — the key never does.
+        assert_eq!(
+            get_account_signer_address_impl(&a1.id, &state).expect("derive"),
+            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+        );
+        assert!(get_account_signer_address_impl(&a2.id, &state).is_err());
+        assert!(derive_evm_signer_address_impl("0xnothex").is_err());
+        assert!(derive_evm_signer_address_impl("0x1234").is_err());
+
+        lock_vault_impl(&state);
+        assert!(get_account_signer_address_impl(&a1.id, &state).is_err());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_legacy_credentials_migrate_to_default_profile() {
         let (state, dir) = test_state_with_vault("migrate");
         initialize_vault_impl("test password", &state).expect("init vault");

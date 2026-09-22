@@ -98,6 +98,28 @@ impl EvmWalletSigner {
         format!("0x{}", hex::encode(self.address))
     }
 
+    /// EIP-55 checksummed `0x` address — the mixed-case form venue UIs show,
+    /// so an operator can eyeball the signer against an agent list.
+    pub fn address_checksum(&self) -> String {
+        let lower = hex::encode(self.address);
+        let hash = keccak256(lower.as_bytes());
+        let mut out = String::with_capacity(42);
+        out.push_str("0x");
+        for (i, c) in lower.chars().enumerate() {
+            if c.is_ascii_digit() {
+                out.push(c);
+            } else {
+                let nibble = (hash[i / 2] >> (if i % 2 == 0 { 4 } else { 0 })) & 0xf;
+                out.push(if nibble >= 8 {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                });
+            }
+        }
+        out
+    }
+
     fn signing_key(&self) -> anyhow::Result<SigningKey> {
         SigningKey::from_bytes((&*self.secret).into())
             .map_err(|e| anyhow::anyhow!("EVM signing key reconstruction failed: {e}"))
@@ -216,5 +238,15 @@ mod tests {
         let dbg = format!("{w:?}");
         assert!(dbg.contains(TEST_ADDR));
         assert!(!dbg.contains(TEST_KEY));
+    }
+
+    #[test]
+    fn checksum_matches_eip55() {
+        // Key 0x…01 → 0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf (EIP-55).
+        let w = EvmWalletSigner::from_hex(TEST_KEY).unwrap();
+        assert_eq!(
+            w.address_checksum(),
+            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+        );
     }
 }
