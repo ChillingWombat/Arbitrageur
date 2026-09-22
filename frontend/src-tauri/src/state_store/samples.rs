@@ -32,6 +32,12 @@ impl StateStore {
                 if !e.mid.is_finite() || e.mid <= 0.0 {
                     continue;
                 }
+                // Crossed quotes produce a meaningless mid — drop rather than
+                // persist a plausible-looking number (upstream validators
+                // already reject crossed books; this is the last line).
+                if e.best_ask.is_finite() && e.best_bid.is_finite() && e.best_ask < e.best_bid {
+                    continue;
+                }
                 stmt.execute(params![
                     symbol,
                     venue_id,

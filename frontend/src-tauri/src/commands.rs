@@ -10321,24 +10321,27 @@ mod tests {
         seed_samples(
             &state,
             "ETH-USDC",
-            now - 2_000,
+            now - 60_000,
             &[("hyperliquid", 3000.0), ("lighter", 3006.0)],
         );
-        // Second bucket: only hyperliquid -> lighter cell must be null.
+        // Second observation 59s later: lighter's last quote is beyond the
+        // staleness bound (30s) so that bucket has a lone venue and is
+        // skipped entirely — a venue missing past the bound is a real gap,
+        // while a fresher one would still be carried as its standing quote.
         seed_samples(&state, "ETH-USDC", now - 1_000, &[("hyperliquid", 3001.0)]);
 
         let s = get_signal_series_impl("ETH-USDC", "leader", 300, &state)
             .await
             .expect("series");
         assert_eq!(s.mode, "leader");
-        assert_eq!(s.ts_ms.len(), 2);
+        assert_eq!(s.ts_ms.len(), 1, "lone-venue bucket is not emitted");
         // No volumes in test state -> deterministic leader = alphabetically
         // first venue ("hyperliquid"), pinned at 0.
         assert_eq!(s.dev_bps[0][0], Some(0.0));
-        assert_eq!(s.dev_bps[1][1], None, "missing venue stays a gap");
-        assert_eq!(
-            s.band_max_bps[1], s.band_min_bps[1],
-            "single-venue band collapses"
+        assert!(s.dev_bps[0][1].is_some());
+        assert!(
+            s.band_max_bps[0] > s.band_min_bps[0],
+            "two-venue band spans the gross spread"
         );
     }
 

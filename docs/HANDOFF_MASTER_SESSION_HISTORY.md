@@ -2389,3 +2389,13 @@ clippy+fmt clean, app restarted on the new binary.
 
 - 373 desktop + 120 math + 210 frontend tests; clippy/fmt/tsc clean; vite + release (`--features custom-protocol`) builds green; app restarted on the new binary.
 - New math tests pin the funding curve (cross degradation, expected-scales-income-only, empty-book/`None`-win honesty).
+
+### Deviation-series data cleaning + retention footprint (post-capacity follow-up)
+
+- **Ingestion is venue-wide (verified, not assumed)**: every WS frame (`feed.rs::ingest_book`) and every round-robin REST book (`monitor.rs::poll_due_books`) persists to `spread_samples` for ALL listed markets — live DB showed ~280 distinct symbols in the last 10min and fresh ETH rows on all five venues while BTC was selected. The per-ticker appearance was chart-side artifacts, not a fetch gap. Per-venue sample *rates* legitimately differ: WS lanes write per book-change (hyperliquid ~129k rows/hr), REST-budgeted lanes pace by `usable_per_min` (lighter ~2.4k rows/hr total).
+- **`compute_deviation_series` bucketing rewritten** (`dislocation.rs`): per-bucket **median** (a lone bad tick can't move a venue's line); **bounded carry-forward** — a venue's last mid stands in for missing buckets while ≤ `max(4×bucket, 30s)` old (its standing quote; stabilizes the baseline venue set, which was the real bounce source); **buckets need ≥2 venues** to emit (a lone venue's deviation is trivially 0 — that was the "line touches zero" artifact). 30s floor matches `PAIR_ALIGN_GAP_MS`.
+- **`build_pair_series` nearest-match**: was first-in-window (could pick a 30s-stale sell while a 1s-fresh one sat in the same window); now minimizes |Δt| with a V-shaped early-exit scan, same consume-once semantics.
+- **`record_spread_samples` drops crossed quotes** (`best_ask < best_bid`) — last-line guard behind the book validators.
+- **`get_storage_stats` IPC**: `{db_bytes, sample_rows, oldest/newest_sample_ts_ms}` — `PRAGMA page_count×page_size` (same measure the GB budget enforces) + one `spread_samples` scan. Settings → Data → Historical Price Data shows "Retained Xd · Stored YMB · N samples", 15s poll.
+- **Tests encode the new semantics**: `gaps_stay_gaps` → `gaps_beyond_staleness_stay_gaps`; new coverage for carry-in-window, median spike damping, single-venue skip, nearest-match pairing. IPC test `leader_mode_and_gap_preservation` updated: a 59s-stale venue's bucket now skips entirely (was a null cell).
+- Verified: 373 desktop + 124 math + 210 frontend tests; clippy/fmt/tsc/vite/release green.
