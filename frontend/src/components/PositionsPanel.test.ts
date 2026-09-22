@@ -30,17 +30,19 @@ const baseProps = {
   onOpenTickerExplorer: () => {},
 };
 
-test("position card renders identity, grey PnL, and long/short sums", () => {
+test("position card renders identity, strategy chip under the name, and PnL under the sizes", () => {
   const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
-  // Strategy chip left of the ticker + PnL field below
+  // Strategy chip renders AFTER (below) the ticker, PnL sits under the
+  // long/short sums in the right column.
   const chip = html.indexOf(">SPREAD<");
   const sym = html.indexOf(">BTC-USDC<");
-  assert.ok(chip >= 0 && sym > chip, "strategy chip renders left of the symbol");
-  assert.match(html, /PnL \+\$4\.20/);
-  // Exposure sums across venues — no per-venue tags, no trailing zeros.
+  assert.ok(sym >= 0 && chip > sym, "strategy chip renders below the symbol");
   const longIdx = html.indexOf(">Long<");
   const shortIdx = html.indexOf(">Short<");
+  const pnlIdx = html.indexOf("PnL +$4.20");
   assert.ok(longIdx >= 0 && shortIdx > longIdx, "long sum renders above short sum");
+  assert.ok(pnlIdx > shortIdx, "PnL renders under the position sizes");
+  assert.match(html, /PnL \+\$4\.20/);
   assert.match(html, /\+1\.5/);
   assert.match(html, /-1\.5/);
   assert.doesNotMatch(html, /1\.5000/);
