@@ -10,6 +10,8 @@ import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
+import { DetailField, DetailSection } from "./DetailBits";
+import { InfoTooltip } from "./InfoTooltip";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
 interface FundingRadarProps {
@@ -29,17 +31,6 @@ interface FundingRadarProps {
   /** Global open positions (App fan-out); the gadget filters strategy "funding". */
   openPositions?: OpenPositionDto[];
 }
-
-const CarryDetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
-  label,
-  value,
-  title,
-}) => (
-  <div className="space-y-0.5" title={title}>
-    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
-    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
-  </div>
-);
 
 /** Scanner card box: decay-aware expected net over the modelled hold
  * (backend value, flat fallback), replacing the unrealistic flat daily rate. */
@@ -351,6 +342,31 @@ const FundingTrendGraph: React.FC<{ opp: FundingOpportunityDto; minAprPct: numbe
             </text>
           </g>
         )}
+        {[0.25, 0.5, 0.75].map((f) => {
+          const t = startT + f * xSpan;
+          const x = xPos(t);
+          return (
+            <g key={f}>
+              <line x1={x} y1={PADT} x2={x} y2={H - PADB} stroke="#e2e8f0" strokeWidth="1" />
+              <text x={x} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="middle">
+                {fmtT(t)}
+              </text>
+            </g>
+          );
+        })}
+        {netPts.length > 1 && (
+          <text
+            x={xPos(netPts[netPts.length - 1].t) - 6}
+            y={yFund(netPts[netPts.length - 1].v) + 12}
+            fontSize="9.5"
+            fontWeight="600"
+            fill="#64748b"
+            fontFamily="Inter, sans-serif"
+            textAnchor="end"
+          >
+            gap {fmtEndPct(netPts[netPts.length - 1].v)}
+          </text>
+        )}
         <text x={PADL} y={H - 6} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
           {fmtT(startT)}
         </text>
@@ -484,8 +500,11 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                 <VenueLogo venueId={opp.short_venue} name={opp.short_venue} size={15} />
                 {opp.short_venue}
               </span>
-              <span className="text-xs font-sans font-bold text-accent tabular-nums">
-                {opp.net_apy_pct.toFixed(2)}% APY
+              <span
+                className="text-xs font-sans font-bold text-accent tabular-nums"
+                title={`Compounded: ${opp.net_apy_pct.toFixed(2)}% APY`}
+              >
+                {opp.net_apr_pct.toFixed(2)}% APR
               </span>
             </div>
             <button
@@ -499,8 +518,8 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-              <CarryDetailField
+            <DetailSection title="Route">
+              <DetailField
                 label="Long leg"
                 value={
                   <span className="inline-flex items-center gap-1">
@@ -508,9 +527,9 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                     {`${opp.long_venue} · ${opp.long_symbol ?? "?"} (${opp.long_market_type ?? "?"})`}
                   </span>
                 }
-                title="Display venue plus the exact execution symbol and market type used for books and orders"
+                tip="Display venue plus the exact execution symbol and market type used for books and orders."
               />
-              <CarryDetailField
+              <DetailField
                 label="Short leg"
                 value={
                   <span className="inline-flex items-center gap-1">
@@ -518,122 +537,146 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                     {`${opp.short_venue} · ${opp.short_symbol ?? "?"} (${opp.short_market_type ?? "?"})`}
                   </span>
                 }
-                title="Display venue plus the exact execution symbol and market type used for books and orders"
+                tip="Display venue plus the exact execution symbol and market type used for books and orders."
               />
-              <CarryDetailField
+              <DetailField
+                label="Type"
+                value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
+                tip="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding."
+              />
+              {opp.kind === "basis" && (
+                <DetailField
+                  label="Basis divergence"
+                  value={opp.basis_bps != null ? `${opp.basis_bps >= 0 ? "+" : ""}${opp.basis_bps.toFixed(1)} bps` : "—"}
+                  tip="Signed live divergence (perp − spot) / spot. Positive = contango."
+                />
+              )}
+              {opp.kind === "basis" && opp.spot_price != null && (
+                <DetailField
+                  label="Spot ref"
+                  value={`$${opp.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                  tip="Spot mid used as the basis reference at scan time."
+                />
+              )}
+              {opp.kind === "basis" && opp.perp_price != null && (
+                <DetailField
+                  label="Perp ref"
+                  value={`$${opp.perp_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                  tip="Perp mid used as the basis reference at scan time."
+                />
+              )}
+            </DetailSection>
+
+            <DetailSection title="Rates & Income">
+              <DetailField
                 label={`Long funding · ${opp.long_venue}`}
                 value={
                   opp.long_rate_8h_pct != null && Number.isFinite(opp.long_rate_8h_pct)
                     ? `${opp.long_rate_8h_pct >= 0 ? "+" : ""}${opp.long_rate_8h_pct.toFixed(4)}% / 8h`
                     : "—"
                 }
-                title="Current funding print of the long leg, 8h-normalized. Spot legs pay none (0)."
+                tip="Current funding print of the long leg, 8h-normalized. Spot legs pay none (0). Positive = you pay; negative = you receive."
               />
-              <CarryDetailField
+              <DetailField
                 label={`Short funding · ${opp.short_venue}`}
                 value={
                   opp.short_rate_8h_pct != null && Number.isFinite(opp.short_rate_8h_pct)
                     ? `${opp.short_rate_8h_pct >= 0 ? "+" : ""}${opp.short_rate_8h_pct.toFixed(4)}% / 8h`
                     : "—"
                 }
-                title="Current funding print of the short leg, 8h-normalized."
+                tip="Current funding print of the short leg, 8h-normalized. Positive print = the short receives."
               />
-              <CarryDetailField
+              <DetailField
                 label="Net 8h rate"
                 value={`+${opp.net_rate_8h_pct.toFixed(4)}%`}
+                tip="Short-leg funding received minus long-leg funding paid, per 8h. Positive = net income."
               />
-              <CarryDetailField label="Annualized APR" value={`${opp.net_apr_pct.toFixed(2)}%`} />
-              <CarryDetailField label="Compounded APY" value={`${opp.net_apy_pct.toFixed(2)}%`} />
-              <CarryDetailField
-                label="Breakeven (model)"
-                value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
-                title="Probability of covering costs over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)"
+              <DetailField
+                label="Annualized APR"
+                value={`${opp.net_apr_pct.toFixed(2)}%`}
+                tip="Net 8h rate annualized (× 1095 intervals/yr), non-compounded."
               />
-              <CarryDetailField
-                label="Depth slope"
-                value={opp.depth_slope_bps_per_1k != null ? `${opp.depth_slope_bps_per_1k.toFixed(2)} bps/$1k` : "—"}
-                title="Marginal entry-cost gradient summed over both legs at trade size — how fast slippage grows per extra $1k (informational only)"
+              <DetailField
+                label="Compounded APY"
+                value={`${opp.net_apy_pct.toFixed(2)}%`}
+                tip="Net rate compounded over each 8h funding interval for a year."
               />
-              <CarryDetailField
-                label="Type"
-                value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
-                title="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding"
+              <DetailField
+                label="Daily income"
+                value={`+$${opp.estimated_daily_income_usd.toFixed(2)}`}
+                tip="Net funding accrued over 24h at the configured trade size — assumes the current print persists."
               />
-              {opp.kind === "basis" && (
-                <CarryDetailField
-                  label="Basis divergence"
-                  value={opp.basis_bps != null ? `${opp.basis_bps >= 0 ? "+" : ""}${opp.basis_bps.toFixed(1)} bps` : "—"}
-                  title="Signed live divergence (perp - spot) / spot. Positive = contango."
-                />
-              )}
-              {opp.kind === "basis" && opp.spot_price != null && (
-                <CarryDetailField
-                  label="Spot ref"
-                  value={`$${opp.spot_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                />
-              )}
-              {opp.kind === "basis" && opp.perp_price != null && (
-                <CarryDetailField
-                  label="Perp ref"
-                  value={`$${opp.perp_price.toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                />
-              )}
-              <CarryDetailField
-                label="Opportunity capacity"
-                value={
-                  opp.optimal_size_usd != null && opp.optimal_size_usd > 0
-                    ? `$${opp.optimal_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
-                    : "—"
-                }
-                title="Depth-supported size from both legs' live orderbooks"
+            </DetailSection>
+
+            <DetailSection title="Costs & Breakeven">
+              <DetailField
+                label="Round-trip fees"
+                value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)${spreadCost > 0 ? ` + spread $${spreadCost.toFixed(2)}` : ""}`}
+                tip="Entry friction: taker fees plus measured entry-spread cross (both deducted in Model Estimate)."
               />
-              <CarryDetailField
+              <DetailField
                 label="Entry spread"
                 value={
                   opp.entry_spread_bps != null && opp.entry_spread_bps >= 0
                     ? `${opp.entry_spread_bps.toFixed(1)} bps`
                     : "—"
                 }
-                title="Measured long-ask vs short-bid cross at executable size"
+                tip="Measured long-ask vs short-bid cross at executable size."
               />
-              <CarryDetailField
+              <DetailField
                 label="Fee breakeven (min)"
                 value={`${opp.break_even_hours.toFixed(1)} hrs`}
-                title="Minimum hold to cover round-trip fees at the current 8h rate (excl. entry spread). Compare with Auto hold (expected) for the modelled exit."
+                tip="Minimum hold to cover round-trip fees at the current 8h rate (excl. entry spread). Compare with Auto hold (expected) for the modelled exit."
               />
-              <CarryDetailField label="Daily income" value={`+$${opp.estimated_daily_income_usd.toFixed(2)}`} />
-              <CarryDetailField
-                label="Round-trip fees"
-                value={`-$${fees.toFixed(2)} (${opp.round_trip_fee_bps.toFixed(1)} bps)${spreadCost > 0 ? ` + spread $${spreadCost.toFixed(2)}` : ""}`}
-                title="Entry friction: taker fees plus measured entry-spread cross (both deducted in Projected net carry)"
+              <DetailField
+                label="Depth slope"
+                value={opp.depth_slope_bps_per_1k != null ? `${opp.depth_slope_bps_per_1k.toFixed(2)} bps/$1k` : "—"}
+                tip="Marginal entry-cost gradient summed over both legs at trade size — how fast slippage grows per extra $1k (informational only)."
               />
-              <CarryDetailField
+              <DetailField
+                label="Opportunity capacity"
+                value={
+                  opp.optimal_size_usd != null && opp.optimal_size_usd > 0
+                    ? `$${opp.optimal_size_usd.toLocaleString(undefined, { maximumFractionDigits: 0 })}`
+                    : "—"
+                }
+                tip="Depth-supported size from both legs' live orderbooks."
+              />
+            </DetailSection>
+
+            <DetailSection title="Outcome Evidence">
+              <DetailField
+                label="Breakeven (model)"
+                value={opp.win_probability != null ? `${(opp.win_probability * 100).toFixed(0)}%` : "—"}
+                tip="Probability of covering costs over the expected hold with gap decay (informational only — never gates entries; agrees in sign with Expected)."
+              />
+              <DetailField
                 label={holdIsModelled ? "Auto hold (expected)" : "Auto hold"}
                 value={
                   autoH != null
                     ? `${autoH} days${opp.hold_confidence != null ? ` · ${(opp.hold_confidence * 100).toFixed(0)}%` : ""}`
                     : "—"
                 }
-                title={
+                tip={
                   opp.hold_reason ??
-                  "Fallback: fee break-even only (stale backend without persistence model) — not set manually"
+                  "Fallback: fee break-even only (stale backend without persistence model) — not set manually."
                 }
               />
-              <CarryDetailField
+              <DetailField
                 label="Model Estimate"
                 value={
                   net != null ? `${net >= 0 ? "+" : "-"}$${Math.abs(net).toFixed(2)}` : "—"
                 }
-                title="Scenario point estimate along the expected (trend) gap path with linear decay to the min-APR exit, net of round-trip fees and entry spread. A model number, not a measurement — see Backtest rows for measured history."
+                tip="Scenario point estimate along the expected (trend) gap path with linear decay to the min-APR exit, net of round-trip fees and entry spread. A model number, not a measurement — see Backtest rows for measured history."
               />
-              <CarryDetailField
+              <DetailField
                 label="Backtest win"
                 value={
                   opp.backtest_win_rate != null
                     ? `${(opp.backtest_win_rate * 100).toFixed(0)}%${opp.backtest_episodes != null ? ` (n~${opp.backtest_episodes})` : opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
                     : "—"
                 }
-                title={`Measured fraction of trailing-history entries covering costs. Unmeasurable below 20 scoreable entries.${
+                tip={`Measured fraction of trailing-history entries covering costs. Unmeasurable below 20 scoreable entries.${
                   opp.backtest_win_rate_lower != null && opp.backtest_win_rate_upper != null
                     ? ` 90% CI [${(opp.backtest_win_rate_lower * 100).toFixed(0)}% – ${(opp.backtest_win_rate_upper * 100).toFixed(0)}%] on ~${opp.backtest_episodes ?? "?"} effective episode-blocks (consecutive prints overlap — raw n overstates evidence).`
                     : ""
@@ -643,33 +686,36 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                     : ""
                 }`}
               />
-              <CarryDetailField
+              <DetailField
                 label="Gap persistence"
                 value={
                   opp.persistence_probability != null
                     ? `${(opp.persistence_probability * 100).toFixed(0)}%`
                     : "—"
                 }
-                title={`Measured survival probability: P(funding gap stays above the min-APR threshold through the modelled breakeven horizon).${
+                tip={`Measured survival probability: P(funding gap stays above the min-APR threshold through the modelled breakeven horizon).${
                   opp.persistence_probability_lower != null
                     ? ` Wilson lower bound ${(opp.persistence_probability_lower * 100).toFixed(0)}%.`
                     : ""
                 } Unlike the Breakeven (model) heuristic this is estimated from actual gap lifetimes.`}
               />
-              <CarryDetailField
+              <DetailField
                 label="Backtest expected"
                 value={
                   opp.backtest_expected_usd != null
                     ? `${opp.backtest_expected_usd >= 0 ? "+" : "-"}$${Math.abs(opp.backtest_expected_usd).toFixed(2)}${opp.backtest_expected_usd_se != null ? ` ±${opp.backtest_expected_usd_se.toFixed(2)}` : ""}${opp.backtest_trials != null ? ` (n=${opp.backtest_trials})` : ""}`
                     : "—"
                 }
-                title="Measured mean net per trailing-history entry ± 1 standard error across trials. Unmeasurable below 20 scoreable entries."
+                tip="Measured mean net per trailing-history entry ± 1 standard error across trials. Unmeasurable below 20 scoreable entries."
               />
-              <div
-                className="space-y-0.5"
-                title="Empirical probability that a trailing-history entry nets at least the target (≈, interpolated over 11 net deciles). Unmeasurable below 20 scoreable entries."
-              >
-                <div className="text-[11px] font-sans text-slate-400 font-medium">P(target profit)</div>
+              <div className="space-y-0.5">
+                <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
+                  P(target profit)
+                  <InfoTooltip
+                    text="Empirical probability that a trailing-history entry nets at least the target (≈, interpolated over 11 net deciles). Unmeasurable below 20 scoreable entries."
+                    position="top"
+                  />
+                </div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-sm font-bold font-sans text-slate-900 tabular-nums">$</span>
                   <input
@@ -687,14 +733,15 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
                   </div>
                 )}
               </div>
-            </div>
+            </DetailSection>
 
           <div>
-            <div
-              className="text-[11px] font-sans text-slate-400 font-medium mb-1.5"
-              title="Carry profit vs position size walked through both leg orderbooks. Carry income is depth-invariant (net rate × modelled hold) — the curve degrades only through the entry cross. Expected = income scaled by the Breakeven (model) probability; Net = raw. Dashed marker: depth-supported size."
-            >
-              Capacity curve — profit vs position size (both leg orderbooks)
+            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5 flex items-center">
+              Capacity curve — profit vs position size
+              <InfoTooltip
+                text="Carry profit vs position size walked through both leg orderbooks. Carry income is depth-invariant (net rate × modelled hold) — the curve degrades only through the entry cross. Expected = income scaled by the Breakeven (model) probability; Net = raw. Dashed marker: depth-supported size."
+                position="top"
+              />
             </div>
             {(opp.depth_curve?.length ?? 0) >= 2 ? (
               <CapacityChart
@@ -707,8 +754,12 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
           </div>
 
           <div>
-            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5">
-              Funding trend — solid: venue prints (%/8h, left) · blue: {opp.symbol} mid (right) · dashed green: model-expected net to min-APR exit
+            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5 flex items-center">
+              Funding trend
+              <InfoTooltip
+                text={`Solid lines: per-venue funding prints (%/8h, left axis). Blue: ${opp.symbol} mid (right axis). Dashed gray: net gap (short − long) on shared timestamps. Dashed green: model-expected path from the current net print decaying to the min-APR exit over the modelled hold. Dotted red: min-APR exit threshold.`}
+                position="top"
+              />
             </div>
             <FundingTrendGraph opp={opp} minAprPct={minAprPct} />
           </div>
@@ -792,9 +843,15 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
           </button>
         </div>
         <div className="flex-1 overflow-y-auto p-5 space-y-5">
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-            <CarryDetailField label="Strategy" value={pos.strategyId} />
-            <CarryDetailField
+          <DetailSection title="Position">
+            <DetailField label="Strategy" value={pos.strategyId} />
+            <DetailField label="Opened" value={Number.isFinite(t0) ? fmtT(t0) : pos.openedAt} />
+            <DetailField
+              label="Signals"
+              value={String(pos.signalCount)}
+              tip="Signal executions still counted as open in this position."
+            />
+            <DetailField
               label="Legs"
               value={
                 pos.venues.length ? (
@@ -810,23 +867,26 @@ const PositionDetailModal: React.FC<PositionDetailModalProps> = React.memo(({ po
                   "—"
                 )
               }
+              tip="Net filled quantity per venue/symbol in this position."
             />
-            <CarryDetailField
+            <DetailField
               label="Notional"
               value={pos.notionalUsd != null ? `$${pos.notionalUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
+              tip="USD notional at entry."
             />
-            <CarryDetailField label="Fees paid" value={`-$${Math.abs(fees).toFixed(2)}`} />
-            <CarryDetailField
+          </DetailSection>
+          <DetailSection title="PnL & Costs">
+            <DetailField
+              label="Fees paid"
+              value={`-$${Math.abs(fees).toFixed(2)}`}
+              tip="Cumulative taker fees charged on fills so far."
+            />
+            <DetailField
               label="Unrealized PnL"
               value={`${nowPnl >= 0 ? "+" : "-"}$${Math.abs(nowPnl).toFixed(2)}`}
+              tip="Marked-to-market net PnL including fees paid; falls back to −fees when no mark is available."
             />
-            <CarryDetailField
-              label="Signals"
-              value={String(pos.signalCount)}
-              title="Signal executions still counted as open in this position"
-            />
-            <CarryDetailField label="Opened" value={Number.isFinite(t0) ? fmtT(t0) : pos.openedAt} />
-          </div>
+          </DetailSection>
           <div>
             <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5">
               Net PnL since entry — solid: realized · dashed: illustrative 24h projection

@@ -18,6 +18,8 @@ import type {
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
+import { DetailField, DetailSection } from "./DetailBits";
+import { InfoTooltip } from "./InfoTooltip";
 import { CapacityChart } from "./CapacityChart";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 
@@ -54,17 +56,6 @@ interface TriangleLegView {
   price: number;
   fee_bps: number;
 }
-
-const TriangleDetailField: React.FC<{ label: string; value: React.ReactNode; title?: string }> = ({
-  label,
-  value,
-  title,
-}) => (
-  <div className="space-y-0.5" title={title}>
-    <div className="text-[11px] font-sans text-slate-400 font-medium">{label}</div>
-    <div className="text-sm font-bold font-sans text-slate-900 tabular-nums">{value}</div>
-  </div>
-);
 
 interface TriangleDetailModalProps {
   opp: TriangleOpportunityDto;
@@ -122,7 +113,12 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
           </div>
 
           <div className="flex-1 overflow-y-auto p-5 space-y-5">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center">
+                Legs
+                <InfoTooltip text="The three atomic trades of the cycle, executed in order on one venue. Price is the book level used at scan time; Fee is that leg's taker commission." position="top" />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {legs.map(({ leg, label, tone }) => (
                 <div key={label} className="rounded-xl border border-surface-border bg-surface-raised p-3 space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -142,33 +138,40 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
                   </div>
                 </div>
               ))}
+              </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-3">
-              <TriangleDetailField label="Exchange" value={opp.venue} />
-              <TriangleDetailField
+            <DetailSection title="Economics">
+              <DetailField
                 label="Gross discrepancy"
                 value={`+${formatBps(opp.gross_spread_bps)} BPS`}
+                tip="Raw cross-product imbalance around the cycle before any fees, in bps."
               />
-              <TriangleDetailField
+              <DetailField
                 label="Total fees"
                 value={`-${formatBps(opp.total_fee_bps)} BPS`}
+                tip="Sum of the three legs' taker commissions, in bps."
               />
-              <TriangleDetailField
+              <DetailField
                 label="Net profit"
                 value={`${opp.net_spread_bps >= 0 ? "+" : ""}${formatBps(opp.net_spread_bps)} BPS`}
+                tip="Gross discrepancy minus total fees, in bps — the executable edge at scan size."
               />
-              <TriangleDetailField
+              <DetailField
                 label="Est. profit"
                 value={`$${opp.net_profit_usd.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                title={`At $${opp.trade_size_usd.toLocaleString()} trade size`}
+                tip={`At $${opp.trade_size_usd.toLocaleString()} trade size.`}
               />
-              <TriangleDetailField
+            </DetailSection>
+
+            <DetailSection title="Context">
+              <DetailField label="Exchange" value={opp.venue} tip="Single venue — all three legs execute atomically here." />
+              <DetailField
                 label="Est. latency"
                 value={`${opp.estimated_latency_ms}ms`}
-                title="Measured venue latency at scan time"
+                tip="Measured venue latency at scan time."
               />
-            </div>
+            </DetailSection>
 
             <div className="rounded-xl border border-accent-line bg-accent-dim px-4 py-2.5 text-xs font-sans flex items-center justify-between gap-2">
               <span className="text-slate-500">
@@ -183,11 +186,9 @@ const TriangleDetailModal: React.FC<TriangleDetailModalProps> = React.memo(
             </div>
 
             <div>
-              <div
-                className="text-[11px] font-sans font-medium text-slate-400 mb-1.5"
-                title="Net cycle profit vs start notional, evaluated at a size ladder through all three leg books (VWAP per leg). Atomic cycles have no win-rate model — only the Net series is meaningful; Expected is unavailable by construction."
-              >
-                Capacity curve — net profit vs cycle size (3-leg VWAP)
+              <div className="text-[11px] font-sans font-medium text-slate-400 mb-1.5 flex items-center">
+                Capacity curve — net profit vs cycle size
+                <InfoTooltip text="Net cycle profit vs start notional, evaluated at a size ladder through all three leg books (VWAP per leg). Atomic cycles have no win-rate model — only the Net series is meaningful; Expected is unavailable by construction." position="top" />
               </div>
               {(opp.depth_curve?.length ?? 0) >= 2 ? (
                 <CapacityChart points={opp.depth_curve ?? []} />

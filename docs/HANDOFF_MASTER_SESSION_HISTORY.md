@@ -2399,3 +2399,15 @@ clippy+fmt clean, app restarted on the new binary.
 - **`get_storage_stats` IPC**: `{db_bytes, sample_rows, oldest/newest_sample_ts_ms}` — `PRAGMA page_count×page_size` (same measure the GB budget enforces) + one `spread_samples` scan. Settings → Data → Historical Price Data shows "Retained Xd · Stored YMB · N samples", 15s poll.
 - **Tests encode the new semantics**: `gaps_stay_gaps` → `gaps_beyond_staleness_stay_gaps`; new coverage for carry-in-window, median spike damping, single-venue skip, nearest-match pairing. IPC test `leader_mode_and_gap_preservation` updated: a 59s-stale venue's bucket now skips entirely (was a null cell).
 - Verified: 373 desktop + 124 math + 210 frontend tests; clippy/fmt/tsc/vite/release green.
+
+### Detail-modal completeness pass — sections + `?` tooltips everywhere (2026-09-22 follow-up)
+
+The earlier "group metrics into sections" request had only landed on the radar/spatial/prediction modals; funding, position, and triangle popups still rendered flat grids with invisible native `title=` hovers (SPEC claimed otherwise — now genuinely true).
+
+- **`CarryDetailModal`** (FundingRadar): flat grid → `DetailSection` groups — **Route** (legs, type, basis refs) / **Rates & Income** (per-leg prints, net 8h, APR, APY, daily income) / **Costs & Breakeven** (fees, entry spread, breakeven, depth slope, capacity) / **Outcome Evidence** (breakeven-model %, auto hold, model estimate, backtest win/expected, gap persistence, P(target)). Every metric's former `title=` text moved to a visible `?` `InfoTooltip`; previously unexplained metrics (Net 8h rate, APR, APY, Daily income, Spot/Perp ref) gained tips. P(target profit) input got the `?` too.
+- **`PositionDetailModal`** (same file): → **Position** (strategy, opened, signals, legs, notional) / **PnL & Costs** (fees paid, unrealized PnL) sections with tips.
+- **`TriangleDetailModal`**: → **Legs** (section header over the three leg cards) / **Economics** (gross, fees, net, est. profit) / **Context** (exchange, latency); all tips converted.
+- **`CarryDetailField`/`TriangleDetailField` deleted** — `DetailBits` is now the only detail-field implementation.
+- **Modal header consistency**: funding modal header shows **APR** (was APY — matches the card headline convention; APY lives in Rates & Income with a compounded note).
+- **Funding trend graph refinement**: 3 mid-axis time gridlines + labels (was start/end only), net-gap endpoint value label, chart captions converted to `?` affordances.
+- Verified: tsc, 210/210 frontend tests, vite build — all green.
