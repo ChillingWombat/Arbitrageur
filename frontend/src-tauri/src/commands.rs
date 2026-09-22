@@ -712,6 +712,11 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("okx", s.okx_enabled || account_enabled("okx"));
     push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
     push("ig", s.ig_enabled || account_enabled("ig"));
+    // Long-tail perp venues admit via an enabled account only (no
+    // engine-settings flags exist for them).
+    for adapter in &state.live_dex_perps {
+        push(adapter.spec_id(), account_enabled(adapter.spec_id()));
+    }
     out
 }
 
@@ -939,7 +944,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     };
     let probe_ms = |vid: &str| latency_by_venue.get(vid).copied();
 
-    let venues = vec![
+    let mut venues = vec![
         VenueStatusDto {
             id: "hyperliquid".into(),
             name: if is_live {
@@ -1097,6 +1102,19 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             fee_bps: 5.0,
         },
     ];
+    // Long-tail perp venues append dynamically — same admission rule
+    // (enabled account) and the adapter's spec carries name/type/fee.
+    for adapter in &state.live_dex_perps {
+        let vid = adapter.spec_id();
+        venues.push(VenueStatusDto {
+            id: vid.into(),
+            name: adapter.spec_name().into(),
+            market_type: adapter.market_type_label().into(),
+            status: venue_status(vid, account_enabled(vid)).into(),
+            latency_ms: probe_ms(vid),
+            fee_bps: adapter.taker_fee_bps(),
+        });
+    }
 
     let current_drawdown = cb
         .current_drawdown_usd()
@@ -4171,7 +4189,9 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        assert_eq!(status.active_venues.len(), 16);
+        // 16 primary venues + 26 DexPerpAdapter venues (all OFFLINE —
+        // nothing enabled, no credentials).
+        assert_eq!(status.active_venues.len(), 42);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);
@@ -7776,6 +7796,63 @@ mod tests {
             *state.is_live_mode.read(),
             "live mode should automatically restore upon unlocking vault when real mode was chosen"
         );
+    }
+
+    #[tokio::test]
+    async fn test_auto_lock_keeps_credentials_manual_lock_wipes() {
+        let (state, _dir) = test_state_with_vault("autolock-sync");
+        state.settings.write().aster_enabled = true;
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
+        upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "aster".into(),
+                label: "Aster Test".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_key: "aster_key".into(),
+                    api_secret: "aster_secret".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create aster account");
+        state.sync_vault_credentials_to_adapters();
+        let aster_has_creds = |s: &AppEngineState| {
+            get_venue_execution_capabilities_impl(s)
+                .iter()
+                .find(|c| c.venue == "aster")
+                .expect("aster cap")
+                .has_credentials
+        };
+        assert!(aster_has_creds(&state), "provisioned after sync");
+
+        // Inactivity expiry → auto-lock: the vault forgets its secrets but
+        // provisioned adapter credentials keep working (unattended uptime).
+        state.vault.write().force_timer_expiry();
+        assert!(!state.vault.write().is_unlocked());
+        assert!(state.vault.write().is_auto_locked());
+        state.sync_vault_credentials_to_adapters();
+        assert!(
+            aster_has_creds(&state),
+            "auto-lock must not wipe provisioned adapter credentials"
+        );
+
+        // Explicit operator lock → panic-halt: adapter credentials wiped.
+        lock_vault_impl(&state);
+        assert!(!state.vault.write().is_auto_locked());
+        assert!(
+            !aster_has_creds(&state),
+            "manual lock must wipe adapter credentials"
+        );
+
+        // Re-unlock reprovisions the adapter.
+        unlock_vault_impl("test-password-123", &state).expect("re-unlock");
+        assert!(aster_has_creds(&state), "unlock reprovisions adapter");
     }
 
     #[tokio::test]

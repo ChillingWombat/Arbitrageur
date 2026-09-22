@@ -97,6 +97,11 @@ pub struct VaultData {
 pub struct VaultStatus {
     pub is_initialized: bool,
     pub is_unlocked: bool,
+    /// True only while locked by the inactivity timer (not an explicit
+    /// operator lock). Auto-lock forgets vault secrets but leaves
+    /// provisioned adapter credentials working, so unattended deployments
+    /// keep trading; a manual lock wipes adapter credentials instead.
+    pub auto_locked: bool,
     pub unlocked_until: Option<DateTime<Utc>>,
 }
 
@@ -139,6 +144,11 @@ fn normalize_profile_id(raw: &str) -> anyhow::Result<String> {
 pub struct SecureVault {
     storage_path: PathBuf,
     is_unlocked: bool,
+    /// Distinguishes timer-expiry locks (`true`) from explicit operator
+    /// locks (`false`). Credential sync treats them differently: auto-lock
+    /// keeps provisioned adapter credentials so live operation survives an
+    /// unattended session; manual lock wipes them as a panic-halt.
+    auto_locked: bool,
     unlocked_until: Option<DateTime<Utc>>,
     decrypted_cache: Option<VaultData>,
     encryption_key: Option<Zeroizing<[u8; 32]>>,
@@ -150,6 +160,7 @@ impl SecureVault {
         Self {
             storage_path: path,
             is_unlocked: false,
+            auto_locked: false,
             unlocked_until: None,
             decrypted_cache: None,
             encryption_key: None,
@@ -178,16 +189,35 @@ impl SecureVault {
         }
         if let Some(until) = self.unlocked_until {
             if Utc::now() > until {
-                // Auto-lock expired
-                self.lock();
+                self.apply_lock(true);
                 return false;
             }
         }
         true
     }
 
+    /// Whether the current locked state came from the inactivity timer.
+    /// Always false while unlocked or after an explicit `lock()`.
+    pub fn is_auto_locked(&self) -> bool {
+        !self.is_unlocked && self.auto_locked
+    }
+
+    /// Force the inactivity timer into the past so the next `is_unlocked`
+    /// check exercises the auto-lock path.
+    #[cfg(test)]
+    pub fn force_timer_expiry(&mut self) {
+        self.unlocked_until = Some(Utc::now() - chrono::Duration::seconds(1));
+    }
+
+    /// Explicit operator lock — panic-halt. The credential sync wipes
+    /// provisioned adapter credentials in addition to vault secrets.
     pub fn lock(&mut self) {
+        self.apply_lock(false);
+    }
+
+    fn apply_lock(&mut self, auto: bool) {
         self.is_unlocked = false;
+        self.auto_locked = auto;
         self.unlocked_until = None;
         self.decrypted_cache = None;
         self.encryption_key = None;
@@ -199,6 +229,7 @@ impl SecureVault {
         VaultStatus {
             is_initialized: self.is_initialized(),
             is_unlocked: unlocked,
+            auto_locked: self.is_auto_locked(),
             unlocked_until: self.unlocked_until,
         }
     }
@@ -356,6 +387,7 @@ impl SecureVault {
         Self::write_file_atomic(&self.storage_path, &bytes)?;
 
         self.is_unlocked = true;
+        self.auto_locked = false;
         self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
         self.decrypted_cache = Some(empty_data);
         self.encryption_key = Some(key);
@@ -406,6 +438,7 @@ impl SecureVault {
             salt_arr.copy_from_slice(salt);
 
             self.is_unlocked = true;
+            self.auto_locked = false;
             self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
             self.decrypted_cache = Some(data);
             self.encryption_key = Some(key);
@@ -444,6 +477,7 @@ impl SecureVault {
             Self::write_file_atomic(&self.storage_path, &bytes)?;
 
             self.is_unlocked = true;
+            self.auto_locked = false;
             self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
             self.decrypted_cache = Some(data);
             self.encryption_key = Some(new_key);
@@ -473,6 +507,7 @@ impl SecureVault {
         self.decrypted_cache = Some(data.clone());
         self.encryption_key = Some(key);
         self.kdf_salt = Some(salt);
+        self.auto_locked = false;
         self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
         Ok(())
     }

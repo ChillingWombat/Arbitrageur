@@ -66,6 +66,10 @@ pub struct ReconcileSummary {
     pub escalated: usize,
     pub poll_errors: usize,
     pub skipped: usize,
+    /// True when pending legs exist but cannot be polled because the
+    /// operator locked the vault (adapter credentials wiped). Legs stay
+    /// pending — never resolved — until re-unlock reprovisions adapters.
+    pub vault_locked: bool,
 }
 
 /// Per-leg outcome of one poll, aggregated per signal for status derivation.
@@ -205,7 +209,22 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
     if pending.is_empty() {
         return summary;
     }
+    let manual_locked = {
+        let mut vault = state.vault.write();
+        // Initialized + locked + not-auto = operator panic-halt. An
+        // uninitialized vault isn't a lock — adapters simply have no
+        // credentials and per-venue poll failures report as usual.
+        vault.is_initialized() && !vault.is_unlocked() && !vault.is_auto_locked()
+    };
+    // Under manual lock this clears adapter credentials; under auto-lock it
+    // leaves them provisioned so polling continues.
     state.sync_vault_credentials_to_adapters();
+    if manual_locked {
+        // Fail closed: venue truth is unreachable without credentials, so
+        // legs stay pending rather than guessing at order state.
+        summary.vault_locked = true;
+        return summary;
+    }
 
     // Aggregate per-signal outcomes for the status pass below.
     let mut outcomes: HashMap<String, Vec<LegPoll>> = HashMap::new();
@@ -839,9 +858,21 @@ pub fn spawn_supervisor(state: Arc<AppEngineState>) {
         }
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
+        let mut lock_warned = false;
         loop {
             interval.tick().await;
             let s = reconcile_pending_orders(&state).await;
+            if s.vault_locked {
+                if !lock_warned {
+                    tracing::warn!(
+                        "reconciliation paused: credential vault locked — {} pending leg(s) cannot be polled until re-unlock",
+                        s.pending_legs
+                    );
+                    lock_warned = true;
+                }
+                continue;
+            }
+            lock_warned = false;
             if s.resolved > 0 || s.escalated > 0 || s.poll_errors > 0 {
                 tracing::info!(
                     "order reconciliation pass: {} pending, {} resolved, {} escalated, {} errors",
@@ -1244,11 +1275,20 @@ mod tests {
         }
     }
 
+    /// Tempdir vault path: `AppEngineState::new()` would point at the real
+    /// `~/.arbitrageur/vault.enc`, making vault-state-dependent behavior
+    /// (e.g. the manual-lock reconcile pause) environment-sensitive.
+    fn test_state() -> AppEngineState {
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_recon_vault_{}", rand::random::<u64>()));
+        AppEngineState::new_with_vault_path(dir.join("vault.enc"))
+    }
+
     fn seeded_state(
         strategy_id: &str,
         legs: Vec<(&'static str, LegSide)>,
     ) -> (AppEngineState, String) {
-        let state = AppEngineState::new();
+        let state = test_state();
         // Passive unwind is default-on; zero the attempt wait so the
         // limit/cancel/fallback sequence runs instantly in tests.
         state.settings.write().passive_unwind.timeout_secs = 0;
@@ -1309,6 +1349,38 @@ mod tests {
         let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(sig.status, SignalStatus::Balanced);
         assert!(sig.legs.iter().all(|l| l.filled_qty == 1.0));
+    }
+
+    #[tokio::test]
+    async fn e2e_manual_lock_pauses_polling_auto_lock_does_not() {
+        let (state, _sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        for v in ["kraken", "aster"] {
+            state.test_adapters.write().unwrap().insert(
+                v.to_string(),
+                Arc::new(MockVenue::new(v, vec![Ok(mock_filled())])),
+            );
+        }
+
+        // Timer expiry → auto-lock: polling continues on provisioned creds.
+        state.vault.write().initialize("test-password-123").unwrap();
+        state.vault.write().force_timer_expiry();
+        let sum = reconcile_pending_orders(&state).await;
+        assert!(!sum.vault_locked);
+        assert_eq!(sum.polled, 2);
+
+        // Explicit operator lock → panic-halt: legs cannot be polled.
+        let (state, _sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state.vault.write().initialize("test-password-123").unwrap();
+        state.vault.write().lock();
+        let sum = reconcile_pending_orders(&state).await;
+        assert!(sum.vault_locked);
+        assert_eq!(sum.polled, 0);
     }
 
     #[tokio::test]
@@ -1541,7 +1613,7 @@ mod tests {
         // accepted and later polled filled. The signal must surface
         // Imbalanced — not park Unresolved forever — so residual
         // auto-flatten covers the naked leg.
-        let state = AppEngineState::new();
+        let state = test_state();
         state.settings.write().passive_unwind.timeout_secs = 0;
         let sid = format!("sig-{}", rand::random::<u32>());
         state
@@ -1626,7 +1698,7 @@ mod tests {
         // order id. It must fail out — not count as open, not burn the
         // attempt bound — and the pass must dispatch a real child that
         // carries the parent to closed once it fills.
-        let state = AppEngineState::new();
+        let state = test_state();
         state.settings.write().passive_unwind.timeout_secs = 0;
         let sid = format!("sig-{}", rand::random::<u32>());
         state

@@ -819,6 +819,9 @@ export interface StorageStatsDto {
 export interface VaultStatus {
   is_initialized: boolean;
   is_unlocked: boolean;
+  /** True only for inactivity-timer locks: provisioned venue credentials
+      keep working. False after a manual lock, which wipes them. */
+  auto_locked?: boolean;
   unlocked_until?: string | null;
 }
 
