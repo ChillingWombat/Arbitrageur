@@ -44,6 +44,8 @@ interface CredFieldSpec {
   placeholder?: string;
   optional?: boolean;
   hint?: string;
+  /** secp256k1 EVM signer key — show the derived "signs as 0x…" address. */
+  evmSigner?: boolean;
 }
 
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
@@ -55,7 +57,7 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Hyperliquid: account/vault address + API wallet (agent) private key
   hyperliquid: [
     { key: "walletAddress", label: "Trading EOA Wallet Address", placeholder: "0x..." },
-    { key: "privateKey", label: "API Wallet / Agent Private Key", secret: true, placeholder: "0x..." },
+    { key: "privateKey", label: "API Wallet / Agent Private Key", secret: true, placeholder: "0x...", evmSigner: true },
     { key: "accountId", label: "Vault Address", optional: true, placeholder: "0x..." },
   ],
   kalshi: [
@@ -79,7 +81,7 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Polymarket: L1 Polygon key signs orders; L2 key/secret/passphrase authenticate the CLOB API
   polymarket: [
     { key: "walletAddress", label: "Polygon Wallet Address", placeholder: "0x..." },
-    { key: "privateKey", label: "Polygon Private Key (L1 Signing)", secret: true, placeholder: "0x..." },
+    { key: "privateKey", label: "Polygon Private Key (L1 Signing)", secret: true, placeholder: "0x...", evmSigner: true },
     { key: "apiKey", label: "API Key", secret: true },
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
@@ -91,7 +93,7 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // main private key must never be pasted here.
   popdex: [
     { key: "walletAddress", label: "Main Account Address", placeholder: "0x...", hint: "Your PopDEX main account holding funds (public 0x...). Orders trade for this account." },
-    { key: "privateKey", label: "Agent Private Key", secret: true, placeholder: "0x...", hint: "ONLY the delegated agent key approved via approveAgent. Signs orders with timestamp nonces; cannot withdraw. Never paste the main private key." },
+    { key: "privateKey", label: "Agent Private Key", secret: true, placeholder: "0x...", hint: "ONLY the delegated agent key approved via approveAgent. Signs orders with timestamp nonces; cannot withdraw. Never paste the main private key.", evmSigner: true },
   ],
   // Robinhood Chain is a Lighter deployment (apidocs.rh.lighter.xyz): same
   // credential scheme — account_index + api_key_index + API private key.
@@ -159,7 +161,7 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Aster: V3 = user wallet + API wallet (agent) signer; V1 legacy key/secret still works for existing keys
   aster: [
     { key: "walletAddress", label: "Main Account Wallet (User)", placeholder: "0x..." },
-    { key: "privateKey", label: "API Wallet / Agent Private Key", secret: true, placeholder: "0x..." },
+    { key: "privateKey", label: "API Wallet / Agent Private Key", secret: true, placeholder: "0x...", evmSigner: true },
     { key: "apiKey", label: "V1 API Key", secret: true, optional: true },
     { key: "apiSecret", label: "V1 API Secret", secret: true, optional: true },
   ],
@@ -275,6 +277,59 @@ interface CredGridProps {
   toggleShow: (key: string) => void;
 }
 
+/** Derived-signer readout for EVM agent-key fields: shows which address
+ *  the typed (or stored) key signs as, so a wrong/stale agent key is
+ *  visible before a live order fails — e.g. HL's "API Wallet 0x… does
+ *  not exist" rejection. Typed keys derive via a pure IPC call; the
+ *  stored key derives vault-side and returns only the address. */
+const SignerAddressHint: React.FC<{
+  typedKey: string;
+  accountId: string | null;
+  stored: boolean;
+}> = ({ typedKey, accountId, stored }) => {
+  const [addr, setAddr] = useState<string | null>(null);
+  const [invalid, setInvalid] = useState(false);
+  const trimmed = typedKey.trim();
+  const looksComplete = /^(0x)?[0-9a-fA-F]{64}$/.test(trimmed);
+
+  useEffect(() => {
+    setAddr(null);
+    setInvalid(false);
+    let dead = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (looksComplete) {
+      timer = setTimeout(() => {
+        api
+          .deriveEvmSignerAddress(trimmed)
+          .then((a) => { if (!dead) setAddr(a); })
+          .catch(() => { if (!dead) setInvalid(true); });
+      }, 300);
+    } else if (!trimmed && stored && accountId) {
+      api
+        .getAccountSignerAddress(accountId)
+        .then((a) => { if (!dead) setAddr(a); })
+        .catch(() => {});
+    }
+    return () => {
+      dead = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [trimmed, looksComplete, stored, accountId]);
+
+  if (!addr && !invalid) return null;
+  return (
+    <p
+      className={`text-[10px] mt-1 leading-tight font-mono break-all ${
+        invalid ? "text-amber-600" : "text-slate-500"
+      }`}
+    >
+      {addr
+        ? `${trimmed ? "signs as" : "stored key signs as"} ${addr}`
+        : "not a valid EVM private key"}
+    </p>
+  );
+};
+
 const CredentialGrid: React.FC<CredGridProps> = ({
   fields,
   values,
@@ -326,6 +381,13 @@ const CredentialGrid: React.FC<CredGridProps> = ({
           </div>
           {f.hint && (
             <p className="text-[10px] text-slate-400 mt-1 leading-tight">{f.hint}</p>
+          )}
+          {f.evmSigner && (
+            <SignerAddressHint
+              typedKey={values[f.key] ?? ""}
+              accountId={account?.id ?? null}
+              stored={stored}
+            />
           )}
         </div>
       );

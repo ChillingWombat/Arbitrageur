@@ -180,6 +180,8 @@ fn main() {
             commands::delete_account,
             commands::delete_account_credentials,
             commands::get_account_credential_field,
+            commands::derive_evm_signer_address,
+            commands::get_account_signer_address,
             commands::set_default_account,
             commands::list_strategy_routes,
             commands::upsert_strategy_route,

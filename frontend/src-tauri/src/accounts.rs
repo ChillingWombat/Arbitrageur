@@ -1151,6 +1151,43 @@ pub async fn get_account_credential_field(
     get_account_credential_field_impl(&account_id, &field, &state)
 }
 
+/// Derive the EVM signer address from a hex private key — used by the
+/// credentials UI to show "signs as 0x…" so a wrong/stale agent key is
+/// visible before a live order fails. The key is validated but never
+/// stored or logged.
+pub fn derive_evm_signer_address_impl(private_key: &str) -> Result<String, String> {
+    arbitrageur_exchanges::wallet::EvmWalletSigner::from_hex(private_key)
+        .map(|s| s.address_checksum())
+        .map_err(|e| format!("not a valid EVM private key: {e}"))
+}
+
+/// Vault-gated signer identity for the STORED privateKey: derives the
+/// address server-side and returns only it — the secret never crosses IPC.
+/// Lets the operator verify the stored key against the venue's agent list.
+pub fn get_account_signer_address_impl(
+    account_id: &str,
+    state: &AppEngineState,
+) -> Result<String, String> {
+    let key = get_account_credential_field_impl(account_id, "privateKey", state)?;
+    if key.is_empty() {
+        return Err("no private key stored for this account".into());
+    }
+    derive_evm_signer_address_impl(&key)
+}
+
+#[tauri::command]
+pub async fn derive_evm_signer_address(private_key: String) -> Result<String, String> {
+    derive_evm_signer_address_impl(&private_key)
+}
+
+#[tauri::command]
+pub async fn get_account_signer_address(
+    account_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<String, String> {
+    get_account_signer_address_impl(&account_id, &state)
+}
+
 #[tauri::command]
 pub async fn set_default_account(
     venue: String,

@@ -185,6 +185,8 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "delete_account",
   "delete_account_credentials",
   "get_account_credential_field",
+  "derive_evm_signer_address",
+  "get_account_signer_address",
   "set_default_account",
   "list_strategy_routes",
   "upsert_strategy_route",
@@ -942,6 +944,19 @@ export const api = {
    *  so the full credential bundle never sits in renderer memory. */
   async getAccountCredentialField(accountId: string, field: string): Promise<string> {
     return invokeDesktop<string>("get_account_credential_field", { accountId, field });
+  },
+
+  /** Derive the EVM signer address for a typed private key — "signs as
+   *  0x…" readout under agent-key fields so a wrong/stale key is visible
+   *  before a live order fails. The key is validated, never stored. */
+  async deriveEvmSignerAddress(privateKey: string): Promise<string> {
+    return invokeDesktop<string>("derive_evm_signer_address", { privateKey });
+  },
+
+  /** Signer address of the STORED private key — derived vault-side; the
+   *  secret itself never crosses IPC. */
+  async getAccountSignerAddress(accountId: string): Promise<string> {
+    return invokeDesktop<string>("get_account_signer_address", { accountId });
   },
 
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {
