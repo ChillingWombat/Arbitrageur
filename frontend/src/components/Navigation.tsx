@@ -41,7 +41,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   const tabs = [
     {
       id: "spatial" as ActiveTab,
-      label: "Single Spread",
+      label: "Simple Spread",
       icon: SpreadGapIcon,
       badge: spatialCount > 0 ? spatialCount : undefined,
     },

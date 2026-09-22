@@ -208,7 +208,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
             })
         });
     // Radar-dispatched fills persist under the "radar" strategy so the
-    // Spread Radar page scopes positions separately from Single Spread.
+    // Spread Radar page scopes positions separately from Simple Spread.
     let res = execute_spatial_arbitrage_inner(
         &sym,
         buy_venue,

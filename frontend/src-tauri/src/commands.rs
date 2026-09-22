@@ -3179,7 +3179,7 @@ pub struct StrategyTickerDto {
 
 /// Resolve which strategy record carries the auto-filters for an execution
 /// or listing context. The Spread Radar scans the same perp universe as
-/// Single Spread, so "radar" evaluates against the "futures" record.
+/// Simple Spread, so "radar" evaluates against the "futures" record.
 fn filter_strategy_id(strategy_id: &str) -> Result<&'static str, String> {
     match strategy_id.trim().to_lowercase().as_str() {
         "futures" | "radar" => Ok("futures"),

@@ -1661,7 +1661,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             ) : (
               /* Strategy-Specific Sections */
               <>
-                {/* Single Spread (Futures) */}
+                {/* Simple Spread (Futures) */}
                 {activeStrategyTab === "futures" && (
                   <>
                     {activeSection === "hurdle" && renderFuturesHurdleSection()}

@@ -75,7 +75,7 @@ fn default_max_ticker_equity_pct() -> f64 {
 #[serde(rename_all = "camelCase")]
 pub struct StrategyParamsDto {
     pub strategy_id: String,
-    // Single Spread (futures)
+    // Simple Spread (futures)
     pub target_profit_bps: f64,
     pub window_percentile: u32,
     pub sliding_window: String,
@@ -83,7 +83,7 @@ pub struct StrategyParamsDto {
     pub sliding_window_mode: String,
     #[serde(default = "default_sliding_window_secs")]
     pub sliding_window_secs: u64,
-    /// Single Spread sizing redesign: one grid step = min(mult ×
+    /// Simple Spread sizing redesign: one grid step = min(mult ×
     /// venue-compatible min lot, maxStepUsd / price), quantized UP to the
     /// venue step. Max steps derive per ticker from total paper equity × pct.
     /// `max_accumulated_units` is therefore DERIVED, not authored.

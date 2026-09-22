@@ -180,13 +180,13 @@ export const DEFAULT_PASSIVE_UNWIND: PassiveUnwindDto = {
 };
 export interface StrategyParamsDto {
   strategyId: string;
-  // Single Spread (futures)
+  // Simple Spread (futures)
   targetProfitBps: number;
   windowPercentile: number;
   slidingWindow: string;
   slidingWindowMode: "manual" | "auto";
   slidingWindowSecs: number;
-  // Single Spread sizing: one grid step = min(mult x venue min lot,
+  // Simple Spread sizing: one grid step = min(mult x venue min lot,
   // maxStepUsd / price); max steps derive per ticker from paper equity x pct.
   stepSizeMult: number;
   maxStepUsd: number;
@@ -1331,6 +1331,25 @@ export interface VenueLaneStatusDto {
   refreshIntervalSecs: number;
   backingOff: boolean;
   accountTier: string;
+}
+
+/** One persisted pair-signal lifecycle event (monitor_signal_events table).
+ * Append-only audit: every status transition plus minute-bucketed heartbeats
+ * while a signal stays active. `economicsJson` carries the point-in-time
+ * friction/exit snapshot behind the transition. */
+export interface MonitorSignalEventDto {
+  id: number;
+  symbol: string;
+  buyVenue: string;
+  sellVenue: string;
+  tsMs: number;
+  oldStatus: string | null;
+  newStatus: string;
+  edgeBps: number | null;
+  devBps: number | null;
+  pWin: number | null;
+  economicsJson: string | null;
+  trigger: string;
 }
 
 export interface MonitorSnapshotDto {

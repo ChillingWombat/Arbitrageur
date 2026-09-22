@@ -39,7 +39,7 @@ interface TickerExplorerProps {
   onSelectTicker: (symbol: string) => void;
   executionLogs: ExecutionLogEntry[];
   strategyConfigs?: Map<string, TickerStrategyConfigDto>;
-  /** Universal Single Spread sizing params + paper equity — the per-ticker
+  /** Universal Simple Spread sizing params + paper equity — the per-ticker
    *  grid cap derives from these, not from an authored max. */
   futuresParams?: StrategyParamsDto | null;
   totalEquityUsd?: number | null;
@@ -72,6 +72,8 @@ interface TickerRowProps {
   base: string;
   isSelected: boolean;
   isEnabled: boolean;
+  /** Live bot lifecycle for this ticker — "running" gets a tag by the name. */
+  botStatus: TickerBotStatus;
   hasIssue: boolean | undefined;
   issueDescription: string | undefined;
   tradeCount: number;
@@ -89,6 +91,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
     base,
     isSelected,
     isEnabled,
+    botStatus,
     hasIssue,
     issueDescription,
     tradeCount,
@@ -147,6 +150,15 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
             <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
               Perp
             </span>
+            {botStatus === "running" && (
+              <span
+                className="inline-flex items-center gap-1 text-[9px] font-sans px-1.5 py-0.2 rounded bg-profit-dim text-profit font-bold border border-profit-border"
+                title="Bot is running for this ticker — new entries allowed"
+              >
+                <span className="w-1 h-1 rounded-full bg-profit animate-pulse" />
+                Running
+              </span>
+            )}
           </div>
           {hasIssue ? (
             <span title={issueDescription || "Position Unbalanced or Risk Issue"} className="shrink-0 flex items-center">
@@ -717,6 +729,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               base={ticker.base}
               isSelected={selectedSymbol === ticker.symbol}
               isEnabled={enabledTickers ? enabledTickers.has(ticker.symbol) : false}
+              botStatus={tickerBotStatus(ticker.symbol)}
               hasIssue={ticker.hasIssue}
               issueDescription={ticker.issueDescription}
               tradeCount={ticker.tradeCount}

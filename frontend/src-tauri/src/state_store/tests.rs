@@ -1554,6 +1554,13 @@ fn test_signal_events_append_readback_and_validation() {
         Some(r#"{"friction_bps":5.0}"#)
     );
     assert_eq!(rows[1].buy_venue, "hyperliquid");
+    // Full UI symbols resolve to the canonical-base storage key: the monitor
+    // records under "BTC" while pages query "BTC-USDC" — both must match.
+    let alias_rows = store
+        .recent_monitor_signal_events(Some("BTC-USDC"), None, None, 10)
+        .unwrap();
+    assert_eq!(alias_rows.len(), 3);
+
     // Unfiltered sees all three; limit bounds the read.
     assert_eq!(
         store

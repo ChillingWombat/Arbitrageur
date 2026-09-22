@@ -125,7 +125,7 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = React.memo(Tick
 
 function TickerLogMonitorInner({
   symbol,
-  strategyName = "Single Spread",
+  strategyName = "Simple Spread",
   config,
   executionLogs = [],
   orderbooks = [],

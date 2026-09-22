@@ -234,7 +234,7 @@ export const App: React.FC = () => {
   }, [systemStatus]);
 
   // Tickers hidden via their configurator drop out of the explorer and all
-  // strategy selection; the Single Spread configurator's Reveal All clears
+  // strategy selection; the Simple Spread configurator's Reveal All clears
   // the manual list (right-click Hide re-adds).
   const [exemptedTickers, setExemptedTickers] = useState<Set<string>>(new Set());
   useEffect(() => {
@@ -839,7 +839,7 @@ export const App: React.FC = () => {
       <div className="relative flex flex-1 overflow-hidden">
         {/* Left Aggregated Positions Panel — symbol selection is
             strategy-specific, so the ticker explorer lives inside the
-            Single Spread page rather than the universal sidebar. */}
+            Simple Spread page rather than the universal sidebar. */}
         <PositionsPanel
           positions={openPositions}
           currentStrategyId={TAB_STRATEGY[activeTab].id}

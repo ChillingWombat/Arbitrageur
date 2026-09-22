@@ -1,4 +1,4 @@
-//! Live execution core for Single Spread (spatial) plus the adjacent
+//! Live execution core for Simple Spread (spatial) plus the adjacent
 //! execution domains: cross-ticker/prediction dispatch, candidate
 //! arbitration, circuit-breaker controls, killswitch, symbol flattening,
 //! passive unwind, and liquidation-trim/convergence exits.
