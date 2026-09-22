@@ -748,16 +748,14 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                   bot
                 </span>
               )}
-              <span
-                className={`px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold ${
-                  live
-                    ? "border-profit-border bg-profit-dim text-profit"
-                    : "border-surface-border bg-surface-raised text-slate-500"
-                }`}
-                title={live ? "Both venues support live API execution" : "Route involves a read-only venue — paper execution only"}
-              >
-                {live ? "LIVE" : "PAPER"}
-              </span>
+              {!live && (
+                <span
+                  className="px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold border-surface-border bg-surface-raised text-slate-500"
+                  title="Route involves a read-only venue — paper execution only"
+                >
+                  PAPER
+                </span>
+              )}
               <span
                 className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
                 title={

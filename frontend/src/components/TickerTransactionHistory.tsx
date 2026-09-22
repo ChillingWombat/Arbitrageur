@@ -70,28 +70,10 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <span className="text-xs font-bold text-slate-800 font-mono tracking-wide">
             Transaction Records
           </span>
-          {tickerLogs.length > 0 ? (
-            tickerLogs[0].is_live ? (
-              <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
-                Live Trading
-              </span>
-            ) : (
-              <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
-                Paper Trading
-              </span>
-            )
-          ) : (
-            logs.length > 0 && (
-              logs[0].is_live ? (
-                <span className="px-1.5 py-0.5 rounded-md bg-emerald-100 border border-emerald-200 text-emerald-800 text-[10px] font-mono font-bold uppercase tracking-wider">
-                  Live Trading
-                </span>
-              ) : (
-                <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
-                  Paper Trading
-                </span>
-              )
-            )
+          {(tickerLogs[0] ?? logs[0])?.is_live === false && (
+            <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
+              Paper Trading
+            </span>
           )}
         </div>
 
