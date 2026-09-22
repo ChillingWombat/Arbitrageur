@@ -34,7 +34,7 @@ interface FundingRadarProps {
 
 /** Scanner card box: decay-aware expected net over the modelled hold
  * (backend value, flat fallback), replacing the unrealistic flat daily rate. */
-const CarryExpectedBox: React.FC<{ opp: FundingOpportunityDto }> = ({ opp }) => {
+const CarryExpectedInline: React.FC<{ opp: FundingOpportunityDto }> = ({ opp }) => {
   // Real (backtested) expected net; "—" when history is too thin to measure.
   // The model estimate lives in the popup details, not here.
   const v =
@@ -50,17 +50,14 @@ const CarryExpectedBox: React.FC<{ opp: FundingOpportunityDto }> = ({ opp }) => 
       ? `Mean net over ${opp.backtest_trials} trailing-history backtest entries${holdH != null ? ` (modelled hold ~${holdH.toFixed(1)}h)` : ""} — measured, not modelled`
       : "Expected net unmeasurable — fewer than 20 scoreable history entries";
   return (
-    <div
-      className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border"
-      title={title}
-    >
-      <div className="text-slate-500">Expected</div>
-      <div
+    <span className="inline-flex items-baseline gap-1" title={title}>
+      <span className="text-slate-500">Expected Profit:</span>
+      <span
         className={`font-semibold tabular-nums ${v == null ? "text-slate-400" : v >= 0 ? "text-profit" : "text-loss"}`}
       >
         {v == null ? "—" : fmtSignedUsd(v)}
-      </div>
-    </div>
+      </span>
+    </span>
   );
 };
 
@@ -1374,6 +1371,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         </div>
                       )}
                       <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-500">Breakeven:</span>
+                        <span className="font-semibold text-slate-900 tabular-nums">{opp.break_even_hours.toFixed(1)}h</span>
+                      </div>
+                      <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Win:</span>
                         <span
                           className={`font-semibold tabular-nums ${opp.backtest_win_rate != null && opp.backtest_win_rate < 0.5 ? "text-loss" : "text-slate-900"}`}
@@ -1382,32 +1383,20 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           {opp.backtest_win_rate != null ? `${(opp.backtest_win_rate * 100).toFixed(0)}%` : "—"}
                         </span>
                       </div>
-                      {opp.persistence_probability != null && (
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-slate-500">Persist:</span>
-                          <span
-                            className="font-semibold tabular-nums text-slate-900"
-                            title={`Measured P(funding gap survives above min-APR through the breakeven horizon)${opp.persistence_probability_lower != null ? ` — lower bound ${(opp.persistence_probability_lower * 100).toFixed(0)}%` : ""}`}
-                          >
-                            {(opp.persistence_probability * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-1.5 font-sans text-[10px]">
-                      <div className="px-1.5 py-1 bg-surface-raised rounded-lg border border-surface-border">
-                        <div className="text-slate-500">Breakeven</div>
-                        <div className="font-semibold text-slate-900 tabular-nums">{opp.break_even_hours.toFixed(1)}h</div>
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-slate-500">Persist:</span>
+                        <span
+                          className={`font-semibold tabular-nums ${opp.persistence_probability != null ? "text-slate-900" : "text-slate-400"}`}
+                          title={opp.persistence_probability != null ? `Measured P(funding gap survives above min-APR through the breakeven horizon)${opp.persistence_probability_lower != null ? ` — lower bound ${(opp.persistence_probability_lower * 100).toFixed(0)}%` : ""}` : "Persistence unmeasurable — insufficient gap-history entries"}
+                        >
+                          {opp.persistence_probability != null ? `${(opp.persistence_probability * 100).toFixed(0)}%` : "—"}
+                        </span>
                       </div>
-                      <CarryExpectedBox opp={opp} />
                     </div>
                   </div>
 
                   <div className="pt-2 border-t border-surface-border flex items-center justify-between font-sans text-[10px]">
-                    <span className="font-semibold text-slate-500 tabular-nums" title="Compounded annual yield">
-                      {opp.net_apy_pct.toFixed(1)}% APY
-                    </span>
+                    <CarryExpectedInline opp={opp} />
                     <span onClick={(e) => e.stopPropagation()}>
                       <ExecuteButton
                         executed={lastExecuted === opp.id}
