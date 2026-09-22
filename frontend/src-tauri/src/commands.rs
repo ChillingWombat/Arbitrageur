@@ -2201,7 +2201,7 @@ pub fn save_engine_settings_impl(
         return Err("Min depth ratio must be at least 1.0".into());
     }
     if let Err(e) = settings.passive_unwind.validate() {
-        return Err(format!("Passive Limit Unwind settings: {e}"));
+        return Err(format!("Auto Position Exit settings: {e}"));
     }
     if settings.engine_rpc_port == 0
         || settings.engine_ws_port == 0

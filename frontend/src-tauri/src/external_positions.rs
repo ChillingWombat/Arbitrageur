@@ -688,7 +688,7 @@ pub async fn close_external_position_impl(
         let cfg = state.settings.read().passive_unwind;
         if !cfg.enabled || cfg.validate().is_err() {
             return Err(
-                "Auto Limit Exit needs Passive Limit Unwind enabled and valid in Engine Settings → Execution — or choose Limit/Market"
+                "Auto Limit Exit needs Auto Position Exit enabled and valid in Engine Settings → Execution — or choose Limit/Market"
                     .into(),
             );
         }
@@ -1049,7 +1049,7 @@ pub async fn schedule_external_exit_impl(
         let cfg = state.settings.read().passive_unwind;
         if !cfg.enabled || cfg.validate().is_err() {
             return Err(
-                "Scheduled auto exit needs Passive Limit Unwind enabled in Engine Settings → Execution"
+                "Scheduled auto exit needs Auto Position Exit enabled in Engine Settings → Execution"
                     .into(),
             );
         }
