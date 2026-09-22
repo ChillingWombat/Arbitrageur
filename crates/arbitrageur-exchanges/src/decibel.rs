@@ -1538,7 +1538,11 @@ impl ExchangeAdapter for DecibelAdapter {
         let qty = order.quantity;
         if row.lot_size > dec!(0) {
             let lots = qty / row.lot_size;
-            if lots < dec!(1) || !lots.fract().is_zero() {
+            // Tolerate f64→Decimal binary-expansion dust (~1e-19 relative)
+            // when checking the lot multiple; genuine sub-lot dust bails.
+            let lots_rounded = lots.round();
+            let lot_tol = (lots.abs() * dec!(0.0000000000001)).max(dec!(0.000000001));
+            if lots_rounded < dec!(1) || (lots - lots_rounded).abs() > lot_tol {
                 anyhow::bail!(
                     "Decibel order size {} is not an exact lot multiple {} for {}",
                     order.quantity,

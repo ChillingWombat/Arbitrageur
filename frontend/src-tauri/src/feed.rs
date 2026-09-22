@@ -390,22 +390,35 @@ async fn run_lighter_protocol(
         .send()
         .await;
 
+    // The static fallback map encodes *mainnet* market ids. On a non-mainnet
+    // base URL (testnet / regional), falling back would subscribe guessed
+    // ids and mislabel whatever streams back — the venue's own
+    // orderBookDetails is the only honest source there.
+    let is_mainnet = base_url.contains("mainnet.") || base_url.contains("api.rh.lighter");
     let symbol_map = match details_res {
         Ok(resp) if resp.status().is_success() => {
             if let Ok(details) = resp.json::<serde_json::Value>().await {
                 let map = lighter_market_symbol_map(&details);
                 if !map.is_empty() {
                     map
-                } else {
+                } else if is_mainnet {
                     lighter_default_market_symbol_map()
+                } else {
+                    anyhow::bail!("{venue} orderBookDetails returned no usable markets; refusing fallback map on non-mainnet host");
                 }
-            } else {
+            } else if is_mainnet {
                 lighter_default_market_symbol_map()
+            } else {
+                anyhow::bail!("{venue} orderBookDetails unparseable; refusing fallback map on non-mainnet host");
             }
         }
         _ => {
-            tracing::info!("{venue} HTTP orderBookDetails failed/WAF challenge; falling back to default perp market map");
-            lighter_default_market_symbol_map()
+            if is_mainnet {
+                tracing::info!("{venue} HTTP orderBookDetails failed/WAF challenge; falling back to default perp market map");
+                lighter_default_market_symbol_map()
+            } else {
+                anyhow::bail!("{venue} orderBookDetails unreachable; refusing fallback map on non-mainnet host");
+            }
         }
     };
     let ws = ws_connect(&ws_url).await?;

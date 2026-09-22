@@ -2565,7 +2565,7 @@ pub fn save_engine_settings_impl(
                 if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
                     let n = state.paper_exchanges().len() as u32;
                     if n > 0 {
-                        cb_reanchor_to_paper(state, eq * Decimal::from(n));
+                        crate::execution::cb_reanchor_to_sims(state, eq * Decimal::from(n));
                     }
                 }
             }
@@ -7127,6 +7127,39 @@ mod tests {
         .await;
         assert!(res.expect_err("target must reject").contains("below the"));
 
+        // Toxic-fill ceiling: a route whose net edge exceeds
+        // `cb_max_spread_divergence_bps` is a symbol collision or corrupt
+        // quote (production saw SPX500 "spreads" of ~147M bps), never alpha.
+        // Restore the target first so only the ceiling can reject.
+        {
+            let mut params = state.strategy_params.write();
+            let mut p = params
+                .get("futures")
+                .cloned()
+                .unwrap_or_else(|| StrategyParamsDto::defaults_for("futures"));
+            p.target_profit_bps = 1.0;
+            params.insert("futures".to_string(), p);
+        }
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(100.0), dec!(100.1));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64200.0), dec!(64210.0));
+        let res = execute_spatial_arbitrage_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            0.1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &state,
+        )
+        .await;
+        assert!(res
+            .expect_err("implausible spread must reject")
+            .contains("plausibility ceiling"));
+
         assert!(state.virtual_ledger.read().lots.is_empty());
         assert!(get_execution_logs_impl(&state).expect("logs").is_empty());
     }
@@ -10182,7 +10215,7 @@ mod tests {
             dec!(3000.0),
             dec!(3005.0),
         );
-        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3060.0), dec!(3065.0));
 
         // A prior signal for BTC-USDC holds residual exposure: only its long
         // leg filled. The ticker must refuse new orders until it reconciles.
@@ -10289,7 +10322,7 @@ mod tests {
             dec!(3000.0),
             dec!(3005.0),
         );
-        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3060.0), dec!(3065.0));
 
         let outcomes = execute_spatial_candidates_impl(
             vec![
@@ -10347,7 +10380,11 @@ mod tests {
 
         let eth = outcomes.iter().find(|o| o.symbol == "ETH-USDC").unwrap();
         assert!(eth.selected);
-        assert!(eth.result.as_ref().unwrap().execution_success);
+        assert!(
+            eth.result.as_ref().is_some_and(|r| r.execution_success),
+            "ETH winner must execute; rejection reason: {:?}",
+            eth.reason
+        );
 
         // Exactly one durable signal per dispatched ticker.
         assert_eq!(
@@ -10386,7 +10423,7 @@ mod tests {
             dec!(3000.0),
             dec!(3005.0),
         );
-        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3110.0), dec!(3115.0));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3060.0), dec!(3065.0));
 
         // In-flight signal on BTC-USDC blocks every candidate in the batch.
         state
@@ -10460,7 +10497,11 @@ mod tests {
         }
         let eth = outcomes.iter().find(|o| o.symbol == "ETH-USDC").unwrap();
         assert!(eth.selected);
-        assert!(eth.result.as_ref().unwrap().execution_success);
+        assert!(
+            eth.result.as_ref().is_some_and(|r| r.execution_success),
+            "ETH winner must execute; rejection reason: {:?}",
+            eth.reason
+        );
         // Only the in-flight seed exists for BTC — nothing new was dispatched.
         assert_eq!(
             state

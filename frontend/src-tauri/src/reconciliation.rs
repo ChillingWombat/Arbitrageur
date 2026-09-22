@@ -693,30 +693,36 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
     // too wide — or tries exhaust). A strategy whose mode is `off` keeps
     // the straight market path.
     let passive_cfg = passive_cfg_for(state, &exec.strategy_id);
+    // The first dispatch failure is persisted into the child's note below —
+    // "never dispatched" alone is undiagnosable from durable state once the
+    // process log has rotated.
+    let mut first_dispatch_err: Option<String> = None;
+    let mut note_err = |e: String| {
+        if first_dispatch_err.is_none() {
+            first_dispatch_err = Some(e);
+        }
+    };
     for (leg, qty) in &residuals {
         let child_side = match leg.side {
             LegSide::Long => LegSide::Short,
             LegSide::Short => LegSide::Long,
         };
         if leg.symbol.is_empty() {
-            tracing::error!(
-                "reconcile: residual leg on {} carries no symbol — cannot flatten",
-                leg.venue
-            );
+            let e = format!("residual leg on {} carries no symbol", leg.venue);
+            tracing::error!("reconcile: {e} — cannot flatten");
+            note_err(e);
             continue;
         }
         let Some(adapter) = state.get_adapter(&leg.venue) else {
-            tracing::error!(
-                "reconcile: no adapter admitted for residual leg on {}",
-                leg.venue
-            );
+            let e = format!("no adapter admitted for residual leg on {}", leg.venue);
+            tracing::error!("reconcile: {e}");
+            note_err(e);
             continue;
         };
         if !adapter.live_order_submission_implemented() || !adapter.has_live_credentials() {
-            tracing::error!(
-                "reconcile: {} not live-submission ready — residual leg not flattened",
-                leg.venue
-            );
+            let e = format!("{} not live-submission ready", leg.venue);
+            tracing::error!("reconcile: {e} — residual leg not flattened");
+            note_err(e);
             continue;
         }
         // Residuals are f64 arithmetic — from_f64_retain preserves binary
@@ -767,6 +773,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                             "reconcile: passive residual flatten on {} failed: {e:#}",
                             leg.venue
                         );
+                        note_err(format!("passive flatten on {} failed: {e:#}", leg.venue));
                         continue;
                     }
                 }
@@ -787,6 +794,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                             "reconcile: residual flatten order on {} rejected: {e}",
                             leg.venue
                         );
+                        note_err(format!("flatten order on {} rejected: {e}", leg.venue));
                         continue;
                     }
                 }
@@ -830,10 +838,14 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                 || l.filled_qty > 0.0
         });
         if !submitted {
+            let note = match &first_dispatch_err {
+                Some(e) => format!("residual flatten never dispatched an order: {e}"),
+                None => "residual flatten never dispatched an order".to_string(),
+            };
             let _ = state.state_store.update_signal_status(
                 &close_id,
                 SignalStatus::Failed,
-                Some("residual flatten never dispatched an order"),
+                Some(note.as_str()),
             );
         }
     }

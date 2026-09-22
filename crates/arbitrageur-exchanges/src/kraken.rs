@@ -1099,7 +1099,12 @@ impl ExchangeAdapter for KrakenAdapter {
         let venue_symbol = Self::to_futures_symbol(&order.symbol)?;
         let ct = self.contract_size_for(&order.symbol).await?;
         let contracts = order.quantity / ct;
-        if contracts < dec!(1) || !contracts.fract().is_zero() {
+        // Tolerate f64→Decimal binary-expansion dust (~1e-19 relative) when
+        // snapping to a whole-contract count; genuine fractional-contract
+        // dust still bails rather than silently rounding a close.
+        let contracts_rounded = contracts.round();
+        let contract_tol = (contracts.abs() * dec!(0.0000000000001)).max(dec!(0.000000001));
+        if contracts_rounded < dec!(1) || (contracts - contracts_rounded).abs() > contract_tol {
             anyhow::bail!(
                 "Kraken order {qty} {sym} is not an exact whole-contract multiple ({ct} base units)",
                 qty = order.quantity,
@@ -1107,6 +1112,7 @@ impl ExchangeAdapter for KrakenAdapter {
                 ct = ct
             );
         }
+        let contracts = contracts_rounded;
         let side_str = match order.side {
             arbitrageur_core::types::Side::Buy => "buy",
             arbitrageur_core::types::Side::Sell => "sell",
