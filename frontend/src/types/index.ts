@@ -20,7 +20,13 @@ export interface VenueStatusDto {
   status: string;
   latency_ms: number | null;
   fee_bps: number;
+  can_submit?: boolean;
+  can_enter_strategy?: boolean;
 }
+
+/** Backend-reported order capability per venue id, built from
+ *  `SystemStatusDto.active_venues`. */
+export type VenueCaps = Map<string, { canSubmit: boolean; canEnterStrategy: boolean }>;
 
 export interface VenueCapabilityDto {
   venue: string;
