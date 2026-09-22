@@ -43,6 +43,8 @@ mod tests {
         script: Vec<MockResponse>,
         fallback: MockResponse,
         calls: Arc<Mutex<Vec<OrderRequest>>>,
+        fetch_script: Arc<Mutex<Vec<anyhow::Result<OrderResponse>>>>,
+        cancels: Arc<Mutex<Vec<arbitrageur_core::order::CancelRequest>>>,
     }
 
     impl MockExchange {
@@ -52,11 +54,24 @@ mod tests {
                 script,
                 fallback,
                 calls: Arc::new(Mutex::new(Vec::new())),
+                fetch_script: Arc::new(Mutex::new(Vec::new())),
+                cancels: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn call_log(&self) -> Arc<Mutex<Vec<OrderRequest>>> {
             self.calls.clone()
+        }
+
+        /// Scripted fetch_order responses consumed one per call; an empty
+        /// queue fails closed like an adapter without order-status support.
+        fn with_fetch(self, script: Vec<anyhow::Result<OrderResponse>>) -> Self {
+            *self.fetch_script.lock().unwrap() = script;
+            self
+        }
+
+        fn cancel_log(&self) -> Arc<Mutex<Vec<arbitrageur_core::order::CancelRequest>>> {
+            self.cancels.clone()
         }
     }
 
@@ -177,9 +192,25 @@ mod tests {
         }
         async fn cancel_order(
             &self,
-            _req: arbitrageur_core::order::CancelRequest,
+            req: arbitrageur_core::order::CancelRequest,
         ) -> anyhow::Result<()> {
+            self.cancels.lock().unwrap().push(req);
             Ok(())
+        }
+        async fn fetch_order(
+            &self,
+            _symbol: &str,
+            _order_id: &str,
+            _client_order_id: Option<&str>,
+        ) -> anyhow::Result<OrderResponse> {
+            let mut script = self.fetch_script.lock().unwrap();
+            if script.is_empty() {
+                anyhow::bail!(
+                    "order-status polling not implemented for mock {}",
+                    self.name
+                );
+            }
+            script.remove(0)
         }
     }
 
@@ -951,5 +982,303 @@ mod tests {
         assert!(!cb.is_tripped());
         assert_eq!(log_a.lock().unwrap().len(), 1);
         assert_eq!(log_b.lock().unwrap().len(), 1);
+    }
+
+    /// Venue-attributed order state for scripted fetch_order/Raw responses.
+    fn resp(
+        venue: &str,
+        symbol: &str,
+        client_order_id: &str,
+        order_id: &str,
+        status: OrderStatus,
+        filled: Decimal,
+        requested: Decimal,
+    ) -> OrderResponse {
+        OrderResponse {
+            order_id: order_id.to_string(),
+            client_order_id: client_order_id.to_string(),
+            venue: venue.into(),
+            symbol: symbol.to_string(),
+            status,
+            original_qty: requested,
+            filled_qty: filled,
+            remaining_qty: if status == OrderStatus::Cancelled {
+                Decimal::ZERO
+            } else {
+                requested - filled
+            },
+            avg_fill_price: (filled > Decimal::ZERO).then_some(dec!(100)),
+            fee: dec!(0.1),
+            fee_currency: "USDC".to_string(),
+            raw_response: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    /// Canary regression: a leg acked `New` that fills moments later must
+    /// resolve as Success — not force an unwind of the filled sibling.
+    #[tokio::test]
+    async fn test_working_leg_late_fill_resolves_to_success() {
+        let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
+        let log_a = mock_a.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+
+        let order_b = OrderRequest::new_limit(
+            "ex_b".into(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let cid_b = order_b.client_order_id.clone();
+        let acked = resp(
+            "ex_b",
+            "BTC-USDC",
+            &cid_b,
+            "b-order",
+            OrderStatus::New,
+            dec!(0),
+            dec!(1.0),
+        );
+        let filled = resp(
+            "ex_b",
+            "BTC-USDC",
+            &cid_b,
+            "b-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Raw(acked)], MockResponse::Fail)
+            .with_fetch(vec![Ok(filled)]);
+        let cancels_b = mock_b.cancel_log();
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
+        match res {
+            ArbitrageExecutionResult::Success { leg_b, .. } => {
+                assert_eq!(leg_b.order_id, "b-order");
+                assert_eq!(leg_b.filled_qty, dec!(1.0));
+            }
+            other => panic!("Expected Success after late fill, got {:?}", other),
+        }
+        assert!(!cb.is_tripped());
+        assert_eq!(log_a.lock().unwrap().len(), 1);
+        assert!(cancels_b.lock().unwrap().is_empty());
+    }
+
+    /// A still-working zero-fill leg is cancelled after the grace window so
+    /// it can never fill later untracked; the filled sibling is unwound and
+    /// the outcome is a clean BothFailed — no reconciler handoff.
+    #[tokio::test]
+    async fn test_working_leg_cancelled_when_fill_never_lands() {
+        let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
+        let log_a = mock_a.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+
+        let order_b = OrderRequest::new_limit(
+            "ex_b".into(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let cid_b = order_b.client_order_id.clone();
+        let acked = resp(
+            "ex_b",
+            "BTC-USDC",
+            &cid_b,
+            "b-order",
+            OrderStatus::New,
+            dec!(0),
+            dec!(1.0),
+        );
+        let still_new = || {
+            Ok(resp(
+                "ex_b",
+                "BTC-USDC",
+                &cid_b,
+                "b-order",
+                OrderStatus::New,
+                dec!(0),
+                dec!(1.0),
+            ))
+        };
+        let cancelled = Ok(resp(
+            "ex_b",
+            "BTC-USDC",
+            &cid_b,
+            "b-order",
+            OrderStatus::Cancelled,
+            dec!(0),
+            dec!(1.0),
+        ));
+        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Raw(acked)], MockResponse::Fail)
+            .with_fetch(vec![still_new(), still_new(), still_new(), cancelled]);
+        let cancels_b = mock_b.cancel_log();
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, _cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
+        match res {
+            ArbitrageExecutionResult::BothFailed { .. } => {}
+            other => panic!("Expected BothFailed after cancel, got {:?}", other),
+        }
+        assert_eq!(cancels_b.lock().unwrap().len(), 1);
+        // ex_a saw its entry order plus the emergency unwind of the fill.
+        let calls_a = log_a.lock().unwrap();
+        assert_eq!(calls_a.len(), 2);
+        assert_eq!(calls_a[1].side, Side::Sell);
+    }
+
+    /// Leg B errors while leg A's order is still working: settle polls to
+    /// the terminal fill so the unwind covers the FINAL filled quantity —
+    /// unwinding the earlier snapshot would orphan the remainder.
+    #[tokio::test]
+    async fn test_unwind_covers_terminal_qty_when_leg_completes_late() {
+        let order_a =
+            OrderRequest::new_limit("ex_a".into(), "BTC-USDC", Side::Buy, dec!(60000), dec!(1.0));
+        let cid_a = order_a.client_order_id.clone();
+        let partial = resp(
+            "ex_a",
+            "BTC-USDC",
+            &cid_a,
+            "a-order",
+            OrderStatus::PartiallyFilled,
+            dec!(0.4),
+            dec!(1.0),
+        );
+        let still_working = resp(
+            "ex_a",
+            "BTC-USDC",
+            &cid_a,
+            "a-order",
+            OrderStatus::PartiallyFilled,
+            dec!(0.6),
+            dec!(1.0),
+        );
+        let filled = resp(
+            "ex_a",
+            "BTC-USDC",
+            &cid_a,
+            "a-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        let mock_a =
+            MockExchange::new("ex_a", vec![MockResponse::Raw(partial)], MockResponse::Full)
+                .with_fetch(vec![Ok(still_working), Ok(filled)]);
+        let log_a = mock_a.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Fail));
+
+        let (coordinator, _cb) = make_coordinator();
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
+        match res {
+            ArbitrageExecutionResult::LegBFailedUnwound { unwind_resp, .. } => {
+                assert_eq!(unwind_resp.filled_qty, dec!(1.0));
+            }
+            other => panic!("Expected LegBFailedUnwound, got {:?}", other),
+        }
+        let calls_a = log_a.lock().unwrap();
+        assert_eq!(calls_a.len(), 2);
+        assert_eq!(calls_a[1].quantity, dec!(1.0));
+    }
+
+    /// A fetch echo for a different order id is never adopted: the leg keeps
+    /// its last verified state and is handed to the reconciler, still
+    /// working, rather than classified on someone else's fill.
+    #[tokio::test]
+    async fn test_fetch_identity_mismatch_never_adopted() {
+        let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+
+        let order_b = OrderRequest::new_limit(
+            "ex_b".into(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+        let cid_b = order_b.client_order_id.clone();
+        let acked = resp(
+            "ex_b",
+            "BTC-USDC",
+            &cid_b,
+            "b-order",
+            OrderStatus::New,
+            dec!(0),
+            dec!(1.0),
+        );
+        let foreign = resp(
+            "ex_b",
+            "BTC-USDC",
+            "other-cid",
+            "other-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        let mock_b = MockExchange::new("ex_b", vec![MockResponse::Raw(acked)], MockResponse::Fail)
+            .with_fetch(vec![Ok(foreign)]);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+
+        let res = coordinator
+            .execute_two_leg(&ex_a, order_a, &ex_b, order_b)
+            .await;
+        match res {
+            ArbitrageExecutionResult::UnresolvedExposure { leg_b_fill, .. } => {
+                assert_eq!(
+                    leg_b_fill.expect("working leg preserved").order_id,
+                    "b-order"
+                );
+            }
+            other => panic!("Expected UnresolvedExposure handoff, got {:?}", other),
+        }
+        // Tracked working orders are handed to the reconciler — the
+        // coordinator does not trip on them (the caller may).
+        assert!(!cb.is_tripped());
     }
 }

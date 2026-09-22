@@ -2576,3 +2576,17 @@ The four-attempt `User or API Wallet <random> does not exist` saga (`0xe8dc…`,
 - **Note**: `live_entry_enabled` is session-only (in-memory, resets to off each launch) — intentional per-session opt-in; the canary refusal at 16:22 was the gate working, not a bug.
 
 Verified: 27 HL tests incl. new canonical-form test, clippy/fmt clean, release rebuild + restart. **Pending**: credentialed canary retry on the fixed binary — HL leg should now reach the venue with a recoverable signer.
+
+### Credentialed Hyperliquid fill proven + coordinator settle-window fix (2026-09-23, later)
+
+The retry canary on the fixed binary **filled the Hyperliquid leg** (`Filled` 0.005/0.005 — the first credentialed HL fill) and its emergency unwind also filled (`553220045454`); venue state after: HL flat, spot ≈656.8 USDC untouched. Signing, preflight, and wire format are now proven end-to-end against the live venue.
+
+The same canary exposed a second, subtler defect — an **ack-before-fill-report race**:
+
+- The Lighter leg acked `status=New` with zero fill; the coordinator treated it as failed and emergency-unwound the filled HL leg — ~2s before Lighter's fill report landed. Result: 4 legs of churn (entry + unwind + late fill + reconciler flatten) instead of a clean two-leg fill, plus a conservative breaker trip.
+- **Fix — `settle_working_leg`** (`coordinator.rs`): before classifying an `Ok` leg, any still-working order gets a bounded identity-verified `fetch_order` window (5 × 600ms; venue fills typically report <2s). A late fill resolves to `Success`. A zero-fill leg still working afterwards is **cancelled** then re-polled — it can never fill later untracked (previously a working leg could linger and fill at a stale price; only the reconciler's slower cancel budget covered it).
+- In the asymmetric `(Ok, Err)`/`(Err, Ok)` arms the working leg is settled with `cancel_partial=true`: the unwind then targets the **terminal** filled quantity — previously it unwound the snapshot qty while the remainder kept working, orphaned (its order id never reached durable state on the `LegXFailedUnwound` path).
+- `(Ok, Ok)` partial fills keep polling-only (`cancel_partial=false`): a working remainder belongs to the matched-pair trim design; zero-fill remainders are still cancelled.
+- A leg non-terminal after poll+cancel keeps its verified identity for the reconciler — the previous safety net is unchanged.
+
+Regression tests pin the canary failure shape: late fill → `Success`; never-filling leg → cancelled → `BothFailed`; sibling-error unwind covers the terminal (not snapshot) quantity; mismatched fetch echoes are never adopted. Verified: 49 execution tests, 389 desktop tests, clippy/fmt clean.
