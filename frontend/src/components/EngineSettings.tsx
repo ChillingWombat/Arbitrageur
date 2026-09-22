@@ -1890,7 +1890,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             type="submit"
             state={saveBtn.state}
             disabled={loading}
-            className="w-36 font-mono font-medium"
           />
         </div>
       </div>
