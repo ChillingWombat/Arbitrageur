@@ -2598,3 +2598,11 @@ The futures auto-exit's `TimedOut` trigger was hardcoded to `SpatialExitConfig::
 - **New setting**: `EngineSettingsDto.auto_exit_max_hold_secs` (seconds, validated 60–604800 = 1min–7d, default 86400). Persisted under kv `engine.auto_exit_max_hold_secs`, restored at boot, **live-applied on save** — the 5s convergence supervisor reads `state.settings` each pass, so a new deadline takes effect on the next tick without restart.
 - **UI**: System Settings → Auto Position Exit → "Max hold before auto-exit (min)" — sits outside the limit-exit policy grid since the hold deadline is a *trigger* (fires regardless of limit/market execution mode); radar-bot positions keep their own per-bot `Hold timeout ×`.
 - Validation rejects out-of-range values with a clear error; tests pin the bounds and kv round-trip.
+
+### Ticker selector quote-variant disambiguation (2026-09-23, later)
+
+The selector panel showed apparent duplicate rows (two "XAG", two "XRP", two "ZEC"…). Investigation found **not** a data merge bug: `applyMarketUniverse` keys a Map on canonical `BASE-QUOTE`, and the backend per-venue list is `dedup()`ed — the duplicated-looking rows were distinct instruments sharing a base (`XRP-USDC` on HL/Lighter vs `XRP-USDT` on Aster/Binance-class venues; `tickers.test.ts` pins stablecoin quotes staying distinct). The row component rendered only `{base}` + a static "Perp" badge, so both variants were visually identical.
+
+- **Fix**: `TickerRow` renders `base` + `-{quote}` suffix (`TickerExplorer.tsx`); `tickersWithStats` dedupes by canonical symbol so no input source can emit two rows under one React key.
+- **Also**: `useSyncExternalStore` bot-phase subscription gained a `getServerSnapshot` (SSR/test render compatibility — the new component test surfaced it).
+- **Tests**: `TickerExplorer.test.ts` (component render — quote variants render distinguishable, same-symbol inputs collapse to one row); `PERP_TICKERS` catalog-uniqueness guard in `tickers.test.ts`.
