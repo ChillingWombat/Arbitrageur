@@ -364,6 +364,16 @@ impl HyperliquidAdapter {
 /// integer prices always pass. The rounding direction never crosses the
 /// caller's protective bound — buy caps floor (pay less), sell caps ceil
 /// (receive more) — by at most one tick.
+/// Canonical decimal wire string — Hyperliquid re-serializes parsed `p`/`s`
+/// values before hashing the action, so the bytes we hash must already be in
+/// their minimal form ("0.005", not "0.0050"; "2740", not "2740.0"). A
+/// padded string signs a connection_id HL can never reproduce, and their
+/// ecrecover lands on a different unregistered address per nonce — the
+/// "User or API Wallet <random> does not exist" rejection.
+fn hl_wire_decimal(d: Decimal) -> String {
+    d.normalize().to_string()
+}
+
 fn hl_wire_price(price: Decimal, sz_decimals: u32, side: Side) -> Decimal {
     if price <= dec!(0) || price.fract().is_zero() {
         return price; // invalid or already integral — pass through
@@ -1065,8 +1075,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let wire_order = HlOrderWire {
             a: asset_index,
             b: order.side == Side::Buy,
-            p: price.to_string(),
-            s: quantity.to_string(),
+            p: hl_wire_decimal(price),
+            s: hl_wire_decimal(quantity),
             r: order.reduce_only,
             t: HlOrderTypeWire {
                 limit: HlLimitWire {
@@ -1665,6 +1675,60 @@ mod tests {
 
     const ACCOUNT: &str = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
     const SIGNER: &str = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+
+    /// Diagnostic: emits the exact JSON body `place_order` would POST for a
+    /// live-shaped ETH order signed with the dev key at a fresh nonce. Run
+    /// with `--nocapture`, then curl the body at /exchange — the address in
+    /// HL's "does not exist" error is what their ecrecover sees.
+    #[test]
+    fn print_live_order_exchange_body() {
+        // Mirror place_order's wire construction: quantity arrives at
+        // szDecimals scale ("0.0050") and must be canonicalized exactly as
+        // the live path does.
+        let order = HlOrderWire {
+            a: 1,
+            b: true,
+            p: dec!(2733.8).normalize().to_string(),
+            s: dec!(0.0050).normalize().to_string(),
+            r: false,
+            t: HlOrderTypeWire {
+                limit: HlLimitWire {
+                    tif: "Ioc".to_string(),
+                },
+            },
+            c: None,
+        };
+        let action = HlActionWire::Order {
+            orders: vec![order],
+            grouping: "na".to_string(),
+        };
+        let pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
+        let nonce = Utc::now().timestamp_millis() as u64;
+        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, true, pk).unwrap();
+        let body = json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": { "r": r, "s": s, "v": v },
+            "vaultAddress": null,
+        });
+        eprintln!("HL_CURL_BODY={}", serde_json::to_string(&body).unwrap());
+        eprintln!("HL_EXPECTED_SIGNER=0x7e5f4552091a69125d5dfcb7b8c2659029395bdf");
+    }
+
+    #[test]
+    fn hl_wire_decimal_emits_canonical_form() {
+        // Trailing zeros are stripped — HL hashes the canonical form.
+        assert_eq!(hl_wire_decimal(dec!(0.0050)), "0.005");
+        assert_eq!(hl_wire_decimal(dec!(2733.80)), "2733.8");
+        assert_eq!(hl_wire_decimal(dec!(2740.00)), "2740");
+        assert_eq!(hl_wire_decimal(dec!(0.1)), "0.1");
+        assert_eq!(hl_wire_decimal(dec!(123456)), "123456");
+        assert_eq!(hl_wire_decimal(dec!(0.00001234)), "0.00001234");
+        // The exact canary failure shape: szDecimals=4 quantity arrives as
+        // "0.0050" and must go on the wire as "0.005".
+        let q = dec!(0.005).trunc_with_scale(4);
+        assert_eq!(hl_wire_decimal(q), "0.005");
+    }
 
     #[test]
     fn signer_role_direct_user_matching_account_ok() {
