@@ -46,6 +46,8 @@ interface CredFieldSpec {
   hint?: string;
   /** secp256k1 EVM signer key — show the derived "signs as 0x…" address. */
   evmSigner?: boolean;
+  /** Fixed-value dropdown instead of a free-text input (e.g. region domains). */
+  options?: { value: string; label: string }[];
 }
 
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
@@ -153,7 +155,24 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "API Key", secret: true },
     { key: "apiSecret", label: "API Secret", secret: true },
   ],
+  // OKX: keys live in per-region namespaces — a key created on app.okx.com
+  // does not exist on www.okx.com ("API key doesn't exist", code 50119).
+  // The domain must match the site where the key was issued.
   okx: [
+    {
+      key: "baseUrl",
+      label: "Region / API Domain",
+      optional: true,
+      options: [
+        { value: "", label: "Global — www.okx.com (default)" },
+        { value: "https://app.okx.com", label: "US / AU / regional — app.okx.com" },
+        { value: "https://us.okx.com", label: "US — us.okx.com" },
+        { value: "https://eea.okx.com", label: "EEA — eea.okx.com" },
+        { value: "https://my.okx.com", label: "EEA (legacy) — my.okx.com" },
+        { value: "https://tr.okx.com", label: "Türkiye — tr.okx.com" },
+      ],
+      hint: "Must match the domain in your address bar where the API key was created. A mismatch returns 'API key doesn't exist' (50119) even for valid keys.",
+    },
     { key: "apiKey", label: "API Key", secret: true },
     { key: "apiSecret", label: "API Secret", secret: true },
     { key: "passphrase", label: "Passphrase", secret: true },
@@ -230,6 +249,65 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   qfex: [],
   sodex: [],
   vest: [],
+  /* ------------- EVM spot AMMs (EvmAmmAdapter — local-wallet swaps) ------- */
+  // The six standard-router venues (uniswap…quickswap) accept a funded
+  // dedicated-wallet private key — the key IS the trader; the optional
+  // wallet address must equal the signer's derived address when provided.
+  // The five market-data-only venues (camelot/aerodrome/velodrome/ramses/
+  // pharaoh) never take a key — an optional public wallet address enables
+  // balance reads only. For all eleven, baseUrl doubles as the JSON-RPC
+  // endpoint override (private Alchemy/Infura/self-hosted node recommended
+  // over the public default).
+  uniswap: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — must equal the key's derived address if set." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com", hint: "Optional Ethereum JSON-RPC override (private node recommended)." },
+  ],
+  uniswap_v2: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com" },
+  ],
+  pancakeswap: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (BNB Chain)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://bsc-rpc.publicnode.com" },
+  ],
+  pancakeswap_v3: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (BNB Chain)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://bsc-rpc.publicnode.com" },
+  ],
+  sushiswap: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com" },
+  ],
+  quickswap: [
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Polygon)." },
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://polygon-bor-rpc.publicnode.com" },
+  ],
+  camelot: [
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://arbitrum-one-rpc.publicnode.com" },
+  ],
+  aerodrome: [
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://base-rpc.publicnode.com" },
+  ],
+  velodrome: [
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://optimism-rpc.publicnode.com" },
+  ],
+  ramses: [
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://arbitrum-one-rpc.publicnode.com" },
+  ],
+  pharaoh: [
+    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
+    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://avalanche-c-chain-rpc.publicnode.com" },
+  ],
 };
 
 export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
@@ -277,6 +355,18 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   sodex: "SoDEX",
   standx: "StandX",
   vest: "Vest",
+  // EVM spot AMMs (EvmAmmAdapter ids — must match the spec table).
+  uniswap: "Uniswap V3",
+  uniswap_v2: "Uniswap V2",
+  pancakeswap: "PancakeSwap V2",
+  pancakeswap_v3: "PancakeSwap V3",
+  sushiswap: "SushiSwap",
+  quickswap: "QuickSwap",
+  camelot: "Camelot V2",
+  aerodrome: "Aerodrome",
+  velodrome: "Velodrome",
+  ramses: "Ramses",
+  pharaoh: "Pharaoh",
 };
 
 const venueDisplay = (v: string) => ACCOUNT_VENUE_DISPLAY[v] ?? v;
@@ -343,6 +433,8 @@ const fieldIsSet = (a: AccountDto, key: CredFieldKey): boolean => {
       return a.subaccountIndex != null;
     case "apiKeyIndex":
       return a.apiKeyIndex != null;
+    case "baseUrl":
+      return a.hasBaseUrl;
     default:
       return false;
   }
@@ -373,11 +465,20 @@ const SignerAddressHint: React.FC<{
   typedKey: string;
   accountId: string | null;
   stored: boolean;
-}> = ({ typedKey, accountId, stored }) => {
+  venue: string | null;
+  isDefault: boolean;
+  activeVersion: string;
+}> = ({ typedKey, accountId, stored, venue, isDefault, activeVersion }) => {
   const [addr, setAddr] = useState<string | null>(null);
   const [invalid, setInvalid] = useState(false);
+  const [active, setActive] = useState<string | null>(null);
+  const [activeLoaded, setActiveLoaded] = useState(false);
+  const [activeError, setActiveError] = useState(false);
   const trimmed = typedKey.trim();
   const looksComplete = /^(0x)?[0-9a-fA-F]{64}$/.test(trimmed);
+  // get_active_signer_address is only implemented for Hyperliquid — other
+  // venues keep the typed/stored derivation and never show an active line.
+  const activeSupported = venue === "hyperliquid";
 
   useEffect(() => {
     setAddr(null);
@@ -403,17 +504,95 @@ const SignerAddressHint: React.FC<{
     };
   }, [trimmed, looksComplete, stored, accountId]);
 
-  if (!addr && !invalid) return null;
+  // The signer the live adapter holds right now — independent of vault
+  // lock state. Only the default account's credentials are provisioned;
+  // re-query on save/reprovision and lock transitions via activeVersion.
+  useEffect(() => {
+    setActive(null);
+    setActiveLoaded(false);
+    setActiveError(false);
+    let dead = false;
+    if (activeSupported && venue && isDefault && api.isTauri) {
+      api
+        .getActiveSignerAddress(venue)
+        .then((a) => {
+          if (!dead) {
+            setActive(a);
+            setActiveLoaded(true);
+          }
+        })
+        .catch(() => {
+          if (!dead) {
+            setActiveError(true);
+            setActiveLoaded(true);
+          }
+        });
+    }
+    return () => {
+      dead = true;
+    };
+  }, [venue, isDefault, activeVersion]);
+
+  const typedAddr = trimmed && !invalid ? addr : null;
+  const storedAddr = !trimmed && stored ? addr : null;
+  const compareAddr = typedAddr ?? storedAddr;
+  let activeLine: { text: string; cls: string } | null = null;
+  if (activeLoaded) {
+    if (activeError) {
+      activeLine = {
+        text: "unable to read live adapter signer",
+        cls: "text-amber-600",
+      };
+    } else if (!active) {
+      activeLine = {
+        text: "live adapter has no signing key loaded",
+        cls: "text-loss",
+      };
+    } else if (compareAddr && compareAddr.toLowerCase() === active.toLowerCase()) {
+      activeLine = {
+        text: `live adapter signs as ${active} (matches)`,
+        cls: "text-profit",
+      };
+    } else if (typedAddr) {
+      activeLine = {
+        text: `live adapter still signs as ${active} — save this key before trading`,
+        cls: "text-amber-600",
+      };
+    } else if (storedAddr) {
+      activeLine = {
+        text: `LIVE SIGNER MISMATCH: adapter signs as ${active} — save or re-unlock before trading`,
+        cls: "text-loss",
+      };
+    } else {
+      activeLine = {
+        text: `live adapter currently signs as ${active}`,
+        cls: "text-slate-500",
+      };
+    }
+  }
+
+  if (!addr && !invalid && !activeLine) return null;
   return (
-    <p
-      className={`text-[10px] mt-1 leading-tight font-mono break-all ${
-        invalid ? "text-amber-600" : "text-slate-500"
-      }`}
-    >
-      {addr
-        ? `${trimmed ? "signs as" : "stored key signs as"} ${addr}`
-        : "not a valid EVM private key"}
-    </p>
+    <>
+      {(addr || invalid) && (
+        <p
+          className={`text-[10px] mt-1 leading-tight font-mono break-all ${
+            invalid ? "text-amber-600" : "text-slate-500"
+          }`}
+        >
+          {addr
+            ? `${trimmed ? "typed key signs as" : "stored key signs as"} ${addr}`
+            : "not a valid EVM private key"}
+        </p>
+      )}
+      {activeLine && (
+        <p
+          className={`text-[10px] mt-1 leading-tight font-mono break-all ${activeLine.cls}`}
+        >
+          {activeLine.text}
+        </p>
+      )}
+    </>
   );
 };
 
@@ -444,15 +623,35 @@ const CredentialGrid: React.FC<CredGridProps> = ({
             {f.optional ? " (Optional)" : ""}:
           </label>
           <div className="relative">
-            <input
-              type={f.secret && !shown ? "password" : f.numeric ? "number" : "text"}
-              disabled={disabled}
-              value={values[f.key] ?? ""}
-              placeholder={placeholder}
-              onChange={(e) => setValue(f.key, e.target.value)}
-              autoComplete="off"
-              className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
-            />
+            {f.options ? (
+              <select
+                disabled={disabled}
+                value={values[f.key] ?? ""}
+                onChange={(e) => setValue(f.key, e.target.value)}
+                className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50"
+              >
+                {f.options.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+                {/* A stored value outside the known set stays visible rather
+                    than silently snapping to the first option. */}
+                {f.options.every((o) => o.value !== (values[f.key] ?? "")) && (
+                  <option value={values[f.key] ?? ""}>{values[f.key] ?? ""}</option>
+                )}
+              </select>
+            ) : (
+              <input
+                type={f.secret && !shown ? "password" : f.numeric ? "number" : "text"}
+                disabled={disabled}
+                value={values[f.key] ?? ""}
+                placeholder={placeholder}
+                onChange={(e) => setValue(f.key, e.target.value)}
+                autoComplete="off"
+                className={`w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent font-mono disabled:opacity-50 ${f.secret ? "pr-9" : ""}`}
+              />
+            )}
             {f.secret && (
               <button
                 type="button"
@@ -474,6 +673,9 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               typedKey={values[f.key] ?? ""}
               accountId={account?.id ?? null}
               stored={stored}
+              venue={account?.venue ?? null}
+              isDefault={account?.isDefault ?? false}
+              activeVersion={`${account?.updatedAt ?? ""}:${disabled ? "disabled" : "enabled"}`}
             />
           )}
         </div>
@@ -997,6 +1199,21 @@ export const AccountCard: React.FC<AccountCardProps> = ({
     let any = false;
     for (const f of fields) {
       const raw = (valueFor(f.key) ?? "").trim();
+      if (f.key === "baseUrl") {
+        // RPC endpoints are secret and often embed provider API keys: only
+        // a draft decides the outcome — empty string is the explicit-clear
+        // signal, a value sets. No draft means untouched (an unrevealed
+        // stored URL is never accidentally cleared); a revealed non-empty
+        // value still round-trips through the generic path below.
+        if (Object.prototype.hasOwnProperty.call(drafts, f.key)) {
+          (creds as Record<string, unknown>)[f.key] = raw;
+          any = true;
+        } else if (raw !== "") {
+          (creds as Record<string, unknown>)[f.key] = raw;
+          any = true;
+        }
+        continue;
+      }
       if (f.numeric) {
         // Index fields always serialize: non-empty sets, empty clears.
         if (raw === "") {

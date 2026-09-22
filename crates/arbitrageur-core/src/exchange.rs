@@ -204,6 +204,13 @@ pub trait ExchangeAdapter: Send + Sync {
         self.order_status_polling_implemented()
     }
 
+    /// Whether this adapter is safe for automated multi-leg strategy entry.
+    /// Submission transport + polling are necessary but not sufficient (venues
+    /// may still lack gas/friction modeling or venue evidence).
+    fn live_strategy_entry_implemented(&self) -> bool {
+        self.live_order_reconciliation_implemented()
+    }
+
     /// Whether authenticated live trading credentials are loaded in memory for this adapter.
     fn has_live_credentials(&self) -> bool {
         false

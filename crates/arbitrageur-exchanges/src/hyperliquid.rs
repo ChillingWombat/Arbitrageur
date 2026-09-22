@@ -14,6 +14,7 @@ use serde_json::json;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -172,6 +173,21 @@ pub fn sign_hyperliquid_l1_action<T: Serialize>(
     Ok((r_hex, s_hex, v))
 }
 
+/// How long a successful `userRole` answer stays authoritative — API
+/// wallets can expire or be deregistered, so the cache must not outlive
+/// the venue's ability to change its mind during multi-day operation.
+const SIGNER_VERIFICATION_TTL: Duration = Duration::from_secs(300);
+
+/// A signer identity verified via `userRole` together with the configured
+/// account it was verified against — an approval for one account must never
+/// be reused to skip the check after the account changes.
+#[derive(Clone)]
+struct VerifiedSigner {
+    signer: String,
+    account: String,
+    verified_at: Instant,
+}
+
 /// Hyperliquid L1 Perpetual and Spot exchange adapter.
 #[allow(dead_code)]
 pub struct HyperliquidAdapter {
@@ -180,6 +196,9 @@ pub struct HyperliquidAdapter {
     base_url: String,
     wallet_address: RwLock<Option<String>>,
     private_key: RwLock<Option<Zeroizing<String>>>,
+    /// Signer+account pair verified via `userRole` for the currently-held
+    /// credentials; cleared whenever credentials actually change.
+    verified_signer: RwLock<Option<VerifiedSigner>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -199,14 +218,25 @@ impl HyperliquidAdapter {
             base_url: base,
             wallet_address: RwLock::new(wallet_address),
             private_key: RwLock::new(private_key.map(Zeroizing::new)),
+            verified_signer: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
         }
     }
 
     /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
+    /// A no-op when nothing changed — the periodic credential sync must not
+    /// wipe the verified-signer preflight cache on every pass.
     pub fn update_credentials(&self, wallet_address: Option<String>, private_key: Option<String>) {
-        *self.wallet_address.write() = wallet_address;
-        *self.private_key.write() = private_key.map(Zeroizing::new);
+        let mut wallet_guard = self.wallet_address.write();
+        let mut key_guard = self.private_key.write();
+        let unchanged = wallet_guard.as_deref() == wallet_address.as_deref()
+            && key_guard.as_ref().map(|k| k.as_str()) == private_key.as_deref();
+        if unchanged {
+            return;
+        }
+        *wallet_guard = wallet_address;
+        *key_guard = private_key.map(Zeroizing::new);
+        *self.verified_signer.write() = None;
     }
 
     /// Whether valid, non-empty API credentials are held in memory.
@@ -215,6 +245,67 @@ impl HyperliquidAdapter {
         let p = self.private_key.read();
         w.as_ref().is_some_and(|w| !w.trim().is_empty())
             && p.as_ref().is_some_and(|p| !p.trim().is_empty())
+    }
+
+    /// The EIP-55 address the currently-held private key derives to — the
+    /// exact identity Hyperliquid ecrecovers from our signatures. `None`
+    /// when no usable key is held. Never exposes key material.
+    pub fn active_signer_address(&self) -> Option<String> {
+        let guard = self.private_key.read();
+        let key = guard.as_deref()?;
+        let key = key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        crate::wallet::EvmWalletSigner::from_hex(key)
+            .ok()
+            .map(|s| s.address_checksum())
+    }
+
+    /// Configured trading account (master wallet / vault the orders target).
+    pub fn configured_wallet_address(&self) -> Option<String> {
+        self.wallet_address.read().clone()
+    }
+
+    /// Whether a fresh `userRole` verification is cached for this exact
+    /// (signer, account) pair — expiry forces a re-query because API
+    /// wallets can be deregistered between orders.
+    fn has_fresh_signer_verification(&self, signer: &str, configured_account: &str) -> bool {
+        self.verified_signer.read().as_ref().is_some_and(|v| {
+            v.signer.eq_ignore_ascii_case(signer)
+                && v.account.eq_ignore_ascii_case(configured_account)
+                && v.verified_at.elapsed() < SIGNER_VERIFICATION_TTL
+        })
+    }
+
+    /// Pre-flight identity check: query `userRole` for the derived signer
+    /// and refuse before submission when the key isn't a valid signer for
+    /// the configured account. Answers are cached per (signer, account)
+    /// pair for SIGNER_VERIFICATION_TTL; a transport/HTTP failure fails
+    /// closed — submitting anyway would burn a nonce and strand order state.
+    async fn verify_signer_registered(
+        &self,
+        signer: &str,
+        configured_account: &str,
+    ) -> anyhow::Result<()> {
+        if self.has_fresh_signer_verification(signer, configured_account) {
+            return Ok(());
+        }
+        let role_resp = self
+            .post_info(json!({"type": "userRole", "user": signer}))
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Hyperliquid: could not verify signer {signer} against account {configured_account} ({e}); no order submitted"
+                )
+            })?;
+        validate_signer_role_response(&role_resp, signer, configured_account)?;
+        *self.verified_signer.write() = Some(VerifiedSigner {
+            signer: signer.to_string(),
+            account: configured_account.to_string(),
+            verified_at: Instant::now(),
+        });
+        Ok(())
     }
 
     async fn post_info(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -350,6 +441,73 @@ fn perp_coin(symbol: &str) -> anyhow::Result<String> {
         anyhow::bail!("Hyperliquid symbol '{symbol}' has empty coin");
     }
     Ok(base.to_string())
+}
+
+/// Pure validation of a Hyperliquid `userRole` info response for the
+/// unified-account trading path. A `user` role is valid only when the
+/// signer IS the configured account; an `agent` is valid only when
+/// `data.user` binds it to the configured account. `missing`, `vault`,
+/// `subAccount`, malformed payloads, and unknown roles all fail closed —
+/// nothing here may pass on ambiguity. Address comparison is
+/// case-insensitive (EIP-55 checksum vs lowercase storage).
+fn validate_signer_role_response(
+    response: &serde_json::Value,
+    signer: &str,
+    configured_account: &str,
+) -> anyhow::Result<()> {
+    if signer.trim().is_empty() || configured_account.trim().is_empty() {
+        anyhow::bail!(
+            "Hyperliquid signer verification requires non-empty signer and configured account; no order submitted"
+        );
+    }
+    let role = response
+        .get("role")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Hyperliquid userRole response for {signer} is malformed or has no role; no order submitted"
+            )
+        })?;
+    match role {
+        // The held key IS the configured account — a direct signer is
+        // valid only when it would trade the configured account itself.
+        "user" => {
+            if signer.eq_ignore_ascii_case(configured_account) {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "Hyperliquid signer {signer} is a direct account key, but not for configured account {configured_account} — this key would trade its own account instead; no order submitted"
+                )
+            }
+        }
+        // A registered API wallet (agent) — valid only when bound to the
+        // configured account.
+        "agent" => {
+            let bound = response
+                .get("data")
+                .and_then(|d| d.get("user"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            if bound.is_empty() {
+                anyhow::bail!(
+                    "Hyperliquid userRole for agent {signer} carries no bound account (data.user); no order submitted"
+                );
+            }
+            if bound.eq_ignore_ascii_case(configured_account) {
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "Hyperliquid agent {signer} is bound to account {bound}, not configured account {configured_account}; no order submitted"
+                )
+            }
+        }
+        "missing" => anyhow::bail!(
+            "Hyperliquid signer {signer} is not an approved API wallet for configured account {configured_account} — approve it at app.hyperliquid.xyz/API; no order submitted"
+        ),
+        other => anyhow::bail!(
+            "Hyperliquid signer {signer} has role '{other}', not a valid signer role for unified-account trading on configured account {configured_account}; no order submitted"
+        ),
+    }
 }
 
 /// Strict pure parser for the Hyperliquid `/exchange` order response.
@@ -847,17 +1005,30 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+        // Snapshot credentials once: signer derivation, preflight, and
+        // signing must all come from the SAME key/wallet pair — credentials
+        // can be re-provisioned concurrently, and mixing snapshots could
+        // verify one identity while signing with another.
         let private_key = {
             let guard = self.private_key.read();
             guard
                 .as_deref()
                 .map(|k| k.trim())
                 .filter(|k| !k.is_empty())
-                .map(ToString::to_string)
+                .map(|k| Zeroizing::new(k.to_string()))
         }
         .ok_or_else(|| {
             anyhow::anyhow!("Hyperliquid live order placement requires a private key")
         })?;
+        let configured_wallet = self
+            .configured_wallet_address()
+            .map(|w| w.trim().to_string())
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Hyperliquid live order placement requires a configured wallet address"
+                )
+            })?;
 
         let coin = perp_coin(&order.symbol)?;
         let (asset_index, sz_decimals) = self.resolve_asset_meta(&coin).await?;
@@ -910,9 +1081,26 @@ impl ExchangeAdapter for HyperliquidAdapter {
             grouping: "na".to_string(),
         };
 
+        // Pre-flight: refuse to submit when the held key derives an identity
+        // that can't sign for the configured account — otherwise every order
+        // burns a rejected nonce and surfaces a random-looking "does not
+        // exist" address post-mortem.
+        let signer = crate::wallet::EvmWalletSigner::from_hex(private_key.as_str())
+            .map(|s| s.address_checksum())
+            .map_err(|e| {
+                anyhow::anyhow!("Hyperliquid stored private key does not derive a signer: {e}")
+            })?;
+        self.verify_signer_registered(&signer, &configured_wallet)
+            .await?;
+        tracing::info!(
+            "hyperliquid order: signer={signer} account={configured_wallet} asset={asset_index} side={:?} px={} sz={} tif={tif}",
+            order.side, price, quantity
+        );
+
         let nonce = Utc::now().timestamp_millis() as u64;
         let is_mainnet = !self.base_url.contains("testnet");
-        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, &private_key)?;
+        let (r, s, v) =
+            sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, private_key.as_str())?;
 
         let body = json!({
             "action": action,
@@ -1307,6 +1495,62 @@ mod tests {
     }
 
     #[test]
+    fn test_hyperliquid_signature_matches_python_sdk_reference() {
+        // Self-consistency isn't enough — the digest must equal what the
+        // official SDK produces, or HL ecrecovers a garbage (different-per-
+        // message) address and rejects "User or API Wallet does not exist".
+        // Vectors produced by hyperliquid-python-sdk signing.py:
+        //   action {"type":"order","orders":[{a:0,b:true,p:"3000.5",
+        //     s:"0.1",r:false,t:{limit:{tif:"Ioc"}}}],"grouping":"na"},
+        //   nonce 1700000000000, key 0x…01, mainnet.
+        let order = HlOrderWire {
+            a: 0,
+            b: true,
+            p: "3000.5".to_string(),
+            s: "0.1".to_string(),
+            r: false,
+            t: HlOrderTypeWire {
+                limit: HlLimitWire {
+                    tif: "Ioc".to_string(),
+                },
+            },
+            c: None,
+        };
+        let action = HlActionWire::Order {
+            orders: vec![order],
+            grouping: "na".to_string(),
+        };
+        let nonce = 1700000000000u64;
+        let pk = "0x0000000000000000000000000000000000000000000000000000000000000001";
+
+        // msgpack bytes must match msgpack.packb(action) exactly.
+        let packed = rmp_serde::to_vec_named(&action).unwrap();
+        assert_eq!(
+            hex::encode(&packed),
+            "83a474797065a56f72646572a66f72646572739186a16100a162c3a170a6333030302e35a173a3302e31a172c2a17481a56c696d697481a3746966a3496f63a867726f7570696e67a26e61",
+            "msgpack bytes differ from Python packb — hash input mismatch"
+        );
+        let digest = hyperliquid_l1_digest(&action, nonce, None, true).unwrap();
+        // The digest the Python SDK signed — proven by the r/s/v vectors
+        // below (RFC-6979 is deterministic over key+digest).
+        assert_eq!(
+            hex::encode(digest),
+            "cf67b3c90b4eea9c1cd6ea58b849b76cb6c5e6137aa2c1f1b5a772a101e0850b",
+            "EIP-712 digest differs from Python SDK reference"
+        );
+        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, true, pk).unwrap();
+        assert_eq!(
+            r, "0xa5ce1af2ef19c026adfc5dc50b5b56ad0828a8274316c52fd17cbcd9c7c6110f",
+            "r differs from Python SDK reference"
+        );
+        assert_eq!(
+            s, "0x788ded8d03eb2b5aab945748f9b9a16f98b38f385c82c5874c5333cbe3dc5eec",
+            "s differs from Python SDK reference"
+        );
+        assert_eq!(v, 27, "v differs from Python SDK reference");
+    }
+
+    #[test]
     fn test_hyperliquid_capabilities_and_credentials() {
         let adapter = HyperliquidAdapter::new(None, None, None);
         assert!(adapter.supports_live_execution());
@@ -1417,5 +1661,166 @@ mod tests {
         for resp in cases {
             assert!(parse_hl_order_response(&resp, &order, &venue, dec!(50000)).is_err());
         }
+    }
+
+    const ACCOUNT: &str = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+    const SIGNER: &str = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+
+    #[test]
+    fn signer_role_direct_user_matching_account_ok() {
+        // The held key IS the configured account.
+        let resp = json!({"role": "user"});
+        assert!(validate_signer_role_response(&resp, ACCOUNT, ACCOUNT).is_ok());
+        // Case-insensitive comparison — EIP-55 checksum vs lowercase.
+        assert!(validate_signer_role_response(&resp, &ACCOUNT.to_uppercase(), ACCOUNT).is_ok());
+    }
+
+    #[test]
+    fn signer_role_direct_user_mismatched_account_err() {
+        let resp = json!({"role": "user"});
+        let err = validate_signer_role_response(&resp, SIGNER, ACCOUNT).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(SIGNER), "names the signer: {msg}");
+        assert!(msg.contains(ACCOUNT), "names the configured account: {msg}");
+        assert!(msg.contains("no order submitted"), "fails closed: {msg}");
+    }
+
+    #[test]
+    fn signer_role_agent_bound_to_account_ok() {
+        // Agent approved for the configured account — case-insensitive.
+        let resp = json!({"role": "agent", "data": {"user": ACCOUNT}});
+        assert!(validate_signer_role_response(&resp, SIGNER, ACCOUNT).is_ok());
+        let resp = json!({"role": "agent", "data": {"user": ACCOUNT.to_uppercase()}});
+        assert!(validate_signer_role_response(&resp, SIGNER, ACCOUNT).is_ok());
+    }
+
+    #[test]
+    fn signer_role_agent_bound_to_other_account_err() {
+        let resp = json!({"role": "agent", "data": {"user": "0x2222222222222222222222222222222222222222"}});
+        let err = validate_signer_role_response(&resp, SIGNER, ACCOUNT).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains(SIGNER), "names the signer: {msg}");
+        assert!(
+            msg.contains("0x2222222222222222222222222222222222222222"),
+            "names the bound account: {msg}"
+        );
+        assert!(msg.contains(ACCOUNT), "names the configured account: {msg}");
+        assert!(msg.contains("no order submitted"), "fails closed: {msg}");
+    }
+
+    #[test]
+    fn signer_role_missing_err() {
+        let resp = json!({"role": "missing"});
+        let err = validate_signer_role_response(&resp, SIGNER, ACCOUNT).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not an approved API wallet"), "{msg}");
+        assert!(msg.contains("no order submitted"), "{msg}");
+    }
+
+    #[test]
+    fn signer_role_agent_malformed_data_err() {
+        for resp in [
+            json!({"role": "agent"}),
+            json!({"role": "agent", "data": {}}),
+            json!({"role": "agent", "data": {"user": ""}}),
+            json!({"role": "agent", "data": {"user": 42}}),
+        ] {
+            assert!(
+                validate_signer_role_response(&resp, SIGNER, ACCOUNT).is_err(),
+                "malformed agent data must fail closed: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn signer_role_malformed_or_absent_err() {
+        for resp in [
+            json!({}),
+            json!({"role": null}),
+            json!({"role": 7}),
+            json!("user"),
+            json!({"role": ""}),
+        ] {
+            assert!(
+                validate_signer_role_response(&resp, SIGNER, ACCOUNT).is_err(),
+                "malformed/missing role must fail closed: {resp}"
+            );
+        }
+    }
+
+    #[test]
+    fn signer_role_vault_and_subaccount_err() {
+        for role in ["vault", "subAccount", "bogon"] {
+            let resp = json!({"role": role});
+            let err = validate_signer_role_response(&resp, SIGNER, ACCOUNT).unwrap_err();
+            assert!(
+                err.to_string().contains("not a valid signer role"),
+                "role {role}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn signer_role_empty_identities_err() {
+        let resp = json!({"role": "user"});
+        assert!(validate_signer_role_response(&resp, "", ACCOUNT).is_err());
+        assert!(validate_signer_role_response(&resp, SIGNER, "").is_err());
+        assert!(validate_signer_role_response(&resp, "  ", ACCOUNT).is_err());
+    }
+
+    #[test]
+    fn active_signer_tracks_credentials_and_cache_survives_identical_update() {
+        let key_a = format!("0x{}", "0".repeat(63) + "1");
+        let key_b = format!("0x{}", "0".repeat(62) + "11");
+        let adapter = HyperliquidAdapter::new(None, Some(ACCOUNT.to_string()), Some(key_a.clone()));
+        assert_eq!(adapter.active_signer_address().as_deref(), Some(SIGNER));
+
+        // Inject a successful verification; a byte-identical re-provision
+        // (periodic sync while unlocked) must not clear it.
+        *adapter.verified_signer.write() = Some(VerifiedSigner {
+            signer: SIGNER.to_string(),
+            account: ACCOUNT.to_string(),
+            verified_at: Instant::now(),
+        });
+        assert!(adapter.has_fresh_signer_verification(SIGNER, ACCOUNT));
+
+        // A stale entry past the TTL must not count as a cache hit — API
+        // wallets can be deregistered between orders.
+        *adapter.verified_signer.write() = Some(VerifiedSigner {
+            signer: SIGNER.to_string(),
+            account: ACCOUNT.to_string(),
+            verified_at: Instant::now() - SIGNER_VERIFICATION_TTL - Duration::from_secs(1),
+        });
+        assert!(
+            !adapter.has_fresh_signer_verification(SIGNER, ACCOUNT),
+            "expired verification must force a fresh userRole query"
+        );
+
+        *adapter.verified_signer.write() = Some(VerifiedSigner {
+            signer: SIGNER.to_string(),
+            account: ACCOUNT.to_string(),
+            verified_at: Instant::now(),
+        });
+        adapter.update_credentials(Some(ACCOUNT.to_string()), Some(key_a));
+        assert!(
+            adapter.verified_signer.read().is_some(),
+            "identical credential update must preserve the verified-signer cache"
+        );
+
+        // A changed key invalidates the cache and moves the active signer.
+        adapter.update_credentials(Some(ACCOUNT.to_string()), Some(key_b));
+        assert!(adapter.verified_signer.read().is_none());
+        let expected_b =
+            crate::wallet::EvmWalletSigner::from_hex(&format!("0x{}", "0".repeat(62) + "11"))
+                .unwrap()
+                .address_checksum();
+        assert_eq!(
+            adapter.active_signer_address().as_deref(),
+            Some(expected_b.as_str())
+        );
+
+        // Clearing credentials drops the signer entirely.
+        adapter.update_credentials(None, None);
+        assert_eq!(adapter.active_signer_address(), None);
     }
 }

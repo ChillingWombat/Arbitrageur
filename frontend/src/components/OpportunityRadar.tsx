@@ -158,6 +158,12 @@ const LIVE_CAPABLE_VENUES = new Set([
   "ondoperps",
   "pacifica",
   "standx",
+  // EVM spot AMMs (uniswap/uniswap_v2/pancakeswap/pancakeswap_v3/
+  // sushiswap/quickswap) have explicit submission transports, but
+  // automated route entry is backend-disabled
+  // (live_strategy_entry_implemented() = false) pending gas-aware
+  // profitability modeling and credentialed venue evidence. They remain
+  // admitted for market data and account configuration.
 ]);
 const isLiveCapableRoute = (v1: string, v2: string): boolean =>
   LIVE_CAPABLE_VENUES.has(v1.toLowerCase()) && LIVE_CAPABLE_VENUES.has(v2.toLowerCase());

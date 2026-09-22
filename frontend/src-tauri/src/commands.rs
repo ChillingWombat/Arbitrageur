@@ -57,6 +57,11 @@ pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result
                 "Venue '{venue}' has no order-status polling for reconciliation"
             ));
         }
+        if !adapter.live_strategy_entry_implemented() {
+            return Err(format!(
+                "Venue '{venue}' submission transport is not admitted for automated strategy entry"
+            ));
+        }
         if !adapter.has_live_credentials() {
             return Err(format!("Venue '{venue}' has no live credentials loaded"));
         }
@@ -717,6 +722,9 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     for adapter in &state.live_dex_perps {
         push(adapter.spec_id(), account_enabled(adapter.spec_id()));
     }
+    for adapter in &state.live_evm_amms {
+        push(adapter.spec_id(), account_enabled(adapter.spec_id()));
+    }
     out
 }
 
@@ -1105,6 +1113,17 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     // Long-tail perp venues append dynamically — same admission rule
     // (enabled account) and the adapter's spec carries name/type/fee.
     for adapter in &state.live_dex_perps {
+        let vid = adapter.spec_id();
+        venues.push(VenueStatusDto {
+            id: vid.into(),
+            name: adapter.spec_name().into(),
+            market_type: adapter.market_type_label().into(),
+            status: venue_status(vid, account_enabled(vid)).into(),
+            latency_ms: probe_ms(vid),
+            fee_bps: adapter.taker_fee_bps(),
+        });
+    }
+    for adapter in &state.live_evm_amms {
         let vid = adapter.spec_id();
         venues.push(VenueStatusDto {
             id: vid.into(),
@@ -1996,6 +2015,7 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
             let submission_ready = is_unlocked && supports_live && has_credentials;
             let strategy_entry_ready = is_unlocked
                 && adapter.live_order_reconciliation_implemented()
+                && adapter.live_strategy_entry_implemented()
                 && has_credentials
                 && state.settings.read().live_entry_enabled;
             let live_ready = strategy_entry_ready;
@@ -4189,9 +4209,9 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        // 16 primary venues + 26 DexPerpAdapter venues (all OFFLINE —
-        // nothing enabled, no credentials).
-        assert_eq!(status.active_venues.len(), 42);
+        // 16 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
+        // venues (all OFFLINE — nothing enabled, no credentials).
+        assert_eq!(status.active_venues.len(), 53);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);
@@ -5418,6 +5438,116 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_account_base_url_patch_semantics() {
+        let (state, dir) = test_state_with_vault("base-url-patch");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        // Create an OKX account carrying a regional-entity override plus a
+        // secret; both must persist.
+        let a1 = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "okx".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_BASEURL_SEC".into(),
+                    base_url: Some("https://eea.okx.com".into()),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("create a1");
+        assert!(a1.has_base_url);
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "baseUrl", &state).expect("reveal"),
+            "https://eea.okx.com"
+        );
+
+        // Explicit clear: a `Some` payload with `base_url: Some("")` clears
+        // the endpoint while untouched secrets survive the same merge.
+        let updated = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: Some(a1.id.clone()),
+                venue: "okx".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    base_url: Some(String::new()),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("clear base_url");
+        assert!(!updated.has_base_url);
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "baseUrl", &state).expect("reveal"),
+            ""
+        );
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "apiSecret", &state).expect("reveal"),
+            "SENTINEL_BASEURL_SEC"
+        );
+
+        // Omitted preserves: a credential update without the base_url key
+        // must not resurrect or clear the endpoint.
+        let re_set = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: Some(a1.id.clone()),
+                venue: "okx".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    base_url: Some("https://app.okx.com".into()),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("set again");
+        assert!(re_set.has_base_url);
+        let untouched = upsert_account_impl(
+            AccountUpsertInput {
+                account_tier: None,
+                max_leverage: None,
+                id: Some(a1.id.clone()),
+                venue: "okx".into(),
+                label: "Main".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    api_secret: "SENTINEL_BASEURL_SEC2".into(),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("update without base_url");
+        assert!(untouched.has_base_url, "omitted base_url must preserve");
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "baseUrl", &state).expect("reveal"),
+            "https://app.okx.com"
+        );
+        assert_eq!(
+            get_account_credential_field_impl(&a1.id, "apiSecret", &state).expect("reveal"),
+            "SENTINEL_BASEURL_SEC2"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_get_account_signer_address_derives_without_secret() {
         let (state, dir) = test_state_with_vault("signer-addr");
 
@@ -5433,10 +5563,11 @@ mod tests {
                 venue: "hyperliquid".into(),
                 label: "Main".into(),
                 enabled: true,
-                make_default: false,
+                make_default: true,
                 credentials: Some(AccountCredentialInput {
                     // dev key 0x…01 -> 0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf
                     private_key: Some(format!("0x{}", "0".repeat(63) + "1")),
+                    wallet_address: Some("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf".into()),
                     ..AccountCredentialInput::default()
                 }),
             },
@@ -5467,8 +5598,38 @@ mod tests {
         assert!(derive_evm_signer_address_impl("0xnothex").is_err());
         assert!(derive_evm_signer_address_impl("0x1234").is_err());
 
+        // The default account's credentials were provisioned into the live
+        // adapter — its active signer must equal the stored-key derivation.
+        state.sync_vault_credentials_to_adapters();
+        let stored = get_account_signer_address_impl(&a1.id, &state).expect("stored derive");
+        assert_eq!(
+            get_active_signer_address_impl("hyperliquid", &state).expect("active"),
+            Some(stored),
+            "live adapter signer must match the stored key's derived address"
+        );
+
+        // Auto-lock (timer expiry) forgets vault secrets but keeps
+        // provisioned adapter credentials so unattended trading survives.
+        state.vault.write().force_timer_expiry();
+        state.sync_vault_credentials_to_adapters();
+        assert!(
+            get_account_signer_address_impl(&a1.id, &state).is_err(),
+            "auto-locked vault must not derive from stored secrets"
+        );
+        assert_eq!(
+            get_active_signer_address_impl("hyperliquid", &state).expect("active"),
+            Some("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf".to_string()),
+            "auto-lock must keep the provisioned signer"
+        );
+
+        // An explicit operator lock is a panic-halt: the adapter key goes.
         lock_vault_impl(&state);
         assert!(get_account_signer_address_impl(&a1.id, &state).is_err());
+        assert_eq!(
+            get_active_signer_address_impl("hyperliquid", &state).expect("active"),
+            None,
+            "manual lock must clear the provisioned signer"
+        );
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5494,6 +5655,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: true,
             }])
             .expect("seed legacy cred");
@@ -5513,6 +5675,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: true,
             }])
             .expect("seed hsm");

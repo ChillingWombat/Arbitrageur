@@ -4,6 +4,7 @@ pub mod binance;
 pub mod coinbase;
 pub mod decibel;
 pub mod dex_perps;
+pub mod evm_amm;
 pub mod hyperliquid;
 pub mod kraken;
 pub mod lighter;

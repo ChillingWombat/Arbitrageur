@@ -187,6 +187,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_account_credential_field",
   "derive_evm_signer_address",
   "get_account_signer_address",
+  "get_active_signer_address",
   "set_default_account",
   "list_strategy_routes",
   "upsert_strategy_route",
@@ -957,6 +958,13 @@ export const api = {
    *  secret itself never crosses IPC. */
   async getAccountSignerAddress(accountId: string): Promise<string> {
     return invokeDesktop<string>("get_account_signer_address", { accountId });
+  },
+
+  /** Signer address the live adapter would sign with right now — derived
+   *  from the provisioned in-memory key (null when none is loaded). Works
+   *  while the vault is locked, unlike the stored-key derivation. */
+  async getActiveSignerAddress(venue: string): Promise<string | null> {
+    return invokeDesktop<string | null>("get_active_signer_address", { venue });
   },
 
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {

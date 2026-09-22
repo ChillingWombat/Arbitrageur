@@ -931,6 +931,8 @@ export interface AccountDto {
   hasAccountId: boolean;
   hasWalletAddress: boolean;
   hasPrivateKey: boolean;
+  /** A venue endpoint override is stored (REST entity domain or JSON-RPC). */
+  hasBaseUrl: boolean;
   accountIndex: number | null;
   subaccountIndex: number | null;
   apiKeyIndex: number | null;
@@ -953,6 +955,9 @@ export interface AccountCredentialInput {
   accountIndex?: number | null;
   subaccountIndex?: number | null;
   apiKeyIndex?: number | null;
+  /** Venue endpoint patch: omitted preserves, empty clears, nonempty sets.
+   *  Supports REST entity domains and secret JSON-RPC URLs. */
+  baseUrl?: string;
 }
 
 export interface AccountUpsertInput {

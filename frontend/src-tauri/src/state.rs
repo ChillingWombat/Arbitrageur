@@ -8,6 +8,9 @@ use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
 use arbitrageur_exchanges::dex_perps::{DexPerpAdapter, ADMITTED_DEX_PERP_VENUE_IDS};
+use arbitrageur_exchanges::evm_amm::{
+    EvmAmmAdapter, ADMITTED_EVM_AMM_VENUE_IDS, LIVE_EVM_AMM_VENUE_IDS,
+};
 use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
 use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
@@ -804,6 +807,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: true,
             });
         }
@@ -829,6 +833,7 @@ impl EngineSettingsDto {
                 subaccount_index: self.hyperliquid_subaccount_index,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.hyperliquid_enabled,
             });
         }
@@ -850,6 +855,7 @@ impl EngineSettingsDto {
                 subaccount_index: self.lighter_subaccount_index,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.lighter_enabled,
             });
         }
@@ -875,6 +881,7 @@ impl EngineSettingsDto {
                 subaccount_index: self.vanta_subaccount_index,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.vanta_enabled,
             });
         }
@@ -899,6 +906,7 @@ impl EngineSettingsDto {
                 subaccount_index: self.robinhood_subaccount_index,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.robinhood_enabled,
             });
         }
@@ -916,6 +924,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.arcus_enabled,
             });
         }
@@ -934,6 +943,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.kraken_enabled && self.kraken_spot_enabled,
             });
         }
@@ -953,6 +963,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.kraken_enabled && self.kraken_futures_enabled,
             });
         }
@@ -977,6 +988,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.polymarket_enabled,
             });
         }
@@ -994,6 +1006,7 @@ impl EngineSettingsDto {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
                 enabled: self.kalshi_enabled,
             });
         }
@@ -1069,6 +1082,10 @@ pub struct AppEngineState {
     pub live_decibel: Arc<DecibelAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
     pub live_dex_perps: Vec<Arc<DexPerpAdapter>>,
+    /// Generic EVM spot-AMM venues (Uniswap/PancakeSwap/Aerodrome family).
+    /// Spec-driven like `live_dex_perps`; `EvmAmmAdapter::for_venue` takes a
+    /// per-account RPC override via `set_base_url` during credential sync.
+    pub live_evm_amms: Vec<Arc<EvmAmmAdapter>>,
     pub live_polymarket: Arc<PolymarketAdapter>,
     pub live_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -1203,7 +1220,23 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "eve dex" => Some("evedex"),
         "gate dex" => Some("gatedex"),
         "io trader" => Some("iotrader"),
+        // EVM spot-AMM venues: display aliases, then canonical ids.
+        "uniswap v3" | "uni v3" | "uniswap v3 (ethereum)" => Some("uniswap"),
+        "uniswap v2" | "uni v2" | "uniswap v2 (ethereum)" => Some("uniswap_v2"),
+        "pancakeswap v2" | "pcs v2" | "pancakeswap (v2)" => Some("pancakeswap"),
+        "pancakeswap v3" | "pcs v3" | "pancakeswap (v3)" => Some("pancakeswap_v3"),
+        "sushi" | "sushiswap v2" => Some("sushiswap"),
+        "quickswap v2" | "quickswap (polygon)" => Some("quickswap"),
+        "camelot v2" | "camelot dex" => Some("camelot"),
+        "aerodrome finance" | "aerodrome slipstream" => Some("aerodrome"),
+        "velodrome v2" | "velodrome finance" => Some("velodrome"),
+        "ramses exchange" | "ramses v2" => Some("ramses"),
+        "pharaoh exchange" | "pharaoh v2" => Some("pharaoh"),
         id if ADMITTED_DEX_PERP_VENUE_IDS.contains(&id) => ADMITTED_DEX_PERP_VENUE_IDS
+            .iter()
+            .copied()
+            .find(|v| *v == id),
+        id if ADMITTED_EVM_AMM_VENUE_IDS.contains(&id) => ADMITTED_EVM_AMM_VENUE_IDS
             .iter()
             .copied()
             .find(|v| *v == id),
@@ -1541,6 +1574,12 @@ impl AppEngineState {
             .iter()
             .filter_map(|id| DexPerpAdapter::for_venue(id, None).map(Arc::new))
             .collect();
+        // EVM spot AMMs: spec default public RPC until a per-account
+        // `base_url` credential override repoints the adapter.
+        let live_evm_amms: Vec<Arc<EvmAmmAdapter>> = ADMITTED_EVM_AMM_VENUE_IDS
+            .iter()
+            .filter_map(|id| EvmAmmAdapter::for_venue(id, None).map(Arc::new))
+            .collect();
         let live_polymarket = Arc::new(PolymarketAdapter::new(
             endpoint(&initial_settings.polymarket_url),
             None,
@@ -1612,6 +1651,7 @@ impl AppEngineState {
             live_kraken,
             live_decibel,
             live_dex_perps,
+            live_evm_amms,
             live_polymarket,
             live_kalshi,
             market_data_hub,
@@ -1679,11 +1719,16 @@ impl AppEngineState {
             self.live_vanta.update_credentials(None, None, None);
             self.live_binance.update_credentials(None, None);
             self.live_okx.update_credentials(None, None, None);
+            let _ = self.live_okx.set_base_url(None);
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
             for adapter in &self.live_dex_perps {
                 let _ = adapter.update_credentials(None, None, None, None, None, None);
+            }
+            for adapter in &self.live_evm_amms {
+                let _ = adapter.update_credentials(None, None, None, None, None, None);
+                let _ = adapter.set_base_url(None);
             }
             return;
         }
@@ -1807,7 +1852,12 @@ impl AppEngineState {
             let mut okx_key = None;
             let mut okx_sec = None;
             let mut okx_pass = None;
+            let mut okx_url = None;
             if let Some(cred) = get_active_cred(&["okx"]) {
+                // Regional-domain override applies to public endpoints too —
+                // an app.okx.com account's instrument set differs from the
+                // global site's, so quotes must come from the same entity.
+                okx_url = cred.base_url.clone().filter(|u| !u.trim().is_empty());
                 if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
                     okx_key = Some(cred.api_key.clone());
                     okx_sec = Some(cred.api_secret.clone());
@@ -1895,7 +1945,15 @@ impl AppEngineState {
                 .update_credentials(vanta_acc, vanta_key, vanta_sec);
             self.live_binance
                 .update_credentials(binance_key, binance_sec);
-            self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
+            // Endpoint identity precedes credentials: a regional-entity key
+            // must never be provisioned onto the wrong host, and a rejected
+            // override withholds the credentials entirely (fail closed).
+            if let Err(e) = self.live_okx.set_base_url(okx_url) {
+                tracing::warn!("OKX base URL override rejected ({e}) — credentials withheld");
+                self.live_okx.update_credentials(None, None, None);
+            } else {
+                self.live_okx.update_credentials(okx_key, okx_sec, okx_pass);
+            }
             self.live_coinbase
                 .update_credentials(cb_key, cb_sec, cb_pass);
             self.live_kraken.update_credentials(kraken_key, kraken_sec);
@@ -1925,6 +1983,43 @@ impl AppEngineState {
                     tracing::warn!("{vid} credential sync refused: {e}");
                 }
             }
+            // EVM AMMs: wallet_address + private_key carry the agent wallet;
+            // the account `base_url` field doubles as the RPC override so a
+            // private endpoint (Alchemy/Infura/self-hosted) replaces the
+            // public default.
+            for adapter in &self.live_evm_amms {
+                let vid = adapter.spec_id();
+                let cred = get_active_cred(&[vid]);
+                // A rejected RPC override withholds this adapter's
+                // credentials (fail closed) but never blocks other venues.
+                if let Err(e) = adapter.set_base_url(
+                    cred.and_then(|c| c.base_url.clone().filter(|u| !u.trim().is_empty())),
+                ) {
+                    tracing::warn!("{vid} RPC override rejected ({e}) — credentials withheld");
+                    let _ = adapter.update_credentials(None, None, None, None, None, None);
+                    continue;
+                }
+                let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
+                // Market-data-only venues never receive a private key —
+                // even if a stale vault record still holds one. The wallet
+                // address still flows so balance reads can resolve an owner.
+                let private_key = if LIVE_EVM_AMM_VENUE_IDS.contains(&vid) {
+                    cred.and_then(|c| nonopt(&c.private_key))
+                } else {
+                    None
+                };
+                let res = adapter.update_credentials(
+                    None,
+                    None,
+                    None,
+                    None,
+                    cred.and_then(|c| nonopt(&c.wallet_address)),
+                    private_key,
+                );
+                if let Err(e) = res {
+                    tracing::warn!("{vid} credential sync refused: {e}");
+                }
+            }
         } else {
             self.live_aster.update_credentials(None, None);
             let _ = self.live_popdex.update_credentials(None, None, None);
@@ -1936,11 +2031,16 @@ impl AppEngineState {
             self.live_vanta.update_credentials(None, None, None);
             self.live_binance.update_credentials(None, None);
             self.live_okx.update_credentials(None, None, None);
+            let _ = self.live_okx.set_base_url(None);
             self.live_coinbase.update_credentials(None, None, None);
             self.live_kraken.update_credentials(None, None);
             self.live_decibel.update_credentials(None, None, None, None);
             for adapter in &self.live_dex_perps {
                 let _ = adapter.update_credentials(None, None, None, None, None, None);
+            }
+            for adapter in &self.live_evm_amms {
+                let _ = adapter.update_credentials(None, None, None, None, None, None);
+                let _ = adapter.set_base_url(None);
             }
         }
     }
@@ -2013,6 +2113,11 @@ impl AppEngineState {
         // account is the only admission switch. Capability flags on the
         // adapter still gate every downstream live path.
         for adapter in &self.live_dex_perps {
+            if account_enabled(adapter.spec_id()) {
+                list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
+            }
+        }
+        for adapter in &self.live_evm_amms {
             if account_enabled(adapter.spec_id()) {
                 list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
             }

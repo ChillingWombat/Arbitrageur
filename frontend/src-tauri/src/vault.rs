@@ -43,6 +43,13 @@ pub struct ExchangeCredentials {
     pub api_key_index: Option<u64>,
     #[serde(default)]
     pub private_key: Option<String>,
+    /// Optional venue endpoint override — a REST entity domain (e.g. an
+    /// OKX key issued on app.okx.com does not exist on www.okx.com, so
+    /// the whole venue must be pointed at the right host) or a JSON-RPC
+    /// URL (EVM AMM chains). URLs may embed secrets such as provider API
+    /// keys; treat the value as secret material.
+    #[serde(default)]
+    pub base_url: Option<String>,
     pub enabled: bool,
 }
 
@@ -61,6 +68,10 @@ impl Drop for ExchangeCredentials {
         }
         if let Some(private_key) = self.private_key.as_mut() {
             private_key.zeroize();
+        }
+        // Endpoint URLs can embed provider API keys — wipe like a secret.
+        if let Some(base_url) = self.base_url.as_mut() {
+            base_url.zeroize();
         }
     }
 }
@@ -82,6 +93,10 @@ impl std::fmt::Debug for ExchangeCredentials {
             .field(
                 "has_passphrase",
                 &self.passphrase.as_ref().is_some_and(|p| !p.is_empty()),
+            )
+            .field(
+                "has_base_url",
+                &self.base_url.as_ref().is_some_and(|v| !v.is_empty()),
             )
             .finish()
     }
@@ -121,6 +136,7 @@ pub struct CredentialPresence {
     pub has_account_id: bool,
     pub has_wallet_address: bool,
     pub has_private_key: bool,
+    pub has_base_url: bool,
     pub account_index: Option<u64>,
     pub subaccount_index: Option<u64>,
     pub api_key_index: Option<u64>,
@@ -540,8 +556,10 @@ impl SecureVault {
     }
 
     /// Merge nonempty submitted values onto an existing record. Empty strings
-    /// and `None` preserve stored values; `enabled` and index fields always
-    /// update. `profile_id` and `venue` are never mutated by a merge.
+    /// and `None` preserve stored values — except `base_url`, where an
+    /// explicit `Some("")` clears the stored endpoint while `None` preserves
+    /// it. `enabled` and index fields always update. `profile_id` and
+    /// `venue` are never mutated by a merge.
     fn merge_credential_fields(existing: &mut ExchangeCredentials, sub: &ExchangeCredentials) {
         if !sub.api_key.is_empty() {
             existing.api_key = sub.api_key.clone();
@@ -572,6 +590,13 @@ impl SecureVault {
                 existing.private_key = Some(private_key.clone());
             }
         }
+        // Endpoint override follows patch semantics: absent (`None`)
+        // preserves the stored URL, `Some("")` clears it back to the
+        // adapter's default host, a non-empty value replaces it.
+        if let Some(base_url) = &sub.base_url {
+            let trimmed = base_url.trim();
+            existing.base_url = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
         existing.enabled = sub.enabled;
     }
 
@@ -579,9 +604,9 @@ impl SecureVault {
     /// ID and persist. Only records with `profile_id == None` participate, so
     /// account-bound records can never be matched or overwritten by venue.
     /// Nonempty submitted values replace stored ones; empty strings and
-    /// `None` preserve existing values. `enabled` and index fields always
-    /// update. Used only for the non-account `remote_hsm` record and for
-    /// pre-migration writes.
+    /// `None` preserve existing values — except `base_url`, where `Some("")`
+    /// clears. `enabled` and index fields always update. Used only for the
+    /// non-account `remote_hsm` record and for pre-migration writes.
     pub fn upsert_credentials(
         &mut self,
         submitted: Vec<ExchangeCredentials>,
@@ -601,6 +626,10 @@ impl SecureVault {
                 Self::merge_credential_fields(existing, &sub);
             } else {
                 sub.profile_id = None;
+                // Never persist the clear sentinel on a new record.
+                if sub.base_url.as_deref().is_some_and(|u| u.trim().is_empty()) {
+                    sub.base_url = None;
+                }
                 data.credentials.push(sub);
             }
         }
@@ -633,6 +662,14 @@ impl SecureVault {
         } else {
             let mut record = cred;
             record.profile_id = Some(pid);
+            // Never persist the clear sentinel on a new record.
+            if record
+                .base_url
+                .as_deref()
+                .is_some_and(|u| u.trim().is_empty())
+            {
+                record.base_url = None;
+            }
             data.credentials.push(record);
         }
 
@@ -659,6 +696,7 @@ impl SecureVault {
                 has_account_id: c.account_id.as_ref().is_some_and(|v| !v.is_empty()),
                 has_wallet_address: c.wallet_address.as_ref().is_some_and(|v| !v.is_empty()),
                 has_private_key: c.private_key.as_ref().is_some_and(|v| !v.is_empty()),
+                has_base_url: c.base_url.as_ref().is_some_and(|v| !v.is_empty()),
                 account_index: c.account_index,
                 subaccount_index: c.subaccount_index,
                 api_key_index: c.api_key_index,
@@ -920,6 +958,7 @@ mod tests {
             subaccount_index: Some(1),
             api_key_index: None,
             private_key: None,
+            base_url: None,
 
             enabled: true,
         });
@@ -996,6 +1035,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: true,
             }],
@@ -1054,7 +1094,9 @@ mod tests {
             account_index: Some(3),
             subaccount_index: Some(9),
             api_key_index: None,
-            private_key: None,
+            private_key: Some("SENTINEL_PRIVKEY_3f9".into()),
+            // Endpoint URLs can embed provider API keys — never Debug them.
+            base_url: Some("SENTINEL_RPCURL_b2c".into()),
 
             enabled: true,
         };
@@ -1065,6 +1107,8 @@ mod tests {
             "SENTINEL_PASS_c41",
             "SENTINEL_ACCT_d88",
             "SENTINEL_WALLET_e5a",
+            "SENTINEL_PRIVKEY_3f9",
+            "SENTINEL_RPCURL_b2c",
         ] {
             assert!(
                 !debug.contains(sentinel),
@@ -1076,6 +1120,8 @@ mod tests {
         assert!(debug.contains("has_api_key: true"));
         assert!(debug.contains("has_api_secret: true"));
         assert!(debug.contains("has_passphrase: true"));
+        assert!(debug.contains("has_private_key: true"));
+        assert!(debug.contains("has_base_url: true"));
     }
 
     #[test]
@@ -1097,6 +1143,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: true,
             }])
@@ -1116,6 +1163,7 @@ mod tests {
                 subaccount_index: Some(5),
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: false,
             }])
@@ -1157,6 +1205,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: true,
             }])
@@ -1197,6 +1246,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: true,
             }])
@@ -1239,6 +1289,7 @@ mod tests {
                     subaccount_index: None,
                     api_key_index: None,
                     private_key: None,
+                    base_url: None,
 
                     enabled: true,
                 },
@@ -1254,6 +1305,7 @@ mod tests {
                     subaccount_index: None,
                     api_key_index: None,
                     private_key: None,
+                    base_url: None,
 
                     enabled: true,
                 },
@@ -1310,6 +1362,7 @@ mod tests {
                 subaccount_index: None,
                 api_key_index: None,
                 private_key: None,
+                base_url: None,
 
                 enabled: true,
             }])

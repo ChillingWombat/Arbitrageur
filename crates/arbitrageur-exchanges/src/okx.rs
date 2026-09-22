@@ -17,7 +17,10 @@ use zeroize::Zeroizing;
 pub struct OkxAdapter {
     venue_id: VenueId,
     client: Client,
-    base_url: String,
+    /// Constructor-set host — the restore target when an account override
+    /// is cleared. Never mutated after construction.
+    default_base_url: Zeroizing<String>,
+    base_url: RwLock<Zeroizing<String>>,
     api_key: RwLock<Option<Zeroizing<String>>>,
     api_secret: RwLock<Option<Zeroizing<String>>>,
     passphrase: RwLock<Option<Zeroizing<String>>>,
@@ -55,7 +58,10 @@ impl OkxAdapter {
         api_secret: Option<String>,
         passphrase: Option<String>,
     ) -> Self {
-        let base = base_url.unwrap_or_else(|| "https://www.okx.com".to_string());
+        let base = base_url
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| "https://www.okx.com".to_string());
         let venue_id = VenueId::new("okx");
         Self {
             venue_id,
@@ -75,7 +81,8 @@ impl OkxAdapter {
                     .build()
                     .unwrap_or_default()
             },
-            base_url: base,
+            default_base_url: Zeroizing::new(base.clone()),
+            base_url: RwLock::new(Zeroizing::new(base)),
             api_key: RwLock::new(api_key.map(Zeroizing::new)),
             api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
             passphrase: RwLock::new(passphrase.map(Zeroizing::new)),
@@ -94,15 +101,44 @@ impl OkxAdapter {
         *self.passphrase.write() = passphrase.map(Zeroizing::new);
     }
 
+    /// Point the whole adapter at a different OKX entity domain (regional
+    /// namespaces like app.okx.com / eea.okx.com have their own key stores —
+    /// a key issued there 50119s on www.okx.com). `None`/blank restores the
+    /// constructor's host; non-http(s) values return `Err` and the current
+    /// host is kept.
+    pub fn set_base_url(&self, base_url: Option<String>) -> anyhow::Result<()> {
+        let next = base_url
+            .map(|u| u.trim().trim_end_matches('/').to_string())
+            .filter(|u| !u.is_empty());
+        match next {
+            None => *self.base_url.write() = self.default_base_url.clone(),
+            Some(u) if u.starts_with("http://") || u.starts_with("https://") => {
+                *self.base_url.write() = Zeroizing::new(u);
+            }
+            Some(_) => {
+                // Never echo the submitted URL — it may embed credentials.
+                anyhow::bail!("OKX endpoint override rejected: must use http(s)");
+            }
+        }
+        Ok(())
+    }
+
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
-        if let Some(cached_str) = self.rate_limiter.acquire_or_cache_path(path, true).await? {
+        // Cache identity is host-qualified: regional entities serve distinct
+        // instrument sets and key namespaces for the same path.
+        let base = self.base_url.read().clone();
+        let cache_key = format!("{}{path}", base.as_str());
+        if let Some(cached_str) = self
+            .rate_limiter
+            .acquire_or_cache_path(&cache_key, true)
+            .await?
+        {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cached_str) {
                 return Ok(val);
             }
         }
 
-        let url = format!("{}{}", self.base_url, path);
-        let resp = match self.client.get(&url).send().await {
+        let resp = match self.client.get(&cache_key).send().await {
             Ok(r) => r,
             Err(e) => {
                 self.rate_limiter.record_failure(false);
@@ -140,7 +176,8 @@ impl OkxAdapter {
                 anyhow::bail!("OKX API returned error code {}: {}", code, path);
             }
         }
-        self.rate_limiter.record_success_path(path, text.clone());
+        self.rate_limiter
+            .record_success_path(&cache_key, text.clone());
         Ok(data)
     }
 
@@ -192,7 +229,7 @@ impl OkxAdapter {
         let body_str = body.unwrap_or("");
         let preimage = format!("{ts}{method}{path}{body_str}");
         let sign = Self::sign_request(&api_secret, &preimage)?;
-        let url = format!("{}{}", self.base_url, path);
+        let url = format!("{}{}", self.base_url.read().as_str(), path);
         let mut req = match method {
             "GET" => self.client.get(&url),
             "POST" => self.client.post(&url),
@@ -1122,6 +1159,37 @@ mod tests {
         let pre = "2020-12-08T09:08:57.715ZPOST/api/v5/trade/order{\"instId\":\"BTC-USDT-SWAP\",\"tdMode\":\"isolated\",\"side\":\"buy\",\"ordType\":\"market\",\"sz\":\"1\"}";
         let sig = OkxAdapter::sign_request(&secret, pre).unwrap();
         assert_eq!(sig, "1mGn7nuHsjf/9bT57H1rzqrdrjs0S9gIS4QTbfF3yM0=");
+    }
+
+    #[test]
+    fn base_url_lifecycle_restores_constructor_host() {
+        // Injected constructor host normalizes and becomes the restore target.
+        let a = OkxAdapter::new(
+            Some("https://example.test/root/".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(a.base_url.read().as_str(), "https://example.test/root");
+        assert_eq!(a.default_base_url.as_str(), "https://example.test/root");
+
+        // Regional entity override applies.
+        a.set_base_url(Some("https://app.okx.com".to_string()))
+            .unwrap();
+        assert_eq!(a.base_url.read().as_str(), "https://app.okx.com");
+
+        // Blank and None restore the constructor host, never hardcoded www.
+        a.set_base_url(Some("   ".to_string())).unwrap();
+        assert_eq!(a.base_url.read().as_str(), "https://example.test/root");
+        a.set_base_url(Some("https://eea.okx.com/".to_string()))
+            .unwrap();
+        assert_eq!(a.base_url.read().as_str(), "https://eea.okx.com");
+        a.set_base_url(None).unwrap();
+        assert_eq!(a.base_url.read().as_str(), "https://example.test/root");
+
+        // Invalid scheme errors and keeps the active host.
+        assert!(a.set_base_url(Some("ftp://nope".to_string())).is_err());
+        assert_eq!(a.base_url.read().as_str(), "https://example.test/root");
     }
 
     #[test]

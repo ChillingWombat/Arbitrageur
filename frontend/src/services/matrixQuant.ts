@@ -241,6 +241,20 @@ export function getVenueFeeBps(venueIdOrName: string): number {
   if (v === "sodex") return 3.0;
   if (v === "standx") return 4.0;
   if (v === "vest") return 3.0;
+  // EVM spot AMMs — pool fees are per-pair onchain; these are the venue
+  // defaults (Uniswap V3 WETH/USDC sits in the 5bp tier; PancakeSwap V2
+  // charges 25bp; Solidly volatile pools ~30bp).
+  if (v === "uniswap") return 5.0;
+  if (v === "uniswap_v2") return 30.0;
+  if (v === "pancakeswap") return 25.0;
+  if (v === "pancakeswap_v3") return 25.0;
+  if (v === "sushiswap") return 30.0;
+  if (v === "quickswap") return 30.0;
+  if (v === "camelot") return 30.0;
+  if (v === "aerodrome") return 30.0;
+  if (v === "velodrome") return 30.0;
+  if (v === "ramses") return 30.0;
+  if (v === "pharaoh") return 30.0;
   if (v.includes("lighter") || v.includes("lgt")) return 1.5;
   if (v.includes("hyperliquid") || v.includes("hl")) return 2.0;
   if (v.includes("vanta") || v.includes("vnt")) return 3.0;
