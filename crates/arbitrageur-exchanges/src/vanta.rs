@@ -590,7 +590,32 @@ impl VantaAdapter {
     }
 
     /// Pure build of a POST /v1/order body (no network) — unit-tested.
-    fn build_order_body(order: &OrderRequest, venue_symbol: &str) -> anyhow::Result<String> {
+    /// Venue order granularity for one symbol — (quote_tick, base_tick).
+    /// marketSummary is cached by the request coordinator, so this is
+    /// cheap on the order path.
+    async fn symbol_ticks(&self, venue_symbol: &str) -> anyhow::Result<(Decimal, Decimal)> {
+        let data = self
+            .public_query(serde_json::json!({"type": "marketSummary"}))
+            .await?;
+        let row = data
+            .get("markets")
+            .and_then(|m| m.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|i| i.get("symbol").and_then(|s| s.as_str()) == Some(venue_symbol))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Vanta marketSummary has no symbol {venue_symbol}"))?;
+        let quote_tick = dec_from_json(row.get("quote_tick")).unwrap_or(dec!(0));
+        let base_tick = dec_from_json(row.get("base_tick")).unwrap_or(dec!(0));
+        Ok((quote_tick, base_tick))
+    }
+
+    fn build_order_body(
+        order: &OrderRequest,
+        venue_symbol: &str,
+        quote_tick: Decimal,
+        base_tick: Decimal,
+    ) -> anyhow::Result<String> {
         if order.quantity <= dec!(0) {
             anyhow::bail!("Vanta order quantity must be positive");
         }
@@ -612,17 +637,42 @@ impl VantaAdapter {
         } else {
             "LIMIT"
         };
+        // Orderly enforces base_tick / quote_tick — floor quantity to the
+        // base tick (never oversize); the limit price is a protective
+        // bound, so buys floor and sells ceil.
+        let qty_wire = if base_tick > dec!(0) {
+            (order.quantity / base_tick).floor() * base_tick
+        } else {
+            order.quantity
+        };
+        if qty_wire <= dec!(0) {
+            anyhow::bail!(
+                "Vanta {venue_symbol} quantity {} rounds to zero at base_tick {base_tick}",
+                order.quantity
+            );
+        }
         let mut req = serde_json::json!({
             "symbol": venue_symbol,
             "order_type": order_type,
             "side": side_str,
-            "order_quantity": order.quantity.normalize().to_string(),
+            "order_quantity": qty_wire.normalize().to_string(),
         });
         if !is_market {
             let px = order.price.filter(|x| *x > dec!(0)).ok_or_else(|| {
                 anyhow::anyhow!("Vanta {order_type} order requires a positive limit price")
             })?;
-            req["order_price"] = serde_json::Value::String(px.normalize().to_string());
+            let pxw = if quote_tick > dec!(0) {
+                match order.side {
+                    Side::Buy => (px / quote_tick).floor() * quote_tick,
+                    Side::Sell => (px / quote_tick).ceil() * quote_tick,
+                }
+            } else {
+                px
+            };
+            if pxw <= dec!(0) {
+                anyhow::bail!("Vanta {venue_symbol} price {px} rounds below the quote_tick floor");
+            }
+            req["order_price"] = serde_json::Value::String(pxw.normalize().to_string());
         }
         if order.reduce_only {
             req["reduce_only"] = serde_json::Value::Bool(true);
@@ -910,7 +960,8 @@ impl ExchangeAdapter for VantaAdapter {
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
         let venue_symbol = Self::to_vanta_symbol(&order.symbol)?;
-        let body = Self::build_order_body(&order, &venue_symbol)?;
+        let (quote_tick, base_tick) = self.symbol_ticks(&venue_symbol).await?;
+        let body = Self::build_order_body(&order, &venue_symbol, quote_tick, base_tick)?;
         let v = self.signed_orderly("POST", "/v1/order", &body).await?;
         let data = v
             .get("data")
@@ -1180,6 +1231,8 @@ mod tests {
                     Some(dec!(60000)),
                 ),
                 "PERP_BTC_USDC",
+                dec!(0),
+                dec!(0),
             )
             .unwrap(),
         )
@@ -1194,6 +1247,8 @@ mod tests {
                     None,
                 ),
                 "PERP_BTC_USDC",
+                dec!(0),
+                dec!(0),
             )
             .unwrap(),
         )
@@ -1208,6 +1263,45 @@ mod tests {
                 None,
             ),
             "PERP_BTC_USDC",
+            dec!(0),
+            dec!(0),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn build_order_body_respects_orderly_ticks() {
+        use arbitrageur_core::order::OrderRequest;
+        use arbitrageur_core::types::{Side, TimeInForce};
+        let mk = |side: Side, qty: Decimal, px: Decimal| {
+            let mut o = OrderRequest::new_market(VenueId::new("vanta"), "BTC-USDC", side, qty);
+            o.order_type = arbitrageur_core::types::OrderType::Limit;
+            o.time_in_force = TimeInForce::GoodTilCancelled;
+            o.price = Some(px);
+            o
+        };
+        // quote_tick 0.5, base_tick 0.0001 (the live PERP_ETH_USDC shape).
+        let body = |o: &OrderRequest| {
+            serde_json::from_str::<serde_json::Value>(
+                &VantaAdapter::build_order_body(o, "PERP_BTC_USDC", dec!(0.5), dec!(0.0001))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        // Buy floors the protective cap; sell ceils it.
+        let v = body(&mk(Side::Buy, dec!(0.01), dec!(60000.3)));
+        assert_eq!(v["order_price"], "60000");
+        let v = body(&mk(Side::Sell, dec!(0.01), dec!(60000.3)));
+        assert_eq!(v["order_price"], "60000.5");
+        // Quantity floors to base_tick — never oversizes.
+        let v = body(&mk(Side::Buy, dec!(0.019999), dec!(60000)));
+        assert_eq!(v["order_quantity"], "0.0199");
+        // Sub-tick quantity fails closed rather than submitting dust.
+        assert!(VantaAdapter::build_order_body(
+            &mk(Side::Buy, dec!(0.00009), dec!(60000)),
+            "PERP_BTC_USDC",
+            dec!(0.5),
+            dec!(0.0001),
         )
         .is_err());
     }

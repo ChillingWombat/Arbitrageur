@@ -36,6 +36,28 @@ fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     }
 }
 
+/// Binance enforces PRICE_FILTER.tickSize and LOT_SIZE.stepSize — raw
+/// Decimal precision is rejected outright. Quantity floors to the step
+/// (never oversizes); the limit price is a protective bound, so buys
+/// floor and sells ceil (never crosses the intended cap/floor).
+fn binance_wire_qty(qty: Decimal, step: Decimal) -> Decimal {
+    if step > dec!(0) {
+        (qty / step).floor() * step
+    } else {
+        qty
+    }
+}
+
+fn binance_wire_price(price: Decimal, side: Side, tick: Decimal) -> Decimal {
+    if tick <= dec!(0) {
+        return price;
+    }
+    match side {
+        Side::Buy => (price / tick).floor() * tick,
+        Side::Sell => (price / tick).ceil() * tick,
+    }
+}
+
 fn parse_pair(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
     let arr = level.as_array()?;
     if arr.len() < 2 {
@@ -86,6 +108,40 @@ impl BinanceAdapter {
     pub fn update_credentials(&self, api_key: Option<String>, api_secret: Option<String>) {
         *self.api_key.write() = api_key.map(Zeroizing::new);
         *self.api_secret.write() = api_secret.map(Zeroizing::new);
+    }
+
+    /// Venue order filters for one symbol — (PRICE_FILTER.tickSize,
+    /// LOT_SIZE.stepSize, LOT_SIZE.minQty). exchangeInfo is cached by the
+    /// request coordinator, so this is cheap on the order path.
+    async fn symbol_filters(
+        &self,
+        venue_symbol: &str,
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
+        let val = self.get_json("/fapi/v1/exchangeInfo").await?;
+        let symbols = val
+            .get("symbols")
+            .and_then(|s| s.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Binance exchangeInfo missing 'symbols'"))?;
+        let item = symbols
+            .iter()
+            .find(|i| i.get("symbol").and_then(|s| s.as_str()) == Some(venue_symbol))
+            .ok_or_else(|| anyhow::anyhow!("Binance exchangeInfo has no symbol {venue_symbol}"))?;
+        let mut tick = dec!(0);
+        let mut step = dec!(0);
+        let mut min_qty = dec!(0);
+        if let Some(filters) = item.get("filters").and_then(|f| f.as_array()) {
+            for f in filters {
+                match f.get("filterType").and_then(|t| t.as_str()) {
+                    Some("PRICE_FILTER") => tick = dec_from_json(f.get("tickSize")).unwrap_or(tick),
+                    Some("LOT_SIZE") => {
+                        step = dec_from_json(f.get("stepSize")).unwrap_or(step);
+                        min_qty = dec_from_json(f.get("minQty")).unwrap_or(min_qty);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok((tick, step, min_qty))
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -816,8 +872,11 @@ impl ExchangeAdapter for BinanceAdapter {
             anyhow::bail!("Binance order quantity must be positive");
         }
         let venue_symbol = Self::to_venue_symbol(&order.symbol)?;
+        // Binance enforces PRICE_FILTER.tickSize and LOT_SIZE.stepSize —
+        // resolved before the params map consumes the symbol.
+        let (tick_size, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
         let mut params = BTreeMap::new();
-        params.insert("symbol", venue_symbol);
+        params.insert("symbol", venue_symbol.clone());
         let side_str = match order.side {
             Side::Buy => "BUY",
             Side::Sell => "SELL",
@@ -840,12 +899,29 @@ impl ExchangeAdapter for BinanceAdapter {
         if let Some(tif) = tif_str {
             params.insert("timeInForce", tif.to_string());
         }
-        params.insert("quantity", order.quantity.to_string());
+        let qty_wire = binance_wire_qty(order.quantity, step_size);
+        if qty_wire <= dec!(0) || qty_wire < min_qty {
+            anyhow::bail!(
+                "Binance {} quantity {} below lot floor (step {}, min {})",
+                venue_symbol,
+                order.quantity,
+                step_size,
+                min_qty
+            );
+        }
+        params.insert("quantity", qty_wire.normalize().to_string());
         if let Some(p) = order.price {
             if p <= dec!(0) {
                 anyhow::bail!("Binance order limit price must be positive");
             }
-            params.insert("price", p.to_string());
+            let pw = binance_wire_price(p, order.side, tick_size);
+            if pw <= dec!(0) {
+                anyhow::bail!(
+                    "Binance {} price {p} rounds below the tick floor",
+                    venue_symbol
+                );
+            }
+            params.insert("price", pw.normalize().to_string());
         }
         if order.reduce_only {
             params.insert("reduceOnly", "true".to_string());
@@ -1173,5 +1249,36 @@ mod tests {
         assert_eq!(resp.status, OrderStatus::Filled);
         assert_eq!(resp.filled_qty, dec!(5));
         assert_eq!(resp.avg_fill_price, Some(dec!(0.012)));
+    }
+
+    #[test]
+    fn wire_values_respect_tick_and_step_filters() {
+        use arbitrageur_core::types::Side;
+        // Quantity floors to stepSize — never rounds up into an oversize.
+        assert_eq!(binance_wire_qty(dec!(0.004999), dec!(0.001)), dec!(0.004));
+        assert_eq!(binance_wire_qty(dec!(1.005), dec!(0.01)), dec!(1.00));
+        assert_eq!(binance_wire_qty(dec!(2.5), dec!(0)), dec!(2.5));
+        // Buy price floors (protective cap never rises); sell price ceils.
+        assert_eq!(
+            binance_wire_price(dec!(2734.2783), Side::Buy, dec!(0.01)),
+            dec!(2734.27)
+        );
+        assert_eq!(
+            binance_wire_price(dec!(2734.2783), Side::Sell, dec!(0.01)),
+            dec!(2734.28)
+        );
+        // Exact multiples pass through unchanged; zero tick disables.
+        assert_eq!(
+            binance_wire_price(dec!(2734.28), Side::Buy, dec!(0.01)),
+            dec!(2734.28)
+        );
+        assert_eq!(
+            binance_wire_price(dec!(0.012345), Side::Sell, dec!(0.000001)),
+            dec!(0.012345)
+        );
+        assert_eq!(
+            binance_wire_price(dec!(1.234), Side::Buy, dec!(0)),
+            dec!(1.234)
+        );
     }
 }

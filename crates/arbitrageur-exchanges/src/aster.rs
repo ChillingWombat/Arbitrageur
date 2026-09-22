@@ -415,6 +415,40 @@ impl AsterAdapter {
             })
     }
 
+    /// Venue order filters for one symbol — (PRICE_FILTER.tickSize,
+    /// LOT_SIZE.stepSize, LOT_SIZE.minQty). exchangeInfo is cached by the
+    /// request coordinator, so this is cheap on the order path.
+    async fn symbol_filters(
+        &self,
+        venue_symbol: &str,
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
+        let info = self.get_json("/fapi/v3/exchangeInfo").await?;
+        let item = info
+            .get("symbols")
+            .and_then(|s| s.as_array())
+            .and_then(|arr| {
+                arr.iter()
+                    .find(|i| i.get("symbol").and_then(|s| s.as_str()) == Some(venue_symbol))
+            })
+            .ok_or_else(|| anyhow::anyhow!("Aster exchangeInfo has no symbol {venue_symbol}"))?;
+        let mut tick = dec!(0);
+        let mut step = dec!(0);
+        let mut min_qty = dec!(0);
+        if let Some(filters) = item.get("filters").and_then(|f| f.as_array()) {
+            for f in filters {
+                match f.get("filterType").and_then(|t| t.as_str()) {
+                    Some("PRICE_FILTER") => tick = dec_from_json(f.get("tickSize")).unwrap_or(tick),
+                    Some("LOT_SIZE") => {
+                        step = dec_from_json(f.get("stepSize")).unwrap_or(step);
+                        min_qty = dec_from_json(f.get("minQty")).unwrap_or(min_qty);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok((tick, step, min_qty))
+    }
+
     #[allow(dead_code)]
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
         if let Some(cached_str) = self.rate_limiter.acquire_or_cache_path(path, true).await? {
@@ -933,12 +967,44 @@ impl ExchangeAdapter for AsterAdapter {
         if let Some(tif) = tif_str {
             params.insert("timeInForce", tif.to_string());
         }
-        params.insert("quantity", order.quantity.to_string());
+        // Aster enforces PRICE_FILTER.tickSize / LOT_SIZE.stepSize like
+        // Binance futures — floor qty to the step; the limit price is a
+        // protective bound so buys floor and sells ceil.
+        let (tick_size, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
+        let qty_wire = if step_size > dec!(0) {
+            (order.quantity / step_size).floor() * step_size
+        } else {
+            order.quantity
+        };
+        if qty_wire <= dec!(0) || qty_wire < min_qty {
+            anyhow::bail!(
+                "Aster {} quantity {} below lot floor (step {}, min {})",
+                venue_symbol,
+                order.quantity,
+                step_size,
+                min_qty
+            );
+        }
+        params.insert("quantity", qty_wire.normalize().to_string());
         if let Some(p) = order.price {
             if p <= dec!(0) {
                 anyhow::bail!("Aster order limit price must be positive");
             }
-            params.insert("price", p.to_string());
+            let pw = if tick_size > dec!(0) {
+                match order.side {
+                    Side::Buy => (p / tick_size).floor() * tick_size,
+                    Side::Sell => (p / tick_size).ceil() * tick_size,
+                }
+            } else {
+                p
+            };
+            if pw <= dec!(0) {
+                anyhow::bail!(
+                    "Aster {} price {p} rounds below the tick floor",
+                    venue_symbol
+                );
+            }
+            params.insert("price", pw.normalize().to_string());
         }
         if order.reduce_only {
             params.insert("reduceOnly", "true".to_string());

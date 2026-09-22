@@ -377,8 +377,11 @@ impl StateStore {
         let mut stmt = conn.prepare(
             "SELECT l.id FROM signal_legs l
              JOIN signal_executions e ON e.id = l.signal_id
-             WHERE l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
-               AND l.venue_order_id NOT LIKE 'sim-%'
+             WHERE (
+                 (l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
+                  AND l.venue_order_id NOT LIKE 'sim-%')
+                 OR e.status IN ('imbalanced', 'unresolved')
+               )
                AND e.status IN ('in_flight', 'imbalanced', 'unresolved')",
         )?;
         let leg_ids: Vec<String> = stmt
