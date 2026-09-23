@@ -1748,7 +1748,14 @@ impl AppEngineState {
             // Closed already, so the open-only list can't see them).
             let mut all_signals_cache: Option<Vec<crate::state_store::SignalExecution>> = None;
             let mut ledger = virtual_ledger.write();
-            for sig in open_signals.iter().filter(|s| s.status.counts_as_open()) {
+            // Family children are not roots: a `trim-` child also carries a
+            // Long and a Short leg — but on swapped venues — so it would
+            // otherwise spawn a phantom `rehydrated-` lot on inverted venues.
+            for sig in open_signals.iter().filter(|s| {
+                s.status.counts_as_open()
+                    && !s.id.starts_with("flat-")
+                    && !s.id.starts_with("trim-")
+            }) {
                 let venue_of = |side: LegSide| {
                     sig.legs
                         .iter()
