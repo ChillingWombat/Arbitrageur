@@ -9,11 +9,11 @@
 
 use crate::commands::{
     compute_route_economics, effective_venue_fee_bps, fetch_multi_market_quotes_impl,
-    live_entry_gate, live_entry_notional_guard, maybe_record_margin_snapshots,
-    record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
-    reject_if_strategy_filtered, resolve_effective_leverage, snapshot_venue_equity,
-    strategy_slippage_bps, validate_adapter_book, validate_market_symbol, ConvergenceCheckDto,
-    MarginHealthDto, NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
+    live_entry_gate, maybe_record_margin_snapshots, record_execution_failure, record_execution_log,
+    refresh_equity_expectations_after_fills, reject_if_strategy_filtered,
+    resolve_effective_leverage, snapshot_venue_equity, strategy_slippage_bps,
+    validate_adapter_book, validate_market_symbol, ConvergenceCheckDto, MarginHealthDto,
+    NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
 };
 use crate::num::dec_opt_f64;
 use crate::state::{AppEngineState, ExecutionLogEntry};
@@ -594,19 +594,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .ok_or_else(|| format!("No executable sell depth on {}", sell_venue))?;
     if buy_remaining > dec!(0) || sell_remaining > dec!(0) {
         return Err("Requested quantity exceeds executable book depth within IOC limits".into());
-    }
-
-    // Live canary bound: refuse (never clamp) when either leg's notional
-    // exceeds the operator cap. Runs after VWAP sizing so it measures the
-    // real executable notional, not the caller's intent.
-    if is_live {
-        live_entry_notional_guard(
-            state,
-            &[
-                (buy_venue, qty_dec * buy_vwap),
-                (sell_venue, qty_dec * sell_vwap),
-            ],
-        )?;
     }
 
     let target_profit_bps = state

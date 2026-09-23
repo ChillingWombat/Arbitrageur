@@ -1332,7 +1332,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               <EmptyState
                 plain
                 title="No Open Funding Positions"
-                hint="Carry/basis fills aggregate here per symbol with live PnL after execution. Live entries require the live_entry_enabled opt-in plus an unlocked vault and a per-leg notional cap."
+                hint="Carry/basis fills aggregate here per symbol with live PnL after execution. Live entries dispatch on venues with credentials in the unlocked vault and adapter order polling."
               />
             ) : (
               <div className="divide-y divide-surface-border">

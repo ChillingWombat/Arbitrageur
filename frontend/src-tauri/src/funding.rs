@@ -6,10 +6,10 @@
 
 use crate::commands::{
     backtest_stats, dec_to_f64, effective_venue_fee_bps, get_market_universe_impl, live_entry_gate,
-    live_entry_notional_guard, margin_monitor_from_settings, maybe_record_margin_snapshots,
-    reconcile_signal_legs, record_execution_failure, record_execution_log,
-    refresh_equity_expectations_after_fills, resolve_effective_leverage, strategy_slippage_bps,
-    validate_adapter_book, validate_market_symbol, SimStepResultDto, FUNDING_STRATEGY_ID,
+    margin_monitor_from_settings, maybe_record_margin_snapshots, reconcile_signal_legs,
+    record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
+    resolve_effective_leverage, strategy_slippage_bps, validate_adapter_book,
+    validate_market_symbol, SimStepResultDto, FUNDING_STRATEGY_ID,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use crate::triangle::triangle_dust_qty;
@@ -1320,9 +1320,9 @@ pub async fn execute_funding_carry_impl(
     state: &AppEngineState,
     auto: bool,
 ) -> Result<SimStepResultDto, String> {
-    // Autonomous entries stay testnet-only in live mode — the
-    // live_entry_enabled opt-in covers operator-directed entries (same
-    // policy as the radar bot's evaluate_entry_gates hard-block).
+    // Autonomous entries stay testnet-only in live mode (same policy as
+    // the radar bot's evaluate_entry_gates hard-block); operator-directed
+    // manual entries are the live path.
     if auto && state.is_live() {
         return Err(
             "autonomous funding entries are testnet-only — run a manual Execute for live carry"
@@ -1353,10 +1353,9 @@ pub async fn execute_funding_carry_impl(
     let is_live = state.is_live();
     if is_live {
         // Funding entries reuse the same two-leg coordinator + durable
-        // signal reconciliation as the spatial path, so they run under the
-        // same operator opt-in: live_entry_enabled + unlocked vault +
-        // adapter submission/polling/entry eligibility + live credentials.
-        // The per-leg notional cap is checked below once leg VWAPs price.
+        // signal reconciliation as the spatial path, under the same live
+        // gate: unlocked vault + adapter submission/polling/entry
+        // eligibility + live credentials.
         live_entry_gate(state, &[long_venue, short_venue])?;
     }
 
@@ -1551,15 +1550,6 @@ pub async fn execute_funding_carry_impl(
     }
     let long_vwap_f = dec_to_f64(long_vwap, "funding long VWAP")?;
     let short_vwap_f = dec_to_f64(short_vwap, "funding short VWAP")?;
-    if is_live {
-        live_entry_notional_guard(
-            state,
-            &[
-                (long_canon, qty * long_vwap),
-                (short_canon, qty * short_vwap),
-            ],
-        )?;
-    }
     let max_entry_spread_bps = state
         .strategy_params
         .read()

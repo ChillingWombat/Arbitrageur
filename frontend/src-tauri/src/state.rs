@@ -591,19 +591,6 @@ pub struct EngineSettingsDto {
     /// takes min(strategy target, account max, venue max, this).
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
-    /// Opt-in: allow live strategy entries (spatial, funding carry, and
-    /// triangle paths). Reconciliation machinery (poll supervisor, residual
-    /// auto-flatten, bounded cancel retry) covers every entry signal that
-    /// lands imbalanced — this flag is the explicit operator decision to
-    /// accept that residual one-sided-exposure risk.
-    /// Off by default: live mode stays read + risk-reducing closes only.
-    #[serde(default)]
-    pub live_entry_enabled: bool,
-    /// Per-leg notional cap (USD) for live strategy entries. A leg whose
-    /// qty × entry VWAP exceeds this is refused, never clamped. 0 (the
-    /// default) refuses every live entry even when `live_entry_enabled`.
-    #[serde(default)]
-    pub live_entry_max_notional_usd: f64,
     /// Global Auto Position Exit policy (System Settings → Execution):
     /// the single shared limit-exit configuration. Strategies with
     /// `*_passive_mode = "inherit"` (the default) use this record; "custom"
@@ -794,8 +781,6 @@ impl Default for EngineSettingsDto {
             margin_min_liquidation_distance_pct: default_margin_min_liq_distance_pct(),
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
             max_leverage: default_max_leverage(),
-            live_entry_enabled: false,
-            live_entry_max_notional_usd: 0.0,
             passive_unwind: default_passive_unwind_policy(),
             auto_exit_max_hold_secs: default_auto_exit_max_hold_secs(),
             hyperliquid_enabled: false,

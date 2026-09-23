@@ -357,5 +357,8 @@ Every added adapter reports honest capability flags:
   otherwise.
 - No adapter claims fills from submit acknowledgements; `fetch_order` polls
   venue truth (REST order status or chain receipt for AMM swaps).
-- Live strategy entry still requires the operator's `live_entry_enabled`
-  canary gate and venue sandbox evidence — see `docs/CAPABILITIES.md`.
+- Live strategy entry dispatches through `live_entry_gate` — unlocked
+  vault plus per-venue submission/polling/strategy-entry/credential
+  eligibility — and venue sandbox evidence still distinguishes
+  canary-proven routes from implemented-but-unproven ones; see
+  `docs/CAPABILITIES.md`.

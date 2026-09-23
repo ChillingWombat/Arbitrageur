@@ -5,7 +5,7 @@
 
 This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, the controls designed for them, and an operational runbook.
 
-> **Current capability boundary:** live strategy entries (spatial, Spread Radar manual, funding carry/basis, triangle) are **opt-in** — `live_entry_enabled` + unlocked vault + per-leg notional cap + per-venue submission/polling/credential eligibility, refused never clamped; autonomous bot loops stay testnet-only. Working orders are reconciled to terminal fill/cancel/expiry by the startup+5s supervisor and recovered after restart; imbalanced entries auto-flatten the residual leg unconditionally (bounded attempts) with bounded cancel retry. The Hyperliquid↔Lighter live canary is venue-proven; other venue pairs still warrant per-pair canary sizing. Do not interpret this runbook as proof that remote signing is enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
+> **Current capability boundary:** live strategy entries (spatial, Spread Radar manual, funding carry/basis, triangle) dispatch in Live mode once the credential vault is unlocked and every leg venue passes submission/polling/strategy-entry/credential eligibility (`live_entry_gate`); autonomous bot loops stay testnet-only. Working orders are reconciled to terminal fill/cancel/expiry by the startup+5s supervisor and recovered after restart; imbalanced entries auto-flatten the residual leg unconditionally (bounded attempts) with bounded cancel retry. The Hyperliquid↔Lighter live canary is venue-proven; other venue pairs still warrant per-pair canary sizing. Do not interpret this runbook as proof that remote signing is enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
 
 ---
 
@@ -137,27 +137,29 @@ Portfolio monitor (command `reconcile_orders_now`, returns a poll summary).
 
 ### 2.4 Live entry canary procedure
 
-Live strategy entries are **opt-in**: off by default and bounded by the
-per-leg notional cap. The gate covers the spatial two-leg path, Spread
-Radar manual entries, funding carry/basis, and single-venue triangle
-cycles; every path reconciles through the same poll supervisor and
-residual auto-flatten.
+Live strategy entries dispatch in Live mode on venues whose adapters pass
+the `live_entry_gate`: unlocked vault, order submission, order-status
+polling, strategy-entry eligibility, and loaded credentials. The gate
+covers the spatial two-leg path, Spread Radar manual entries, funding
+carry/basis, and single-venue triangle cycles; every path reconciles
+through the same poll supervisor and residual auto-flatten. (The
+`live_entry_enabled` opt-in flag and per-leg notional cap were removed on
+2026-09-24 — Trading Mode = Live is itself the operator opt-in; entry
+size follows the per-strategy size settings.)
 
 To run one minimal real-money entry:
 
 1. Unlock the credential vault; set Trading Mode to **Live Trading**.
-2. Engine Settings → Execution: enable **Enable live strategy
-   entries**; set **Live max notional per leg** just above both venues'
-   minimums (e.g. $15–25). Residual auto-flatten is unconditional (no
-   toggle since 2026-09-22) — a mixed outcome always self-heals via
-   flatten children (reduce-only where the venue supports the flag; spot
-   legs flatten via plain orders the venue itself bounds).
+2. Residual auto-flatten is unconditional (no toggle since 2026-09-22) —
+   a mixed outcome always self-heals via flatten children (reduce-only
+   where the venue supports the flag; spot legs flatten via plain orders
+   the venue itself bounds).
 3. Pick a symbol with **no open position on either venue** — the entry
    refuses if `fetch_account` shows one. Keep existing positions untouched:
    the system never sweeps account positions; it only manages signal legs
    it created.
-4. In the canary panel (visible only when live entries are enabled in Live
-   mode): symbol, buy venue, sell venue, qty per leg, accepted loss bps
+4. In the canary panel (Engine Settings → Safety, visible in Live mode):
+   symbol, buy venue, sell venue, qty per leg, accepted loss bps
    (≤50 — this pays the spread+fees to test mechanics). Run it.
 5. Watch: `signal_executions`/`signal_legs` rows (venue order ids must be
    populated), the reconciliation supervisor (5s polls → `balanced`), the

@@ -3038,12 +3038,11 @@ fn variation_covers_friction(
     true
 }
 
-/// Whether the row may be executed right now. Live mode keeps rows
-/// non-executable until the operator opts in via `live_entry_enabled` —
-/// manual radar entries then dispatch through the spatial two-leg path,
-/// which enforces the vault, adapter-eligibility, and per-leg cap checks
-/// downstream. Autonomous bot entries stay testnet-only regardless of the
-/// flag: `evaluate_entry_gates` hard-blocks live mode on its own layer.
+/// Whether the row may be executed right now. Live mode manual radar
+/// entries dispatch through the spatial two-leg path, which enforces the
+/// vault, adapter-eligibility, and credential checks downstream.
+/// Autonomous bot entries stay testnet-only regardless: `evaluate_entry_gates`
+/// hard-blocks live mode on its own layer.
 #[allow(clippy::too_many_arguments)]
 fn execution_gate(
     status: PairStatus,
@@ -3060,15 +3059,6 @@ fn execution_gate(
     state: &AppEngineState,
     symbol: &str,
 ) -> (bool, Option<String>) {
-    if state.is_live() && !state.settings.read().live_entry_enabled {
-        return (
-            false,
-            Some(
-                "live entries need the live_entry_enabled opt-in (Engine Settings → Risk Control)"
-                    .into(),
-            ),
-        );
-    }
     if *state.is_paused.read() {
         return (false, Some("engine paused".into()));
     }

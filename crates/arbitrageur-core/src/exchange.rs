@@ -227,9 +227,7 @@ pub trait ExchangeAdapter: Send + Sync {
     /// desktop supervisor provides the machinery — terminal-state polling,
     /// restart recovery, residual-exposure blocking, opt-in residual
     /// auto-resolution, and bounded cancel retry — so the per-adapter
-    /// requirement reduces to a working `fetch_order`. Implemented-but-not-
-    /// venue-proven: strategy entries additionally require the operator's
-    /// `live_entry_enabled` opt-in and notional cap.
+    /// requirement reduces to a working `fetch_order`.
     fn live_order_reconciliation_implemented(&self) -> bool {
         self.order_status_polling_implemented()
     }

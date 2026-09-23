@@ -3,10 +3,10 @@
 //! helpers stay reachable via `crate::commands`.
 
 use crate::commands::{
-    dec_to_f64, effective_venue_fee_bps, live_entry_gate, live_entry_notional_guard,
-    margin_monitor_from_settings, maybe_record_margin_snapshots, record_execution_failure,
-    record_execution_log, refresh_equity_expectations_after_fills, resolve_effective_leverage,
-    validate_adapter_book, SimStepResultDto, TRIANGLE_STRATEGY_ID,
+    dec_to_f64, effective_venue_fee_bps, live_entry_gate, margin_monitor_from_settings,
+    maybe_record_margin_snapshots, record_execution_failure, record_execution_log,
+    refresh_equity_expectations_after_fills, resolve_effective_leverage, validate_adapter_book,
+    SimStepResultDto, TRIANGLE_STRATEGY_ID,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use arbitrageur_core::exchange::ExchangeAdapter;
@@ -533,10 +533,9 @@ pub async fn execute_triangle_arbitrage_impl(
     if !params.min_profit_bps.is_finite() || params.min_profit_bps < 0.0 {
         return Err("min_profit_bps must be finite and nonnegative".into());
     }
-    // Autonomous entries stay testnet-only in live mode — the
-    // live_entry_enabled opt-in covers operator-directed entries (same
-    // policy as the radar bot's evaluate_entry_gates hard-block and the
-    // funding auto flag).
+    // Autonomous entries stay testnet-only in live mode (same policy as
+    // the radar bot's evaluate_entry_gates hard-block and the funding
+    // auto flag); operator-directed manual entries are the live path.
     if params.auto && state.is_live() {
         return Err(
             "autonomous triangle entries are testnet-only — run a manual Execute for live".into(),
@@ -592,9 +591,9 @@ pub async fn execute_triangle_arbitrage_impl(
     if state.is_live() {
         // Triangle legs dispatch sequentially on one venue with durable
         // leg records; a partial cycle lands `imbalanced` and the
-        // reconciler auto-flattens the residual reduce-only. Same opt-in
-        // surface as spatial/funding: live_entry_enabled + unlocked vault
-        // + adapter submission/polling/entry eligibility + credentials.
+        // reconciler auto-flattens the residual reduce-only. Same live
+        // gate as spatial/funding: unlocked vault + adapter
+        // submission/polling/entry eligibility + credentials.
         live_entry_gate(state, &[vid.as_str()])?;
     }
     let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols, true)
@@ -611,22 +610,6 @@ pub async fn execute_triangle_arbitrage_impl(
             "triangle net {:.1} BPS is below the {:.1} BPS hurdle — not executed",
             eval.net_bps, params.min_profit_bps
         ));
-    }
-    if state.is_live() {
-        // Cap each priced leg at the configured per-leg notional — the cap
-        // refuses, never clamps.
-        let legs: Vec<(&str, Decimal)> = eval
-            .order_qty
-            .iter()
-            .zip(eval.leg_prices.iter())
-            .map(|(q, p)| {
-                (
-                    vid.as_str(),
-                    Decimal::from_f64_retain(q * p).unwrap_or(dec!(0)),
-                )
-            })
-            .collect();
-        live_entry_notional_guard(state, &legs)?;
     }
 
     // One-open-pair-per-symbol, extended to the cycle: any blocking ledger
