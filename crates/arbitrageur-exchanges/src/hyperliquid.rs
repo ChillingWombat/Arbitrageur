@@ -682,8 +682,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     size_decimals: sz_decimals,
                     min_order_size: dec!(0.001),
                     min_notional: dec!(10.0),
-                    maker_fee_bps: dec!(-0.2), // Hyperliquid maker rebate or low fee
-                    taker_fee_bps: dec!(2.5),  // 2.5 bps taker fee
+                    maker_fee_bps: dec!(1.5), // standard-tier maker 0.015%
+                    taker_fee_bps: dec!(4.5), // standard-tier taker 0.045%
                     contract_size: dec!(1.0),
                     is_active: true,
                 });

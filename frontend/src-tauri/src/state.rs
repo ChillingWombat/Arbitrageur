@@ -1232,6 +1232,11 @@ pub struct AppEngineState {
         std::collections::HashMap<String, Arc<arbitrageur_exchanges::simulated::SimulatedExchange>>,
     >,
     pub autotune_apply_lock: tokio::sync::Mutex<()>,
+    /// Legs (`{signal_id}:{side}`) whose terminal fill has already had its
+    /// one-shot fee-enrichment `fetch_order` this process — submit-response
+    /// fills carry `fee_usd = 0` because venue acks never report fees, and
+    /// each unpriced leg gets exactly one poll per boot.
+    pub fee_enrich_done: Mutex<std::collections::HashSet<String>>,
     /// Epoch hour of the last spread_samples prune pass.
     pub sample_prune_at: Mutex<i64>,
     /// Last liquidation-trim dispatch per signal id — cooldown so the 5s
@@ -1767,6 +1772,7 @@ impl AppEngineState {
             #[cfg(test)]
             test_sims: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
+            fee_enrich_done: Mutex::new(std::collections::HashSet::new()),
             sample_prune_at: Mutex::new(0),
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
