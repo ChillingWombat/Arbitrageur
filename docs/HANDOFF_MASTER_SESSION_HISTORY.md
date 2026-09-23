@@ -274,7 +274,7 @@ The gadget is now backend-driven end to end; no frontend math.
 **Persistence** (`state_store.rs`, migration v3)
 - `spread_samples` table: `(symbol, venue_id, ts_ms, mid, best_bid, best_ask)` with `(symbol, ts_ms)` index; WAL mode.
 - `record_spread_samples` (batch tx, drops non-finite/non-positive mids, no-op on empty batches), `spread_samples(symbol, from, to)` range query, `earliest_spread_sample_ts`, `prune_spread_samples(retention, row_cap)`.
-- `fetch_orderbooks_impl` records every poll's per-venue top-of-book best-effort (store failures never break market data); hourly prune keeps **30 days**, capped at **4M rows** (`AppEngineState::sample_prune_at` tracks the last prune hour).
+- `fetch_orderbooks_impl` records every poll's per-venue top-of-book best-effort (store failures never break market data); hourly `enforce_retention_pass` applies the operator-set `spread_samples_max_days`/`spread_samples_max_gb` bounds (both unset = unlimited; `AppEngineState::sample_prune_at` tracks the last prune hour).
 
 **Math** (`arbitrageur-math/src/dislocation.rs`)
 - `compute_deviation_series(samples, weights, mode, bucket_ms, max_points)` → bucketed per-venue bps deviations from baseline + max–min dislocation band; null-preserved gaps; endpoint-preserving stride downsample to `max_points`.
@@ -2819,3 +2819,13 @@ Exit-path audit: all strategies have supervised exits — futures 5s convergence
 ## Session 2026-09-23 — Credential/venue lifecycle gates for open live positions
 
 Same strand class as the vault lock, closed in live mode: `delete_exchange_credentials_impl` (venue-wide), `delete_account_credentials_impl` + `upsert_account_impl` disable (account-bound legs), `save_engine_settings_impl` venue-flag disable (adapter leaves `get_venues`). Each refuses naming the blocking open positions; testnet unaffected. Tests `test_credential_delete_refused_with_open_live_leg`, `test_venue_disable_refused_with_open_live_leg`. SPEC.md entry 37; desktop 407 tests.
+
+## Session 2026-09-23 — Retention/storage audit: GB-cap drain bug fixed
+
+Audit of `~/.arbitrageur/state.sqlite3` (831 MB, ~10 days ≈ 83 MB/day): `spread_samples` 4.91M rows, `monitor_signal_events` 914k, `funding_rate_samples` 283k. Retention knobs (`retention.max_days`/`retention.max_gb` in kv) were unset → unlimited by design; the UI exposes both with a live footprint readout, so bounds stay an operator choice.
+
+Two real defects fixed in the hourly `enforce_retention_pass` path:
+- **GB-cap table drain**: the budget compared `PRAGMA page_count` (allocated) — deletes only grow the freelist, so an over-budget DB would delete the whole `spread_samples` table chasing a size that never drops. Now measures used bytes (`page_count − freelist_count`, new `db_used_bytes`) and runs a bounded `PRAGMA incremental_vacuum(50_000)` post-eviction so the file converges to the cap over successive passes (`incremental_vacuum` store method added).
+- **Per-batch full-table sort**: `delete_oldest_spread_samples` did `ORDER BY ts_ms ASC, id ASC LIMIT` on millions of rows each loop; rows are append-only so rowid order ≡ ts order — now `ORDER BY id` walks the PK.
+
+Regression: `test_retention_gb_budget_measures_used_not_allocated` (budget between used and allocated evicts nothing; fixture asserts freelist exists). Test fixture note: `seed_samples` mids must stay within 3× of the incumbent anchor — `record_spread_samples` drops wider deviations as symbol collisions (silently shrinks seeded counts). SPEC.md entry 38; PARAMETER_GUIDE gained a Storage retention section; stale handoff line claiming a hardcoded 30d/4M-row prune corrected to settings-driven. Desktop 408 tests.

@@ -81,4 +81,24 @@ impl StateStore {
         let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
         Ok((page_count.max(0) as u64) * (page_size.max(0) as u64))
     }
+
+    /// Bytes actually holding data — excludes freelist pages. Deletes grow
+    /// the freelist without shrinking `page_count`, so retention budgets
+    /// must be measured against this, not the allocated file size.
+    pub fn db_used_bytes(&self) -> anyhow::Result<u64> {
+        let conn = self.conn.lock();
+        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let freelist: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        Ok(((page_count - freelist).max(0) as u64) * (page_size.max(0) as u64))
+    }
+
+    /// Returns up to `max_pages` freelist pages to the OS, shrinking the
+    /// database file. Bounded per call so a retention pass stays cheap;
+    /// successive passes converge the file toward its used size.
+    pub fn incremental_vacuum(&self, max_pages: u32) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute_batch(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+        Ok(())
+    }
 }

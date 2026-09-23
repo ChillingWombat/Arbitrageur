@@ -183,6 +183,10 @@ These values initialize missing settings; they are not universal recommendations
 
 Review and reduce these values for the actual account before any testnet run. Live strategy entries are additionally opt-in gated (`live_entry_enabled`) with a per-leg notional cap.
 
+## Storage retention
+
+`spread_samples_max_days` and `spread_samples_max_gb` (Engine Settings → storage/retention inputs, persisted as `retention.max_days`/`retention.max_gb`) bound the always-on market-data recorder via the hourly `enforce_retention_pass`. Both default to **unlimited**. Measured growth on a 9-venue watchlist (2026-09-13→23): ~83 MB/day — `spread_samples` dominates (4.9M rows, 831 MB total DB after 10 days). The same day-cutoff also bounds `venue_volume_samples`, `monitor_signal_events`, `margin_snapshots`, and `funding_rate_samples`. Analytics consumers never read beyond 30 days (`BASELINE_RETENTION_MS`), so `max_days = 30` loses no model input. `max_gb` caps the DB's *used* bytes (allocated minus freelist — the file's own size cannot shrink on deletes alone); after evictions the pass runs a bounded `PRAGMA incremental_vacuum` so the file converges toward the cap over successive hourly runs. `session_profiles`/`session_hour_bins` are derived rollups and are never pruned.
+
 ## Why fixed risk presets are still gated
 
 A named preset creates an implied recommendation. To publish one responsibly, the project needs:

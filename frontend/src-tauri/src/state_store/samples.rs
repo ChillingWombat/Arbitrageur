@@ -372,9 +372,12 @@ impl StateStore {
 
     pub fn delete_oldest_spread_samples(&self, limit: u64) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
+        // Rows are append-only with ts_ms = insert time, so rowid order is
+        // timestamp order — ORDER BY id walks the PK directly instead of
+        // sorting the whole table per batch under a GB retention cap.
         Ok(conn.execute(
             "DELETE FROM spread_samples WHERE id IN (
-                 SELECT id FROM spread_samples ORDER BY ts_ms ASC, id ASC LIMIT ?1
+                 SELECT id FROM spread_samples ORDER BY id ASC LIMIT ?1
              )",
             [limit as i64],
         )?)
