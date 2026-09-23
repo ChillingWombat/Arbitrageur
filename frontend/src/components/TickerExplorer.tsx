@@ -137,7 +137,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
           hasIssue
             ? "bg-loss-dim border-loss-border text-loss shadow-2xs hover:bg-red-100/70"
             : isSelected
-            ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
+            ? "bg-blue-50 border-blue-300 shadow-2xs text-slate-900"
             : !isEnabled
             ? "opacity-40 grayscale bg-slate-100/60 border-slate-200 hover:opacity-60"
             : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300 shadow-2xs"
@@ -151,7 +151,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
               {/* Distinct stablecoin quotes are distinct instruments (XRP-USDC
                   vs XRP-USDT trade different venue sets) — the quote suffix is
                   what keeps their rows visually distinguishable. */}
-              <span className="text-slate-400 font-semibold">-{quote}</span>
+              <span className="text-muted font-semibold">-{quote}</span>
             </span>
             <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
               Perp
@@ -192,7 +192,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
                   ? "text-profit"
                   : isLoss
                   ? "text-loss"
-                  : "text-slate-400"
+                  : "text-muted"
               }`}
             >
               {showLiquidity
@@ -514,19 +514,19 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
         {/* Search Bar & Sort Configuration Button */}
         <div className="flex items-center space-x-1.5 relative">
           <div className="relative flex-1">
-            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+            <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search perp pairs…"
               aria-label="Search tickers"
-              className="w-full pl-8 pr-7 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-sans text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+              className="w-full pl-8 pr-7 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-sans text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
             />
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5 cursor-pointer"
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted hover:text-slate-600 p-0.5 cursor-pointer"
               >
                 <X className="w-3 h-3" />
               </button>
@@ -543,9 +543,9 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               }`}
               className={`p-1.5 rounded-lg border transition-all flex items-center justify-center relative cursor-pointer shadow-2xs ${
                 showBotMenu
-                  ? "bg-accent/10 border-accent text-accent"
+                  ? "bg-accent/10 border-accent text-accent-strong"
                   : botFilter !== "all"
-                  ? "bg-accent/5 border-accent-line text-accent"
+                  ? "bg-accent/5 border-accent-line text-accent-strong"
                   : "bg-surface border-surface-border text-slate-600 hover:text-slate-900 hover:border-slate-300"
               }`}
             >
@@ -558,7 +558,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
             {/* Floating Popover Menu */}
             {showBotMenu && (
               <div className="absolute right-0 top-full mt-1.5 w-56 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
-                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-surface-border/60">
+                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-muted border-b border-surface-border/60">
                   Filter by Bot Status
                 </div>
 
@@ -571,17 +571,17 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     }}
                     className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                       botFilter === option.value
-                        ? "bg-accent/10 text-accent font-semibold"
+                        ? "bg-accent/10 text-accent-strong font-semibold"
                         : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                     }`}
                   >
                     <div className="flex items-center space-x-2">
                       <span>{option.label}</span>
-                      <span className="text-[10px] font-mono tabular-nums text-slate-400">
+                      <span className="text-[10px] font-mono tabular-nums text-muted">
                         {botStatusCounts[option.value]}
                       </span>
                     </div>
-                    {botFilter === option.value && <Check className="w-3.5 h-3.5 text-accent" />}
+                    {botFilter === option.value && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                   </button>
                 ))}
 
@@ -605,9 +605,9 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               }`}
               className={`p-1.5 rounded-lg border transition-all flex items-center justify-center relative cursor-pointer shadow-2xs ${
                 showSortMenu
-                  ? "bg-accent/10 border-accent text-accent"
+                  ? "bg-accent/10 border-accent text-accent-strong"
                   : sortOption !== "alpha"
-                  ? "bg-accent/5 border-accent-line text-accent"
+                  ? "bg-accent/5 border-accent-line text-accent-strong"
                   : "bg-surface border-surface-border text-slate-600 hover:text-slate-900 hover:border-slate-300"
               }`}
             >
@@ -620,7 +620,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
             {/* Floating Popover Menu */}
             {showSortMenu && (
               <div className="absolute right-0 top-full mt-1.5 w-56 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
-                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-surface-border/60">
+                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-muted border-b border-surface-border/60">
                   Sort Tickers
                 </div>
 
@@ -631,7 +631,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                   }}
                   className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "alpha"
-                      ? "bg-accent/10 text-accent font-semibold"
+                      ? "bg-accent/10 text-accent-strong font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                   }`}
                 >
@@ -639,7 +639,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     <ArrowDownAZ className="w-3.5 h-3.5 text-slate-500" />
                     <span>A-Z (Name)</span>
                   </div>
-                  {sortOption === "alpha" && <Check className="w-3.5 h-3.5 text-accent" />}
+                  {sortOption === "alpha" && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                 </button>
 
                 <button
@@ -649,7 +649,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                   }}
                   className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "trades"
-                      ? "bg-accent/10 text-accent font-semibold"
+                      ? "bg-accent/10 text-accent-strong font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                   }`}
                 >
@@ -657,7 +657,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     <Activity className="w-3.5 h-3.5 text-slate-500" />
                     <span>Strategy Trades</span>
                   </div>
-                  {sortOption === "trades" && <Check className="w-3.5 h-3.5 text-accent" />}
+                  {sortOption === "trades" && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                 </button>
 
                 <button
@@ -667,7 +667,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                   }}
                   className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "pnl"
-                      ? "bg-accent/10 text-accent font-semibold"
+                      ? "bg-accent/10 text-accent-strong font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                   }`}
                 >
@@ -675,7 +675,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     <DollarSign className="w-3.5 h-3.5 text-slate-500" />
                     <span>Net Profit / Loss</span>
                   </div>
-                  {sortOption === "pnl" && <Check className="w-3.5 h-3.5 text-accent" />}
+                  {sortOption === "pnl" && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                 </button>
 
                 <button
@@ -685,7 +685,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                   }}
                   className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     sortOption === "liquidity"
-                      ? "bg-accent/10 text-accent font-semibold"
+                      ? "bg-accent/10 text-accent-strong font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                   }`}
                 >
@@ -693,7 +693,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
                     <Droplets className="w-3.5 h-3.5 text-slate-600" />
                     <span>Liquidity (Avg 24h Vol)</span>
                   </div>
-                  {sortOption === "liquidity" && <Check className="w-3.5 h-3.5 text-accent" />}
+                  {sortOption === "liquidity" && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                 </button>
 
               </div>

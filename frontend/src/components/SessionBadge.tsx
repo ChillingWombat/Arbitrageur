@@ -11,7 +11,7 @@ interface SessionBadgeProps {
 const ALLOW_STYLE = (allow: number | null | undefined): string => {
   if (allow == null || !Number.isFinite(allow)) return "bg-surface-raised text-slate-500 border-surface-border";
   if (allow <= 0) return "bg-loss-dim text-loss border-loss-border";
-  if (allow < 1) return "bg-warn-dim text-warn border-warn-border";
+  if (allow < 1) return "bg-warn-dim text-warn-strong border-warn-border";
   return "bg-profit-dim text-profit border-profit-border";
 };
 

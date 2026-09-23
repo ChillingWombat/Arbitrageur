@@ -95,7 +95,7 @@ const MatrixCellView: React.FC<MatrixCellViewProps> = React.memo(({ cell, isSele
   if (cell.isDiagonal) {
     return (
       <td className="h-10 overflow-hidden whitespace-nowrap text-center border-r border-surface-border last:border-r-0 bg-surface-raised/40 select-none">
-        <span className="block truncate text-slate-400 font-mono text-[10px]">—</span>
+        <span className="block truncate text-muted font-mono text-[10px]">—</span>
       </td>
     );
   }
@@ -122,25 +122,23 @@ const MatrixCellView: React.FC<MatrixCellViewProps> = React.memo(({ cell, isSele
             </>
           )}
         </div>
-        <div
-          className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
-        >
-          {cell.baselineReady === false || cell.sampleCount === 0 ? (
-            <span>Δ —</span>
-          ) : (
-            <>
-              {cell.deltaBps > 0 ? (
-                <TrendingUp className="w-2 h-2 inline" />
-              ) : cell.deltaBps < 0 ? (
-                <TrendingDown className="w-2 h-2 inline" />
-              ) : null}
-              <span>
-                Δ {cell.deltaBps > 0 ? "+" : ""}
-                {cell.deltaBps.toFixed(1)}
-              </span>
-            </>
-          )}
-        </div>
+        {/* Delta-vs-baseline badge only renders when both economics and a
+            baseline exist — a bare "Δ —" placeholder is noise, not honesty. */}
+        {cell.costReady !== false && cell.baselineReady !== false && cell.sampleCount !== 0 && (
+          <div
+            className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
+          >
+            {cell.deltaBps > 0 ? (
+              <TrendingUp className="w-2 h-2 inline" />
+            ) : cell.deltaBps < 0 ? (
+              <TrendingDown className="w-2 h-2 inline" />
+            ) : null}
+            <span>
+              Δ {cell.deltaBps > 0 ? "+" : ""}
+              {cell.deltaBps.toFixed(1)}
+            </span>
+          </div>
+        )}
       </div>
     </td>
   );
@@ -212,7 +210,7 @@ const OpportunityRowView: React.FC<OpportunityRowViewProps> = React.memo(
             <VenueLogo venueId={(opp.buy_venue_id ?? opp.buy_venue ?? "").toLowerCase()} name={opp.buy_venue} size={16} />
             <span className="text-slate-800 font-semibold">{opp.buy_venue}</span>
           </span>
-          <span className="text-slate-400 text-xs">➔</span>
+          <span className="text-muted text-xs">➔</span>
           <span className="flex items-center gap-1 min-w-0">
             <VenueLogo venueId={(opp.sell_venue_id ?? opp.sell_venue ?? "").toLowerCase()} name={opp.sell_venue} size={16} />
             <span className="text-slate-800 font-semibold">{opp.sell_venue}</span>
@@ -298,7 +296,7 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
                 className={`px-2 py-0.5 rounded-md text-xs font-sans font-semibold border ${
                   opp.is_executable
                     ? "bg-profit-dim text-profit border-profit-border"
-                    : "bg-surface-raised text-slate-400 border-surface-border"
+                    : "bg-surface-raised text-muted border-surface-border"
                 }`}
               >
                 {opp.is_executable ? "EXECUTABLE" : "SUB-HURDLE"}
@@ -307,7 +305,7 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
               title="Close details (ESC)"
             >
               <X className="w-4 h-4" />
@@ -430,7 +428,7 @@ const SpatialDetailModal: React.FC<SpatialDetailModalProps> = React.memo(
                     breakevenSizeUsd={opp.breakeven_size_usd}
                   />
                 ) : (
-                  <span className="text-slate-400 text-xs">no depth data</span>
+                  <span className="text-muted text-xs">no depth data</span>
                 )}
               </div>
             </DetailSection>
@@ -918,7 +916,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               signal's own legs reconcile. */}
           {hasActiveTicker && positionState?.blocked && (
             <div
-              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border bg-warn-dim text-warn border-warn-border"
+              className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg border bg-warn-dim text-warn-strong border-warn-border"
               title={`Signal ${positionState.blockingSignalIds.join(", ")} is in-flight or imbalanced — new orders on ${symbol} are refused until its legs confirm delta-neutral. Net filled position: ${positionState.netPositionQty}`}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" />
@@ -936,18 +934,18 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                 className="ribbon-pill"
                 title="Target profit locked in per round-trip after fees and friction — edit via Configurator"
               >
-                <span className="text-slate-400">Target</span>
+                <span className="text-muted">Target</span>
                 <span className="font-bold text-slate-900">{currentStrategyConfig.targetProfitBps.toFixed(1)}</span>
-                <span className="text-slate-400">BPS</span>
+                <span className="text-muted">BPS</span>
               </div>
 
               <div
                 className="ribbon-pill"
                 title={`${windowTitle} · percentile trigger P${currentStrategyConfig.windowPercentile}%`}
               >
-                <span className="text-slate-400">Window</span>
+                <span className="text-muted">Window</span>
                 <span className="font-bold text-slate-900">{windowLabel}</span>
-                <span className="text-slate-400">P{currentStrategyConfig.windowPercentile}%</span>
+                <span className="text-muted">P{currentStrategyConfig.windowPercentile}%</span>
               </div>
 
             </>
@@ -963,7 +961,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
             className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Simple Spread strategy parameters (applies to all tickers)"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
             <span>Configurator</span>
           </button>
 
@@ -1019,13 +1017,13 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   onClick={() => setStageTab("matrix")}
                   className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
                     stageTab === "matrix"
-                      ? "text-accent font-bold bg-surface"
+                      ? "text-accent-strong font-bold bg-surface"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
                   }`}
                 >
                   <LayoutGrid
                     className={`w-3 h-3 transition shrink-0 ${
-                      stageTab === "matrix" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                      stageTab === "matrix" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                     }`}
                   />
                   <span>Dislocation Matrix</span>
@@ -1039,18 +1037,18 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   onClick={() => setStageTab("quotes")}
                   className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
                     stageTab === "quotes"
-                      ? "text-accent font-bold bg-surface"
+                      ? "text-accent-strong font-bold bg-surface"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
                   }`}
                 >
                   <Table
                     className={`w-3 h-3 transition shrink-0 ${
-                      stageTab === "quotes" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                      stageTab === "quotes" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                     }`}
                   />
                   <span>Venue Quotes</span>
                   {orderbooks.length > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
                     {orderbooks.length}
                   </span>
                   )}
@@ -1064,18 +1062,18 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   onClick={() => setStageTab("opportunities")}
                   className={`relative h-9 flex items-center justify-center gap-2 px-2.5 text-[11px] font-sans transition select-none group cursor-pointer ${
                     stageTab === "opportunities"
-                      ? "text-accent font-bold bg-surface"
+                      ? "text-accent-strong font-bold bg-surface"
                       : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
                   }`}
                 >
                   <Zap
                     className={`w-3 h-3 transition shrink-0 ${
-                      stageTab === "opportunities" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                      stageTab === "opportunities" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                     }`}
                   />
                   <span>Ranked Opportunities</span>
                   {profitableOpportunities.length > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
                     {profitableOpportunities.length}
                   </span>
                   )}
@@ -1213,7 +1211,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   {orderbooks.map((book) => {
                     const isBestBid = book.best_bid === overallBestBid && overallBestBid > 0;
                     const isBestAsk = book.best_ask === overallBestAsk && overallBestAsk > 0;
-                    const spreadColor = book.spread_bps < 10 ? "text-profit" : "text-warn";
+                    const spreadColor = book.spread_bps < 10 ? "text-profit" : "text-warn-strong";
 
                     return (
                       <tr key={book.venue_id} className="hover:bg-surface-raised/50 transition">
@@ -1318,18 +1316,18 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               onClick={() => setBottomTab("history")}
               className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
                 bottomTab === "history"
-                  ? "text-accent font-bold bg-surface"
+                  ? "text-accent-strong font-bold bg-surface"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
               }`}
             >
               <History
                 className={`w-3 h-3 transition shrink-0 ${
-                  bottomTab === "history" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                  bottomTab === "history" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
               />
               <span>Execution History</span>
               {tickerLogsCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
                 {tickerLogsCount}
               </span>
               )}
@@ -1343,13 +1341,13 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               onClick={() => setBottomTab("opps")}
               className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
                 bottomTab === "opps"
-                  ? "text-accent font-bold bg-surface"
+                  ? "text-accent-strong font-bold bg-surface"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
               }`}
             >
               <Radar
                 className={`w-3 h-3 transition shrink-0 ${
-                  bottomTab === "opps" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                  bottomTab === "opps" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
               />
               <span>Opportunity History</span>
@@ -1363,18 +1361,18 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
               onClick={() => setBottomTab("logs")}
               className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
                 bottomTab === "logs"
-                  ? "text-accent font-bold bg-surface"
+                  ? "text-accent-strong font-bold bg-surface"
                   : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
               }`}
             >
               <Terminal
                 className={`w-3 h-3 transition shrink-0 ${
-                  bottomTab === "logs" ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                  bottomTab === "logs" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
               />
               <span>Log Monitor</span>
               {tickerLogsCount > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
                 {tickerLogsCount}
               </span>
               )}

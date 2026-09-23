@@ -52,7 +52,7 @@ const fmtBps = (v: number | null | undefined, digits = 1) =>
   v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(digits)}`;
 
 // Table cells carry the unit; headers stay unitless.
-const bpsUnit = <span className="text-slate-400 font-normal"> bps</span>;
+const bpsUnit = <span className="text-muted font-normal"> bps</span>;
 const fmtBpsU = (v: number | null | undefined, digits = 1) => (
   <>
     {fmtBps(v, digits)}
@@ -95,7 +95,7 @@ const getWin = (r: MonitorRowDto): number | null | undefined =>
 
 const STATUS_STYLE: Record<string, string> = {
   ready: "bg-profit-dim text-profit border-profit-border",
-  triggered: "bg-warn-dim text-warn border-warn-border",
+  triggered: "bg-warn-dim text-warn-strong border-warn-border",
   tracking: "bg-sky-50 text-sky-700 border-sky-300",
   preparing: "bg-surface-raised text-slate-600 border-surface-border",
   "no-data": "bg-loss-dim text-loss border-loss-border",
@@ -306,7 +306,7 @@ const ConfigPanel: React.FC<{
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
               <SlidersHorizontal className="w-4 h-4" />
             </div>
             <div>
@@ -320,7 +320,7 @@ const ConfigPanel: React.FC<{
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Configurator (ESC)"
             >
               <X className="w-4 h-4" />
@@ -334,7 +334,7 @@ const ConfigPanel: React.FC<{
           <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
             <div className="space-y-3">
               <div className="px-2 pt-1 flex items-center justify-between">
-                <span className="text-xs font-mono font-bold tracking-wider text-slate-400">
+                <span className="text-xs font-mono font-bold tracking-wider text-muted">
                   Settings
                 </span>
               </div>
@@ -352,7 +352,7 @@ const ConfigPanel: React.FC<{
                           : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                       }`}
                     >
-                      <Icon className={`w-3.5 h-3.5 shrink-0 ${activeSection === s.id ? "text-white" : "text-slate-400"}`} />
+                      <Icon className={`w-3.5 h-3.5 shrink-0 ${activeSection === s.id ? "text-white" : "text-muted"}`} />
                       <div className="min-w-0 flex-1 flex items-center">
                         <span className="truncate">{s.label}</span>
                         <InfoTooltip
@@ -794,7 +794,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
               title="Close details (ESC)"
             >
               <X className="w-4 h-4" />
@@ -903,7 +903,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
             </DetailSection>
 
             {r.blockReason && (
-              <div className="p-3 bg-warn-dim border border-warn-border rounded-lg text-xs font-sans text-warn">
+              <div className="p-3 bg-warn-dim border border-warn-border rounded-lg text-xs font-sans text-warn-strong">
                 {r.blockReason}
               </div>
             )}
@@ -935,7 +935,7 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                     breakevenSizeUsd={r.breakevenSizeUsd}
                   />
                 ) : (
-                  <span className="text-slate-400 text-xs">no depth data</span>
+                  <span className="text-muted text-xs">no depth data</span>
                 )}
               </div>
             </DetailSection>
@@ -1360,27 +1360,27 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Engine floor on directional trade win probability — the executable gate also requires the Wilson lower bound to clear a confidence floor. Edit via Configurator."
           >
-            <span className="text-slate-400">Min Win</span>
+            <span className="text-muted">Min Win</span>
             <span className="font-bold text-slate-900">
               {cfg ? `${(cfg.minWinProbability * 100).toFixed(0)}` : "—"}
             </span>
-            <span className="text-slate-400">%</span>
+            <span className="text-muted">%</span>
           </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Bot entry hurdle — minimum probability-weighted expected profit (bps of notional) an opportunity must clear before the bot enters. Edit via Configurator → bot section."
           >
-            <span className="text-slate-400">Min Exp</span>
+            <span className="text-muted">Min Exp</span>
             <span className="font-bold text-slate-900">
               {botCfg ? to2dpStr(botCfg.minExpectedProfitBps) : "—"}
             </span>
-            <span className="text-slate-400">bps</span>
+            <span className="text-muted">bps</span>
           </div>
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Execution mode — edit via Configurator"
           >
-            <span className="text-slate-400">Execution</span>
+            <span className="text-muted">Execution</span>
             <span className="font-bold text-slate-900">
               {cfg ? (cfg.executionMode === "two_way" ? "Two-Way" : "Single-Way") : "—"}
             </span>
@@ -1410,7 +1410,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
             className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Spread Radar monitor parameters"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
             <span>Configurator</span>
           </button>
 
@@ -1459,20 +1459,20 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                   className={`px-1.5 py-0.5 rounded border text-[10px] font-bold uppercase ${
                     s.status === "imbalanced"
                       ? "bg-loss/15 text-loss border-loss-border"
-                      : "bg-warn-dim text-warn border-warn-border"
+                      : "bg-warn-dim text-warn-strong border-warn-border"
                   }`}
                 >
                   {s.status}
                 </span>
                 <span className="text-slate-700 font-bold">{s.symbol}</span>
-                <span className="text-slate-400">{s.id}</span>
+                <span className="text-muted">{s.id}</span>
                 {s.note && (
                   <span className="text-slate-500 truncate max-w-md" title={s.note}>
                     {s.note}
                   </span>
                 )}
                 <button
-                  className="ml-auto px-1.5 py-0.5 rounded border border-slate-600 text-slate-400 hover:bg-slate-700/40 transition cursor-pointer"
+                  className="ml-auto px-1.5 py-0.5 rounded border border-slate-600 text-muted hover:bg-slate-700/40 transition cursor-pointer"
                   title="After checking both venues yourself: unresolved → mark failed (nothing executed); imbalanced → mark closed (you flattened the residual manually)"
                   onClick={async () => {
                     const resolution = s.status === "imbalanced" ? "closed" : "failed";
@@ -1500,7 +1500,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                       {l.venue} {l.side} {l.filledQty}/{l.intendedQty} · order {l.venueOrderId}
                     </span>
                     <button
-                      className="px-1.5 py-0.5 rounded border border-warn-border text-warn hover:bg-warn-dim transition cursor-pointer"
+                      className="px-1.5 py-0.5 rounded border border-warn-border text-warn-strong hover:bg-warn-dim transition cursor-pointer"
                       title="Send a venue cancel for this order, then re-poll — risk-reducing only"
                       onClick={async () => {
                         try {
@@ -1538,8 +1538,8 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
             className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
             title="Display filter — symbol contains"
           >
-            <Search size={13} className="text-slate-400 shrink-0" />
-            <span className="text-slate-400 font-medium">Symbol</span>
+            <Search size={13} className="text-muted shrink-0" />
+            <span className="text-muted font-medium">Symbol</span>
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
@@ -1554,7 +1554,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2 py-2 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
               title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
             >
-              <span className="text-slate-400 font-medium">Venue</span>
+              <span className="text-muted font-medium">Venue</span>
               {venueFilters.length > 0 && (
                 <span className="flex items-center -space-x-1">
                   {venueFilters.slice(0, 4).map((v) => (
@@ -1568,7 +1568,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                   : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
               </span>
               <ChevronDown
-                className={`w-3.5 h-3.5 text-slate-400 transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+                className={`w-3.5 h-3.5 text-muted transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
               />
             </button>
             {showVenueMenu && (
@@ -1578,7 +1578,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                   onClick={() => setVenueFilters([])}
                   className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                     venueFilters.length === 0
-                      ? "bg-accent/10 text-accent font-semibold"
+                      ? "bg-accent/10 text-accent-strong font-semibold"
                       : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                   }`}
                 >
@@ -1599,7 +1599,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                       }
                       className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                         on
-                          ? "bg-accent/10 text-accent font-semibold"
+                          ? "bg-accent/10 text-accent-strong font-semibold"
                           : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                       }`}
                     >
@@ -1618,7 +1618,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
             className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
             title="Display filter — minimum expected profit"
           >
-            <span className="text-slate-400 font-medium">Min Exp</span>
+            <span className="text-muted font-medium">Min Exp</span>
             <input
               value={minExpBps}
               onChange={(e) => {
@@ -1628,13 +1628,13 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
               placeholder={String(defaultRadarBotConfig().minExpectedProfitBps)}
               className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
             />
-            <span className="text-slate-400 text-[11px] font-medium">BPS</span>
+            <span className="text-muted text-[11px] font-medium">BPS</span>
           </div>
           <div
             className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
             title="Display filter — minimum directional trade win probability (reversion-based, gated). Net % column shows the P&L-defined rate; both render '—' when history is thin."
           >
-            <span className="text-slate-400 font-medium">Min Win</span>
+            <span className="text-muted font-medium">Min Win</span>
             <input
               value={minPWin}
               onChange={(e) => {
@@ -1644,7 +1644,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
               placeholder="0"
               className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
             />
-            <span className="text-slate-400 text-[11px] font-medium">%</span>
+            <span className="text-muted text-[11px] font-medium">%</span>
           </div>
           <div className="ml-auto flex items-center gap-2">
             {(snap?.exempted.length ?? 0) > 0 && (

@@ -287,7 +287,7 @@ export const ExternalPositionsGadget: React.FC = () => {
   const tabCls = (on: boolean) =>
     `px-2.5 py-1.5 rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer ${
       on
-        ? "bg-accent-dim text-accent border-accent-line/60"
+        ? "bg-accent-dim text-accent-strong border-accent-line/60"
         : "bg-surface text-slate-500 border-surface-border hover:text-slate-800"
     }`;
 
@@ -297,7 +297,7 @@ export const ExternalPositionsGadget: React.FC = () => {
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div>
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-            <HandCoins className="w-5 h-5 text-accent" />
+            <HandCoins className="w-5 h-5 text-accent-strong" />
             <span>External Positions — Close via Bot</span>
           </h2>
           <p className="text-xs text-slate-600 font-mono mt-1">
@@ -310,7 +310,7 @@ export const ExternalPositionsGadget: React.FC = () => {
               className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${
                 data.environment === "live"
                   ? "bg-loss-dim/40 text-loss border-loss-border/60"
-                  : "bg-accent/10 text-accent border-accent/30"
+                  : "bg-accent/10 text-accent-strong border-accent/30"
               }`}
               title={data.environment === "live" ? "Live environment — real venue state, real money" : "Testnet environment — real venue demo endpoints"}
             >
@@ -328,7 +328,7 @@ export const ExternalPositionsGadget: React.FC = () => {
           <button
             type="button"
             onClick={() => void load()}
-            className="p-2 rounded-lg border border-surface-border text-slate-500 hover:text-accent hover:border-accent/40 transition cursor-pointer"
+            className="p-2 rounded-lg border border-surface-border text-slate-500 hover:text-accent-strong hover:border-accent/40 transition cursor-pointer"
             title="Refresh live account reads now"
           >
             <RefreshCw className="w-3.5 h-3.5" />
@@ -343,7 +343,7 @@ export const ExternalPositionsGadget: React.FC = () => {
       )}
       {(data?.unreadable ?? []).length > 0 && (
         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border bg-warn-dim/40 border-warn-border text-[11px] font-mono text-slate-700">
-          <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn" />
+          <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn-strong" />
           <span>{data!.unreadable.join(" · ")}</span>
         </div>
       )}
@@ -360,13 +360,13 @@ export const ExternalPositionsGadget: React.FC = () => {
             <div key={`${groupBy}-${g.key}`} className="rounded-lg border border-surface-border overflow-hidden">
               <div className="flex items-center justify-between gap-2 px-3 py-2 bg-surface-raised/70 text-xs font-mono">
                 <span className="font-bold text-slate-900 flex items-center gap-1.5">
-                  <ArrowDownUp className="w-3.5 h-3.5 text-slate-400" />
+                  <ArrowDownUp className="w-3.5 h-3.5 text-muted" />
                   {g.label}
-                  <span className="text-slate-400 font-semibold">· {g.positions.length}</span>
+                  <span className="text-muted font-semibold">· {g.positions.length}</span>
                 </span>
                 <span className="tabular-nums text-slate-600">
                   net <span className={`font-bold ${g.netNotionalUsd >= 0 ? "text-slate-900" : "text-slate-900"}`}>${Math.abs(g.netNotionalUsd).toFixed(0)}</span>
-                  <span className="text-slate-400"> gross ${g.grossNotionalUsd.toFixed(0)}</span>
+                  <span className="text-muted"> gross ${g.grossNotionalUsd.toFixed(0)}</span>
                   {" · "}
                   <span className={`font-bold ${g.totalUnrealizedUsd >= 0 ? "text-profit" : "text-loss"}`}>{usd(g.totalUnrealizedUsd)}</span>
                 </span>
@@ -397,9 +397,9 @@ export const ExternalPositionsGadget: React.FC = () => {
                       <span className="font-bold text-slate-900 truncate">{p.symbol}</span>
                       <span className="flex items-center gap-1.5 min-w-0">
                         <VenueLogo venueId={p.venue.toLowerCase()} name={p.venue} size={16} />
-                        <span className="text-slate-400 truncate">{p.venue}</span>
+                        <span className="text-muted truncate">{p.venue}</span>
                       </span>
-                      {!p.closeSupported && <span className="text-warn text-[10px] font-bold">NO BOT CLOSE</span>}
+                      {!p.closeSupported && <span className="text-warn-strong text-[10px] font-bold">NO BOT CLOSE</span>}
                     </span>
                     <span className="flex items-center gap-2 shrink-0">
                       <span className="tabular-nums text-slate-700">
@@ -441,7 +441,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                           e.stopPropagation();
                           openDetails(p);
                         }}
-                        className="px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent-strong border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
                         title={p.closeSupported ? `Advanced Close ${p.symbol} on ${p.venue} — mode, portion, schedule in the popup; nothing closes until Confirm` : `${p.venue} cannot place live orders through the bot`}
                       >
                         Advanced Close
@@ -486,7 +486,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => closeDetails()}
-                  className="p-1.5 rounded-lg border border-surface-border text-slate-400 hover:text-slate-700 cursor-pointer shrink-0"
+                  className="p-1.5 rounded-lg border border-surface-border text-muted hover:text-slate-700 cursor-pointer shrink-0"
                   title="Close popup (Esc)"
                 >
                   <X className="w-4 h-4" />
@@ -517,7 +517,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                 ))}
               </div>
               {rec.warnings.length > 0 && (
-                <div className="flex items-start gap-2 text-[11px] font-mono text-warn">
+                <div className="flex items-start gap-2 text-[11px] font-mono text-warn-strong">
                   <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-0.5" />
                   <span>{rec.warnings.join(" ")}</span>
                 </div>
@@ -580,7 +580,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                       inputMode="decimal"
                       className={`w-full px-2.5 py-1.5 pr-6 bg-surface border rounded-lg text-xs font-mono font-semibold tabular-nums focus:outline-none focus:ring-1 focus:ring-accent ${pctValid ? "border-surface-border" : "border-loss"}`}
                     />
-                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-mono font-bold text-slate-400 pointer-events-none">%</span>
+                    <span className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] font-mono font-bold text-muted pointer-events-none">%</span>
                   </span>
                 </label>
               </div>
@@ -638,7 +638,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => void cancelSchedule(s.id)}
-                      className="text-slate-400 hover:text-loss cursor-pointer"
+                      className="text-muted hover:text-loss cursor-pointer"
                       title="Cancel this scheduled exit"
                     >
                       <X className="w-3 h-3" />
@@ -661,7 +661,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                   className={`px-3 py-2 rounded-lg text-xs font-mono font-bold transition border cursor-pointer disabled:cursor-not-allowed min-w-32 ${
                     armed
                       ? "bg-loss text-white border-loss-border"
-                      : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-slate-400 disabled:border-surface-border"
+                      : "bg-accent text-white border-accent disabled:bg-surface-raised disabled:text-muted disabled:border-surface-border"
                   }`}
                   title={closeDisabledReason ?? (armed
                     ? scheduleOn

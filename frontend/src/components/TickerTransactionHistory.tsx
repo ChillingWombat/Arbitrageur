@@ -80,13 +80,13 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
         {/* Filter & Search Bar */}
         <div className="flex items-center space-x-2">
           <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-3.5 h-3.5 text-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               placeholder="Filter venue/note..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-8 pr-2.5 py-1 text-xs font-mono bg-surface-raised border border-surface-border rounded-lg text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent w-40 transition-colors"
+              className="pl-8 pr-2.5 py-1 text-xs font-mono bg-surface-raised border border-surface-border rounded-lg text-slate-800 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent w-40 transition-colors"
             />
           </div>
 
@@ -195,7 +195,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     {/* DateTime */}
                     <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
                       <div className="font-semibold text-slate-900">{timeFormatted}</div>
-                      <div className="text-[11px] text-slate-400">{dateFormatted}</div>
+                      <div className="text-[11px] text-muted">{dateFormatted}</div>
                     </td>
 
                     {/* Direction & Action */}
@@ -219,7 +219,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     <td className="py-2.5 px-3 whitespace-nowrap text-slate-800">
                       <div className="flex items-center space-x-1.5">
                         <span className="font-semibold text-slate-900">{log.venue_a}</span>
-                        <ArrowRight className="w-3 h-3 text-slate-400" />
+                        <ArrowRight className="w-3 h-3 text-muted" />
                         <span className="font-semibold text-slate-900">{log.venue_b}</span>
                       </div>
                     </td>
@@ -231,10 +231,10 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           <div className="font-bold text-slate-900">
                             {triggerSpread > 0 ? `+${triggerSpread.toFixed(1)}` : triggerSpread.toFixed(1)} BPS
                           </div>
-                          <div className="text-[11px] text-slate-400">instantaneous</div>
+                          <div className="text-[11px] text-muted">instantaneous</div>
                         </div>
                       ) : (
-                        <span className="text-slate-400">—</span>
+                        <span className="text-muted">—</span>
                       )}
                     </td>
 
@@ -254,14 +254,14 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           )}
                         </div>
                       ) : (
-                        <span className="text-slate-400">—</span>
+                        <span className="text-muted">—</span>
                       )}
                     </td>
 
                     {/* Position Step Number */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-center">
                       <div className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-surface-raised border border-surface-border text-[11px] font-mono font-medium text-slate-700">
-                        <Layers className="w-3 h-3 text-slate-400" />
+                        <Layers className="w-3 h-3 text-muted" />
                         <span>
                           Step {step} / {maxUnits}
                         </span>
@@ -284,7 +284,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                           )}
                         </div>
                       ) : (
-                        <span className="text-slate-400">—</span>
+                        <span className="text-muted">—</span>
                       )}
                     </td>
 
@@ -293,7 +293,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                       <div className={`font-bold tabular-nums ${log.net_profit >= 0 ? "text-profit" : "text-loss"}`}>
                         {formatCurrencyPnl(log.net_profit)}
                       </div>
-                      <div className="text-[11px] text-slate-400">{log.latency_us} µs</div>
+                      <div className="text-[11px] text-muted">{log.latency_us} µs</div>
                     </td>
 
                     {/* Diagnostic Note / Status */}

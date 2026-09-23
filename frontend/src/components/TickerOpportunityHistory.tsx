@@ -30,10 +30,10 @@ const ACTIONABLE = new Set(["triggered", "ready"]);
 
 const STATUS_STYLE: Record<string, string> = {
   ready: "bg-profit-dim text-profit border-profit-border",
-  triggered: "bg-blue-50 text-accent border-blue-200",
+  triggered: "bg-blue-50 text-accent-strong border-blue-200",
   tracking: "bg-slate-100 text-slate-700 border-slate-200",
-  preparing: "bg-warn-dim text-warn border-warn-border",
-  "no-data": "bg-slate-50 text-slate-400 border-slate-200",
+  preparing: "bg-warn-dim text-warn-strong border-warn-border",
+  "no-data": "bg-slate-50 text-muted border-slate-200",
 };
 
 const statusChip = (s: string | null) => {
@@ -123,12 +123,12 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2 mb-2.5">
         <div className="relative flex-1 min-w-[140px] max-w-[240px]">
-          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+          <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted" />
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Filter symbol / venue…"
-            className="w-full pl-8 pr-2 py-1.5 text-xs bg-surface-raised border border-surface-border rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition"
+            className="w-full pl-8 pr-2 py-1.5 text-xs bg-surface-raised border border-surface-border rounded-lg text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition"
           />
         </div>
         <button
@@ -136,7 +136,7 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
           onClick={() => setDetectedOnly((v) => !v)}
           className={`px-2 py-1.5 rounded-lg border text-[11px] font-semibold transition cursor-pointer ${
             detectedOnly
-              ? "bg-accent-dim text-accent border-accent-line"
+              ? "bg-accent-dim text-accent-strong border-accent-line"
               : "bg-surface text-slate-600 border-surface-border hover:bg-surface-raised"
           }`}
           title="Detected only = transitions into triggered/ready. Off = the full lifecycle audit including heartbeats and drop-outs."
@@ -148,14 +148,14 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
           onClick={() => setAllTickers((v) => !v)}
           className={`px-2 py-1.5 rounded-lg border text-[11px] font-semibold transition cursor-pointer ${
             allTickers
-              ? "bg-accent-dim text-accent border-accent-line"
+              ? "bg-accent-dim text-accent-strong border-accent-line"
               : "bg-surface text-slate-600 border-surface-border hover:bg-surface-raised"
           }`}
           title={allTickers ? "Showing every ticker's detections" : `Scoped to ${symbol || "the selected ticker"}`}
         >
           {allTickers ? "All tickers" : symbol || "This ticker"}
         </button>
-        <span className="ml-auto inline-flex items-center text-[10px] text-slate-400">
+        <span className="ml-auto inline-flex items-center text-[10px] text-muted">
           durable audit log
           <InfoTooltip text="Every row is a persisted monitor event: status transitions plus a heartbeat each minute while a signal stays active. 'Detected only' keeps transitions into triggered/ready — the moments an actionable spread edge appeared." />
         </span>
@@ -163,7 +163,7 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
 
       {/* Body */}
       {!loaded ? (
-        <div className="py-8 text-center text-xs text-slate-400">Loading opportunity history…</div>
+        <div className="py-8 text-center text-xs text-muted">Loading opportunity history…</div>
       ) : error ? (
         <EmptyState
           icon={Radar}
@@ -230,7 +230,7 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
                     <span className="inline-flex items-center gap-1 text-slate-700">
                       <VenueLogo venueId={e.buyVenue} name={e.buyVenue} size={14} />
                       {e.buyVenue}
-                      <span className="text-slate-400">→</span>
+                      <span className="text-muted">→</span>
                       <VenueLogo venueId={e.sellVenue} name={e.sellVenue} size={14} />
                       {e.sellVenue}
                     </span>
@@ -238,7 +238,7 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
                   <td className="py-1.5 px-3 whitespace-nowrap">
                     <span className="inline-flex items-center gap-1">
                       {statusChip(e.oldStatus)}
-                      <span className="text-slate-400">→</span>
+                      <span className="text-muted">→</span>
                       {statusChip(e.newStatus)}
                     </span>
                   </td>
@@ -258,7 +258,7 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
                   <td className="py-1.5 px-3 text-right whitespace-nowrap">
                     <span
                       className={`text-[10px] font-semibold ${
-                        e.trigger === "transition" ? "text-accent" : "text-slate-400"
+                        e.trigger === "transition" ? "text-accent-strong" : "text-muted"
                       }`}
                       title={
                         e.trigger === "transition"

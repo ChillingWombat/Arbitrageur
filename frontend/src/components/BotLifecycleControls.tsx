@@ -83,7 +83,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
             icon: <ArrowDown className="w-3 h-3" />,
             enabled: availability.reduceOnly,
             onClick: onReduceOnly ?? (() => {}),
-            activeClass: "text-warn hover:bg-warn-dim border-warn-border",
+            activeClass: "text-warn-strong hover:bg-warn-dim border-warn-border",
           },
         ]
       : []),
@@ -118,7 +118,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
             disabled={!b.enabled}
             onClick={b.onClick}
             className={`flex items-center space-x-1 px-2 py-2 rounded-lg border text-xs font-mono font-bold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed ${
-              b.enabled ? b.activeClass : "text-slate-400 border-surface-border bg-surface-raised/40"
+              b.enabled ? b.activeClass : "text-muted border-surface-border bg-surface-raised/40"
             }`}
           >
             {b.icon}
@@ -127,7 +127,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
         ))}
       </div>
       {phaseLabel && (
-        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn border border-warn-border">
+        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn-strong border border-warn-border">
           {phaseLabel}
         </span>
       )}

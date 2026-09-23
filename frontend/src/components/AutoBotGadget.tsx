@@ -43,7 +43,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           tone === "armed"
             ? "bg-profit-dim text-profit border-profit-border"
             : tone === "draining"
-              ? "bg-warn-dim text-warn border-warn-border"
+              ? "bg-warn-dim text-warn-strong border-warn-border"
               : "bg-surface-raised text-slate-600 border-surface-border"
         }`}
         title={

@@ -92,14 +92,14 @@ export const Navigation: React.FC<NavigationProps> = ({
             onClick={() => onSelectTab(t.id)}
             className={`relative h-full flex items-center justify-center space-x-1.5 px-2 lg:px-2 text-xs transition-colors select-none group cursor-pointer ${
               isActive
-                ? "text-accent font-sans font-bold bg-surface"
+                ? "text-accent-strong font-sans font-bold bg-surface"
                 : "text-slate-600 hover:text-slate-900 hover:bg-slate-50/70 font-sans font-medium"
             }`}
             title={t.label}
           >
             <Icon
               className={`w-3.5 h-3.5 transition-colors shrink-0 ${
-                isActive ? "text-accent" : "text-slate-400 group-hover:text-slate-600"
+                isActive ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
               }`}
             />
             <span className="truncate tracking-tight font-sans text-xs">
@@ -113,7 +113,7 @@ export const Navigation: React.FC<NavigationProps> = ({
                   className={`px-1.5 py-0.5 rounded-full text-[11px] font-bold font-mono min-w-[18px] text-center leading-none transition-all ${
                     isActive
                       ? "bg-accent text-white shadow-2xs"
-                      : "bg-accent-dim text-accent border border-accent-line/60"
+                      : "bg-accent-dim text-accent-strong border border-accent-line/60"
                   }`}
                 >
                   {t.badge}

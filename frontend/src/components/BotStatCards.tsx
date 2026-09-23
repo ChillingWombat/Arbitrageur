@@ -29,12 +29,12 @@ export const BotStatCards: React.FC<{ stats: BotCycleStats | null }> = ({ stats 
       <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card space-y-1 hover:border-slate-300 transition-all">
         <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">Total Net Profit</span>
         <div
-          className={`text-xl font-bold font-mono tracking-tight tabular-nums ${unknown || stats?.netProfitUsd == null ? "text-slate-400" : stats.netProfitUsd >= 0 ? "text-profit" : "text-loss"}`}
+          className={`text-xl font-bold font-mono tracking-tight tabular-nums ${unknown || stats?.netProfitUsd == null ? "text-muted" : stats.netProfitUsd >= 0 ? "text-profit" : "text-loss"}`}
           title={profitTitle}
         >
           {unknown ? "—" : fmtMoney(stats?.netProfitUsd ?? null)}
         </div>
-        <div className="text-xs font-mono tabular-nums text-slate-400" title={profitTitle}>
+        <div className="text-xs font-mono tabular-nums text-muted" title={profitTitle}>
           {unknown ? "—" : fmtBps(stats?.netProfitBps ?? null)}
         </div>
       </div>

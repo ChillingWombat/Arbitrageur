@@ -36,7 +36,7 @@ test("Reduce Only is enabled when bot is running with open positions", () => {
     })
   );
 
-  assert.match(html, /text-warn/);
+  assert.match(html, /text-warn-strong/);
 });
 
 test("Reduce Only is disabled when bot is idle without open positions", () => {

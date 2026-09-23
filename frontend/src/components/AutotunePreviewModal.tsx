@@ -169,7 +169,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
       <div className="bg-surface border border-surface-border rounded-2xl w-[860px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
               <FlaskConical className="w-4 h-4" />
             </div>
             <div>
@@ -184,7 +184,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
+            className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
             title="Close preview (ESC)"
           >
             <X className="w-4 h-4" />
@@ -216,7 +216,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
                 )}
               </p>
               {recommendation.readiness.blockers.map((b, i) => (
-                <p key={i} className="text-amber-600">· {b}</p>
+                <p key={i} className="text-amber-700">· {b}</p>
               ))}
             </div>
           )}
@@ -269,7 +269,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
                       </td>
                       <td className="py-1.5 pr-2 font-bold text-slate-800 whitespace-nowrap">
                         {AUTOTUNE_PARAM_LABELS[row.param] ?? row.param}
-                        <span className="block font-normal text-slate-400 text-[10px]">{row.formula_id}</span>
+                        <span className="block font-normal text-muted text-[10px]">{row.formula_id}</span>
                       </td>
                       <td className="py-1.5 pr-2 text-slate-600 whitespace-nowrap">
                         {formatValue(row.param, row.current)}
@@ -287,7 +287,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
                         >
                           {row.status}
                         </span>
-                        <span className="block text-slate-400 text-[10px]">{row.confidence}</span>
+                        <span className="block text-muted text-[10px]">{row.confidence}</span>
                       </td>
                       <td className="py-1.5 pr-2 text-slate-500 max-w-44 break-words">{row.fit_metric}</td>
                       <td className="py-1.5 pr-2 text-slate-500 max-w-44 break-words">
@@ -295,7 +295,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
                       </td>
                       <td className="py-1.5 pr-2 text-slate-500 max-w-56 break-words">
                         {row.rationale}
-                        <span className="block text-slate-400 text-[10px]">n={row.n}</span>
+                        <span className="block text-muted text-[10px]">n={row.n}</span>
                       </td>
                     </tr>
                   );
@@ -328,7 +328,7 @@ export const AutotunePreviewModal: React.FC<AutotunePreviewModalProps> = ({
               </option>
             </select>
             {modeInfo?.last_run_ms != null && (
-              <span className="text-[10px] text-slate-400">
+              <span className="text-[10px] text-muted">
                 last {new Date(modeInfo.last_run_ms).toLocaleTimeString()}
               </span>
             )}

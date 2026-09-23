@@ -248,9 +248,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               }`}
               className={`p-1.5 rounded-lg border transition flex items-center justify-center relative cursor-pointer ${
                 showSortMenu
-                  ? "bg-accent/10 border-accent text-accent"
+                  ? "bg-accent/10 border-accent text-accent-strong"
                   : sortOption !== "name"
-                  ? "bg-accent/5 border-accent-line text-accent"
+                  ? "bg-accent/5 border-accent-line text-accent-strong"
                   : "bg-surface-raised border-surface-border text-slate-600 hover:text-slate-900 hover:border-slate-300"
               }`}
             >
@@ -262,7 +262,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
 
             {showSortMenu && (
               <div className="absolute right-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
-                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-surface-border/60">
+                <div className="px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-muted border-b border-surface-border/60">
                   Sort Positions
                 </div>
                 {(
@@ -280,7 +280,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     }}
                     className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
                       sortOption === id
-                        ? "bg-accent/10 text-accent font-semibold"
+                        ? "bg-accent/10 text-accent-strong font-semibold"
                         : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
                     }`}
                   >
@@ -288,7 +288,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                       <Icon className="w-3.5 h-3.5 text-slate-500" />
                       <span>{label}</span>
                     </div>
-                    {sortOption === id && <Check className="w-3.5 h-3.5 text-accent" />}
+                    {sortOption === id && <Check className="w-3.5 h-3.5 text-accent-strong" />}
                   </button>
                 ))}
               </div>
@@ -359,7 +359,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     </span>
                     {isReduce && (
                       <span
-                        className="text-[9px] px-1.5 py-0.2 rounded bg-warn-dim text-warn font-mono font-bold border border-warn-border whitespace-nowrap"
+                        className="text-[9px] px-1.5 py-0.2 rounded bg-warn-dim text-warn-strong font-mono font-bold border border-warn-border whitespace-nowrap"
                         title="Reduce-Only: No new step increases; position closes on target profit"
                       >
                         Reduce-Only
@@ -376,13 +376,13 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     mark-to-market PnL under the position sizes. */}
                 <div className="flex flex-col items-end space-y-0.5 shrink-0 font-mono">
                   <div className="flex items-baseline space-x-1.5 text-xs">
-                    <span className="text-slate-400 font-sans text-[10px] font-semibold">Long</span>
+                    <span className="text-muted font-sans text-[10px] font-semibold">Long</span>
                     <span className="tabular-nums font-semibold text-slate-800">
                       {formatQty(longSum)}
                     </span>
                   </div>
                   <div className="flex items-baseline space-x-1.5 text-xs">
-                    <span className="text-slate-400 font-sans text-[10px] font-semibold">Short</span>
+                    <span className="text-muted font-sans text-[10px] font-semibold">Short</span>
                     <span className="tabular-nums font-semibold text-slate-800">
                       {formatQty(shortSum)}
                     </span>
@@ -428,7 +428,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 isTripped
                   ? "bg-loss-dim border-loss-border text-loss"
                   : isPaused
-                  ? "bg-warn-dim border-warn-border text-warn"
+                  ? "bg-warn-dim border-warn-border text-warn-strong"
                   : "bg-profit-dim border-profit-border text-profit"
               }`}
               title={
@@ -465,7 +465,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           }`}
           title="Open Portfolio Monitor (Consolidated DeltaGuard, Margins &amp; Strategy Performance)"
         >
-          <Activity className={`w-3.5 h-3.5 ${isPortfolioActive ? "text-white" : "text-accent"}`} />
+          <Activity className={`w-3.5 h-3.5 ${isPortfolioActive ? "text-white" : "text-accent-strong"}`} />
           <span>Portfolio Monitor</span>
         </button>
 
@@ -495,7 +495,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           {/* Header */}
           <div className="px-3 py-1.5 border-b border-surface-border flex items-center justify-between text-[11px] font-mono font-bold text-slate-700">
             <span className="truncate">{contextMenu.position.symbol}</span>
-            <span className="text-slate-400 font-normal uppercase text-[10px]">
+            <span className="text-muted font-normal uppercase text-[10px]">
               {STRATEGY_SHORT[contextMenu.position.strategyId] ?? contextMenu.position.strategyId}
             </span>
           </div>
@@ -507,12 +507,12 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               onClick={() => handleToggleReduceOnly(contextMenu.position)}
               className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-warn-dim/40 cursor-pointer group"
             >
-              <TrendingDown className="w-4 h-4 text-warn shrink-0 mt-0.5" />
+              <TrendingDown className="w-4 h-4 text-warn-strong shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-slate-800 group-hover:text-slate-900 flex items-center justify-between">
                   <span>Reduce Only</span>
                   {isPositionReduceOnly(contextMenu.position.symbol) && (
-                    <span className="text-[10px] text-warn font-mono font-bold">Active</span>
+                    <span className="text-[10px] text-warn-strong font-mono font-bold">Active</span>
                   )}
                 </div>
                 <p className="text-[10px] text-slate-500 mt-0.5 leading-tight">
@@ -547,11 +547,11 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               onClick={() => void handleClearNonEmergently(contextMenu.position)}
               className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-blue-50/70 cursor-pointer group disabled:opacity-50"
             >
-              <Clock className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+              <Clock className="w-4 h-4 text-accent-strong shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-slate-800 group-hover:text-slate-900 flex items-center justify-between">
                   <span>Clear Non-Emergently</span>
-                  <span className="text-[9px] font-mono uppercase bg-accent/10 text-accent px-1 rounded">Limit</span>
+                  <span className="text-[9px] font-mono uppercase bg-accent/10 text-accent-strong px-1 rounded">Limit</span>
                 </div>
                 <p className="text-[10px] text-slate-500 mt-0.5 leading-tight">
                   Attempts passive limit pegged inside spread first, falling back to market on timeout.

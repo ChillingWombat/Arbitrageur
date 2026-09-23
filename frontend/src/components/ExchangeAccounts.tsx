@@ -542,7 +542,7 @@ const SignerAddressHint: React.FC<{
     if (activeError) {
       activeLine = {
         text: "unable to read live adapter signer",
-        cls: "text-amber-600",
+        cls: "text-amber-700",
       };
     } else if (!active) {
       activeLine = {
@@ -557,7 +557,7 @@ const SignerAddressHint: React.FC<{
     } else if (typedAddr) {
       activeLine = {
         text: `live adapter still signs as ${active} — save this key before trading`,
-        cls: "text-amber-600",
+        cls: "text-amber-700",
       };
     } else if (storedAddr) {
       activeLine = {
@@ -578,7 +578,7 @@ const SignerAddressHint: React.FC<{
       {(addr || invalid) && (
         <p
           className={`text-[10px] mt-1 leading-tight font-mono break-all ${
-            invalid ? "text-amber-600" : "text-slate-500"
+            invalid ? "text-amber-700" : "text-slate-500"
           }`}
         >
           {addr
@@ -657,7 +657,7 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               <button
                 type="button"
                 onClick={() => toggleShow(f.key)}
-                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 transition cursor-pointer disabled:opacity-40"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted hover:text-slate-700 transition cursor-pointer disabled:opacity-40"
                 disabled={disabled}
                 title={shown ? "Hide" : "Show"}
                 aria-label={shown ? `Hide ${f.label}` : `Show ${f.label}`}
@@ -667,7 +667,7 @@ const CredentialGrid: React.FC<CredGridProps> = ({
             )}
           </div>
           {f.hint && (
-            <p className="text-[10px] text-slate-400 mt-1 leading-tight">{f.hint}</p>
+            <p className="text-[10px] text-muted mt-1 leading-tight">{f.hint}</p>
           )}
           {f.evmSigner && (
             <SignerAddressHint
@@ -701,7 +701,7 @@ export const VenueBalancePanel: React.FC<{
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 font-mono">
         {/* Metric 1: Equity */}
         <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-          <div className="flex items-center justify-between text-slate-400">
+          <div className="flex items-center justify-between text-muted">
             <span className="text-xs font-bold tracking-wider">Total Equity</span>
             <span className="text-xs">USD</span>
           </div>
@@ -714,7 +714,7 @@ export const VenueBalancePanel: React.FC<{
 
         {/* Metric 2: Available Margin */}
         <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-          <div className="flex items-center justify-between text-slate-400">
+          <div className="flex items-center justify-between text-muted">
             <span className="text-xs font-bold tracking-wider">Available Margin</span>
             <span className="text-xs">USD</span>
           </div>
@@ -727,7 +727,7 @@ export const VenueBalancePanel: React.FC<{
 
         {/* Metric 3: Margin Rate */}
         <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1">
-          <div className="flex items-center justify-between text-slate-400">
+          <div className="flex items-center justify-between text-muted">
             <span className="text-xs font-bold tracking-wider">Margin Rate</span>
             <span className="text-xs">Utilization</span>
           </div>
@@ -735,7 +735,7 @@ export const VenueBalancePanel: React.FC<{
             {bal?.margin_rate_pct != null ? (
               <>
                 <span>{bal.margin_rate_pct.toFixed(1)}%</span>
-                <span className="text-xs font-normal text-slate-400 font-sans">utilized</span>
+                <span className="text-xs font-normal text-muted font-sans">utilized</span>
               </>
             ) : (
               <span>N/A</span>
@@ -783,8 +783,8 @@ export const VenueBalancePanel: React.FC<{
       )}
 
       {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && bal?.status !== "EMPTY" && (
-        <div className="p-2.5 bg-warn-dim border border-warn-border rounded-lg text-xs font-mono text-warn flex items-start space-x-2">
-          <AlertTriangle className="w-3.5 h-3.5 text-warn shrink-0 mt-0.5" />
+        <div className="p-2.5 bg-warn-dim border border-warn-border rounded-lg text-xs font-mono text-warn-strong flex items-start space-x-2">
+          <AlertTriangle className="w-3.5 h-3.5 text-warn-strong shrink-0 mt-0.5" />
           <span>{bal.recommended_action}</span>
         </div>
       )}
@@ -897,9 +897,9 @@ const PopdexAgentToolkit: React.FC<{
       >
         <div className="flex items-center justify-between">
           <h3 className="text-sm font-bold font-mono text-slate-900 flex items-center gap-2">
-            <KeyRound className="w-4 h-4 text-accent" /> PopDEX Agent Setup Toolkit
+            <KeyRound className="w-4 h-4 text-accent-strong" /> PopDEX Agent Setup Toolkit
           </h3>
-          <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 text-lg leading-none px-2" aria-label="Close">
+          <button type="button" onClick={onClose} className="text-muted hover:text-slate-700 text-lg leading-none px-2" aria-label="Close">
             ×
           </button>
         </div>
@@ -927,7 +927,7 @@ const PopdexAgentToolkit: React.FC<{
             </button>
           ))}
           {network === "testnet" && (
-            <span className="text-[10px] font-sans text-slate-400">free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button></span>
+            <span className="text-[10px] font-sans text-muted">free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button></span>
           )}
         </div>
 
@@ -941,7 +941,7 @@ const PopdexAgentToolkit: React.FC<{
             spellCheck={false}
             className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p className="text-[10px] font-sans text-slate-400">
+          <p className="text-[10px] font-sans text-muted">
             Must already hold a deposit — the chain rejects every transaction (error -32000) until the first deposit.{" "}
             {network === "testnet" ? (
               <>Claim free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button>, then deposit in the <button type="button" onClick={() => openDoc(POPDEX_TESTNET_APP, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">testnet app</button>.</>
@@ -965,8 +965,8 @@ const PopdexAgentToolkit: React.FC<{
             </button>
           ) : (
             <div className="space-y-1.5">
-              <div className="text-[11px] font-mono break-all"><span className="text-slate-400">Address: </span><span className="text-slate-900">{agentAddr}</span></div>
-              <div className="text-[11px] font-mono break-all"><span className="text-slate-400">Private key: </span><span className="text-loss font-bold">{agentKey.slice(0, 10)}…{agentKey.slice(-6)} (shown once)</span></div>
+              <div className="text-[11px] font-mono break-all"><span className="text-muted">Address: </span><span className="text-slate-900">{agentAddr}</span></div>
+              <div className="text-[11px] font-mono break-all"><span className="text-muted">Private key: </span><span className="text-loss font-bold">{agentKey.slice(0, 10)}…{agentKey.slice(-6)} (shown once)</span></div>
               <div className="flex gap-2">
                 <button type="button" onClick={() => { onUseKey(agentKey, main.trim()); setKeyUsed(true); }} className={btnAccent}>
                   <Check className="w-3.5 h-3.5" /> {keyUsed ? "Filled into account ✓" : "Use this key + main address in the account form"}
@@ -979,7 +979,7 @@ const PopdexAgentToolkit: React.FC<{
                   setCheck(null);
                 })} className={btnGhost}>Regenerate</button>
               </div>
-              {!keyUsed && <p className="text-[10px] font-sans text-warn">Not saved yet — press “Use this key”, then “Save Changes” on the card.</p>}
+              {!keyUsed && <p className="text-[10px] font-sans text-warn-strong">Not saved yet — press “Use this key”, then “Save Changes” on the card.</p>}
             </div>
           )}
         </div>
@@ -1069,7 +1069,7 @@ const PopdexAgentToolkit: React.FC<{
               </span>
             )}
           </div>
-          {check?.approved && !keyUsed && <p className="text-[10px] font-sans text-warn">Approved on-chain — press “Use this key” in step 2, then “Save Changes”.</p>}
+          {check?.approved && !keyUsed && <p className="text-[10px] font-sans text-warn-strong">Approved on-chain — press “Use this key” in step 2, then “Save Changes”.</p>}
         </div>
 
         {error && (
@@ -1334,20 +1334,20 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             }}
             placeholder={`${venueDisplay(account.venue)} Account ${ordinal}`}
             title="Account label used in strategy routing"
-            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent"
           />
           <span
             className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold tracking-wide shrink-0 border ${
               account.environment === "live"
                 ? "bg-loss-dim/40 text-loss border-loss-border/60"
-                : "bg-accent/10 text-accent border-accent/30"
+                : "bg-accent/10 text-accent-strong border-accent/30"
             }`}
             title={`This account's credentials bind to the ${account.environment === "live" ? "live production" : "testnet/demo"} environment`}
           >
             {account.environment === "live" ? "LIVE" : "TESTNET"}
           </span>
           {account.isDefault ? (
-            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
+            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn-strong border border-warn-border tracking-wide shrink-0">
               Default Account
             </span>
           ) : (
@@ -1355,7 +1355,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
               type="button"
               disabled={busy}
               onClick={() => void handleSetDefault()}
-              className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+              className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn-strong hover:border-warn-border transition cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
               title="Set this account as the venue default"
             >
               Set As Default
@@ -1367,7 +1367,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             type="button"
             disabled={busy}
             onClick={handleDelete}
-            className="p-1.5 text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
+            className="p-1.5 text-muted hover:text-loss disabled:opacity-40 transition cursor-pointer"
             title="Delete this account and its stored credentials"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -1394,7 +1394,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             <span className="w-2 h-2 rounded-full bg-slate-400" />
             <span>Account is disabled — live balance and trading are paused.</span>
           </div>
-          <span className="text-slate-400">Toggle switch above to enable</span>
+          <span className="text-muted">Toggle switch above to enable</span>
         </div>
       ) : (
         <VenueBalancePanel
@@ -1411,7 +1411,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
           <div className="text-xs font-mono">
             <label className="text-slate-600 block mb-1">
               Account Tier{" "}
-              <span className="text-slate-400">
+              <span className="text-muted">
                 (rate-limit budget — lowest tier on this IP wins)
               </span>
               :
@@ -1459,7 +1459,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
         />
 
         <div className="flex items-center justify-between pt-1">
-          <div className="text-xs font-mono text-slate-400">
+          <div className="text-xs font-mono text-muted">
             {account.credentialsConfigured === null
               ? "Unlock the vault to manage credentials"
               : account.credentialsConfigured
@@ -1470,7 +1470,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             <button
               type="button"
               onClick={() => setToolkitOpen(true)}
-              className="w-full mt-1 px-3 py-2 rounded-lg text-xs font-mono font-bold bg-accent-dim border border-accent-line text-accent hover:brightness-95 transition cursor-pointer flex items-center justify-center gap-1.5"
+              className="w-full mt-1 px-3 py-2 rounded-lg text-xs font-mono font-bold bg-accent-dim border border-accent-line text-accent-strong hover:brightness-95 transition cursor-pointer flex items-center justify-center gap-1.5"
               title="Generate an agent key, approve it in your own wallet, verify on-chain"
             >
               <KeyRound className="w-3.5 h-3.5" /> Agent Setup Toolkit — generate key & approve
@@ -1606,10 +1606,10 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
               if (e.key === "Enter") void handleCreate();
             }}
             autoFocus={nextOrdinal > 1}
-            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent"
+            className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {!hasDefault && (
-            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn border border-warn-border tracking-wide shrink-0">
+            <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn-strong border border-warn-border tracking-wide shrink-0">
               Default
             </span>
           )}
@@ -1652,7 +1652,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
           toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
         />
         {locked && (
-          <p className="text-xs font-mono text-warn">
+          <p className="text-xs font-mono text-warn-strong">
             Vault is locked: the account can be created now, but credentials require an unlocked vault.
           </p>
         )}
@@ -1669,7 +1669,7 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
             <button
               type="button"
               onClick={() => setToolkitOpen(true)}
-              className="px-3 py-2 rounded-lg text-xs font-mono font-bold bg-accent-dim border border-accent-line text-accent hover:brightness-95 transition cursor-pointer flex items-center gap-1.5"
+              className="px-3 py-2 rounded-lg text-xs font-mono font-bold bg-accent-dim border border-accent-line text-accent-strong hover:brightness-95 transition cursor-pointer flex items-center gap-1.5"
               title="Generate an agent key, approve it in your own wallet, verify on-chain"
             >
               <KeyRound className="w-3.5 h-3.5" /> Agent Setup Toolkit — generate key & approve
@@ -1748,7 +1748,7 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
 
       {environment === "testnet" && !venueHasTestnet(venue) && (
         <div className="flex items-start gap-2 px-3 py-2 rounded-lg border bg-warn-dim/40 border-warn-border text-[11px] font-mono text-slate-700">
-          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn" />
+          <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn-strong" />
           <span>
             {venueDisplay(venue)} has no public testnet — accounts created now bind to Testnet
             but stay ineligible until the venue exposes a demo endpoint. Switch to Live Trading
@@ -1870,7 +1870,7 @@ export const AddAccountSlot: React.FC<{
       type="button"
       onClick={() => setAdding(true)}
       disabled={locked}
-      className="w-full min-h-[118px] border border-dashed border-surface-border rounded-lg bg-transparent hover:bg-surface-raised/60 hover:border-accent-line flex flex-col items-center justify-center gap-1.5 text-slate-400 hover:text-accent transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+      className="w-full min-h-[118px] border border-dashed border-surface-border rounded-lg bg-transparent hover:bg-surface-raised/60 hover:border-accent-line flex flex-col items-center justify-center gap-1.5 text-muted hover:text-accent-strong transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
     >
       <Plus className="w-5 h-5" />
       <span className="text-xs font-mono font-semibold">Add Another Account</span>
@@ -1934,7 +1934,7 @@ export const AccountLabelControl: React.FC<{
         if (e.key === "Enter") account && saveLabel((e.target as HTMLInputElement).value);
         if (e.key === "Escape") setEditing(null);
       }}
-      className="w-40 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+      className="w-40 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
     />
   );
 };
@@ -1982,7 +1982,7 @@ export const VenueDefaultControl: React.FC<{
           })
           .finally(() => setBusy(false));
       }}
-      className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
+      className="px-2 py-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-500 hover:text-warn-strong hover:border-warn-border transition cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-slate-500 disabled:hover:border-surface-border"
       title={
         !account
           ? "No account configured for this venue"
@@ -2044,7 +2044,7 @@ export const AccountCredentialsDelete: React.FC<{
           )
           .finally(() => setBusy(false));
       }}
-      className="p-1.5 text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
+      className="p-1.5 text-muted hover:text-loss disabled:opacity-40 transition cursor-pointer"
       title={`Remove stored credentials for ${account.label}`}
     >
       <Trash2 className="w-3.5 h-3.5" />
@@ -2319,7 +2319,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
         <button
           type="button"
           onClick={() => setAdding((v) => !v)}
-          className="px-2 py-2 rounded-lg border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
+          className="px-2 py-2 rounded-lg border border-accent-line/60 bg-blue-50/60 hover:bg-blue-100/70 text-accent-strong text-xs font-mono font-bold flex items-center gap-1 transition cursor-pointer shrink-0"
         >
           <Plus className="w-3 h-3" />
           <span>Add Route</span>
@@ -2344,7 +2344,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
             <span className="text-slate-600 truncate">
               {venueDisplay(r.accountAVenue)}:{accountName(r.accountAId, r.accountALabel)}
             </span>
-            <ArrowLeftRight className="w-3 h-3 text-slate-400 shrink-0" />
+            <ArrowLeftRight className="w-3 h-3 text-muted shrink-0" />
             <span className="text-slate-600 truncate">
               {venueDisplay(r.accountBVenue)}:{accountName(r.accountBId, r.accountBLabel)}
             </span>
@@ -2362,7 +2362,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               type="button"
               disabled={busy}
               onClick={() => void handleDelete(r)}
-              className="text-slate-400 hover:text-loss disabled:opacity-40 transition cursor-pointer"
+              className="text-muted hover:text-loss disabled:opacity-40 transition cursor-pointer"
               title="Delete route"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -2386,7 +2386,7 @@ export const StrategyRouteCard: React.FC<StrategyRouteCardProps> = ({ strategy, 
               }}
               onAccount={setAcctA}
             />
-            <ArrowLeftRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <ArrowLeftRight className="w-3.5 h-3.5 text-muted shrink-0" />
             <RouteLegPicker
               accounts={accounts}
               venue={venueB}
@@ -2475,7 +2475,7 @@ export const StrategyRoutingPanel: React.FC = () => {
         <button
           type="button"
           onClick={() => void reload()}
-          className="p-1.5 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+          className="p-1.5 text-muted hover:text-slate-600 transition cursor-pointer"
           title="Refresh routes"
         >
           <RefreshCw className="w-3.5 h-3.5" />

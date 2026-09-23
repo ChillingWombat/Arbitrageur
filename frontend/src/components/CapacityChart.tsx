@@ -199,7 +199,7 @@ export const CapacityChart: React.FC<CapacityChartProps> = ({
           </g>
         ))}
         {zeroY != null && (
-          <line x1={PAD.l} y1={zeroY} x2={W - PAD.r} y2={zeroY} stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" className="text-slate-400" />
+          <line x1={PAD.l} y1={zeroY} x2={W - PAD.r} y2={zeroY} stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" className="text-muted" />
         )}
         {/* x ticks */}
         {xTicks.map((t) => (

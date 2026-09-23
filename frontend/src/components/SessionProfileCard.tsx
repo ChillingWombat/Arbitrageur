@@ -73,7 +73,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
         )}
       </label>
       {unavailable || profile == null ? (
-        <div className="text-xs text-slate-400">
+        <div className="text-xs text-muted">
           {unavailable
             ? "Session profiles unavailable — open the desktop app to calibrate."
             : "Loading session aggregates…"}
@@ -82,7 +82,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {profile.isWeekend && (
-              <span className="px-2 py-0.5 rounded-md border border-warn-border bg-warn-dim text-warn font-medium">
+              <span className="px-2 py-0.5 rounded-md border border-warn-border bg-warn-dim text-warn-strong font-medium">
                 weekend x0.5
               </span>
             )}
@@ -99,13 +99,13 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
             </span>
           </div>
           {profile.sessions.length === 0 ? (
-            <div className="text-xs text-slate-400">
+            <div className="text-xs text-muted">
               No calibrated sessions yet — history accumulates while order books are polled.
             </div>
           ) : (
             <table className="w-full text-xs font-mono tabular-nums">
               <thead>
-                <tr className="text-slate-400 text-left border-b border-surface-border">
+                <tr className="text-muted text-left border-b border-surface-border">
                   <th className="py-1.5 pr-2 font-medium">Session</th>
                   <th className="py-1.5 pr-2 font-medium text-right">Episodes</th>
                   <th className="py-1.5 pr-2 font-medium text-right">Med bps</th>
@@ -124,7 +124,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
                   >
                     <td className="py-1 pr-2">
                       {s.sessionId}
-                      {s.provisional && <span className="text-slate-400"> *</span>}
+                      {s.provisional && <span className="text-muted"> *</span>}
                     </td>
                     <td className="py-1 pr-2 text-right">{s.nEpisodes}</td>
                     <td className="py-1 pr-2 text-right">{fmtMed(s.medAbsSpreadBps)}</td>
@@ -134,7 +134,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
               </tbody>
             </table>
           )}
-          <div className="text-xs text-slate-400">* provisional — neutral x1.0, flagged</div>
+          <div className="text-xs text-muted">* provisional — neutral x1.0, flagged</div>
           <div className="flex flex-wrap items-center gap-2 text-xs pt-1">
             <span className="text-slate-500">
               {profile.promotion == null
@@ -155,7 +155,7 @@ export const SessionProfileCard: React.FC<SessionProfileCardProps> = ({ symbol }
             <div className="text-xs text-slate-500">{promoResult}</div>
           )}
           {profile.promotion != null && (
-            <div className="text-xs text-slate-400" title={profile.promotion.reason}>
+            <div className="text-xs text-muted" title={profile.promotion.reason}>
               fit {profile.promotion.fitDeltaBps.toFixed(1)} / val {profile.promotion.valDeltaBps.toFixed(1)} bps
             </div>
           )}

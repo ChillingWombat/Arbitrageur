@@ -425,7 +425,7 @@ function SignalTrendGadgetInner({
                   {venueName(row.vid)}
                 </span>
                 {displayDev === null ? (
-                  <span className="tabular-nums font-bold text-slate-400">—</span>
+                  <span className="tabular-nums font-bold text-muted">—</span>
                 ) : (
                   <span
                     className={`tabular-nums font-bold ${
@@ -436,7 +436,7 @@ function SignalTrendGadgetInner({
                   </span>
                 )}
                 {cold && ageLabel && (
-                  <span className="tabular-nums text-slate-400">{ageLabel} ago</span>
+                  <span className="tabular-nums text-muted">{ageLabel} ago</span>
                 )}
               </span>
             );
@@ -618,7 +618,7 @@ function SignalTrendGadgetInner({
 
       {/* Footer: honesty indicators — how much real history backs this view */}
       {series && (
-        <div className="flex items-center justify-between text-xs text-slate-400 px-0.5">
+        <div className="flex items-center justify-between text-xs text-muted px-0.5">
           <span>
             {series.sample_count.toLocaleString()} venue samples in window
             {historyLabel ? ` · ${historyLabel} recorded` : ""}

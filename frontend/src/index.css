@@ -18,7 +18,7 @@
     --accent-soft: #edf4ff;
     --accent-line: #bae0ff;
     --muted: #f8f9fb;
-    --muted-foreground: #6c7b8a;
+    --muted-foreground: #57687a;
     --ring: #1677ff;
     --color-bg: #f4f5f8;
     --color-surface: #ffffff;
@@ -115,6 +115,23 @@
   ::-webkit-scrollbar-thumb:hover {
     background: #94a3b8;
   }
+
+  /* Browser surfaces themed from the palette — selection, caret, form
+     accents, and link underlines all carry the same blue as controls. */
+  ::selection {
+    background: #bae0ff;
+    color: #141923;
+  }
+  input, textarea, [contenteditable="true"] {
+    caret-color: #1677ff;
+  }
+  input[type="checkbox"], input[type="radio"], progress {
+    accent-color: #1677ff;
+  }
+  a {
+    text-underline-offset: 2px;
+    text-decoration-thickness: 1px;
+  }
 }
 
 @layer components {
@@ -146,7 +163,7 @@
 
   /* Standardized inputs */
   .input-field {
-    @apply bg-surface border border-surface-border rounded-lg px-2 py-2 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all duration-150;
+    @apply bg-surface border border-surface-border rounded-lg px-2 py-2 text-xs text-slate-800 placeholder:text-muted focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 transition-all duration-150;
   }
 
   /* Modern cards */
@@ -184,22 +201,22 @@
     @apply border-primary ring-2 ring-primary/15 bg-surface;
   }
   .dropdown-chevron {
-    @apply w-3.5 h-3.5 text-slate-400 transition-transform duration-150 shrink-0;
+    @apply w-3.5 h-3.5 text-muted transition-transform duration-150 shrink-0;
   }
   .dropdown-menu {
     @apply absolute z-30 min-w-[180px] bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 font-sans text-xs;
   }
   .dropdown-header {
-    @apply px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-surface-border/60;
+    @apply px-3 py-1 text-[11px] font-bold uppercase tracking-wider text-muted border-b border-surface-border/60;
   }
   .dropdown-item {
     @apply w-full flex items-center justify-between gap-2 px-2.5 py-1.5 text-left rounded-lg text-slate-700 transition cursor-pointer hover:bg-surface-raised hover:text-slate-900;
   }
   .dropdown-item-selected {
-    @apply bg-accent/10 text-accent font-semibold hover:bg-accent/10 hover:text-accent;
+    @apply bg-accent/10 text-accent-strong font-semibold hover:bg-accent/10 hover:text-accent-strong;
   }
   .dropdown-check {
-    @apply w-3.5 h-3.5 text-accent shrink-0;
+    @apply w-3.5 h-3.5 text-accent-strong shrink-0;
   }
   .dropdown-divider {
     @apply border-t border-surface-border/60 my-1 -mx-1;
@@ -223,10 +240,10 @@
     @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-loss-dim text-loss border border-loss-border shadow-2xs;
   }
   .badge-status-warn {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-warn-dim text-warn border border-warn-border shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-warn-dim text-warn-strong border border-warn-border shadow-2xs;
   }
   .badge-status-info {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-accent-dim text-accent border border-accent-line/60 shadow-2xs;
+    @apply inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-sans font-bold bg-accent-dim text-accent-strong border border-accent-line/60 shadow-2xs;
   }
 }
 
@@ -248,7 +265,8 @@
   box-shadow: none;
 }
 
-/* Button a11y: visible keyboard focus for all tokens + native buttons */
+/* Button a11y: visible keyboard focus for all tokens + native buttons +
+   div role="button" rows (ticker list, venue rows) which are real controls */
 .btn-primary:focus-visible,
 .btn-secondary:focus-visible,
 .btn-danger:focus-visible,
@@ -257,7 +275,20 @@
 .btn-success-subtle:focus-visible,
 .btn-accent:focus-visible,
 .btn-warning:focus-visible,
-button:focus-visible {
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible {
   outline: 2px solid #1677ff;
   outline-offset: 2px;
+}
+
+/* Motion safety: status pulses and transitions yield to the OS-level
+   reduced-motion preference — state stays legible without animation. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

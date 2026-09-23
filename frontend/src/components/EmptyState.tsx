@@ -35,7 +35,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
         className={`w-5 h-5 mx-auto text-slate-300 ${pulse ? "animate-pulse" : ""}`}
       />
     )}
-    <div className={plain ? "text-slate-400 text-[11px]" : "text-slate-800 font-bold text-xs"}>{title}</div>
+    <div className={plain ? "text-muted text-[11px]" : "text-slate-800 font-bold text-xs"}>{title}</div>
     {hint && <div className="text-slate-500 leading-snug text-[11px]">{hint}</div>}
     {children}
   </div>

@@ -754,8 +754,8 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
     return {
       bgClass: "bg-surface-raised/60",
       borderClass: "border-surface-border/60",
-      textClass: "text-slate-400 font-normal",
-      deltaClass: "text-slate-400",
+      textClass: "text-muted font-normal",
+      deltaClass: "text-muted",
       deltaBadgeBg: "bg-transparent",
       highlightRing: "",
     };
@@ -790,7 +790,7 @@ export function getMatrixCellVisuals(cell: MatrixCellDto, minBps: number): {
     return {
       bgClass: "bg-surface-raised/40 hover:bg-surface-raised/60",
       borderClass: "border-surface-border/60",
-      textClass: "text-slate-400 font-normal",
+      textClass: "text-muted font-normal",
       deltaClass,
       deltaBadgeBg,
       highlightRing: "",

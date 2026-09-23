@@ -218,7 +218,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           <div className="grid grid-cols-3 gap-3 font-mono text-xs">
             <div className="p-3 bg-surface-raised border border-surface-border rounded-lg shadow-xs">
               <span className="text-xs text-slate-500">Hedge Ratio (Beta)</span>
-              <div className="text-base font-bold text-accent tabular-nums mt-0.5">
+              <div className="text-base font-bold text-accent-strong tabular-nums mt-0.5">
                 {latest ? latest.dynamic_hedge_ratio.toFixed(4) : "—"}
               </div>
             </div>
@@ -250,12 +250,12 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
           <div className="bg-surface-raised border border-surface-border rounded-lg p-4 font-mono text-xs shadow-2xs">
             <div className="flex justify-between text-xs text-slate-500 mb-2">
               <span>Residual Z-Score Spread Walk (Last 25 Cycles)</span>
-              <span className="text-accent font-medium">Entry Threshold: +/- 2.0 Z</span>
+              <span className="text-accent-strong font-medium">Entry Threshold: +/- 2.0 Z</span>
             </div>
 
             <div className="h-32 w-full flex items-center justify-center">
               {history.length < 2 ? (
-                <div className="text-slate-400 text-xs">Click "Step Iteration" to stream Kalman filter updates...</div>
+                <div className="text-muted text-xs">Click "Step Iteration" to stream Kalman filter updates...</div>
               ) : (
                 <svg className="w-full h-full overflow-visible" viewBox="0 0 400 100">
                   {/* +2.0 threshold line */}
@@ -282,7 +282,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               )}
             </div>
 
-            <div className="flex justify-between text-xs text-slate-400 mt-2">
+            <div className="flex justify-between text-xs text-muted mt-2">
               <span className="text-profit">-2.0 Z Buy</span>
               <span className="text-slate-500">0.0 Z Mean</span>
               <span className="text-loss">+2.0 Z Short</span>
@@ -299,7 +299,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                   : latest?.signal === "ENTRY_SHORT_SPREAD"
                   ? "bg-loss-dim text-loss border border-loss-border"
                   : latest?.signal === "EXIT"
-                  ? "bg-accent-dim text-accent border border-accent-line"
+                  ? "bg-accent-dim text-accent-strong border border-accent-line"
                   : "bg-surface text-slate-600 border border-surface-border"
               }`}
             >
@@ -386,7 +386,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Optimal Width (d = |a - m|):</span>
-                <span className="text-accent font-semibold tabular-nums">{bertramResult.optimal_distance.toFixed(4)}</span>
+                <span className="text-accent-strong font-semibold tabular-nums">{bertramResult.optimal_distance.toFixed(4)}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-slate-500">Half-Life of Mean Reversion:</span>
@@ -416,7 +416,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
               onClick={handleFitOu}
               className="btn-secondary w-full !py-2 font-mono !text-xs font-medium flex items-center justify-center space-x-2 cursor-pointer"
             >
-              <RefreshCw className="w-3.5 h-3.5 text-accent" />
+              <RefreshCw className="w-3.5 h-3.5 text-accent-strong" />
               <span>Fit Ornstein-Uhlenbeck Parameters (AR(1) MLE)</span>
             </button>
 

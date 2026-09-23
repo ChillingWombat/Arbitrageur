@@ -10,7 +10,7 @@ export const DetailField: React.FC<{
   tip?: string;
 }> = ({ label, value, title, tip }) => (
   <div className="space-y-0.5" title={title}>
-    <div className="text-[11px] font-sans text-slate-400 font-medium flex items-center">
+    <div className="text-[11px] font-sans text-muted font-medium flex items-center">
       {label}
       {tip && <InfoTooltip text={tip} position="top" />}
     </div>
@@ -28,7 +28,7 @@ export const DetailSection: React.FC<{
   tip?: string;
 }> = ({ title, children, gridClassName, tip }) => (
   <div className="rounded-xl border border-surface-border bg-surface-raised/40 px-3.5 py-3 space-y-2.5">
-    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-slate-400 flex items-center">
+    <div className="text-[11px] font-sans font-bold uppercase tracking-wider text-muted flex items-center">
       {title}
       {tip && <InfoTooltip text={tip} position="top" />}
     </div>

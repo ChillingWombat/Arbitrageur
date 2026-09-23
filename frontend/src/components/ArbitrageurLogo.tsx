@@ -6,7 +6,7 @@ interface ArbitrageurLogoProps {
 }
 
 export const ArbitrageurLogo: React.FC<ArbitrageurLogoProps> = ({
-  className = "w-5 h-5 text-accent",
+  className = "w-5 h-5 text-accent-strong",
   size = 20,
 }) => {
   return (
