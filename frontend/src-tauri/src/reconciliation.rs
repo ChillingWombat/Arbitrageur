@@ -461,14 +461,17 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 if status == SignalStatus::Imbalanced && !is_close_signal {
                     dispatch_residual_flatten(state, signal_id).await;
                 }
-                // A `flat-{parent}-*` close that just resolved filled means
-                // the residual it was dispatched to cover is gone. When ALL
-                // of a parent's flatten children are Closed, the parent can
-                // leave `unresolved`/`imbalanced` — never resurrect a parent
-                // that already reached closed/failed.
+                // A `flat-{parent}-*` or `trim-{parent}-*` child that just
+                // resolved means its fills are final. When ALL of a parent's
+                // family children are Closed, the parent can leave
+                // `unresolved`/`imbalanced` — never resurrect a parent that
+                // already reached closed/failed. The trim prefix matters: a
+                // trim child resolving last would otherwise never retrigger
+                // the check, stranding the parent open forever.
                 if status == SignalStatus::Closed {
                     if let Some(parent_id) = signal_id
                         .strip_prefix("flat-")
+                        .or_else(|| signal_id.strip_prefix("trim-"))
                         .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
                     {
                         resolve_flattened_parent(state, &parent_id);
