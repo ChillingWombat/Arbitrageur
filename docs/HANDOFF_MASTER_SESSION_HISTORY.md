@@ -2644,3 +2644,46 @@ Every `!is_live` parallel-fake branch collapsed onto the live path: balances, po
 ### Verification
 
 389 desktop tests + 213 frontend tests + tsc/clippy/fmt clean. New coverage: schema v29 migration, env-scoped account/routes SQL, testnet admission set, env-namespaced caches, strict env-write validation, testnet-capable venue filter, ExternalPositions env badge.
+
+## Session 2026-09-23 — durable-state analytics survey + forensic fixes (commits 764958f, 37ddc02)
+
+Read-only survey of `~/.arbitrageur/state.sqlite3` (~750 MB) drove three real fixes and produced the first measured calibration data for defaults.
+
+### Data inventory
+
+- `spread_samples` 4.32M rows, `monitor_signal_events` 876k, `venue_volume_samples` 866k, `funding_rate_samples` 251k — rich research base.
+- `monitor_signals` 1953 pairs (123 triggered, 383 tracking, 1445 no-data); `signal_executions` 64 / `signal_legs` 73 / `execution_log` 20 — thin but real live history begins 2026-09-22.
+- `account_equity_events` 19.6k — ~90% pre-deadband noise (see below); `margin_snapshots` 677 — all sim-era $100k defaults, useless history.
+- Empty tables (subsystems never exercised live): `autotune_apply_events`, `har_anchors`, `promotion_state`, `signal_predictions`, `radar_bot_positions`, `scheduled_exits`, `strategy_account_routes`, `ticker_exemptions`.
+
+### Forensic: the 2026-09-22 naked-short incident (reconstructed from durable state)
+
+- 07:45 entry `sig-1790063099601` (ETH-USDC): HL leg rejected `Order has invalid price` (the wire-format bug fixed in 6f9db14), Lighter leg filled 0.005 short → UnresolvedExposure, circuit breaker tripped.
+- 08:06–08:50: ~50 auto residual-flatten children all recorded `failed — never dispatched an order`. Reasons (process log only, now persisted): vault locked (`not live-submission ready`) for most passes; when creds were present the passive-reduce path died on `Lighter quantity 0.0050000000000000001040834086 not representable at size scale 4` — f64→Decimal binary noise reaching `scale_lighter_amount` inside `execute_passive_reduce_live`.
+- The residual finally bought back at 2743.34 vs entry 2725.49 — ~18pt adverse drift (~0.65%) over ~17min of failed retries.
+
+### Fixes (764958f)
+
+- **Wire-scale epsilon tolerance** — `scale_lighter_amount`, Kraken `contracts`, OKX `contracts_for_qty`, Decibel lot check: snap f64-noise ≤ ~1e-13 relative onto the venue grid; genuine sub-wire/sub-contract dust still fails closed. The reconciliation call-site `round_dp(8)` (added 10h after the incident) covered one path; the venue boundary now covers all callers. Regression test: `Decimal::from_f64(0.005)` → wire 50.
+- **Durable flatten errors** — a failed residual-flatten child's note now carries the first dispatch error (`...never dispatched an order: {reason}`) instead of only the process log.
+- **Toxic-fill ceiling** — `cb_max_spread_divergence_bps` (default 250) was configured but never consumed. It now caps `expected_net_bps` in `execute_spatial_arbitrage_inner` — every spatial/monitor/auto-exec/manual entry path. Production data showed SPX500 triggering at ~147M bps (TradFi index symbol collision across HL/Vanta) plus `okx->robinhood` events >1000bps. Oversized-spread test books retuned; test asserts the ceiling rejects.
+- **Lighter feed** — static fallback market map is mainnet-only; non-mainnet hosts now fail closed rather than subscribe guessed ids.
+
+### UI (37ddc02)
+
+- Prominent LIVE/TESTNET badge in the header (red LIVE / amber TESTNET) — the environment is now glanceable. Vault banner wording is env-accurate.
+
+### Measured calibration data
+
+- Trigger edges (monitor_signal_events, new_status=triggered): alt means 10–30bps (NEAR 25, ZEC 18, SUI 20), ETH 10bps; 73–95% of triggers ≥5bps → `futures.targetProfitBps=5` is sane, not starved.
+- Real fills: HL legs fill exactly at intended; Lighter legs ±2.4bps measured → `futuresMaxSlippageBps=5` validated.
+- Entry latency on the real canary: 3.2s (dominated by fill-verification polling; legs dispatch concurrently via `tokio::join!`).
+- Session effect weak: hour-bin medians 11–12.5bps across all UTC hours → session modulators shouldn't dominate tuning.
+- Equity events: `live-*` namespaced accounts post-deadband emit ~zero noise events; the ±$99k "transfer" rows were sim-baseline ($100k) vs real-read collisions under pre-rename account ids — resolved by env namespacing, not reproducible now.
+- Empty `margin_snapshots`/`signal_predictions` history means margin-utilisation and win-probability calibration have no production data yet — collect before tuning those knobs.
+
+### Open observations (not yet fixed)
+
+- `account_equity_events` retains ~19k noise rows from pre-deadband/sim eras — analytics should filter to `{env}-` accounts post-2026-09-22.
+- `execution_log.latency_us` 3.2s confirms the entry-verify path is slow but correct; no sequential-leg window exists (legs join concurrently).
+- Auto-exec `evaluate_entry_gates` has no upper edge bound of its own; the inner-entry ceiling is the authoritative guard (dispatch-level reject is recorded as a skip).

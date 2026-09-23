@@ -1719,7 +1719,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     className="w-28 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <label className="text-slate-600 block text-xs" title="Reserved toxic-fill guard (bps). Stored with the breaker config; enforced by strategy gates.">
+                  <label className="text-slate-600 block text-xs" title="Toxic-fill ceiling (bps). Entries whose expected net spread exceeds this are refused outright — an edge that large is a symbol collision or corrupt quote, not alpha.">
                     Max spread divergence (bps)
                   </label>
                   <input type="number" min="1" step="any" disabled={loading} value={cbMaxSpreadBps}
