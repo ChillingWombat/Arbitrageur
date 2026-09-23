@@ -2220,6 +2220,10 @@ fn transition_environment(
     // reconciliation — its legs belong to the *current* env's adapters and
     // would poll the wrong venue endpoints (or no adapter at all) after the
     // flip, stranding real exposure as 'unresolved' until switched back.
+    // The same holds for `balanced` open positions: their fills were booked
+    // through the current env's adapters, and every flatten/close resolves
+    // `get_adapter` under the *new* env — a testnet hedge flattened after a
+    // live flip would send real orders to the wrong endpoints.
     if target != state.env() {
         if let Ok(pending) = state.state_store.list_pending_order_legs() {
             if !pending.is_empty() {
@@ -2231,6 +2235,20 @@ fn transition_environment(
                     "Cannot switch trading environment while {} signal(s) await reconciliation ({}). Let them settle or resolve the exposure first.",
                     pending.len(),
                     ids.join(", ")
+                ));
+            }
+        }
+        if let Ok(signals) = state.state_store.list_signals(None, None) {
+            let open: Vec<String> = signals
+                .iter()
+                .filter(|s| s.status.counts_as_open())
+                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                .collect();
+            if !open.is_empty() {
+                return Err(format!(
+                    "Cannot switch trading environment while {} position(s) are open ({}). Flatten them first — closes dispatch through the current environment's venues.",
+                    open.len(),
+                    open.join(", ")
                 ));
             }
         }
@@ -8028,6 +8046,77 @@ mod tests {
         let res_off = set_live_mode_impl(false, &state).expect("disable live mode");
         assert!(!res_off);
         assert!(!state.is_live());
+    }
+
+    #[tokio::test]
+    async fn test_env_switch_refused_with_open_position() {
+        // A `balanced` position's fills were booked through the current
+        // env's adapters; flattening after a flip would dispatch through
+        // the new env's venues — the transition must refuse.
+        let state = AppEngineState::new();
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-env-block-1".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .update_signal_status(
+                "sig-env-block-1",
+                crate::state_store::SignalStatus::Balanced,
+                None,
+            )
+            .expect("mark balanced");
+
+        let res = set_live_mode_impl(true, &state);
+        assert!(res.is_err(), "env flip must refuse with an open position");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("position(s) are open") || err.contains("Flatten"),
+            "refusal must name the open-position gate: {err}"
+        );
+        assert!(!state.is_live(), "env must not flip on refusal");
+
+        // Closing the position frees the transition (it will then fail on
+        // the locked-vault gate — a different, expected refusal).
+        state
+            .state_store
+            .update_signal_status(
+                "sig-env-block-1",
+                crate::state_store::SignalStatus::Closed,
+                None,
+            )
+            .expect("close signal");
+        let res = set_live_mode_impl(true, &state);
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err().contains("locked"),
+            "next gate must be the vault, not the position gate"
+        );
     }
 
     #[tokio::test]
