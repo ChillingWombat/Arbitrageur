@@ -458,9 +458,12 @@ impl StateStore {
             [retain_after_ts_ms],
         )?;
         conn.execute(
+            // Rows append with ts_ms = insert time, so rowid order is
+            // timestamp order — ORDER BY id walks the PK instead of sorting
+            // the whole table on every retention pass.
             "DELETE FROM monitor_signal_events WHERE id IN (
                  SELECT id FROM monitor_signal_events
-                 ORDER BY ts_ms DESC, id DESC LIMIT -1 OFFSET ?1
+                 ORDER BY id DESC LIMIT -1 OFFSET ?1
              )",
             [max_rows],
         )?;
