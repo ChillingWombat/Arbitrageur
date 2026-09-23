@@ -2815,3 +2815,7 @@ Exit-path audit: all strategies have supervised exits — futures 5s convergence
 ## Session 2026-09-23 — Vault lock refuses open live positions
 
 `lock_vault` locked unconditionally; the 60s settings-exit auto-lock could silently disable exit supervision (locked vault ⇒ no venue auth ⇒ every flatten fails). In live mode `lock_vault_impl` now refuses while any `counts_as_open` signal exists (testnet unaffected). Frontend: auto-lock logs the refusal; manual Lock surfaces it via `setErrorMsg`. Test `test_vault_lock_refused_with_open_live_position`. SPEC.md entry 36; desktop 405 tests.
+
+## Session 2026-09-23 — Credential/venue lifecycle gates for open live positions
+
+Same strand class as the vault lock, closed in live mode: `delete_exchange_credentials_impl` (venue-wide), `delete_account_credentials_impl` + `upsert_account_impl` disable (account-bound legs), `save_engine_settings_impl` venue-flag disable (adapter leaves `get_venues`). Each refuses naming the blocking open positions; testnet unaffected. Tests `test_credential_delete_refused_with_open_live_leg`, `test_venue_disable_refused_with_open_live_leg`. SPEC.md entry 37; desktop 407 tests.

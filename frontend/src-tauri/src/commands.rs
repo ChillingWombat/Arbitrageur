@@ -2539,6 +2539,55 @@ pub fn save_engine_settings_impl(
         ),
         ("ig".into(), settings.ig_enabled || account_enabled("ig")),
     ];
+    // Disabling a venue with an open live leg strands exit supervision —
+    // the adapter drops out of `get_venues`, so closes can no longer
+    // authenticate or even resolve. Compare the OLD enablement (engine
+    // flag or enabled account, same semantics) with the new one and
+    // refuse any live-open venue that would drop out.
+    if state.is_live() {
+        let old = state.settings.read().clone();
+        let was_enabled = |venue: &str| -> bool {
+            let flag = match venue {
+                "hyperliquid" => old.hyperliquid_enabled,
+                "lighter" => old.lighter_enabled,
+                "robinhood" => old.robinhood_enabled,
+                "vanta" => old.vanta_enabled,
+                "arcus" => old.arcus_enabled,
+                "kraken_spot" => old.kraken_enabled && old.kraken_spot_enabled,
+                "kraken_futures" => old.kraken_enabled && old.kraken_futures_enabled,
+                "polymarket" => old.polymarket_enabled,
+                "kalshi" => old.kalshi_enabled,
+                "aster" => old.aster_enabled,
+                "popdex" => old.popdex_enabled,
+                "binance" => old.binance_enabled,
+                "okx" => old.okx_enabled,
+                "coinbase" => old.coinbase_enabled,
+                "decibel" => old.decibel_enabled,
+                "ibkr" => old.ibkr_enabled,
+                "ig" => old.ig_enabled,
+                _ => false,
+            };
+            flag || account_enabled(venue)
+        };
+        if let Ok(signals) = state.state_store.list_signals(None, None) {
+            let open_venues: Vec<String> = signals
+                .iter()
+                .filter(|s| s.status.counts_as_open())
+                .flat_map(|s| s.legs.iter().map(|l| l.venue.to_lowercase()))
+                .collect();
+            let blocked: Vec<String> = enablement
+                .iter()
+                .filter(|(v, on)| !*on && was_enabled(v) && open_venues.iter().any(|o| o == v))
+                .map(|(v, _)| v.clone())
+                .collect();
+            if !blocked.is_empty() {
+                return Err(format!(
+                    "Cannot disable venue(s) {} while live position(s) route through them. Flatten them first.",
+                    blocked.join(", ")
+                ));
+            }
+        }
+    }
     {
         let mut vault = state.vault.write();
         if vault.is_unlocked() {
@@ -5881,6 +5930,150 @@ mod tests {
         lock_vault_impl(&state).expect("testnet lock must succeed");
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_credential_delete_refused_with_open_live_leg() {
+        // Deleting a venue's credentials while an open live leg routes
+        // through it strands exit supervision — refuse until flattened.
+        let (state, dir) = test_state_with_vault("cred_gate");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        unlock_vault_impl("test password", &state).expect("unlock");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-cred-gate-1".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .update_signal_status(
+                "sig-cred-gate-1",
+                crate::state_store::SignalStatus::Balanced,
+                None,
+            )
+            .expect("mark balanced");
+
+        // The venue with an open leg refuses; an unrelated venue passes the
+        // position gate and fails on the (empty) vault lookup instead.
+        let err = delete_exchange_credentials_impl("hyperliquid", &state)
+            .expect_err("delete must refuse");
+        assert!(
+            err.contains("live position"),
+            "refusal must name open live positions: {err}"
+        );
+
+        // Closing the position frees the delete path.
+        state
+            .state_store
+            .update_signal_status(
+                "sig-cred-gate-1",
+                crate::state_store::SignalStatus::Closed,
+                None,
+            )
+            .expect("close signal");
+        let res = delete_exchange_credentials_impl("hyperliquid", &state);
+        assert!(
+            res.is_ok() || !res.unwrap_err().contains("live position"),
+            "closed position must not trip the gate"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_venue_disable_refused_with_open_live_leg() {
+        // Disabling a venue flag while an open live leg routes through it
+        // drops the adapter out of `get_venues` — closes can no longer
+        // resolve or authenticate. The settings save must refuse.
+        let state = AppEngineState::new();
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        state.settings.write().hyperliquid_enabled = true;
+
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-venue-gate-1".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .update_signal_status(
+                "sig-venue-gate-1",
+                crate::state_store::SignalStatus::Balanced,
+                None,
+            )
+            .expect("mark balanced");
+
+        // Save with hyperliquid flipped off: the gate must refuse. The DTO
+        // mode must match the live env or the transition guard fires first.
+        let mut settings = get_engine_settings_impl(&state).expect("settings");
+        settings.trading_mode = "live".into();
+        settings.hyperliquid_enabled = false;
+        let err =
+            save_engine_settings_impl(settings.clone(), &state).expect_err("save must refuse");
+        assert!(
+            err.contains("live position") || err.contains("Flatten"),
+            "refusal must name open live positions: {err}"
+        );
+        assert!(
+            state.settings.read().hyperliquid_enabled,
+            "venue flag must stay enabled on refusal"
+        );
+
+        // Saving with the flag still on is unaffected by the gate.
+        settings.hyperliquid_enabled = true;
+        save_engine_settings_impl(settings, &state).expect("enabled save ok");
+
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 
     #[tokio::test]
