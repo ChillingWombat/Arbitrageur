@@ -1162,6 +1162,40 @@ fn pending_order_legs_and_monotonic_fill_state() {
 }
 
 #[test]
+fn fee_unaccounted_legs_covers_filled_at_submit() {
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-fee", "BTC-USDC", None, None))
+        .unwrap();
+    // An order id without any fill — nothing to price the fee on yet.
+    store
+        .record_leg_order_id("s-fee", LegSide::Long, "ord-1", Some("cid-1"))
+        .unwrap();
+    assert!(store.list_fee_unaccounted_legs(86_400).unwrap().is_empty());
+    // A fill landing inside the submit ack records fee_usd = 0 — the leg
+    // becomes eligible for the one-shot fee-enrichment poll.
+    store
+        .apply_leg_fill("s-fee", LegSide::Long, 0.5, 100.0, 0.0, Some("ord-1"))
+        .unwrap();
+    let rows = store.list_fee_unaccounted_legs(86_400).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].1.side, LegSide::Long);
+    // Enrichment lands → the leg drops out of the unaccounted set.
+    store
+        .apply_leg_order_state("s-fee", LegSide::Long, 0.5, Some(100.0), 0.02)
+        .unwrap();
+    assert!(store.list_fee_unaccounted_legs(86_400).unwrap().is_empty());
+    // A leg without a venue order id can never be enriched.
+    store
+        .record_signal_execution(&two_leg_signal("s-nooid", "BTC-USDC", None, None))
+        .unwrap();
+    store
+        .apply_leg_fill("s-nooid", LegSide::Short, 0.5, 100.0, 0.0, None)
+        .unwrap();
+    assert!(store.list_fee_unaccounted_legs(86_400).unwrap().is_empty());
+}
+
+#[test]
 fn test_imbalanced_signal_blocks_ticker_despite_net_zero() {
     let store = StateStore::open_in_memory().unwrap();
     // The user's exact scenario: the ticker's aggregate position reads
