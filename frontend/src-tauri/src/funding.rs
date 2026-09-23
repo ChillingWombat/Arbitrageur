@@ -1318,7 +1318,17 @@ pub async fn execute_funding_carry_impl(
     short_venue: &str,
     trade_size_usd: f64,
     state: &AppEngineState,
+    auto: bool,
 ) -> Result<SimStepResultDto, String> {
+    // Autonomous entries stay testnet-only in live mode — the
+    // live_entry_enabled opt-in covers operator-directed entries (same
+    // policy as the radar bot's evaluate_entry_gates hard-block).
+    if auto && state.is_live() {
+        return Err(
+            "autonomous funding entries are testnet-only — run a manual Execute for live carry"
+                .into(),
+        );
+    }
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!(
             "Execution halted by Risk Circuit Breaker: {}",
@@ -2175,10 +2185,18 @@ pub async fn execute_funding_carry(
     long_venue: String,
     short_venue: String,
     trade_size_usd: f64,
+    auto: Option<bool>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
-    match execute_funding_carry_impl(&symbol, &long_venue, &short_venue, trade_size_usd, &state)
-        .await
+    match execute_funding_carry_impl(
+        &symbol,
+        &long_venue,
+        &short_venue,
+        trade_size_usd,
+        &state,
+        auto.unwrap_or(false),
+    )
+    .await
     {
         Ok(r) => Ok(r),
         Err(e) => {

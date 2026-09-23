@@ -730,8 +730,8 @@ export const api = {
     return invokeDesktop<TickerMarketQuoteDto[]>("fetch_multi_market_quotes", { symbols });
   },
 
-  async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number): Promise<SimStepResultDto> {
-    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd });
+  async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number, auto = false): Promise<SimStepResultDto> {
+    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd, auto });
   },
 
   async executePredictionArbitrage(marketTitle: string, buyYesVenue: string, buyNoVenue: string, quantity: number): Promise<SimStepResultDto> {

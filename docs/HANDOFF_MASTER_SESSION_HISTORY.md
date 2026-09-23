@@ -2782,3 +2782,11 @@ Live funding entries opened positions with no automated exit — the convergence
 - `funding_min_apr` promoted `pub(crate)`; `funding_leg_rate_hourly` extracted pure for tests (fresh/spot/stale/missing cases pinned). Funding signal records also now persist the scan's cost-adjusted `expected_return_usd` (was `None`).
 - UI copy synced: EngineSettings live-entry label names all four gated paths; FundingRadar empty-state no longer claims live entries are disabled.
 - Workspace 400 tests green; clippy/fmt clean. SPEC.md entry 33; CAPABILITIES funding rows; PARAMETER_GUIDE min-APR row now documents the exit floor.
+
+## Session 2026-09-23 — Autonomous funding entries testnet-only
+
+Enabling live funding through `live_entry_enabled` also armed the Funding Radar Auto Carry loop — `useBotLifecycle.entriesAllowed` keys on bot phase alone, so a running funding bot would have dispatched live entries every 8s while the Spread Radar autonomous bot is deliberately live-blocked.
+
+- **Policy unified**: autonomous entries are testnet behavior in both strategies; live entries are operator-directed. `execute_funding_carry` IPC + `execute_funding_carry_impl` take `auto` (IPC optional → false). `auto && live` refuses before any gate work, naming the policy.
+- **Frontend**: `executeFundingCarry(…, auto)` threads the flag; the loop marks its dispatches `auto: true`, skips entirely under `isLive` (defense in depth), and shows a "Live: auto-carry off, manual only" hint so a running bot never implies armed autonomous entries. `isLive` sourced from `SystemStatusDto.is_live_mode`.
+- Test `test_funding_carry_auto_entry_testnet_only_in_live` pins the live-auto refusal. Desktop 400 tests, frontend suite, clippy/fmt clean. SPEC.md entry 34; CAPABILITIES funding rows + footnote.

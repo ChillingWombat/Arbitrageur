@@ -667,7 +667,7 @@ export const App: React.FC = () => {
   }, [spatialOpps, refreshAllData]);
 
   const handleExecuteCarry = useCallback(
-    async (opp: FundingOpportunityDto) => {
+    async (opp: FundingOpportunityDto, auto = false) => {
       // Never deploy more than either leg's venue can fund — cap the
       // configured trade size at the lower of the two venue balances.
       // Depth-aware optimal size (when measured) caps it further.
@@ -688,7 +688,7 @@ export const App: React.FC = () => {
       } catch {
         /* balance lookup failed — fall back to the configured trade size */
       }
-      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, size);
+      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, size, auto);
       await refreshAllData();
     },
     [refreshAllData],
@@ -991,6 +991,7 @@ export const App: React.FC = () => {
               tradeSize={fundingTradeSize}
               minAprPct={fundingParams.minAprPct}
               onExecuteCarry={handleExecuteCarry}
+              isLive={systemStatus?.is_live_mode === true}
               loading={refreshing}
               executionLogs={executionLogs}
               onOpenConfig={handleOpenTickerConfig}

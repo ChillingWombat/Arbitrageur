@@ -6432,9 +6432,10 @@ mod tests {
             });
 
         // $20 notional fits the seeded 10-lot test books on both legs.
-        let res = execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 20.0, &state)
-            .await
-            .expect("paper funding carry should dispatch");
+        let res =
+            execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 20.0, &state, false)
+                .await
+                .expect("paper funding carry should dispatch");
         assert!(res.execution_success);
         assert_eq!(res.trade_type, "Funding");
 
@@ -6460,9 +6461,10 @@ mod tests {
     async fn test_funding_carry_live_refusal_names_missing_leg() {
         let state = setup_test_state_with_venues();
         state.set_environment(crate::state::TradingEnvironment::Live);
-        let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
-            .await
-            .expect_err("live funding must refuse without the operator opt-in");
+        let err =
+            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, false)
+                .await
+                .expect_err("live funding must refuse without the operator opt-in");
         assert!(
             err.contains("live_entry_enabled"),
             "refusal must name the opt-in gate: {err}"
@@ -6470,12 +6472,32 @@ mod tests {
         // Opted in but with a locked vault: the gate must still refuse —
         // never a silent dispatch past a named blocker.
         state.settings.write().live_entry_enabled = true;
-        let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
-            .await
-            .expect_err("live funding must refuse while the vault is locked");
+        let err =
+            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, false)
+                .await
+                .expect_err("live funding must refuse while the vault is locked");
         assert!(
             err.contains("vault") || err.contains("credentials") || err.contains("polling"),
             "refusal must name the missing live capability: {err}"
+        );
+        state.settings.write().live_entry_enabled = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
+    }
+
+    #[tokio::test]
+    async fn test_funding_carry_auto_entry_testnet_only_in_live() {
+        // Autonomous entries stay testnet-only in live mode regardless of
+        // the opt-in — the same policy as the radar bot's live hard-block.
+        let state = setup_test_state_with_venues();
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        state.settings.write().live_entry_enabled = true;
+        let err =
+            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, true)
+                .await
+                .expect_err("autonomous live funding entry must refuse");
+        assert!(
+            err.contains("testnet-only") || err.contains("manual Execute"),
+            "refusal must name the autonomous-entry policy: {err}"
         );
         state.settings.write().live_entry_enabled = false;
         state.set_environment(crate::state::TradingEnvironment::Testnet);
@@ -6503,9 +6525,10 @@ mod tests {
                     timestamp: Utc::now(),
                 });
         }
-        let err = execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 500.0, &state)
-            .await
-            .expect_err("dust carry must be refused");
+        let err =
+            execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 500.0, &state, false)
+                .await
+                .expect_err("dust carry must be refused");
         assert!(err.contains("hurdle"), "unexpected err: {err}");
     }
 
@@ -6590,10 +6613,16 @@ mod tests {
 
         // Execute through the OLD display triple; the engine must resolve the
         // refreshed canonical/exact fields underneath.
-        let res =
-            execute_funding_carry_impl("BTC-USDC", "lighter SPOT", "lighter PERP", 20.0, &state)
-                .await
-                .expect("basis paper dispatch");
+        let res = execute_funding_carry_impl(
+            "BTC-USDC",
+            "lighter SPOT",
+            "lighter PERP",
+            20.0,
+            &state,
+            false,
+        )
+        .await
+        .expect("basis paper dispatch");
         assert!(res.execution_success);
         assert!(
             res.message.contains("BTC-SPOT") && res.message.contains("BTC-USDC"),
@@ -6723,6 +6752,7 @@ mod tests {
             "lighter PERP",
             500_000.0,
             &state,
+            false,
         )
         .await
         .expect_err("same-venue margin must refuse");
@@ -6758,10 +6788,16 @@ mod tests {
                     timestamp: Utc::now(),
                 });
         }
-        let err =
-            execute_funding_carry_impl("BTC-USDC", "lighter SPOT", "lighter PERP", 20.0, &state)
-                .await
-                .expect_err("wide entry cross must refuse");
+        let err = execute_funding_carry_impl(
+            "BTC-USDC",
+            "lighter SPOT",
+            "lighter PERP",
+            20.0,
+            &state,
+            false,
+        )
+        .await
+        .expect_err("wide entry cross must refuse");
         assert!(err.contains("spread"), "unexpected err: {err}");
     }
 
@@ -6776,6 +6812,7 @@ mod tests {
             "lighter PERP",
             2_000_000.0,
             &state,
+            false,
         )
         .await
         .expect_err("thin-book dispatch must refuse");
@@ -8390,8 +8427,15 @@ mod tests {
         assert!(spot.is_err());
         assert!(spot.unwrap_err().contains("spot"));
 
-        let funding =
-            execute_funding_carry_impl("BTC-USDC", "hyperliquid", "lighter", 25000.0, &state).await;
+        let funding = execute_funding_carry_impl(
+            "BTC-USDC",
+            "hyperliquid",
+            "lighter",
+            25000.0,
+            &state,
+            false,
+        )
+        .await;
         assert!(funding.is_err());
         assert!(funding.unwrap_err().contains("funding"));
 
