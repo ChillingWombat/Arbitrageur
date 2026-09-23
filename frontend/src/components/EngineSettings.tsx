@@ -1240,7 +1240,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                               className={`shrink-0 cursor-pointer transition ${
                                 favoriteExchanges.includes(ex.id)
                                   ? "text-amber-600"
-                                  : "text-slate-300 opacity-0 group-hover:opacity-100 hover:text-amber-400"
+                                  : "text-slate-300 opacity-0 group-hover:opacity-100 hover:text-amber-500"
                               }`}
                             >
                               <Star className={`w-2.5 h-2.5 ${favoriteExchanges.includes(ex.id) ? "fill-amber-500" : ""}`} />

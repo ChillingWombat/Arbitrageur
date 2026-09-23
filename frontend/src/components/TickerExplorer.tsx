@@ -153,12 +153,12 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
                   what keeps their rows visually distinguishable. */}
               <span className="text-muted font-semibold">-{quote}</span>
             </span>
-            <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
+            <span className="text-[9px] font-mono px-1.5 py-px rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
               Perp
             </span>
             {botStatus === "running" && (
               <span
-                className="inline-flex items-center gap-1 text-[9px] font-sans px-1.5 py-0.2 rounded bg-profit-dim text-profit font-bold border border-profit-border"
+                className="inline-flex items-center gap-1 text-[9px] font-sans px-1.5 py-px rounded bg-profit-dim text-profit font-bold border border-profit-border"
                 title="Bot is running for this ticker — new entries allowed"
               >
                 <span className="w-1 h-1 rounded-full bg-profit animate-pulse" />

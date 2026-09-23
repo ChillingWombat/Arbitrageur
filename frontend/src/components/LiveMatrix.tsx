@@ -126,7 +126,7 @@ const MatrixCellView: React.FC<MatrixCellViewProps> = React.memo(({ cell, isSele
             baseline exist — a bare "Δ —" placeholder is noise, not honesty. */}
         {cell.costReady !== false && cell.baselineReady !== false && cell.sampleCount !== 0 && (
           <div
-            className={`flex items-center space-x-0.5 px-1 py-0.2 rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
+            className={`flex items-center space-x-0.5 px-1 py-px rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
           >
             {cell.deltaBps > 0 ? (
               <TrendingUp className="w-2 h-2 inline" />
@@ -1225,7 +1225,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_bid)}</span>
                             {isBestBid && (
-                              <span className="px-1 py-0.2 rounded-lg text-xs font-bold bg-profit-dim text-profit border border-profit-border">
+                              <span className="px-1 py-px rounded-lg text-xs font-bold bg-profit-dim text-profit border border-profit-border">
                                 Best
                               </span>
                             )}
@@ -1235,7 +1235,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                           <span className="flex items-center space-x-1">
                             <span>{formatCurrencyPrice(book.best_ask)}</span>
                             {isBestAsk && (
-                              <span className="px-1 py-0.2 rounded-lg text-xs font-bold bg-loss-dim text-loss border border-loss-border">
+                              <span className="px-1 py-px rounded-lg text-xs font-bold bg-loss-dim text-loss border border-loss-border">
                                 Best
                               </span>
                             )}

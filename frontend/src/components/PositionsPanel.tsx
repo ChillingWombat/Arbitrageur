@@ -193,7 +193,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         <div className="flex items-center justify-between">
           <div className="text-xs font-sans font-bold uppercase tracking-wider text-slate-900 flex items-center space-x-1.5">
             <span>Positions</span>
-            <span className="text-[11px] font-mono font-medium text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded-full">
+            <span className="text-[11px] font-mono font-medium text-slate-500 bg-slate-100 px-1.5 py-px rounded-full">
               ({scoped.length}/{positions.length})
             </span>
           </div>
@@ -359,14 +359,14 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     </span>
                     {isReduce && (
                       <span
-                        className="text-[9px] px-1.5 py-0.2 rounded bg-warn-dim text-warn-strong font-mono font-bold border border-warn-border whitespace-nowrap"
+                        className="text-[9px] px-1.5 py-px rounded bg-warn-dim text-warn-strong font-mono font-bold border border-warn-border whitespace-nowrap"
                         title="Reduce-Only: No new step increases; position closes on target profit"
                       >
                         Reduce-Only
                       </span>
                     )}
                   </div>
-                  <span className="text-[9px] px-1.5 py-0.2 rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap mt-0.5 self-start">
+                  <span className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap mt-0.5 self-start">
                     {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
                   </span>
                 </div>
