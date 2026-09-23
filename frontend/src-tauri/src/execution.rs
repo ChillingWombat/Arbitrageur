@@ -643,10 +643,23 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         }
         _ => target_profit_bps,
     };
-    if econ.expected_net_bps < profit_floor_bps {
+    // Reversion entries (radar) forecast profit from the spread returning
+    // to its band, not from the static top-of-book edge: on a pair whose
+    // mean edge is biased, a negative static edge can still be a positive-
+    // expectation reversion entry. When a baseline mean accompanies a
+    // radar dispatch, the profit floor applies to the deviation net of
+    // route friction (`expected_net − mu`) — the same convention the
+    // monitor gates on. The static-edge plausibility ceiling below still
+    // runs: a wild top-of-book gap is a symbol collision under either
+    // model.
+    let dev_net_bps = baseline_mean_spread_bps
+        .filter(|m| strategy_id == "radar" && m.is_finite())
+        .map(|mu| econ.expected_net_bps - mu);
+    let effective_net_bps = dev_net_bps.unwrap_or(econ.expected_net_bps);
+    if effective_net_bps < profit_floor_bps {
         return Err(format!(
             "Expected net spread {} BPS after route friction is below the {} BPS {}",
-            econ.expected_net_bps,
+            effective_net_bps,
             profit_floor_bps.abs(),
             if profit_floor_bps < 0.0 {
                 "canary loss limit"
@@ -666,8 +679,14 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             econ.expected_net_bps, max_net_bps
         ));
     }
-    let net_bps_f = econ.expected_net_bps;
-    let expected_net_usd = econ.estimated_profit_usd;
+    // The durable expectation is the model the entry actually traded on:
+    // static net edge for spatial paths, deviation-net for radar rows.
+    let net_bps_f = effective_net_bps;
+    let expected_net_usd = net_bps_f / 10_000.0
+        * (((buy_vwap + sell_vwap) / dec!(2)) * qty_dec)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0);
 
     state
         .delta_guard
