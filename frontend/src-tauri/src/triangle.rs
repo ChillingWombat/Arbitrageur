@@ -465,6 +465,7 @@ fn record_triangle_leg_fill(
     fee: Decimal,
     order_id: &str,
     note: &str,
+    expected_net_usd: Option<f64>,
 ) -> Result<(), String> {
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
     if !qty_f64.is_finite() || qty_f64 <= 0.0 {
@@ -493,7 +494,7 @@ fn record_triangle_leg_fill(
             strategy_id: TRIANGLE_STRATEGY_ID.to_string(),
             symbol: symbol.to_string(),
             route_id: None,
-            expected_net_usd: None,
+            expected_net_usd,
             note: Some(note.to_string()),
             legs: vec![NewSignalLeg {
                 account_id,
@@ -854,6 +855,9 @@ pub async fn execute_triangle_arbitrage_impl(
             resp.fee,
             &resp.order_id,
             &cycle_note,
+            // The cycle-level projection persists once — on leg 0 — so the
+            // family carries the eval's expectation without triple-counting.
+            (*idx == 0).then_some(eval.profit_usd),
         ) {
             record_errors.push(e);
         }
