@@ -3389,6 +3389,165 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn supervise_funding_exits_flattens_decayed_carry() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = AppEngineState::new();
+        state.install_test_sim("lighter");
+        state.install_test_sim("hyperliquid");
+        for (venue, sym) in [("lighter", "BTC-USDC"), ("hyperliquid", "BTC-USDC")] {
+            let mut book = book(venue, sym, 99_900.0, 100_100.0, 5);
+            book.timestamp = Utc::now();
+            if let Some(sim) = state
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get(venue).cloned())
+            {
+                let _ = sim.replace_orderbook(book);
+            }
+        }
+        // A balanced funding carry: long perp on lighter, short perp on
+        // hyperliquid. EMA carry has decayed to ~0 — below the 8% floor.
+        let sig_id = "sig-funding-supervise-1";
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: sig_id.into(),
+                strategy_id: "funding".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: Some(1.0),
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record funding signal");
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_fill(sig_id, side, 0.01, 100_000.0, 0.0, None)
+                .expect("leg fill");
+        }
+        state
+            .state_store
+            .update_signal_status(sig_id, SignalStatus::Balanced, None)
+            .expect("mark balanced");
+
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut ema = engine.funding_ema.lock();
+            // Short earns +0.01%/h, long pays +0.01%/h → net ~0% APR.
+            ema.insert(("lighter".into(), "BTC".into()), (0.0001, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "BTC".into()),
+                (0.0001, Instant::now()),
+            );
+        }
+        engine.supervise_funding_exits(&state).await;
+
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list");
+        let sig = sigs.iter().find(|s| s.id == sig_id).expect("signal");
+        assert_eq!(
+            sig.status,
+            SignalStatus::Closed,
+            "decayed carry must flatten through the supervisor (got {:?})",
+            sig.status
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_funding_exits_holds_fresh_carry() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = AppEngineState::new();
+        let sig_id = "sig-funding-supervise-hold";
+        state
+            .state_store
+            .record_signal_execution(&NewSignalExecution {
+                id: sig_id.into(),
+                strategy_id: "funding".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: Some(1.0),
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record funding signal");
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_fill(sig_id, side, 0.01, 100_000.0, 0.0, None)
+                .expect("leg fill");
+        }
+        state
+            .state_store
+            .update_signal_status(sig_id, SignalStatus::Balanced, None)
+            .expect("mark balanced");
+
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut ema = engine.funding_ema.lock();
+            // Short earns +0.05%/h while long pays 0 → ~438% APR, far above
+            // the floor — the position must be held.
+            ema.insert(("lighter".into(), "BTC".into()), (0.0, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "BTC".into()),
+                (0.0005, Instant::now()),
+            );
+        }
+        engine.supervise_funding_exits(&state).await;
+
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list");
+        let sig = sigs.iter().find(|s| s.id == sig_id).expect("signal");
+        assert_eq!(
+            sig.status,
+            SignalStatus::Balanced,
+            "carry above the floor must be held (got {:?})",
+            sig.status
+        );
+    }
+
     #[test]
     fn execution_gate_blocks_not_ready() {
         let state = AppEngineState::new();
