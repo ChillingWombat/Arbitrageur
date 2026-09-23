@@ -12791,6 +12791,59 @@ mod tests {
             "lgt residual {lgt_qty}"
         );
 
+        // Re-clicking flatten while the first child is still open must not
+        // re-dispatch the in-flight remainder — the pending qty suppresses
+        // it, so no second child is created.
+        let children_before = state
+            .state_store
+            .list_signals(None, None)
+            .expect("signals")
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-"))
+            .count();
+        let repeat = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
+            &state,
+        )
+        .await
+        .expect("repeat flatten");
+        assert_eq!(repeat.legs_closed, 0, "working child suppresses redispatch");
+        let children_after = state
+            .state_store
+            .list_signals(None, None)
+            .expect("signals")
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-"))
+            .count();
+        assert_eq!(
+            children_before, children_after,
+            "no duplicate close child; notes: {:?}",
+            repeat.notes
+        );
+
+        // The first child's market orders are done venue-side (0.05 filled,
+        // remainder cancelled by the sim). In production the reconciliation
+        // supervisor resolves the child to a terminal state within seconds;
+        // emulate that here so the retry pass sees the true filled residual.
+        for child in state
+            .state_store
+            .list_signals(None, None)
+            .expect("signals")
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-") && s.status.counts_as_open())
+        {
+            state
+                .state_store
+                .update_signal_status(
+                    &child.id,
+                    crate::state_store::SignalStatus::Closed,
+                    Some("order terminal"),
+                )
+                .expect("resolve child");
+        }
+
         seed_test_book(
             &state,
             "hyperliquid",

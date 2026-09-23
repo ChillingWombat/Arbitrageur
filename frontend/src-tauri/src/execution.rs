@@ -2849,6 +2849,42 @@ pub async fn flatten_ticker_positions_with_type_impl(
         }
         Ok(total)
     };
+    // Quantity already dispatched but not yet filled: the unfilled remainder
+    // of each open child's legs. An incomplete child is marked Unresolved by
+    // this same pass even while its orders still work, so any non-terminal
+    // status can carry in-flight qty — suppress re-dispatch of it or a second
+    // flatten would double-submit. Suppression is time-bounded: past the
+    // reconciler's 15-min working-order deadline (cancels exhausted), the
+    // order is presumed dead and the venue position re-read bounds the
+    // residual — holding pending forever would strand it.
+    let child_pending_on = |family: &[crate::state_store::SignalExecution],
+                            canonical: &str,
+                            side: LegSide|
+     -> Result<Decimal, String> {
+        let mut total = dec!(0);
+        for child in family {
+            if !child.status.counts_as_open() {
+                continue;
+            }
+            let stale = chrono::DateTime::parse_from_rfc3339(&child.created_at)
+                .map(|t| {
+                    (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() > 15 * 60
+                })
+                .unwrap_or(true);
+            if stale {
+                continue;
+            }
+            for cl in &child.legs {
+                if cl.side == side && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
+                {
+                    let pending = ledger_qty_to_dec(cl.intended_qty, "child leg intent")?
+                        - ledger_qty_to_dec(cl.filled_qty, "child leg fill")?;
+                    total += pending.max(dec!(0));
+                }
+            }
+        }
+        Ok(total)
+    };
 
     for sig in roots {
         let family: Vec<crate::state_store::SignalExecution> = all_signals
@@ -2962,20 +2998,30 @@ pub async fn flatten_ticker_positions_with_type_impl(
                     ));
                 }
                 Some(p) => {
-                    let basis = residual.min(p.quantity);
+                    // Subtract qty already in flight on open children — a
+                    // re-click while a close order works must not resubmit it.
+                    let pending = child_pending_on(&family, canonical, opposite(leg.side))?;
+                    let dispatchable = (residual - pending).max(dec!(0));
+                    let basis = dispatchable.min(p.quantity);
                     // Leftover sweep: when the residual exceeds the closable
                     // quantity by less than one full ticker step, close the
                     // ENTIRE residual instead of stranding sub-step dust.
                     // Oversized reduce-only paper orders cap at the position.
                     let mut qty = basis;
-                    let swept =
-                        sweep_flatten_qty(residual, basis, flatten_step_qty(state, &sig.symbol));
+                    let swept = sweep_flatten_qty(
+                        dispatchable,
+                        basis,
+                        flatten_step_qty(state, &sig.symbol),
+                    );
                     if swept > basis {
                         qty = swept;
                         out.notes.push(format!(
                             "{}: {} leg sweep closes entire residual {}/{} (sub-step leftover)",
                             sig.id, leg.venue, swept, basis
                         ));
+                    }
+                    if qty <= dec!(0) {
+                        continue;
                     }
                     targets.push(CloseTarget {
                         venue: leg.venue.clone(),
@@ -3020,6 +3066,18 @@ pub async fn flatten_ticker_positions_with_type_impl(
         };
 
         if targets.is_empty() {
+            // Open children cover the residual only while their orders still
+            // work — closing the family now would orphan their late fills
+            // (resolve_flattened_parent skips a Closed parent) and could mark
+            // a still-live position fully closed. Leave the parent open; the
+            // reconciler closes it once the children reach a terminal state.
+            if family.iter().any(|c| c.status.counts_as_open()) {
+                out.notes.push(format!(
+                    "{}: residual already covered by working close orders — awaiting settlement",
+                    sig.id
+                ));
+                continue;
+            }
             close_family(&format!("flatten {}: no residual venue position", sig.id))?;
             out.signals_closed += 1;
             if let Some((usd, _, fee_basis)) =
@@ -3761,7 +3819,7 @@ async fn maybe_liq_trim_pair(
             // lands via reconciliation against the family (the close-agg
             // excludes `trim-` children, so only the shrink may lag — the
             // boot stale-lot reconcile bounds the residual edge).
-            match realize_liq_trim(
+            let trim_usd = match realize_liq_trim(
                 state,
                 sig,
                 &close_id,
@@ -3772,12 +3830,45 @@ async fn maybe_liq_trim_pair(
                     if usd != 0.0 {
                         note.push_str(&format!("; trim realized {usd:.4} USD"));
                     }
+                    usd
                 }
-                Err(e) => note.push_str(&format!("; trim realization failed: {e}")),
-            }
+                Err(e) => {
+                    note.push_str(&format!("; trim realization failed: {e}"));
+                    0.0
+                }
+            };
             for n in notes {
                 note.push_str(&format!("; {n}"));
             }
+            // Risk-reducing action: mirror flatten's durable log row so the
+            // trim is visible in the Log Monitor, not only in signal history.
+            record_execution_log(
+                state,
+                ExecutionLogEntry {
+                    id: format!("exec-{close_id}"),
+                    timestamp: Utc::now().to_rfc3339(),
+                    trade_type: "Trim".into(),
+                    strategy_id: crate::attribution::attribute_strategy_id(&sig.strategy_id),
+                    symbol: sig.symbol.clone(),
+                    venue_a: buy.venue.clone(),
+                    venue_b: sell.venue.clone(),
+                    leg_a_status: format!("trim {qty} short"),
+                    leg_b_status: format!("trim {qty} long"),
+                    success: true,
+                    gross_profit: 0.0,
+                    fees: 0.0,
+                    net_profit: trim_usd,
+                    latency_us: 0,
+                    note: note.clone(),
+                    direction: Some("Liquidation Trim".into()),
+                    trigger_spread_bps: None,
+                    baseline_mean_spread_bps: None,
+                    position_step: None,
+                    max_units: None,
+                    nominal_hurdle_bps: None,
+                    is_live: state.is_live(),
+                },
+            );
             Some(("trim", "liq_trim", note, false))
         }
         PairTrimDecision::CloseBoth => {

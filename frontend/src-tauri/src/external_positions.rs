@@ -705,6 +705,24 @@ pub async fn close_external_position_impl(
         .state_store
         .list_open_signals()
         .map_err(|e| e.to_string())?;
+    // One close at a time per (venue, symbol): a working extclose leg sits
+    // on the opposite side, so it never nets into `system_qty_for` — without
+    // this gate a second click re-reads the still-full position and submits
+    // another close for the same residual (a position flip on venues without
+    // reduce-only).
+    if let Some(pending) = signals.iter().find(|s| {
+        s.strategy_id == "external"
+            && s.status.counts_as_open()
+            && s.legs.iter().any(|l| {
+                l.venue.trim().eq_ignore_ascii_case(&venue_lc)
+                    && l.symbol.eq_ignore_ascii_case(&input.symbol)
+            })
+    }) {
+        return Err(format!(
+            "A close order for {} on {venue_lc} is already in flight ({}) — wait for it to settle",
+            input.symbol, pending.id
+        ));
+    }
     let live = adapter
         .account_position_for(&account, &input.symbol)
         .map_err(|e| format!("Could not resolve {} on {venue_lc}: {e}", input.symbol))?
