@@ -629,6 +629,14 @@ pub(crate) const PAIR_ALIGN_GAP_MS: i64 = 30_000;
 /// stays under per-IP connection limits and protects the WS lane.
 const MAX_INFLIGHT_BOOK_FETCHES: usize = 4;
 
+/// Persisted pair lifecycle older than this does not rehydrate on startup.
+/// A `triggered`/`ready` row only proves the pair qualified at
+/// `last_seen_ms`; a day-stale row restarting as still-active would carry a
+/// false `first_seen` age and never be pruned. 24h is comfortably beyond
+/// any legitimate sampling gap (slowest lane cadence is minutes) while
+/// short enough that a day-closed app re-discovers rather than resumes.
+const REHYDRATE_STALE_MS: i64 = 24 * 60 * 60 * 1000;
+
 /// Standard normal CDF via the Abramowitz-Stegun erf approximation
 /// (|error| <= 1.5e-7). No extra dependency for one closed-form call.
 fn normal_cdf(x: f64) -> f64 {
@@ -1321,9 +1329,22 @@ impl SpreadMonitorEngine {
             shutdown: Mutex::new(false),
         });
         // Rehydrate lifecycle state so discovery timestamps survive restart.
+        // Rows whose pair hasn't been sampled within the staleness bound are
+        // skipped: a persisted "triggered" only proves the pair qualified at
+        // `last_seen_ms`, and resurrecting it as still-active would keep its
+        // original `first_seen` (lying about signal age) and exempt it from
+        // `prune_monitor_signals` forever — rehydrate loads every row into
+        // `pairs`, and prune keeps every `pairs` key. Skipped rows are not in
+        // `pairs`, so the next universe prune deletes them cleanly.
+        let now_ms = Utc::now().timestamp_millis();
         if let Ok(rows) = state.state_store.monitor_signals() {
             let mut pairs = engine.pairs.lock();
+            let mut skipped = 0usize;
             for r in rows {
+                if now_ms.saturating_sub(r.last_seen_ms) > REHYDRATE_STALE_MS {
+                    skipped += 1;
+                    continue;
+                }
                 pairs.insert(
                     (r.symbol, r.buy_venue, r.sell_venue),
                     PairRuntime {
@@ -1333,6 +1354,11 @@ impl SpreadMonitorEngine {
                         last_edge_bps: r.last_edge_bps,
                         last_dev_bps: r.last_dev_bps,
                     },
+                );
+            }
+            if skipped > 0 {
+                tracing::info!(
+                    "monitor: skipped {skipped} stale persisted signal(s) on rehydrate (>{REHYDRATE_STALE_MS}ms since last sample)"
                 );
             }
         }
@@ -4215,6 +4241,47 @@ mod tests {
         let row = gate_eval(&engine3, &state, &cfg, &stale, now);
         assert_ne!(row.status, "ready", "uncomputable gates never qualify");
         assert!(row.threshold_ratio.is_none());
+    }
+
+    #[test]
+    fn rehydrate_skips_stale_persisted_signals() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        let store = &state.state_store;
+        // Fresh row rehydrates; a day+ stale row must not resurrect as
+        // still-active (it would carry a false first_seen age and never be
+        // pruned — rehydrate feeds `pairs`, prune keeps `pairs` keys).
+        store
+            .upsert_monitor_signal(
+                "SOL-USD",
+                "hyperliquid",
+                "lighter",
+                "triggered",
+                now - 3_600_000,
+                now - 60_000,
+                Some(8.0),
+                Some(3.0),
+            )
+            .unwrap();
+        store
+            .upsert_monitor_signal(
+                "SPX500",
+                "hyperliquid",
+                "vanta",
+                "triggered",
+                now - 90_000_000,
+                now - 90_000_000,
+                Some(147_000_000.0),
+                None,
+            )
+            .unwrap();
+        let engine = SpreadMonitorEngine::new(&state);
+        let pairs = engine.pairs.lock();
+        assert!(pairs.contains_key(&("SOL-USD".into(), "hyperliquid".into(), "lighter".into())));
+        assert!(
+            !pairs.contains_key(&("SPX500".into(), "hyperliquid".into(), "vanta".into())),
+            "stale triggered row must not rehydrate as a live pair"
+        );
     }
 
     #[test]
