@@ -1285,6 +1285,8 @@ export interface TriangleExecutionParams {
   trade_size_usd: number;
   min_profit_bps: number;
   net_spread_bps?: number;
+  /** Autonomous bot dispatch — autonomous entries are testnet-only. */
+  auto?: boolean;
 }
 
 /** One position-aware exit verdict from check_spatial_convergence. */

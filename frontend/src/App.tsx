@@ -1018,6 +1018,7 @@ export const App: React.FC = () => {
               onRefreshAll={refreshAllData}
               onOpenConfig={handleOpenTickerConfig}
               isPaused={isPaused}
+              isLive={systemStatus?.is_live_mode === true}
               hasApiConnectivity={activeVenueCodes.size >= 2}
               params={strategyParams.get("triangle")}
             />
