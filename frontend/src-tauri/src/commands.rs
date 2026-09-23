@@ -6326,6 +6326,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_radar_entry_uses_deviation_net_economics() {
+        let state = setup_test_state_with_venues();
+        // Deliberately crossed books: the buy-side ask sits above the
+        // sell-side bid, so the static top-of-book edge is negative.
+        seed_test_book(&state, "hyperliquid", "ANTH-USDC", dec!(100.0), dec!(100.2));
+        seed_test_book(&state, "lighter", "ANTH-USDC", dec!(99.9), dec!(100.1));
+
+        // The futures (static-edge) path refuses the crossed quote.
+        let err = execute_spatial_arbitrage_inner(
+            "ANTH-USDC",
+            "hyperliquid",
+            "lighter",
+            0.5,
+            Some("OPEN".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "futures",
+            None,
+            None,
+            &state,
+        )
+        .await
+        .expect_err("negative static edge must refuse on the futures path");
+        assert!(err.contains("below the"), "unexpected err: {err}");
+
+        // A radar entry on the same books with a deeply biased baseline
+        // mean (mu = -150 bps) carries a large positive deviation — the
+        // reversion expectation clears the same profit floor.
+        let res = execute_spatial_arbitrage_inner(
+            "ANTH-USDC",
+            "hyperliquid",
+            "lighter",
+            0.5,
+            Some("OPEN".into()),
+            None,
+            Some(-150.0),
+            None,
+            None,
+            None,
+            None,
+            "radar",
+            None,
+            None,
+            &state,
+        )
+        .await
+        .expect("positive dev-net reversion entry must dispatch");
+        assert!(res.execution_success);
+
+        // A radar entry whose baseline sits near the live edge has no
+        // deviation to capture — refused like a bad static route.
+        seed_test_book(&state, "hyperliquid", "ETH-USDC", dec!(100.0), dec!(100.2));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(99.9), dec!(100.1));
+        let err = execute_spatial_arbitrage_inner(
+            "ETH-USDC",
+            "hyperliquid",
+            "lighter",
+            0.5,
+            Some("OPEN".into()),
+            None,
+            Some(-10.0),
+            None,
+            None,
+            None,
+            None,
+            "radar",
+            None,
+            None,
+            &state,
+        )
+        .await
+        .expect_err("thin dev-net must refuse on the radar path too");
+        assert!(err.contains("below the"), "unexpected err: {err}");
+    }
+
+    #[tokio::test]
     async fn test_funding_carry_paper_dispatch_opens_carry_position() {
         let state = setup_test_state_with_venues();
         // Tight cross (~23 bps) so the max-entry-spread gate passes.

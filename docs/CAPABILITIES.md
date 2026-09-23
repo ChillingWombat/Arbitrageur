@@ -19,7 +19,7 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | Strategy / path | Authentic scan | Testnet execution | Live entry | Exit / reconciliation | Current operator meaning |
 |---|---|---|---|---|---|
 | Cross-venue perpetual spatial | Yes | Yes (testnet-capable venues) | **Opt-in** (`live_entry_enabled` + per-leg notional cap; off by default) — venue-proven by the HL↔Lighter live canary | Orders poll to terminal state and restart-recover; unconditional residual auto-flatten + bounded cancel retry | Keep the cap minimal — residual one-sided-exposure risk remains on venue outage |
-| Spread Radar manual entry | Yes | Yes | Via `live_entry_enabled` gate | Bot-managed exits | Testnet |
+| Spread Radar manual entry | Yes | Yes | Via `live_entry_enabled` gate — dispatches through the spatial two-leg path, so the same vault + per-leg cap + adapter-eligibility checks apply | Bot-managed exits | Opt-in (off by default) |
 | Spread Radar autonomous bot | Yes | Yes, opt-in | **Testnet-only** (GateContext hard-blocks live autonomous entries) | Bot-managed exits with audit | Testnet only |
 | Perp/perp funding carry | Yes where both funding and books exist | Yes | **Disabled** — no two-leg live dispatch yet | Manual flatten | Testnet only |
 | Same-venue spot/perp basis | Yes where one adapter exposes both exact books | Yes | **Disabled** | Exact per-leg flatten | Testnet only |
@@ -35,7 +35,7 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 
 “Unit” means deterministic parser/signing tests. “Public” means live public-read evidence recorded in the handoff. “Sandbox order” and “mainnet order” require credentialed evidence and are not implied by source code.
 
-*"Strategy live entry" = the `live_entry_enabled` spatial canary path only (per-leg notional cap required); triangle/funding/spot entries remain refused regardless.*
+*"Strategy live entry" = the `live_entry_enabled` spatial canary path only (per-leg notional cap required). Spread Radar manual entries dispatch through that same two-leg path; triangle/funding/spot entries remain refused regardless.*
 
 | Venue | Markets / books | Funding | Account read | Sign + submit | Cancel | Leverage update | Terminal/restart reconciliation | Verification ceiling in repo | Strategy live entry |
 |---|---|---|---|---|---|---|---|---|---|
