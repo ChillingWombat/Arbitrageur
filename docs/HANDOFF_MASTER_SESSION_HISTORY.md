@@ -2797,3 +2797,9 @@ The triangle auto-deploy loop (2.5s poll) had the same autonomous-live hole as f
 
 - Audited every autonomous entry path: Radar bot (GateContext live-block), Funding Auto Carry (`auto`), Triangle auto (`params.auto`), Spot/Prediction loops (backend hard-disabled — cannot dispatch in any mode), LiveMatrix/TickerExplorer (no autonomous dispatch).
 - Test `test_triangle_auto_entry_testnet_only_in_live` pins the refusal. Desktop 401 tests; CAPABILITIES triangle row updated.
+
+## Session 2026-09-23 — Production-data analytics + exit-path audit
+
+Ledger analytics on `~/.arbitrageur/state.sqlite3`: 64 signal executions (48 failed / 16 closed). All 48 failures predate today's fixes and split into two confirmed classes — 47× "residual flatten never dispatched" (the 09-22 leg-desync/retry incident cluster: ETH-USDC every ~10s for 10 min) and 1× bad-key test. 6/7 closed entries show `hyperliquid long filled_qty=0` at entry — submit-ack blindness (fixed via durable order-id polling). No unresolved signals linger; no post-fix entries exist to measure yet. Funding-rate samples (278k rows): Lighter mean +0.017%/8h with ±1.5% tails, HL +0.024%/8h — the 10% APR min-carry default is well inside observed carry; AI-USDC averages 0.45%/8h on Lighter (persistent small-cap carry).
+
+Exit-path audit: all strategies have supervised exits — futures 5s convergence loop (`check_spatial_convergence_impl`), radar bot `evaluate_exit` ticks, funding `supervise_funding_exits`, unconditional reconciler residual flatten; all route through `flatten_ticker_positions_impl` (pause-exempt, live requires unlocked vault — fail-closed). RUNBOOK preamble updated to the current opt-in/canary truth.

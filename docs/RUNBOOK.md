@@ -5,7 +5,7 @@
 
 This document captures the failure modes, production bugs identified during the analysis of open-source arbitrage codebases, the controls designed for them, and an operational runbook.
 
-> **Current capability boundary:** the controls below describe the engineered/paper path and the safety architecture. Working orders are reconciled to terminal fill/cancel/expiry by the startup+5s supervisor and recovered after restart, and automated residual-leg resolution plus bounded cancel retry exist as opt-in mechanisms, but without venue canary evidence new live strategy entries remain disabled. Do not interpret this runbook as proof that live trading, automatic unwinds, or remote signing are currently enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
+> **Current capability boundary:** live strategy entries (spatial, Spread Radar manual, funding carry/basis, triangle) are **opt-in** — `live_entry_enabled` + unlocked vault + per-leg notional cap + per-venue submission/polling/credential eligibility, refused never clamped; autonomous bot loops stay testnet-only. Working orders are reconciled to terminal fill/cancel/expiry by the startup+5s supervisor and recovered after restart; imbalanced entries auto-flatten the residual leg unconditionally (bounded attempts) with bounded cancel retry. The Hyperliquid↔Lighter live canary is venue-proven; other venue pairs still warrant per-pair canary sizing. Do not interpret this runbook as proof that remote signing is enabled. `docs/CAPABILITIES.md` is authoritative for what each path can do today.
 
 ---
 
