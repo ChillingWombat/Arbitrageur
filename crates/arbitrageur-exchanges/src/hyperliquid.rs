@@ -1132,6 +1132,18 @@ impl ExchangeAdapter for HyperliquidAdapter {
         parse_hl_order_response(&resp_json, &order, &self.venue_id, price)
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let coin = perp_coin(symbol)?;
+        let (_asset_index, sz_decimals) = self.resolve_asset_meta(&coin).await?;
+        let wire = qty.trunc_with_scale(sz_decimals);
+        if wire <= dec!(0) {
+            anyhow::bail!(
+                "Hyperliquid {symbol} quantity {qty} truncates to zero at szDecimals={sz_decimals}"
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         let private_key = {
             let guard = self.private_key.read();

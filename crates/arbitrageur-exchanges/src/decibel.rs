@@ -1838,6 +1838,23 @@ impl ExchangeAdapter for DecibelAdapter {
         true
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let row = self.fetch_market_row(symbol).await?;
+        let wire = if row.lot_size > dec!(0) {
+            (qty / row.lot_size).floor() * row.lot_size
+        } else {
+            qty
+        };
+        if wire <= dec!(0) || (row.min_size > dec!(0) && wire < row.min_size) {
+            anyhow::bail!(
+                "Decibel {symbol} quantity {qty} below lot grid (lot {}, min {})",
+                row.lot_size,
+                row.min_size
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         let _guard = self.order_lock.lock().await;
         self.trading_key()?;

@@ -835,6 +835,17 @@ impl ExchangeAdapter for LighterAdapter {
         })
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let (_market_id, _price_dec, size_dec) = self.market_params_for(symbol).await?;
+        let wire = qty.trunc_with_scale(size_dec);
+        if wire <= dec!(0) {
+            anyhow::bail!(
+                "Lighter {symbol} quantity {qty} truncates to zero at size scale {size_dec}"
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         let _guard = self.order_lock.lock().await;
         let (account, api_key_index, api_key) = self.signing_identity()?;

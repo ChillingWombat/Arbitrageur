@@ -1044,6 +1044,22 @@ impl ExchangeAdapter for AsterAdapter {
         )
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let venue_symbol = self.resolve_venue_symbol(symbol).await?;
+        let (_tick, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
+        let wire = if step_size > dec!(0) {
+            (qty / step_size).floor() * step_size
+        } else {
+            qty
+        };
+        if wire <= dec!(0) || wire < min_qty {
+            anyhow::bail!(
+                "Aster {venue_symbol} quantity {qty} below lot floor (step {step_size}, min {min_qty})"
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot cancel live order on Aster: API credentials are not configured or vault is locked");

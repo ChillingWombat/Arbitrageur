@@ -1115,6 +1115,12 @@ impl ExchangeAdapter for PopDexAdapter {
         })
     }
 
+    async fn wire_base_qty(&self, _symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        // PopDEX serializes quantities as wad (1e18) fixed point; the wire
+        // value truncates past the 18th decimal exactly like `dec_to_wad`.
+        Ok(qty.trunc_with_scale(18))
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         let (main, agent_key) = self.require_approved_agent()?;
         if !self.agent_approved().await? {

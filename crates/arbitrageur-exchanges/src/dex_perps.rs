@@ -4938,6 +4938,20 @@ impl ExchangeAdapter for DexPerpAdapter {
         }
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        // GRVT serializes size as u64 at 1e9 scale; the other family venues
+        // pass the decimal quantity through to the venue's own API grid.
+        if self.spec_id == "grvt" {
+            let wire = qty.trunc_with_scale(9);
+            if wire <= dec!(0) {
+                anyhow::bail!("GRVT {symbol} quantity {qty} truncates to zero at 1e9 scale");
+            }
+            return Ok(wire);
+        }
+        let _ = symbol;
+        Ok(qty)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         self.require_trading_ready()?;
         match self.spec_id {

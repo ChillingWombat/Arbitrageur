@@ -1985,6 +1985,19 @@ impl ExchangeAdapter for EvmAmmAdapter {
         .await
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let (_pair, base_tok, _quote_tok) = self.resolve_symbol(symbol)?;
+        let wire = qty.trunc_with_scale(base_tok.decimals as u32);
+        if wire <= Decimal::ZERO {
+            anyhow::bail!(
+                "{} {symbol} quantity {qty} truncates to zero at {} token decimals",
+                self.name,
+                base_tok.decimals
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
         anyhow::bail!(
             "{} swaps settle atomically onchain — nothing rests to cancel",

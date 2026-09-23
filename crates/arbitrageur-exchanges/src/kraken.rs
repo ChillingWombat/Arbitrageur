@@ -1229,6 +1229,15 @@ impl ExchangeAdapter for KrakenAdapter {
         })
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let ct = self.contract_size_for(symbol).await?;
+        let wire = (qty / ct).floor() * ct;
+        if wire < ct {
+            anyhow::bail!("Kraken {symbol} quantity {qty} is below one contract ({ct} base units)");
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot cancel live order on Kraken: API credentials are not configured or vault is locked");

@@ -266,6 +266,59 @@ pub(crate) struct EntryPrediction {
     pub expected_net_bps: Option<f64>,
 }
 
+/// Snap a two-leg order quantity onto BOTH venues' wire grids. Each adapter
+/// independently normalizes to its own lot/contract/scale grid inside
+/// `place_order`, so an un-snapped quantity can fill different sizes on the
+/// two legs — a naked residual by construction. Trade the finer common
+/// size; refuse when the grids are irreconcilable rather than desync legs.
+pub(crate) async fn common_wire_qty(
+    symbol: &str,
+    requested: Decimal,
+    buy_adapter: &Arc<dyn ExchangeAdapter>,
+    sell_adapter: &Arc<dyn ExchangeAdapter>,
+) -> Result<Decimal, String> {
+    let buy_vid = buy_adapter.venue_id();
+    let sell_vid = sell_adapter.venue_id();
+    let buy_wire = buy_adapter
+        .wire_base_qty(symbol, requested)
+        .await
+        .map_err(|e| format!("{buy_vid} cannot size {symbol} on its wire grid: {e}"))?;
+    let sell_wire = sell_adapter
+        .wire_base_qty(symbol, requested)
+        .await
+        .map_err(|e| format!("{sell_vid} cannot size {symbol} on its wire grid: {e}"))?;
+    let common = buy_wire.min(sell_wire);
+    if common <= dec!(0) {
+        return Err(format!(
+            "{symbol} order quantity {requested} snaps to zero on {buy_vid}/{sell_vid} wire grids"
+        ));
+    }
+    let buy_check = buy_adapter
+        .wire_base_qty(symbol, common)
+        .await
+        .map_err(|e| format!("{buy_vid} cannot size snapped quantity {common}: {e}"))?;
+    let sell_check = sell_adapter
+        .wire_base_qty(symbol, common)
+        .await
+        .map_err(|e| format!("{sell_vid} cannot size snapped quantity {common}: {e}"))?;
+    if buy_check != common || sell_check != common {
+        return Err(format!(
+            "Irreconcilable {symbol} wire grids: {buy_vid} -> {buy_check}, {sell_vid} -> {sell_check} for qty {common}"
+        ));
+    }
+    if common != requested {
+        tracing::info!(
+            symbol,
+            venue_buy = %buy_vid,
+            venue_sell = %sell_vid,
+            requested = %requested,
+            snapped_qty = %common,
+            "order quantity snapped to common venue wire grid"
+        );
+    }
+    Ok(common)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_spatial_arbitrage_inner(
     symbol: &str,
@@ -441,6 +494,13 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "Invalid order quantity".to_string())?;
+
+    let qty_dec = common_wire_qty(symbol, qty_dec, &buy_adapter, &sell_adapter).await?;
+    let order_qty: f64 = qty_dec
+        .to_string()
+        .parse()
+        .map_err(|_| "Snapped order quantity is not finite".to_string())?;
+
     let max_slippage_bps = strategy_slippage_bps(state, "futures");
     let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
@@ -3553,5 +3613,101 @@ mod account_read_tests {
             unwind_round_trip_pnl(&entry, &blind, Side::Buy),
             dec!(-0.02)
         );
+    }
+
+    /// Mock adapter whose venue wire grid floors quantities to `step`,
+    /// mirroring the real adapters' `wire_base_qty` contract (grid floor,
+    /// bail below the representable minimum).
+    struct WireGridAdapter {
+        venue: &'static str,
+        step: Decimal,
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for WireGridAdapter {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.venue)
+        }
+        fn name(&self) -> &str {
+            self.venue
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            unimplemented!()
+        }
+        async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+            unimplemented!()
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            unimplemented!()
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            unimplemented!()
+        }
+        async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
+            unimplemented!()
+        }
+        async fn place_order(
+            &self,
+            _o: arbitrageur_core::order::OrderRequest,
+        ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+            unimplemented!()
+        }
+        async fn cancel_order(
+            &self,
+            _r: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        async fn wire_base_qty(&self, _s: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+            let wire = (qty / self.step).floor() * self.step;
+            if wire < self.step {
+                anyhow::bail!("below one grid unit");
+            }
+            Ok(wire)
+        }
+    }
+
+    fn grid_adapter(venue: &'static str, step: Decimal) -> Arc<dyn ExchangeAdapter> {
+        Arc::new(WireGridAdapter { venue, step })
+    }
+
+    #[tokio::test]
+    async fn common_wire_qty_snaps_to_the_finer_grid() {
+        // Lighter-style 4dp grid vs Binance-style 3dp grid on a 0.0059 ask:
+        // un-snapped legs would fill 0.0059 vs 0.005 — a naked 0.0009
+        // residual. The snap trades 0.005 on both.
+        let fine = grid_adapter("lighter", dec!(0.0001));
+        let coarse = grid_adapter("binance", dec!(0.001));
+        let snapped = common_wire_qty("ETH-USDC", dec!(0.0059), &fine, &coarse)
+            .await
+            .expect("aligned grids snap");
+        assert_eq!(snapped, dec!(0.005));
+        // Identical grids snap identically.
+        let snapped = common_wire_qty("ETH-USDC", dec!(0.0059), &coarse, &coarse)
+            .await
+            .expect("same grid");
+        assert_eq!(snapped, dec!(0.005));
+    }
+
+    #[tokio::test]
+    async fn common_wire_qty_refuses_unsizable_and_irreconcilable() {
+        let coarse = grid_adapter("okx", dec!(0.01));
+        let fine = grid_adapter("lighter", dec!(0.0001));
+        // Below the coarse grid's minimum: the venue itself cannot size it.
+        let err = common_wire_qty("ETH-USDC", dec!(0.005), &coarse, &fine)
+            .await
+            .expect_err("sub-grid quantity must refuse");
+        assert!(err.contains("wire grid"), "{err}");
+        // A quantity finer than the coarse grid snaps to the coarse floor —
+        // not an irreconcilable error: 0.0159 -> 0.01 fills both.
+        let snapped = common_wire_qty("ETH-USDC", dec!(0.0159), &coarse, &fine)
+            .await
+            .expect("coarse floor is representable on both");
+        assert_eq!(snapped, dec!(0.01));
     }
 }

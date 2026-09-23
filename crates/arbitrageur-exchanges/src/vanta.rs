@@ -1019,6 +1019,22 @@ impl ExchangeAdapter for VantaAdapter {
         })
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let venue_symbol = Self::to_vanta_symbol(symbol)?;
+        let (_quote_tick, base_tick) = self.symbol_ticks(&venue_symbol).await?;
+        let wire = if base_tick > dec!(0) {
+            (qty / base_tick).floor() * base_tick
+        } else {
+            qty
+        };
+        if wire <= dec!(0) {
+            anyhow::bail!(
+                "Vanta {venue_symbol} quantity {qty} rounds to zero at base_tick {base_tick}"
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if let Some(id) = req.order_id {
             let venue_symbol = Self::to_vanta_symbol(&req.symbol)?;
