@@ -61,14 +61,35 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
     Ok(status)
 }
 
-pub fn lock_vault_impl(state: &AppEngineState) -> VaultStatus {
+pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
+    // In live mode a locked vault cannot authenticate venue calls — every
+    // supervised exit (convergence, funding carry, residual flatten) and
+    // every operator flatten would fail until re-unlock. Refuse the lock
+    // while live positions are open rather than silently disabling exit
+    // supervision; testnet sims need no credentials and lock freely.
+    if state.is_live() {
+        if let Ok(signals) = state.state_store.list_signals(None, None) {
+            let open: Vec<String> = signals
+                .iter()
+                .filter(|s| s.status.counts_as_open())
+                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                .collect();
+            if !open.is_empty() {
+                return Err(format!(
+                    "Cannot lock the vault while {} live position(s) are open ({}) — a locked vault cannot flatten or supervise exits. Flatten them first.",
+                    open.len(),
+                    open.join(", ")
+                ));
+            }
+        }
+    }
     let status = {
         let mut vault = state.vault.write();
         vault.lock();
         vault.get_status()
     };
     state.sync_vault_credentials_to_adapters();
-    status
+    Ok(status)
 }
 
 const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
@@ -1044,7 +1065,7 @@ pub async fn unlock_vault(
 
 #[tauri::command]
 pub async fn lock_vault(state: State<'_, Arc<AppEngineState>>) -> Result<VaultStatus, String> {
-    Ok(lock_vault_impl(&state))
+    lock_vault_impl(&state)
 }
 
 #[tauri::command]

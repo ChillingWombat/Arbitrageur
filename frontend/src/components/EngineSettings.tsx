@@ -869,7 +869,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       clearCredentialInputs();
       setShowVaultModal(true);
     } catch (err) {
-      console.error("Lock error:", err);
+      // Refused while live positions are open — surface the reason, don't
+      // pretend the vault locked.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("Lock refused:", msg);
+      setErrorMsg(msg);
     }
   };
 

@@ -5308,7 +5308,7 @@ mod tests {
         }
         assert_eq!(returned.configured_venues, vec!["hyperliquid".to_string()]);
 
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         let locked = get_engine_settings_impl(&state).expect("locked settings");
         assert!(locked.configured_venues.is_empty());
 
@@ -5609,7 +5609,7 @@ mod tests {
             "SENTINEL_REVEAL2"
         );
 
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         assert!(get_account_credential_field_impl(&a1.id, "apiSecret", &state).is_err());
 
         let _ = std::fs::remove_dir_all(dir);
@@ -5807,13 +5807,78 @@ mod tests {
         );
 
         // An explicit operator lock is a panic-halt: the adapter key goes.
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         assert!(get_account_signer_address_impl(&a1.id, &state).is_err());
         assert_eq!(
             get_active_signer_address_impl("hyperliquid", &state).expect("active"),
             None,
             "manual lock must clear the provisioned signer"
         );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_vault_lock_refused_with_open_live_position() {
+        // A locked vault cannot authenticate venue calls — every supervised
+        // exit and operator flatten would fail until re-unlock. Live mode
+        // with an open position must refuse the lock.
+        let (state, dir) = test_state_with_vault("lock_gate");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        unlock_vault_impl("test password", &state).expect("unlock");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "sig-lock-gate-1".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: Some("BTC-USDC".into()),
+                        intended_qty: 0.01,
+                        intended_price: Some(100_000.0),
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .update_signal_status(
+                "sig-lock-gate-1",
+                crate::state_store::SignalStatus::Balanced,
+                None,
+            )
+            .expect("mark balanced");
+
+        let err = lock_vault_impl(&state).expect_err("lock must refuse");
+        assert!(
+            err.contains("live position"),
+            "refusal must name open live positions: {err}"
+        );
+        assert!(
+            state.vault.write().is_unlocked(),
+            "vault must stay unlocked on refusal"
+        );
+
+        // Testnet env locks freely — sims need no credentials.
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
+        lock_vault_impl(&state).expect("testnet lock must succeed");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5864,7 +5929,7 @@ mod tests {
             }])
             .expect("seed hsm");
 
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         unlock_vault_impl("test password", &state).expect("unlock migrates");
 
         // Legacy unbound creds migrate to the live environment — scope the
@@ -6059,7 +6124,7 @@ mod tests {
         )
         .expect("create");
 
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         let err = delete_account_impl(&a.id, &state).unwrap_err();
         assert!(err.to_lowercase().contains("locked"), "err: {err}");
 
@@ -8426,7 +8491,7 @@ mod tests {
         );
 
         // Explicit operator lock → panic-halt: adapter credentials wiped.
-        lock_vault_impl(&state);
+        let _ = lock_vault_impl(&state);
         assert!(!state.vault.write().is_auto_locked());
         assert!(
             !aster_has_creds(&state),
