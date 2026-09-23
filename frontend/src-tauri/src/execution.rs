@@ -2870,7 +2870,9 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .map(|t| {
                     (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds() > 15 * 60
                 })
-                .unwrap_or(true);
+                // Unparseable timestamp → treat as fresh: when we cannot
+                // prove the order is dead, do not risk a second submit.
+                .unwrap_or(false);
             if stale {
                 continue;
             }
