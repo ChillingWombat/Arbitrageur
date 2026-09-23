@@ -1997,7 +1997,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   href={sponsorLink}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-white font-bold text-xs font-mono rounded-lg transition shadow-2xs flex items-center space-x-2 shrink-0"
+                  className="px-5 py-2.5 bg-amber-500 hover:bg-amber-600 text-slate-900 font-bold text-xs font-mono rounded-lg transition shadow-2xs flex items-center space-x-2 shrink-0"
                 >
                   <span>Buy me a SOLO ($1)</span>
                   <ExternalLink className="w-3.5 h-3.5" />
