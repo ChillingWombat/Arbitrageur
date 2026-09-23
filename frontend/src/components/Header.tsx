@@ -54,24 +54,6 @@ export const Header: React.FC<HeaderProps> = ({
                 ARBITRAGEUR
               </span>
             </div>
-            {/* Environment badge — safety-critical indicator; the operator
-                must never wonder which venue namespace orders hit. */}
-            {status?.environment && (
-              <span
-                className={`ml-2.5 px-2 py-0.5 rounded-md border text-[10px] font-mono font-bold tracking-wider ${
-                  status.environment === "live"
-                    ? "bg-loss-dim border-loss-border text-loss"
-                    : "bg-amber-500/10 border-amber-500/40 text-amber-700"
-                }`}
-                title={
-                  status.environment === "live"
-                    ? "LIVE environment — orders and balances are real mainnet venue state"
-                    : "TESTNET environment — orders and balances are venue demo/testnet state"
-                }
-              >
-                {status.environment === "live" ? "LIVE" : "TESTNET"}
-              </span>
-            )}
           </div>
         </div>
 

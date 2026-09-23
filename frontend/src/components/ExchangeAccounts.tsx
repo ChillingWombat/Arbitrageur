@@ -12,6 +12,7 @@ import {
   Terminal,
   Copy,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
@@ -250,65 +251,62 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   sodex: [],
   vest: [],
   /* ------------- EVM spot AMMs (EvmAmmAdapter — local-wallet swaps) ------- */
-  // The six standard-router venues (uniswap…quickswap) accept a funded
-  // dedicated-wallet private key — the key IS the trader; the optional
-  // wallet address must equal the signer's derived address when provided.
-  // The five market-data-only venues (camelot/aerodrome/velodrome/ramses/
-  // pharaoh) never take a key — an optional public wallet address enables
-  // balance reads only. For all eleven, baseUrl doubles as the JSON-RPC
-  // endpoint override (private Alchemy/Infura/self-hosted node recommended
-  // over the public default).
-  uniswap: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — must equal the key's derived address if set." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com", hint: "Optional Ethereum JSON-RPC override (private node recommended)." },
-  ],
-  uniswap_v2: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com" },
-  ],
-  pancakeswap: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (BNB Chain)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://bsc-rpc.publicnode.com" },
-  ],
-  pancakeswap_v3: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (BNB Chain)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://bsc-rpc.publicnode.com" },
-  ],
-  sushiswap: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Ethereum mainnet)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://ethereum-rpc.publicnode.com" },
-  ],
-  quickswap: [
-    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "EVM EOA key holding the tokens to swap (Polygon)." },
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x..." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://polygon-bor-rpc.publicnode.com" },
-  ],
-  camelot: [
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://arbitrum-one-rpc.publicnode.com" },
-  ],
-  aerodrome: [
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://base-rpc.publicnode.com" },
-  ],
-  velodrome: [
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://optimism-rpc.publicnode.com" },
-  ],
-  ramses: [
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://arbitrum-one-rpc.publicnode.com" },
-  ],
-  pharaoh: [
-    { key: "walletAddress", label: "Wallet Address", optional: true, placeholder: "0x...", hint: "Optional — only needed for balance reads; market data venue, no key required." },
-    { key: "baseUrl", label: "RPC Endpoint", secret: true, optional: true, placeholder: "https://avalanche-c-chain-rpc.publicnode.com" },
-  ],
+  // No per-venue schemas: all eleven share one signer — see the EVM_AMM_VENUES
+  // table and EvmWalletSection below. The sidebar consolidates them under
+  // the pinned "EVM Wallet" label; per-venue RPC overrides live in the
+  // coverage gadget's RPC column.
 };
+
+/**
+ * Venues driven by the shared EVM wallet (EvmAmmAdapter specs). One key
+ * signs swaps onchain on every chain, so per-venue key entry would only
+ * invite drift. `execution` mirrors the backend LIVE_EVM_AMM_VENUE_IDS set:
+ * swap venues receive the private key; market-data venues receive only the
+ * public address — the key never reaches a venue that cannot trade.
+ * `defaultRpc` is the chain's public endpoint shown when no per-venue
+ * override is stored; the backend shares a chain override across same-chain
+ * venues lacking their own.
+ */
+export const EVM_AMM_VENUES: {
+  id: string;
+  chain: string;
+  execution: boolean;
+  defaultRpc: string;
+}[] = [
+  { id: "uniswap", chain: "Ethereum", execution: true, defaultRpc: "https://ethereum-rpc.publicnode.com" },
+  { id: "uniswap_v2", chain: "Ethereum", execution: true, defaultRpc: "https://ethereum-rpc.publicnode.com" },
+  { id: "sushiswap", chain: "Ethereum", execution: true, defaultRpc: "https://ethereum-rpc.publicnode.com" },
+  { id: "pancakeswap", chain: "BNB Chain", execution: true, defaultRpc: "https://bsc-rpc.publicnode.com" },
+  { id: "pancakeswap_v3", chain: "BNB Chain", execution: true, defaultRpc: "https://bsc-rpc.publicnode.com" },
+  { id: "quickswap", chain: "Polygon", execution: true, defaultRpc: "https://polygon-bor-rpc.publicnode.com" },
+  { id: "camelot", chain: "Arbitrum", execution: false, defaultRpc: "https://arbitrum-one-rpc.publicnode.com" },
+  { id: "ramses", chain: "Arbitrum", execution: false, defaultRpc: "https://arbitrum-one-rpc.publicnode.com" },
+  { id: "aerodrome", chain: "Base", execution: false, defaultRpc: "https://base-rpc.publicnode.com" },
+  { id: "velodrome", chain: "Optimism", execution: false, defaultRpc: "https://optimism-rpc.publicnode.com" },
+  { id: "pharaoh", chain: "Avalanche", execution: false, defaultRpc: "https://avalanche-c-chain-rpc.publicnode.com" },
+];
+
+export const EVM_AMM_VENUE_IDS = new Set(EVM_AMM_VENUES.map((v) => v.id));
+
+/** Credential fields for the shared-wallet card — one key + an optional
+ *  address cross-check, fanned out to every AMM venue's default account. */
+export const EVM_WALLET_FIELDS: CredFieldSpec[] = [
+  {
+    key: "privateKey",
+    label: "Wallet Private Key",
+    secret: true,
+    placeholder: "0x...",
+    evmSigner: true,
+    hint: "secp256k1 EOA key — derives the same address on every chain. Full custody: it can move ALL funds this wallet holds, so use a dedicated hot wallet, not your main one.",
+  },
+  {
+    key: "walletAddress",
+    label: "Wallet Address",
+    optional: true,
+    placeholder: "0x...",
+    hint: "Optional cross-check — must equal the key's derived address or the save is refused.",
+  },
+];
 
 export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   arcus: "Arcus",
@@ -477,9 +475,12 @@ const SignerAddressHint: React.FC<{
   const [activeError, setActiveError] = useState(false);
   const trimmed = typedKey.trim();
   const looksComplete = /^(0x)?[0-9a-fA-F]{64}$/.test(trimmed);
-  // get_active_signer_address is only implemented for Hyperliquid — other
-  // venues keep the typed/stored derivation and never show an active line.
-  const activeSupported = venue === "hyperliquid";
+  // get_active_signer_address is implemented for Hyperliquid and the
+  // swap-capable EVM AMM adapters — other venues keep the typed/stored
+  // derivation and never show an active line.
+  const activeSupported =
+    venue === "hyperliquid" ||
+    (venue != null && EVM_AMM_VENUES.some((v) => v.id === venue && v.execution));
 
   useEffect(() => {
     setAddr(null);
@@ -1821,6 +1822,382 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
           />
         </div>
       )}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Shared EVM wallet section — one key + per-venue coverage gadget      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The "EVM Wallet" exchange page: a single credential card whose key fans
+ * out to every EVM AMM venue's default account (swap venues get the key,
+ * market-data venues only the address), plus a gadget listing every venue
+ * the wallet can drive — per-venue enable toggles and RPC overrides.
+ * The venues are live-only: in Testnet mode the section degrades to the
+ * standard no-testnet banner.
+ */
+export const EvmWalletSection: React.FC<{
+  locked: boolean;
+  environment?: "testnet" | "live";
+  refreshKey?: number;
+  onChanged?: () => void;
+}> = ({ locked, environment = "live", refreshKey = 0, onChanged }) => {
+  const [accounts, setAccounts] = useState<AccountDto[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
+  const [rpcDrafts, setRpcDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const saveBtn = useSaveButton();
+
+  const reload = useCallback(async () => {
+    try {
+      const all = await api.listAccounts();
+      setAccounts(all.filter((a) => EVM_AMM_VENUE_IDS.has(a.venue)));
+      setLoadError(null);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload, refreshKey]);
+
+  // The account a gadget row operates on: the venue's credential-resolving
+  // default when present, else its first live-environment account.
+  const acctFor = (vid: string): AccountDto | null =>
+    (accounts ?? [])
+      .filter((a) => a.venue === vid)
+      .sort((a, b) => Number(b.isDefault) - Number(a.isDefault))[0] ?? null;
+
+  // Presence flags + stored-signer readout source: any keyed venue's
+  // account represents the wallet (all keyed venues share it post-save).
+  const representative =
+    (accounts ?? []).find(
+      (a) =>
+        a.hasPrivateKey &&
+        EVM_AMM_VENUES.some((v) => v.id === a.venue && v.execution),
+    ) ?? (accounts ?? [])[0] ?? null;
+
+  const enabledCount = (accounts ?? []).filter((a) => a.enabled).length;
+
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSave = () =>
+    void saveBtn.run(async () => {
+      try {
+        setError(null);
+        setNotice(null);
+        const pk = (drafts.privateKey ?? "").trim();
+        const wa = (drafts.walletAddress ?? "").trim();
+        if (!pk) throw new Error("Wallet private key is required");
+        if (!/^(0x)?[0-9a-fA-F]{64}$/.test(pk)) {
+          throw new Error("Not a valid EVM private key — expected 64 hex characters");
+        }
+        const res = await api.saveEvmWallet(pk, wa || null);
+        setDrafts({});
+        setNotice(
+          `Wallet saved — signs as ${res.signerAddress}. ` +
+            `${res.keyedVenues.length} swap venues received the key; ${res.addressOnlyVenues.length} market-data venues received the address only.` +
+            (res.createdAccounts.length
+              ? ` ${res.createdAccounts.length} venue account(s) created disabled — enable them below.`
+              : ""),
+        );
+        void reload();
+        onChanged?.();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        throw e; // rethrow so the save button lands on "Failed!"
+      }
+    });
+
+  const handleClear = () => {
+    if (
+      !window.confirm(
+        "Remove the shared wallet key and address from every EVM AMM venue? Account rows, enabled flags and RPC overrides are kept — venues keep market data but cannot trade.",
+      )
+    ) {
+      return;
+    }
+    void run(async () => {
+      const n = await api.clearEvmWallet();
+      setNotice(
+        n
+          ? `Wallet material cleared from ${n} credential record(s).`
+          : "No stored wallet material found.",
+      );
+      void reload();
+      onChanged?.();
+    });
+  };
+
+  // Enabling always makes the wallet account the venue's default — that is
+  // the account credential resolution reads, so a stale second key can
+  // never keep signing while the UI shows the shared wallet.
+  const toggleVenue = (v: (typeof EVM_AMM_VENUES)[number], acct: AccountDto | null) =>
+    void run(async () => {
+      if (acct) {
+        await api.upsertAccount({
+          id: acct.id,
+          label: acct.label,
+          enabled: !acct.enabled,
+          makeDefault: !acct.enabled || acct.isDefault,
+          accountTier: acct.accountTier,
+          maxLeverage: acct.maxLeverage ?? null,
+        });
+      } else {
+        await api.upsertAccount({
+          venue: v.id,
+          label: "EVM Wallet",
+          enabled: true,
+          makeDefault: true,
+          environment: "live",
+        });
+      }
+      void reload();
+      onChanged?.();
+    });
+
+  // RPC override: `Some("")` clears a stored endpoint, a value sets it,
+  // and an untouched draft writes nothing (baseUrl patch semantics).
+  const saveRpc = (v: (typeof EVM_AMM_VENUES)[number], acct: AccountDto | null, raw: string) =>
+    void run(async () => {
+      const val = raw.trim();
+      if (acct) {
+        await api.upsertAccount({
+          id: acct.id,
+          label: acct.label,
+          enabled: acct.enabled,
+          makeDefault: acct.isDefault,
+          accountTier: acct.accountTier,
+          maxLeverage: acct.maxLeverage ?? null,
+          credentials: { baseUrl: val },
+        });
+      } else {
+        await api.upsertAccount({
+          venue: v.id,
+          label: "EVM Wallet",
+          enabled: false,
+          makeDefault: false,
+          environment: "live",
+          credentials: { baseUrl: val },
+        });
+      }
+      setRpcDrafts((d) => {
+        const n = { ...d };
+        delete n[v.id];
+        return n;
+      });
+      void reload();
+      onChanged?.();
+    });
+
+  if (environment === "testnet") {
+    return (
+      <div className="flex items-start gap-2 px-3 py-2 rounded-lg border bg-warn-dim/40 border-warn-border text-[11px] font-mono text-slate-700">
+        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-warn-strong" />
+        <span>
+          EVM AMM venues have no public testnet — the shared wallet binds to the Live
+          environment. Switch to Live Trading to configure it.
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {loadError && (
+        <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
+          {loadError}
+        </div>
+      )}
+
+      {/* Shared wallet credential card */}
+      <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
+        <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
+          <div className="flex items-center space-x-2 min-w-0">
+            <Wallet className="w-4 h-4 text-slate-600" />
+            <h3 className="text-[13px] font-mono font-bold text-slate-900">EVM Wallet</h3>
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-surface-border">
+              one signer → all EVM AMMs
+            </span>
+          </div>
+          {representative?.hasPrivateKey && (
+            <button
+              type="button"
+              onClick={handleClear}
+              disabled={busy || locked}
+              className="px-2 py-1 rounded-lg border border-loss-border text-[11px] font-mono text-loss hover:bg-loss-dim transition cursor-pointer disabled:opacity-50"
+              title="Strip the wallet key and address from every AMM venue (accounts and RPC overrides stay)"
+            >
+              Remove Wallet
+            </button>
+          )}
+        </div>
+
+        <p className="text-[11px] text-slate-500 font-sans leading-normal">
+          DEX venues have no exchange account — this key signs swap transactions
+          directly onchain. It holds <strong>full custody</strong> of the wallet on
+          every chain below; use a dedicated hot wallet holding only the trading
+          funds, never your main wallet key.
+        </p>
+
+        <CredentialGrid
+          fields={EVM_WALLET_FIELDS}
+          values={drafts}
+          setValue={(k, v) => setDrafts((d) => ({ ...d, [k]: v }))}
+          disabled={busy || locked}
+          account={representative}
+          showSecrets={showSecrets}
+          toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
+        />
+
+        {locked && (
+          <p className="text-xs font-mono text-warn-strong">
+            Vault is locked: credentials require an unlocked vault.
+          </p>
+        )}
+        {error && (
+          <div className="p-2 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss flex items-start gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+        {notice && (
+          <div className="p-2 bg-profit-dim/60 border border-profit-border rounded-lg text-xs font-mono text-profit flex items-start gap-1.5">
+            <Check className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            <span>{notice}</span>
+          </div>
+        )}
+
+        <div className="flex justify-end pt-1">
+          <SaveButton state={saveBtn.state} onClick={handleSave} />
+        </div>
+      </div>
+
+      {/* Coverage gadget — every venue the wallet can drive */}
+      <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-2.5 shadow-2xs">
+        <div className="flex items-center justify-between">
+          <h4 className="text-[13px] font-mono font-bold text-slate-900">
+            Venues reachable with this wallet
+          </h4>
+          <span className="text-[10px] font-mono text-muted">
+            {enabledCount}/{EVM_AMM_VENUES.length} enabled
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-500 font-sans leading-normal">
+          Enabling admits the venue for quotes — and swaps on swap-capable
+          venues once the wallet key is saved. RPC overrides apply per chain:
+          same-chain venues share an endpoint unless a venue sets its own.
+        </p>
+
+        <div className="divide-y divide-surface-border/70">
+          {EVM_AMM_VENUES.map((v) => {
+            const acct = acctFor(v.id);
+            const credChip = v.execution
+              ? acct?.hasPrivateKey
+                ? { text: "signer key stored", cls: "text-profit" }
+                : { text: "no key — market data only", cls: "text-amber-700" }
+              : acct?.hasWalletAddress
+                ? { text: "address stored", cls: "text-slate-500" }
+                : { text: "no address", cls: "text-muted" };
+            const rpcDraft = rpcDrafts[v.id];
+            const rpcDirty = (rpcDraft ?? "").trim() !== "";
+            return (
+              <div key={v.id} className="py-2.5 flex items-center gap-3">
+                <VenueLogo venueId={v.id} name={venueDisplay(v.id)} size={20} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-mono font-bold text-slate-900">
+                      {venueDisplay(v.id)}
+                    </span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-surface-border">
+                      {v.chain}
+                    </span>
+                    <span
+                      className={`text-[10px] font-mono px-1.5 py-0.5 rounded-md border ${
+                        v.execution
+                          ? "bg-accent-dim text-accent-strong border-accent-line"
+                          : "bg-slate-50 text-slate-500 border-surface-border"
+                      }`}
+                    >
+                      {v.execution ? "Swaps + quotes" : "Market data"}
+                    </span>
+                    <span className={`text-[10px] font-mono ${credChip.cls}`}>
+                      {credChip.text}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={rpcDraft ?? ""}
+                      disabled={busy || locked}
+                      onChange={(e) =>
+                        setRpcDrafts((d) => ({ ...d, [v.id]: e.target.value }))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && rpcDirty) void saveRpc(v, acct, rpcDraft);
+                      }}
+                      onBlur={() => {
+                        if (rpcDirty) void saveRpc(v, acct, rpcDraft);
+                      }}
+                      placeholder={
+                        acct?.hasBaseUrl
+                          ? "RPC override stored — type to replace"
+                          : v.defaultRpc
+                      }
+                      title={
+                        acct?.hasBaseUrl
+                          ? "A custom RPC endpoint is stored for this venue"
+                          : `Default: ${v.defaultRpc}`
+                      }
+                      className="w-64 px-2 py-1 bg-surface-raised border border-surface-border rounded-md text-[11px] font-mono text-slate-800 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-50"
+                    />
+                    {acct?.hasBaseUrl && !rpcDirty && (
+                      <button
+                        type="button"
+                        onClick={() => void saveRpc(v, acct, "")}
+                        disabled={busy || locked}
+                        title="Clear the stored RPC override — back to the chain default"
+                        className="px-1.5 py-1 rounded-md border border-surface-border text-[10px] font-mono text-muted hover:text-loss hover:border-loss-border transition cursor-pointer disabled:opacity-50"
+                      >
+                        reset
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <ToggleSwitch
+                  size="sm"
+                  checked={acct?.enabled ?? false}
+                  disabled={busy || locked}
+                  ariaLabel={`${venueDisplay(v.id)} enabled`}
+                  title={
+                    acct
+                      ? `${venueDisplay(v.id)} enabled`
+                      : `Enable ${venueDisplay(v.id)} — creates its wallet-bound account`
+                  }
+                  onChange={() => toggleVenue(v, acct)}
+                />
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 };
