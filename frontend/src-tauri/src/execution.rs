@@ -2293,9 +2293,25 @@ pub(crate) fn realize_liq_trim(
         let mark = unlotted_fill_key(close_id, short_venue, LegSide::Long);
         let _ = state.state_store.kv_set(&mark, &leg_pnl.to_string());
     }
+    let lot_id = lot.id.clone();
     let snapshot = lot.clone();
     drop(ledger);
     accumulate_realized_profit(state, state.is_live(), realized);
+    // Running trim total on the lot: `close_cycle` only sees the reduced
+    // quantities, so the final close folds this sum back into
+    // `realized_pnl_usd`/`_bps` — per-strategy metrics then reflect the
+    // whole cycle (defensive trims included), not just the last slice.
+    let key = format!("lot.trim_usd.{lot_id}");
+    let prior: f64 = state
+        .state_store
+        .kv_get(&key)
+        .ok()
+        .flatten()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let _ = state
+        .state_store
+        .kv_set(&key, &(prior + realized).to_string());
     if let Err(e) = state.state_store.upsert_cycle_lot(&snapshot) {
         tracing::warn!("persist trimmed cycle lot {} failed: {e}", snapshot.id);
     }
@@ -2518,7 +2534,7 @@ pub(crate) fn close_flattened_spatial_lot(
                 lot.fees_paid_usd = entry_fees;
             }
         }
-        let realized = ledger
+        let close_usd = ledger
             .close_cycle(
                 &id,
                 long_exit.px_qty / long_exit.qty,
@@ -2526,19 +2542,49 @@ pub(crate) fn close_flattened_spatial_lot(
                 exit_fees,
                 close_status,
             )
-            .and_then(|l| {
-                // Persist the closed lot (covers the pre-close fee refresh
-                // too). Best-effort: a store failure loses durable metrics
-                // but the in-memory close already resolved — warn, never
-                // unwind the flatten's accounting.
-                if let Err(e) = state.state_store.upsert_cycle_lot(l) {
-                    tracing::warn!("persist closed cycle lot {} failed: {e}", l.id);
+            .and_then(|l| l.realized_pnl_usd);
+        let realized = close_usd.and_then(|close_usd| {
+            let l = ledger.lots.get_mut(&id)?;
+            // Fold any mid-hold trim realizations into the lot's final
+            // outcome: `close_cycle` only priced the reduced quantities,
+            // so metrics would otherwise under-report a trimmed cycle.
+            // The returned `usd` stays close-only — the counter already
+            // took the trim portion at trim time.
+            let trim_sum: f64 = state
+                .state_store
+                .kv_get(&format!("lot.trim_usd.{}", l.id))
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.0);
+            if trim_sum != 0.0 {
+                let total = close_usd + trim_sum;
+                // Denominator is the ORIGINAL entry notional — the root
+                // legs keep their entry fills while the lot's qty was
+                // shrunk by trims.
+                let orig_notional: f64 = sig
+                    .legs
+                    .iter()
+                    .map(|root| root.fill_price.unwrap_or(0.0) * root.filled_qty)
+                    .sum::<f64>()
+                    / 2.0;
+                l.realized_pnl_usd = Some(total);
+                if orig_notional > 0.0 {
+                    l.realized_pnl_bps = Some((total / orig_notional) * 10_000.0);
                 }
-                match (l.realized_pnl_usd, l.realized_pnl_bps) {
-                    (Some(usd), Some(bps)) => Some((usd, bps, entry_debited)),
-                    _ => None,
-                }
-            });
+            }
+            let total_bps = l.realized_pnl_bps;
+            // Persist the closed lot (covers the pre-close fee refresh
+            // too). Best-effort: a store failure loses durable metrics
+            // but the in-memory close already resolved — warn, never
+            // unwind the flatten's accounting.
+            if let Err(e) = state.state_store.upsert_cycle_lot(l) {
+                tracing::warn!("persist closed cycle lot {} failed: {e}", l.id);
+            }
+            // Close-only cash for the counter; total-cycle bps (trims
+            // included) for prediction resolution.
+            total_bps.map(|bps| (close_usd, bps, entry_debited))
+        });
         // Calibration resolution: the ledger's realized net bps is the
         // authoritative outcome the entry forecast gets scored against.
         // Non-fatal — a prediction left unresolved is uncounted, not wrong.

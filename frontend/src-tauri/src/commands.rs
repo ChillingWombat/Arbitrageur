@@ -9473,6 +9473,15 @@ mod tests {
             lot.status,
             arbitrageur_execution::virtual_ledger::CycleStatus::Closed
         );
+        // The lot's durable outcome is the WHOLE cycle — the close path
+        // folded the trim's 55.6 back in for metrics/prediction resolution
+        // even though the counter only took the close-only 101.4 increment.
+        let lot_usd = lot.realized_pnl_usd.expect("realized usd");
+        assert!((lot_usd - 156.0).abs() < 1e-9, "lot usd {lot_usd}");
+        // bps on original notional: 156 / ((64200*1 + 64440*1)/2) * 1e4.
+        let want_bps = 156.0 / 64_320.0 * 10_000.0;
+        let lot_bps = lot.realized_pnl_bps.expect("realized bps");
+        assert!((lot_bps - want_bps).abs() < 1e-6, "lot bps {lot_bps}");
     }
 
     #[tokio::test]
