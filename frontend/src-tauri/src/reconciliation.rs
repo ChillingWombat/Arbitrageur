@@ -753,7 +753,15 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
     if children.iter().any(|c| c.status.counts_as_open()) {
         return;
     }
-    if children.len() >= MAX_RESIDUAL_ATTEMPTS {
+    // The attempt cap bounds residual-flatten retries only — `trim-`
+    // children count toward coverage and the open-dedup above, but a prior
+    // liquidation trim is not a failed residual attempt and must not consume
+    // the budget.
+    let residual_attempts = children
+        .iter()
+        .filter(|c| c.id.starts_with("flat-"))
+        .count();
+    if residual_attempts >= MAX_RESIDUAL_ATTEMPTS {
         tracing::error!(
             "reconcile: {signal_id} residual persists after {MAX_RESIDUAL_ATTEMPTS} submitted flatten attempts — manual resolution required"
         );
