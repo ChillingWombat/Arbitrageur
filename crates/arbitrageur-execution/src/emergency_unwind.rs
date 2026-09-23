@@ -27,7 +27,9 @@ impl EmergencyUnwindHandler {
 
         let mut unwind_order =
             OrderRequest::new_market(exchange.venue_id(), symbol, unwind_side, unhedged_qty);
-        unwind_order.reduce_only = true;
+        // Spot instruments have no reduce-only concept — the venue refuses
+        // an oversell itself, which is the same guarantee.
+        unwind_order.reduce_only = exchange.supports_reduce_only(symbol);
         let unwind_client_id = unwind_order.client_order_id.clone();
 
         match exchange.place_order(unwind_order).await {

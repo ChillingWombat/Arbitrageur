@@ -864,7 +864,9 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                     order_side,
                     qty_dec,
                 );
-                req.reduce_only = true;
+                // Spot instruments carry no reduce-only flag — the venue
+                // refuses an oversell itself, same guarantee.
+                req.reduce_only = adapter.supports_reduce_only(&leg.symbol);
                 let client_order_id = req.client_order_id.clone();
                 match adapter.place_order(req).await {
                     Ok(resp) => (resp, client_order_id),
@@ -1254,6 +1256,7 @@ mod tests {
         cancel_error: std::sync::Mutex<Option<String>>,
         placed: std::sync::Mutex<Vec<OrderRequest>>,
         place_response: std::sync::Mutex<Option<OrderResponse>>,
+        no_reduce_only: bool,
     }
 
     impl MockVenue {
@@ -1265,6 +1268,14 @@ mod tests {
                 cancel_error: std::sync::Mutex::new(None),
                 placed: std::sync::Mutex::new(Vec::new()),
                 place_response: std::sync::Mutex::new(None),
+                no_reduce_only: false,
+            }
+        }
+
+        fn spot(venue: &'static str, responses: Vec<Result<OrderResponse, String>>) -> Self {
+            Self {
+                no_reduce_only: true,
+                ..Self::new(venue, responses)
             }
         }
     }
@@ -1326,6 +1337,9 @@ mod tests {
         }
         fn live_order_submission_implemented(&self) -> bool {
             true
+        }
+        fn supports_reduce_only(&self, _symbol: &str) -> bool {
+            !self.no_reduce_only
         }
         async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
             self.cancels
@@ -1694,6 +1708,46 @@ mod tests {
         assert_eq!(child.status, SignalStatus::Closed);
         let parent = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(parent.status, SignalStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn e2e_spot_residual_flatten_omits_reduce_only() {
+        // Spot venues have no position model — a reduce-only flag is
+        // rejected outright (Coinbase bails), which would strand the
+        // residual forever. The flatten must go out as a plain market
+        // order; the venue itself refuses an oversell, which is the same
+        // guarantee the flag buys on perps.
+        let (state, _sid) = seeded_state(
+            "funding",
+            vec![("coinbase", LegSide::Long), ("kraken", LegSide::Short)],
+        );
+
+        let coinbase = Arc::new(MockVenue::spot("coinbase", vec![Ok(mock_filled())]));
+        let mut place = mock_filled();
+        place.order_id = "flat-oid-spot".into();
+        *coinbase.place_response.lock().unwrap() = Some(place);
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("coinbase".into(), coinbase.clone());
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new(
+                "kraken",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+
+        reconcile_pending_orders(&state).await;
+        let placed = coinbase.placed.lock().unwrap().clone();
+        assert_eq!(placed.len(), 1);
+        assert!(
+            !placed[0].reduce_only,
+            "spot residual flatten must not carry reduce_only"
+        );
+        assert_eq!(placed[0].side, Side::Sell);
+        assert_eq!(placed[0].quantity, dec!(1));
     }
 
     #[tokio::test]

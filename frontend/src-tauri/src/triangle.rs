@@ -3,10 +3,10 @@
 //! helpers stay reachable via `crate::commands`.
 
 use crate::commands::{
-    dec_to_f64, effective_venue_fee_bps, margin_monitor_from_settings,
-    maybe_record_margin_snapshots, record_execution_failure, record_execution_log,
-    refresh_equity_expectations_after_fills, resolve_effective_leverage, validate_adapter_book,
-    SimStepResultDto, LIVE_ENTRY_SPATIAL_ONLY, TRIANGLE_STRATEGY_ID,
+    dec_to_f64, effective_venue_fee_bps, live_entry_gate, live_entry_notional_guard,
+    margin_monitor_from_settings, maybe_record_margin_snapshots, record_execution_failure,
+    record_execution_log, refresh_equity_expectations_after_fills, resolve_effective_leverage,
+    validate_adapter_book, SimStepResultDto, TRIANGLE_STRATEGY_ID,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use arbitrageur_core::exchange::ExchangeAdapter;
@@ -540,9 +540,6 @@ pub async fn execute_triangle_arbitrage_impl(
                 .into(),
         );
     }
-    if state.is_live() {
-        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
-    }
 
     let adapter = state
         .get_adapter(&params.venue)
@@ -579,7 +576,12 @@ pub async fn execute_triangle_arbitrage_impl(
         );
     }
     if state.is_live() {
-        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
+        // Triangle legs dispatch sequentially on one venue with durable
+        // leg records; a partial cycle lands `imbalanced` and the
+        // reconciler auto-flattens the residual reduce-only. Same opt-in
+        // surface as spatial/funding: live_entry_enabled + unlocked vault
+        // + adapter submission/polling/entry eligibility + credentials.
+        live_entry_gate(state, &[vid.as_str()])?;
     }
     let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols, true)
         .await
@@ -595,6 +597,22 @@ pub async fn execute_triangle_arbitrage_impl(
             "triangle net {:.1} BPS is below the {:.1} BPS hurdle — not executed",
             eval.net_bps, params.min_profit_bps
         ));
+    }
+    if state.is_live() {
+        // Cap each priced leg at the configured per-leg notional — the cap
+        // refuses, never clamps.
+        let legs: Vec<(&str, Decimal)> = eval
+            .order_qty
+            .iter()
+            .zip(eval.leg_prices.iter())
+            .map(|(q, p)| {
+                (
+                    vid.as_str(),
+                    Decimal::from_f64_retain(q * p).unwrap_or(dec!(0)),
+                )
+            })
+            .collect();
+        live_entry_notional_guard(state, &legs)?;
     }
 
     // One-open-pair-per-symbol, extended to the cycle: any blocking ledger

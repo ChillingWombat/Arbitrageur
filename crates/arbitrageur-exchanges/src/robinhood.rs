@@ -116,6 +116,10 @@ impl ExchangeAdapter for RobinhoodAdapter {
         self.inner.supports_live_execution()
     }
 
+    fn supports_reduce_only(&self, symbol: &str) -> bool {
+        self.inner.supports_reduce_only(symbol)
+    }
+
     async fn fetch_order(
         &self,
         symbol: &str,

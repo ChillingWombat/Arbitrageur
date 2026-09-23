@@ -5,11 +5,11 @@
 //! `crate::commands`.
 
 use crate::commands::{
-    backtest_stats, dec_to_f64, effective_venue_fee_bps, get_market_universe_impl,
-    margin_monitor_from_settings, maybe_record_margin_snapshots, reconcile_signal_legs,
-    record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
-    resolve_effective_leverage, strategy_slippage_bps, validate_adapter_book,
-    validate_market_symbol, SimStepResultDto, FUNDING_STRATEGY_ID, LIVE_ENTRY_SPATIAL_ONLY,
+    backtest_stats, dec_to_f64, effective_venue_fee_bps, get_market_universe_impl, live_entry_gate,
+    live_entry_notional_guard, margin_monitor_from_settings, maybe_record_margin_snapshots,
+    reconcile_signal_legs, record_execution_failure, record_execution_log,
+    refresh_equity_expectations_after_fills, resolve_effective_leverage, strategy_slippage_bps,
+    validate_adapter_book, validate_market_symbol, SimStepResultDto, FUNDING_STRATEGY_ID,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use crate::triangle::triangle_dust_qty;
@@ -1312,21 +1312,6 @@ pub async fn scan_funding_opportunities_impl(
     });
     Ok(opps)
 }
-fn funding_leg_live_issue(adapter: &Arc<dyn ExchangeAdapter>) -> Option<String> {
-    let name = adapter.name().to_string();
-    if !adapter.live_order_submission_implemented() {
-        return Some(format!(
-            "{name}: live order submission is not implemented yet"
-        ));
-    }
-    if !adapter.has_live_credentials() {
-        return Some(format!(
-            "{name}: submittable, but no live credentials loaded (add them in Exchange Accounts and unlock the vault)"
-        ));
-    }
-    None
-}
-
 pub async fn execute_funding_carry_impl(
     symbol: &str,
     long_venue: &str,
@@ -1357,33 +1342,17 @@ pub async fn execute_funding_carry_impl(
     }
     let is_live = state.is_live();
     if is_live {
-        // Testnet-only until two-leg live dispatch + reconciliation exists.
-        // Refuse with per-leg reasons so the operator sees exactly what is
-        // missing instead of a blanket denial.
-        let mut issues = Vec::new();
-        for (venue, label) in [(long_venue, "LONG"), (short_venue, "SHORT")] {
-            match state.get_adapter(venue) {
-                Some(adapter) => {
-                    if let Some(issue) = funding_leg_live_issue(&adapter) {
-                        issues.push(format!("{label} leg — {issue}"));
-                    }
-                }
-                None => issues.push(format!("{label} leg — venue '{venue}' is not admitted")),
-            }
-        }
-        issues.push(
-            "funding two-leg live dispatch is not built — live entries are currently spatial-only"
-                .to_string(),
-        );
-        return Err(format!(
-            "Live funding execution is not available for {symbol} (LONG {long_venue} / SHORT {short_venue}): {}. Switch to Testnet to run this pair against venue demo endpoints.",
-            issues.join("; ")
-        ));
+        // Funding entries reuse the same two-leg coordinator + durable
+        // signal reconciliation as the spatial path, so they run under the
+        // same operator opt-in: live_entry_enabled + unlocked vault +
+        // adapter submission/polling/entry eligibility + live credentials.
+        // The per-leg notional cap is checked below once leg VWAPs price.
+        live_entry_gate(state, &[long_venue, short_venue])?;
     }
 
-    // Paper-only path: the caller-supplied triple is never trusted —
-    // rescan and match it against freshly resolved prints (OLD display
-    // triple), then use ONLY the refreshed canonical/exact DTO fields.
+    // The caller-supplied triple is never trusted — rescan and match it
+    // against freshly resolved prints (OLD display triple), then use ONLY
+    // the refreshed canonical/exact DTO fields.
     let opps = scan_funding_opportunities_impl(symbol, trade_size_usd, state).await?;
     let opp = opps
         .into_iter()
@@ -1473,10 +1442,6 @@ pub async fn execute_funding_carry_impl(
                 .into(),
         );
     }
-    if is_live {
-        return Err(LIVE_ENTRY_SPATIAL_ONLY.into());
-    }
-
     // Dispatch-time books per EXACT leg symbol: hub-first (120s), else a
     // fresh read-only fetch through the admitted adapter. Either leg missing
     // or invalid fails the dispatch — never priced off a half book.
@@ -1576,6 +1541,15 @@ pub async fn execute_funding_carry_impl(
     }
     let long_vwap_f = dec_to_f64(long_vwap, "funding long VWAP")?;
     let short_vwap_f = dec_to_f64(short_vwap, "funding short VWAP")?;
+    if is_live {
+        live_entry_notional_guard(
+            state,
+            &[
+                (long_canon, qty * long_vwap),
+                (short_canon, qty * short_vwap),
+            ],
+        )?;
+    }
     let max_entry_spread_bps = state
         .strategy_params
         .read()
@@ -1752,7 +1726,11 @@ pub async fn execute_funding_carry_impl(
             strategy_id: FUNDING_STRATEGY_ID.to_string(),
             symbol: root_symbol.clone(),
             route_id: None,
-            expected_net_usd: None,
+            // The scan's cost-adjusted projection (carry − fees − spread
+            // over the hold estimate) is the honest entry expectation.
+            expected_net_usd: opp
+                .expected_return_usd
+                .filter(|v| v.is_finite()),
             note: Some(format!("{carry_note}; {path}")),
             legs: vec![
                 NewSignalLeg {

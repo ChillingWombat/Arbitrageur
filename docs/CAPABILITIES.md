@@ -21,10 +21,10 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | Cross-venue perpetual spatial | Yes | Yes (testnet-capable venues) | **Opt-in** (`live_entry_enabled` + per-leg notional cap; off by default) — venue-proven by the HL↔Lighter live canary | Orders poll to terminal state and restart-recover; unconditional residual auto-flatten + bounded cancel retry | Keep the cap minimal — residual one-sided-exposure risk remains on venue outage |
 | Spread Radar manual entry | Yes | Yes | Via `live_entry_enabled` gate — dispatches through the spatial two-leg path, so the same vault + per-leg cap + adapter-eligibility checks apply | Bot-managed exits | Opt-in (off by default) |
 | Spread Radar autonomous bot | Yes | Yes, opt-in | **Testnet-only** (GateContext hard-blocks live autonomous entries) | Bot-managed exits with audit | Testnet only |
-| Perp/perp funding carry | Yes where both funding and books exist | Yes | **Disabled** — no two-leg live dispatch yet | Manual flatten | Testnet only |
-| Same-venue spot/perp basis | Yes where one adapter exposes both exact books | Yes | **Disabled** | Exact per-leg flatten | Testnet only |
+| Perp/perp funding carry | Yes where both funding and books exist | Yes | Via `live_entry_enabled` gate — same vault + per-leg cap + adapter-eligibility checks as spatial | Orders poll to terminal; unconditional residual auto-flatten (per-leg, reduce-only where the venue supports it) | Opt-in (off by default) |
+| Same-venue spot/perp basis | Yes where one adapter exposes both exact books | Yes | Via `live_entry_enabled` gate — spot legs submit without `reduce_only` (the venue itself refuses oversells); if a venue still rejects the flatten the residual escalates `unresolved` for manual resolution | Exact per-leg flatten | Opt-in (off by default) |
 | Cross-venue spot arbitrage | No usable scanner | No | **Disabled** | Not implemented | Roadmap |
-| Single-venue triangular | Yes on exact supported books | Yes | **Disabled** | Residual flatten | Testnet only |
+| Single-venue triangular | Yes on exact supported books | Yes | Via `live_entry_enabled` gate — three sequential legs on one venue; each priced leg must clear the per-leg notional cap | Residual flatten | Opt-in (off by default) |
 | Cross-ticker | Research/quote path only | No | **Disabled** | Not implemented | Roadmap |
 | Prediction parity | Research scan when both configured adapters return real books | No | **Disabled** | Not implemented | Research only |
 | Statistical arbitrage | Analysis tools | No integrated dispatcher | **Disabled** | Not implemented | Research only |
@@ -35,7 +35,7 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 
 “Unit” means deterministic parser/signing tests. “Public” means live public-read evidence recorded in the handoff. “Sandbox order” and “mainnet order” require credentialed evidence and are not implied by source code.
 
-*"Strategy live entry" = the `live_entry_enabled` spatial canary path only (per-leg notional cap required). Spread Radar manual entries dispatch through that same two-leg path; triangle/funding/spot entries remain refused regardless.*
+*"Strategy live entry" = the `live_entry_enabled` opt-in gate (per-leg notional cap required, refused never clamped). Spatial, Spread Radar manual, funding carry/basis, and triangle entries all dispatch through it; autonomous Radar bot entries remain testnet-only; cross-venue spot and prediction parity have no live dispatch.*
 
 | Venue | Markets / books | Funding | Account read | Sign + submit | Cancel | Leverage update | Terminal/restart reconciliation | Verification ceiling in repo | Strategy live entry |
 |---|---|---|---|---|---|---|---|---|---|
@@ -90,7 +90,7 @@ Live mode currently means:
 2. Authenticated venue account reads can be shown.
 3. Explicit risk-reducing close submissions can be requested where an adapter supports them.
 4. Live position reads are matched through adapter-owned account-position normalization (for example `BTCUSDT`, `PF_XBTUSD`, `BTC-USDT-SWAP`, `PERP_BTC_USDC`, `BTC-PERP`, and Lighter market IDs). Unknown or ambiguous mappings leave the position unresolved rather than treated as flat. Quantities and prices are kept in venue-native contract units (e.g. `1000PEPE-USDT` positions stay denominated in `1000PEPE` units with per-unit prices — no ×1000 rescaling in either direction).
-5. **New strategy entries are gated, not blanket-blocked** — the spatial two-leg path dispatches live orders when the operator enables `live_entry_enabled` AND sets `live_entry_max_notional_usd` (per-leg refusal, never clamped). All other strategy paths (triangle, funding carry, spot/monitor) refuse live dispatch. Every accepted non-final leg lands in `unresolved`/`imbalanced` reconciliation with its venue order id persisted; an operator acknowledge control resolves escalated signals after manual venue review.
+5. **New strategy entries are gated, not blanket-blocked** — spatial two-leg, Spread Radar manual, funding carry/basis, and single-venue triangle paths dispatch live orders when the operator enables `live_entry_enabled` AND sets `live_entry_max_notional_usd` (per-leg refusal, never clamped). Cross-venue spot, prediction parity, and the autonomous Radar bot do not dispatch live. Every accepted non-final leg lands in `unresolved`/`imbalanced` reconciliation with its venue order id persisted; an operator acknowledge control resolves escalated signals after manual venue review. Residual auto-flatten submits reduce-only closes only where the venue supports the flag (`ExchangeAdapter::supports_reduce_only`) — spot instruments flatten via plain market orders since the venue itself refuses oversells.
 6. **Market data stays websocket-primary in live mode** — the feed supervisor no longer suspends WS lanes when live; orderbooks flow via WS into `MarketDataHub` and REST is fallback-only (2s freshness bound enforced at execution). The monitor keeps running as the hub's REST feeder for venues without a WS lane and as the funding refresher. Engine pause still suspends both.
 7. **Accounts are environment-scoped** — live credential profiles never bind to testnet adapters and vice versa; strategy routes are same-environment only.
 
