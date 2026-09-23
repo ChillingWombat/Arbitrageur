@@ -793,6 +793,11 @@ fn parse_addr(s: &str) -> anyhow::Result<Address> {
 
 /// Decimal → integer base units at `decimals` precision. Rejects negative,
 /// fractional-base-unit, and overflowing inputs (fail-closed conversions).
+/// f64→Decimal round trips leave ~1e-19 binary-expansion dust
+/// (0.005 → 0.0050000000000000001040834086), so a fraction within ~1e-13 of
+/// the scaled value is snapped to the nearest base unit; genuine sub-wei
+/// dust still bails — silently flooring a swap leg would desync it from
+/// the quantity the ledger recorded.
 fn dec_to_u256(v: Decimal, decimals: u8) -> anyhow::Result<U256> {
     if v <= Decimal::ZERO {
         anyhow::bail!("amount must be positive, got {v}");
@@ -800,9 +805,16 @@ fn dec_to_u256(v: Decimal, decimals: u8) -> anyhow::Result<U256> {
     let scaled = v
         .checked_mul(Decimal::from(10u128.pow(decimals as u32)))
         .ok_or_else(|| anyhow::anyhow!("amount {v} overflows at {decimals} decimals"))?;
-    if scaled.fract() != Decimal::ZERO {
-        anyhow::bail!("amount {v} has sub-wei precision at {decimals} decimals");
-    }
+    let scaled = if scaled.fract() != Decimal::ZERO {
+        let grid = scaled.round();
+        let tol = (scaled.abs() * Decimal::new(1, 13)).max(Decimal::new(1, 12));
+        if (scaled - grid).abs() > tol {
+            anyhow::bail!("amount {v} has sub-wei precision at {decimals} decimals");
+        }
+        grid
+    } else {
+        scaled
+    };
     let n: u128 = scaled
         .to_u128()
         .ok_or_else(|| anyhow::anyhow!("amount {v} exceeds u128"))?;
@@ -2275,6 +2287,10 @@ mod tests {
         assert!(dec_to_u256(dec!(0), 18).is_err());
         assert!(dec_to_u256(dec!(-1), 18).is_err());
         assert!(dec_to_u256(dec!(0.0000001), 6).is_err()); // sub-wei
+                                                           // f64→Decimal dust snaps to the wire grid — the residual-close
+                                                           // path must not strand on binary-expansion noise.
+        let noisy = Decimal::from_str("0.0050000000000000001040834086").unwrap();
+        assert_eq!(dec_to_u256(noisy, 6).unwrap(), U256::from(5_000u64));
         assert_eq!(u256_to_dec(U256::from(1_500_000u64), 6), dec!(1.5));
         assert_eq!(u256_to_dec(U256::ZERO, 18), Decimal::ZERO);
     }
