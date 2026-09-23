@@ -1832,11 +1832,32 @@ pub async fn execute_funding_carry_impl(
 
     refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
     // Realized P&L comes from the coordinator's verified fill accounting —
-    // identical semantics in both environments.
+    // identical semantics in both environments. PartialPairKept carries the
+    // closed trim's real P&L and unwound variants a real round-trip cost —
+    // neither may fall into the 0.0 arm.
     let attempt_pnl_f = match &res {
         ArbitrageExecutionResult::Success {
             realized_profit, ..
+        }
+        | ArbitrageExecutionResult::PartialPairKept {
+            realized_profit, ..
         } => realized_profit.to_string().parse::<f64>().unwrap_or(0.0),
+        ArbitrageExecutionResult::LegBFailedUnwound {
+            leg_a_fill,
+            unwind_resp,
+            ..
+        } => crate::execution::unwind_round_trip_pnl(leg_a_fill, unwind_resp, Side::Buy)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+        ArbitrageExecutionResult::LegAFailedUnwound {
+            leg_b_fill,
+            unwind_resp,
+            ..
+        } => crate::execution::unwind_round_trip_pnl(leg_b_fill, unwind_resp, Side::Sell)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
         _ => 0.0,
     };
     let total_f = {
