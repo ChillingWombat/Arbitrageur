@@ -280,13 +280,18 @@ pub struct SignalExecution {
     pub closed_at: Option<String>,
 }
 
-/// True when `child_id` is a `flat-{parent_id}-XXXX` flatten child: the
-/// trailing segment must be exactly the 4-hex sequence suffix, so nested
-/// parents never collide (`flat-s-foo-0001` is a child of `s-foo`, not `s`).
+/// True when `child_id` is a `flat-{parent_id}-XXXX` or `trim-{parent_id}-XXXX`
+/// family child: the trailing segment must be exactly the 4-hex sequence
+/// suffix, so nested parents never collide (`flat-s-foo-0001` is a child of
+/// `s-foo`, not `s`). `trim-` children are liquidation trims — family
+/// members for exposure/residual math, but realized separately (the
+/// cycle-lot close aggregation excludes them so a trimmed lot's remaining
+/// quantity still matches the final flatten's fills).
 pub fn is_flatten_child_id(child_id: &str, parent_id: &str) -> bool {
-    child_id
+    let rest = child_id
         .strip_prefix("flat-")
-        .and_then(|rest| rest.strip_prefix(parent_id))
+        .or_else(|| child_id.strip_prefix("trim-"));
+    rest.and_then(|rest| rest.strip_prefix(parent_id))
         .and_then(|rest| rest.strip_prefix('-'))
         .is_some_and(|suf| suf.len() == 4 && suf.chars().all(|c| c.is_ascii_hexdigit()))
 }
@@ -538,6 +543,7 @@ pub fn aggregate_open_positions(
         let owner: &SignalExecution = match s
             .id
             .strip_prefix("flat-")
+            .or_else(|| s.id.strip_prefix("trim-"))
             .and_then(|t| t.rsplit_once('-').map(|(p, _)| p))
             .and_then(|pid| by_id.get(pid).copied())
         {

@@ -273,7 +273,7 @@ pub async fn get_external_positions_impl(
     }
     let signals = state
         .state_store
-        .list_signals(None, None)
+        .list_open_signals()
         .map_err(|e| e.to_string())?;
 
     let mut positions = Vec::new();
@@ -703,7 +703,7 @@ pub async fn close_external_position_impl(
         .map_err(|e| format!("Account re-read failed for {venue_lc}: {e}"))?;
     let signals = state
         .state_store
-        .list_signals(None, None)
+        .list_open_signals()
         .map_err(|e| e.to_string())?;
     let live = adapter
         .account_position_for(&account, &input.symbol)
