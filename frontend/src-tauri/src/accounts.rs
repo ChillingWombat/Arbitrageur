@@ -68,7 +68,7 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
     // while live positions are open rather than silently disabling exit
     // supervision; testnet sims need no credentials and lock freely.
     if state.is_live() {
-        if let Ok(signals) = state.state_store.list_signals(None, None) {
+        if let Ok(signals) = state.state_store.list_open_signals() {
             let open: Vec<String> = signals
                 .iter()
                 .filter(|s| s.status.counts_as_open())
@@ -110,7 +110,7 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
 /// credentials were deleted — live mode only (testnet strands are
 /// recoverable by re-adding the key; a live position cannot wait).
 fn open_signals_on_venue(venue: &str, state: &AppEngineState) -> Vec<String> {
-    let Ok(signals) = state.state_store.list_signals(None, None) else {
+    let Ok(signals) = state.state_store.list_open_signals() else {
         return Vec::new();
     };
     signals
@@ -550,7 +550,7 @@ pub fn upsert_account_impl(
             // supervision — its adapter drops out of `get_venues`, so
             // closes can no longer authenticate or even resolve.
             if !input.enabled && state.is_live() {
-                if let Ok(signals) = state.state_store.list_signals(None, None) {
+                if let Ok(signals) = state.state_store.list_open_signals() {
                     let open: Vec<String> = signals
                         .iter()
                         .filter(|s| {
@@ -738,7 +738,7 @@ pub fn delete_account_credentials_impl(
     // open strands live exit supervision — the account's orders can no
     // longer authenticate. Same gate as the venue-wide delete above.
     if state.is_live() {
-        if let Ok(signals) = state.state_store.list_signals(None, None) {
+        if let Ok(signals) = state.state_store.list_open_signals() {
             let open: Vec<String> = signals
                 .iter()
                 .filter(|s| {

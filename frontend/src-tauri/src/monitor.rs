@@ -1958,7 +1958,7 @@ impl SpreadMonitorEngine {
             *last = Some(Instant::now());
         }
         let min_apr = crate::funding::funding_min_apr(state);
-        let signals = match state.state_store.list_signals(None, None) {
+        let signals = match state.state_store.list_open_signals() {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("monitor: funding-exit check skipped (signals unreadable): {e}");

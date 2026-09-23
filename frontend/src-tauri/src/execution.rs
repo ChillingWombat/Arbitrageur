@@ -2217,12 +2217,207 @@ pub(crate) fn accumulate_realized_profit(state: &AppEngineState, is_live: bool, 
     persisted.parse::<f64>().unwrap_or(0.0)
 }
 
+/// Realize a liquidation trim's filled portion: accumulate its partial-close
+/// cash and shrink the open lot's quantities so the final flatten's fills
+/// still cover the remaining qty. Returns the realized USD (0 when no fills
+/// landed). The trim child's legs encode closing sides — the long venue's
+/// leg records `Short`, the short venue's records `Long`.
+pub(crate) fn realize_liq_trim(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    close_id: &str,
+    long_venue: &str,
+    short_venue: &str,
+) -> Result<f64, String> {
+    use crate::state_store::LegSide;
+
+    let child = state
+        .state_store
+        .get_signal(close_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("trim child {close_id} missing"))?;
+    let fill_of = |venue: &str, side: LegSide| {
+        child
+            .legs
+            .iter()
+            .find(|l| l.venue.eq_ignore_ascii_case(venue) && l.side == side)
+            .and_then(|l| match (l.fill_price, l.filled_qty, l.fee_usd) {
+                (Some(px), q, f) if q > 0.0 && px > 0.0 => Some((q, px, f)),
+                _ => None,
+            })
+    };
+    let (long_canon, short_canon) = (
+        crate::state::canonical_venue_id(long_venue),
+        crate::state::canonical_venue_id(short_venue),
+    );
+    // The long venue's position is reduced by a Short closing fill; the
+    // short venue's by a Long one.
+    let long_fill = long_canon.and_then(|v| fill_of(v, LegSide::Short));
+    let short_fill = short_canon.and_then(|v| fill_of(v, LegSide::Long));
+    if long_fill.is_none() && short_fill.is_none() {
+        return Ok(0.0);
+    }
+
+    let want_strategy = crate::attribution::ledger_strategy_id(&sig.strategy_id);
+    let mut ledger = state.virtual_ledger.write();
+    let lot = ledger.lots.values_mut().find(|lot| {
+        lot.strategy_id == want_strategy
+            && lot.symbol == sig.symbol
+            && lot.status == CycleStatus::Open
+            && crate::state::canonical_venue_id(&lot.venue_long) == long_canon
+            && crate::state::canonical_venue_id(&lot.venue_short) == short_canon
+    });
+    let Some(lot) = lot else {
+        // No durable lot (pre-v30 position or closed already): the trim's
+        // cash is still real — accumulate it unpriced against entry rather
+        // than dropping it? Entry prices are unknown without the lot, so
+        // the honest bound is proceeds-minus-fees per side, which would
+        // understate losses. Refuse to guess: report, don't fabricate.
+        return Err(format!("no open {} lot for {}", want_strategy, sig.symbol));
+    };
+
+    let mut realized = 0.0;
+    if let Some((q, px, fee)) = long_fill {
+        let leg_pnl = (px - lot.long_entry_price) * q - fee;
+        realized += leg_pnl;
+        lot.long_qty = (lot.long_qty - q).max(0.0);
+        // Durable per-leg mark keeps the unlotted family sweep from
+        // recounting this fill if the lot later dies mid-family-close.
+        let mark = unlotted_fill_key(close_id, long_venue, LegSide::Short);
+        let _ = state.state_store.kv_set(&mark, &leg_pnl.to_string());
+    }
+    if let Some((q, px, fee)) = short_fill {
+        let leg_pnl = (lot.short_entry_price - px) * q - fee;
+        realized += leg_pnl;
+        lot.short_qty = (lot.short_qty - q).max(0.0);
+        let mark = unlotted_fill_key(close_id, short_venue, LegSide::Long);
+        let _ = state.state_store.kv_set(&mark, &leg_pnl.to_string());
+    }
+    let snapshot = lot.clone();
+    drop(ledger);
+    accumulate_realized_profit(state, state.is_live(), realized);
+    if let Err(e) = state.state_store.upsert_cycle_lot(&snapshot) {
+        tracing::warn!("persist trimmed cycle lot {} failed: {e}", snapshot.id);
+    }
+    Ok(realized)
+}
+
+/// Durable per-leg marker: a family child's leg fill realized through the
+/// unlotted sweep (or `realize_liq_trim`) exactly once. Keyed by child id +
+/// venue + closing side — fills land atomically per leg via `apply_leg_fill`,
+/// so a leg present-unmarked gets picked up on the next pass even when its
+/// fill arrived late through order reconciliation.
+fn unlotted_fill_key(child_id: &str, venue: &str, side: crate::state_store::LegSide) -> String {
+    let canon = crate::state::canonical_venue_id(venue).unwrap_or(venue);
+    format!("unlotted.fill.{child_id}.{canon}.{}", side.as_str())
+}
+
+/// Accumulate realized PnL for family children whose fills will never pass
+/// through a `close_cycle` — single-leg residuals, imbalanced pairs, and
+/// signals whose lot can no longer close (family Closed while the lot stays
+/// Open on a qty mismatch: no further children can arrive, so these fills
+/// are the only record). Signals with an open lot while the family is still
+/// open are skipped: their exit fills realize inside the eventual
+/// `close_cycle` net, and counting them here would double-count.
+///
+/// Each leg fill is priced against the matching root entry leg on the same
+/// venue (child side is the closing direction, root side the entry
+/// direction): `Short` closes a long entry, `Long` closes a short entry.
+/// Only leg PnL minus the exit fee lands here — entry fees were already
+/// debited in full when the entry legs persisted, so charging them again
+/// (even pro-rata) would double-count. Legs whose root entry price is
+/// missing are skipped rather than priced at zero — the residual edge is
+/// bounded by the documented pre-v30 lotless boundary.
+///
+/// `children` are the family members to sweep — callers pass the freshest
+/// list (including this pass's new child). Every counted leg gets a durable
+/// kv marker, so a late-arriving reconciliation fill is picked up on a
+/// later pass without double-counting the ones already done.
+pub(crate) fn accumulate_unlotted_family_fills(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    children: &[crate::state_store::SignalExecution],
+    family_closed: bool,
+) {
+    use crate::state_store::LegSide;
+
+    let venue_of = |side: LegSide| {
+        sig.legs
+            .iter()
+            .find(|l| l.side == side)
+            .and_then(|l| crate::state::canonical_venue_id(&l.venue))
+    };
+    let has_open_lot = match (venue_of(LegSide::Long), venue_of(LegSide::Short)) {
+        (Some(long_v), Some(short_v)) => {
+            let want = crate::attribution::ledger_strategy_id(&sig.strategy_id);
+            state.virtual_ledger.read().lots.values().any(|lot| {
+                lot.strategy_id == want
+                    && lot.symbol == sig.symbol
+                    && lot.status == CycleStatus::Open
+                    && crate::state::canonical_venue_id(&lot.venue_long) == Some(long_v)
+                    && crate::state::canonical_venue_id(&lot.venue_short) == Some(short_v)
+            })
+        }
+        _ => false,
+    };
+    // An open lot on a live family defers everything to `close_cycle`; once
+    // the family is closed no further fills can arrive, so a still-open lot
+    // is dead and its orphan fills must realize here instead.
+    if has_open_lot && !family_closed {
+        return;
+    }
+    let mut realized = 0.0;
+    for child in children {
+        for leg in &child.legs {
+            let (Some(px), q, fee) = (leg.fill_price, leg.filled_qty, leg.fee_usd) else {
+                continue;
+            };
+            if !(q > 0.0 && px > 0.0 && fee.is_finite()) {
+                continue;
+            }
+            let mark = unlotted_fill_key(&child.id, &leg.venue, leg.side);
+            match state.state_store.kv_get(&mark) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("unlotted mark read failed for {}: {e}", child.id);
+                    continue;
+                }
+            }
+            let entry_px = sig
+                .legs
+                .iter()
+                .find(|root| root.side != leg.side && root.venue.eq_ignore_ascii_case(&leg.venue))
+                .and_then(|root| root.fill_price)
+                .filter(|px| *px > 0.0);
+            let Some(entry_px) = entry_px else {
+                continue;
+            };
+            let leg_pnl = match leg.side {
+                LegSide::Short => (px - entry_px) * q,
+                LegSide::Long => (entry_px - px) * q,
+            } - fee;
+            // Mark first: if the accumulate below were reordered after a
+            // crash, a counted-but-unmarked leg would double-count on the
+            // next pass — worse than one orphaned leg.
+            if let Err(e) = state.state_store.kv_set(&mark, &leg_pnl.to_string()) {
+                tracing::warn!("unlotted mark write failed for {}: {e}", child.id);
+                continue;
+            }
+            realized += leg_pnl;
+        }
+    }
+    if realized != 0.0 {
+        accumulate_realized_profit(state, state.is_live(), realized);
+    }
+}
+
 /// Returns `(realized_usd, realized_bps, entry_debited)` for the closed lot.
 /// `entry_debited` is the entry-fee figure the entry attempt already wrote to
 /// the cumulative realized counter (the lot's pre-refresh open basis) — the
 /// close's counter increment is `realized_usd + entry_debited` so the counter
 /// converges to the lot's true net regardless of when fee enrichment landed.
-fn close_flattened_spatial_lot(
+pub(crate) fn close_flattened_spatial_lot(
     state: &AppEngineState,
     sig: &crate::state_store::SignalExecution,
     family: &[crate::state_store::SignalExecution],
@@ -2249,6 +2444,12 @@ fn close_flattened_spatial_lot(
     }
     let mut fills: HashMap<(String, &'static str), LegAgg> = HashMap::new();
     for child in family {
+        // `trim-` children realized separately at trim time — their fills
+        // must not join the close VWAP or they would double-count cash and
+        // break the lot-qty match for the trimmed remainder.
+        if child.id.starts_with("trim-") {
+            continue;
+        }
         for leg in &child.legs {
             let Some(canon) = crate::state::canonical_venue_id(&leg.venue) else {
                 continue;
@@ -2610,7 +2811,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .map_err(|e| e.to_string())?;
             for child in state
                 .state_store
-                .list_signals(None, None)
+                .list_open_signals()
                 .map_err(|e| e.to_string())?
                 .into_iter()
                 .filter(|s| {
@@ -2633,6 +2834,11 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 close_flattened_spatial_lot(state, &sig, &family, close_status)
             {
                 accumulate_realized_profit(state, is_live, usd + fee_basis);
+            } else {
+                // Family is closed but no lot covered the exit fills (lotless
+                // signal, or a dead lot that can never match now). Sweep all
+                // unmarked child fills — this is their last chance to count.
+                accumulate_unlotted_family_fills(state, &sig, &family, true);
             }
             continue;
         }
@@ -2818,6 +3024,14 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .state_store
                 .update_signal_status(&close_id, SignalStatus::Unresolved, Some(&note))
                 .map_err(|e| e.to_string())?;
+        }
+        // Lotless signals (1-leg residuals, imbalanced pairs, positions
+        // whose lot never persisted) realize only through child fills —
+        // cash moved whether or not the position is fully flat. The sweep
+        // also picks up fills that arrived late via reconciliation on
+        // earlier children (per-leg marks make each fill count once).
+        if flatten_realized.is_none() {
+            accumulate_unlotted_family_fills(state, &sig, &family_now, false);
         }
 
         record_execution_log(
@@ -3233,7 +3447,11 @@ async fn maybe_liq_trim_pair(
             let mut note = format!(
                 "liq trim: leg within {min_dist_pct:.1}% of liquidation — reducing both legs by {qty}"
             );
-            let close_id = format!("flat-{}-{:04x}", sig.id, rand::random::<u16>());
+            // `trim-` (not `flat-`) prefix: trim fills reduce the open
+            // position but realize separately — the close-agg must exclude
+            // them or a trimmed lot's remaining qty could never match the
+            // final flatten's fills, leaving the lot Open forever.
+            let close_id = format!("trim-{}-{:04x}", sig.id, rand::random::<u16>());
             let child_legs: Vec<crate::state_store::NewSignalLeg> = [
                 (buy, crate::state_store::LegSide::Short),
                 (sell, crate::state_store::LegSide::Long),
@@ -3337,6 +3555,27 @@ async fn maybe_liq_trim_pair(
                     }
                     Err(e) => note.push_str(&format!("; {} leg trim failed: {e}", leg.venue)),
                 }
+            }
+            // Realize the trim: the filled portion is a partial close whose
+            // cash already moved — accumulate it and shrink the open lot so
+            // the final flatten's fills still match the remaining qty.
+            // Unfilled/working legs leave their qty untouched; a late fill
+            // lands via reconciliation against the family (the close-agg
+            // excludes `trim-` children, so only the shrink may lag — the
+            // boot stale-lot reconcile bounds the residual edge).
+            match realize_liq_trim(
+                state,
+                sig,
+                &close_id,
+                buy.venue.as_str(),
+                sell.venue.as_str(),
+            ) {
+                Ok(usd) => {
+                    if usd != 0.0 {
+                        note.push_str(&format!("; trim realized {usd:.4} USD"));
+                    }
+                }
+                Err(e) => note.push_str(&format!("; trim realization failed: {e}")),
             }
             for n in notes {
                 note.push_str(&format!("; {n}"));
