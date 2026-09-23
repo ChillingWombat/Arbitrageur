@@ -2811,3 +2811,7 @@ Exit-path audit: all strategies have supervised exits — futures 5s convergence
 ## Session 2026-09-23 — Funding exit supervisor dispatch coverage
 
 `supervise_funding_exits_flattens_decayed_carry` + `supervise_funding_exits_holds_fresh_carry` pin the end-to-end exit guarantee through the real `flatten_ticker_positions_impl` path (sims close the legs; signal transitions balanced→closed). Desktop 403 tests.
+
+## Session 2026-09-23 — Vault lock refuses open live positions
+
+`lock_vault` locked unconditionally; the 60s settings-exit auto-lock could silently disable exit supervision (locked vault ⇒ no venue auth ⇒ every flatten fails). In live mode `lock_vault_impl` now refuses while any `counts_as_open` signal exists (testnet unaffected). Frontend: auto-lock logs the refusal; manual Lock surfaces it via `setErrorMsg`. Test `test_vault_lock_refused_with_open_live_position`. SPEC.md entry 36; desktop 405 tests.

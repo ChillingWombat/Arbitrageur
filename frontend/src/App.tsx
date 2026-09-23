@@ -515,7 +515,11 @@ export const App: React.FC = () => {
       api
         .lockVault()
         .then((status) => setVaultStatus(status))
-        .catch(() => {});
+        .catch((e) => {
+          // Refused while live positions are open — a locked vault cannot
+          // flatten or supervise exits. Vault stays unlocked by design.
+          console.info("Vault auto-lock skipped:", e);
+        });
     }, 60_000);
   }, []);
   const handleSettingsSaved = useCallback(
