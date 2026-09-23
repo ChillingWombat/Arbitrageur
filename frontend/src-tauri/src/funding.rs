@@ -282,7 +282,7 @@ fn carry_gap_history(
 
 /// Min-APR exit threshold for the funding hold model (strategy params,
 /// default 8% when absent).
-fn funding_min_apr(state: &AppEngineState) -> f64 {
+pub(crate) fn funding_min_apr(state: &AppEngineState) -> f64 {
     state
         .strategy_params
         .read()

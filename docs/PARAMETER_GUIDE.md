@@ -122,7 +122,7 @@ These fields persist, validate, and round-trip through the UI, but no live runti
 |---|---|---|
 | `funding_auto_rebalance` | Funding → Risk & Rebalance | Dormant — no rebalance supervisor exists |
 | `funding_rotation_threshold_bps` | Funding → Risk & Rebalance | Dormant — no rotation supervisor exists (`rotation_improves` is library-only) |
-| `funding_auto_exit_spread_pct` | Funding → Execution & Slippage | Dormant — funding exits are operator-driven |
+| `funding_auto_exit_spread_pct` | Funding → Execution & Slippage | Dormant — exits run on the min-APR supervisor + operator flatten; this spread trigger has no consumer |
 | `funding_liq_trim_pct` | Funding → Risk & Rebalance | Dormant — liquidation-trim watcher is futures-only |
 | `spot_liq_trim_pct` | Spot → Risk & Safety | Dormant — same watcher is futures-only |
 | `prediction_liq_trim_pct` | persisted, not rendered | Dormant — no prediction supervisor |
@@ -167,7 +167,7 @@ These values initialize missing settings; they are not universal recommendations
 | Target leverage | 5x | Live — effective-leverage resolution |
 | Futures max slippage | 15 BPS | Live — dispatch VWAP gate |
 | Funding trade size | $25,000 per leg | Live — scan sizing arg |
-| Funding minimum APR | 8% | Live — scan hurdle |
+| Funding minimum APR | 8% | Live — scan hurdle **and** exit floor: the 60s supervisor flattens an open carry/basis when EMA-smoothed net funding decays below it |
 | Funding max slippage | 15 BPS | Live — dispatch VWAP gate |
 | Funding max entry spread | 50 BPS | Live — dispatch gate |
 | Funding auto-exit spread | off | Dormant |
