@@ -1739,6 +1739,11 @@ impl AppEngineState {
         {
             use crate::state_store::LegSide;
             let open_signals = state_store.list_open_signals().unwrap_or_default();
+            // Lazy full-history list: needed only when a rebuild candidate
+            // has family children (a mid-hold trim's fills reduce what the
+            // rebuilt lot should carry — `flat-`/`trim-` children may be
+            // Closed already, so the open-only list can't see them).
+            let mut all_signals_cache: Option<Vec<crate::state_store::SignalExecution>> = None;
             let mut ledger = virtual_ledger.write();
             for sig in open_signals.iter().filter(|s| s.status.counts_as_open()) {
                 let venue_of = |side: LegSide| {
@@ -1760,7 +1765,31 @@ impl AppEngineState {
                 else {
                     continue;
                 };
-                let matched = long_leg.filled_qty.min(short_leg.filled_qty);
+                // Residual quantities after family children: a mid-hold
+                // trim's fills already reduced the physical position, so a
+                // rebuilt lot must carry the remainder — otherwise the final
+                // flatten's fills could never satisfy `exit.qty >= lot.qty`
+                // and the lot would dead-close without an outcome.
+                if all_signals_cache.is_none() {
+                    all_signals_cache = state_store.list_signals(None, None).ok();
+                }
+                let closed_qty = |venue: &str, closing: LegSide| -> f64 {
+                    let Some(all) = &all_signals_cache else {
+                        return 0.0;
+                    };
+                    all.iter()
+                        .filter(|c| crate::state_store::is_flatten_child_id(&c.id, &sig.id))
+                        .flat_map(|c| c.legs.iter())
+                        .filter(|l| {
+                            l.side == closing && canonical_venue_id(&l.venue) == Some(venue)
+                        })
+                        .map(|l| l.filled_qty)
+                        .sum()
+                };
+                let rem_long = (long_leg.filled_qty - closed_qty(long_v, LegSide::Short)).max(0.0);
+                let rem_short =
+                    (short_leg.filled_qty - closed_qty(short_v, LegSide::Long)).max(0.0);
+                let matched = rem_long.min(rem_short);
                 if !(matched > 0.0 && long_px > 0.0 && short_px > 0.0) {
                     continue;
                 }
