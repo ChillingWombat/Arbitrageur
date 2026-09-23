@@ -114,7 +114,7 @@ A venue/strategy pair can move to live entry only after all of these have eviden
 - Restart recovery and reconciliation (implemented via the reconciliation supervisor)
 - Automated residual-exposure resolution: implemented unconditionally — an imbalanced entry auto-submits reduce-only flattens (max 3 attempts) persisted as `flat-*` children the supervisor reconciles; requires venue evidence before it can be trusted live
 - Cancel-failure retry: implemented — orders working past the 15-minute deadline get up to 3 cancel attempts (kv-persisted across restarts) before escalation; needs venue evidence
-- Live entry gate: implemented — `live_entry_gate` admits entries on the spatial/radar/funding/triangle paths when the vault is unlocked and every leg venue passes submission+polling+strategy-entry+credential checks; a Safety-tab canary panel submits one minimal pair with a bounded loss acceptance
+- Live entry gate: implemented — `live_entry_gate` admits entries on the spatial/radar/funding/triangle paths when the vault is unlocked and every leg venue passes submission+polling+strategy-entry+credential checks; unproven routes are validated with a minimal manual entry through the normal strategy paths
 - Sandbox tests for success, partial fill, one-leg failure, timeout, cancel race, and process restart
 - Small-notional owner-approved live canary — IN PROGRESS
 - Updated capability row and release notes

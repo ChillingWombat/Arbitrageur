@@ -135,7 +135,7 @@ Synthetic paper order ids (`sim-%`) are excluded from venue polling. An
 operator can force an immediate pass via **Reconcile Orders Now** on the
 Portfolio monitor (command `reconcile_orders_now`, returns a poll summary).
 
-### 2.4 Live entry canary procedure
+### 2.4 Live entry venue-proving procedure
 
 Live strategy entries dispatch in Live mode on venues whose adapters pass
 the `live_entry_gate`: unlocked vault, order submission, order-status
@@ -143,11 +143,11 @@ polling, strategy-entry eligibility, and loaded credentials. The gate
 covers the spatial two-leg path, Spread Radar manual entries, funding
 carry/basis, and single-venue triangle cycles; every path reconciles
 through the same poll supervisor and residual auto-flatten. (The
-`live_entry_enabled` opt-in flag and per-leg notional cap were removed on
-2026-09-24 — Trading Mode = Live is itself the operator opt-in; entry
-size follows the per-strategy size settings.)
+`live_entry_enabled` opt-in flag, per-leg notional cap, and Safety-tab
+canary panel were removed on 2026-09-24 — Trading Mode = Live is itself
+the operator opt-in; entry size follows the per-strategy size settings.)
 
-To run one minimal real-money entry:
+To prove a venue pair with one minimal real-money entry:
 
 1. Unlock the credential vault; set Trading Mode to **Live Trading**.
 2. Residual auto-flatten is unconditional (no toggle since 2026-09-22) —
@@ -158,15 +158,17 @@ To run one minimal real-money entry:
    refuses if `fetch_account` shows one. Keep existing positions untouched:
    the system never sweeps account positions; it only manages signal legs
    it created.
-4. In the canary panel (Engine Settings → Safety, visible in Live mode):
-   symbol, buy venue, sell venue, qty per leg, accepted loss bps
-   (≤50 — this pays the spread+fees to test mechanics). Run it.
+4. Dispatch a minimal manual entry through the normal strategy path —
+   e.g. a Spread Radar row **Execute** or a Funding Radar **Execute** at
+   the smallest size the venues accept (above both venues' minimum
+   notionals). The configured profit hurdle applies as usual; on a tight
+   pair the cost is just spread + fees.
 5. Watch: `signal_executions`/`signal_legs` rows (venue order ids must be
    populated), the reconciliation supervisor (5s polls → `balanced`), the
    venue accounts (two small positions), and `execution_log`.
 6. Close via the external-close / flatten path and confirm `closed` after
    venue polling and a fresh account reread.
 
-Expected canary cost is the spread + taker fees on both legs — typically a
+Expected cost is the spread + taker fees on both legs — typically a
 few cents at minimal size. Any `imbalanced`/`unresolved` outcome blocks the
 ticker, appears on the radar attention strip, and is handled per §2.2.
