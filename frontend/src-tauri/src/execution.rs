@@ -2357,6 +2357,31 @@ fn unlotted_fill_key(child_id: &str, venue: &str, side: crate::state_store::LegS
     format!("unlotted.fill.{child_id}.{canon}.{}", side.as_str())
 }
 
+/// Sum the counted-fee share of durable marks on a family's close-aggregation
+/// legs. Only reachable when `close_flattened_spatial_lot` matched a lot —
+/// which requires the lot to have been created AFTER some fills were already
+/// marked (the `rehydrated-` boot path): `close_cycle`'s `exit_fees` sums all
+/// flat children fills, so the counted portion's fees were deducted from
+/// `usd` even though that portion's leg PnL isn't in `usd` (it prices
+/// `lot.qty`, the residual). Adding the marked fee share back keeps the
+/// increment exactly equal to the uncounted remainder. `trim-` legs are
+/// skipped: their fills never join the close VWAP or its fee total.
+pub(crate) fn marked_family_fees(
+    state: &AppEngineState,
+    family: &[crate::state_store::SignalExecution],
+) -> f64 {
+    family
+        .iter()
+        .filter(|child| !child.id.starts_with("trim-"))
+        .flat_map(|child| child.legs.iter().map(move |l| (child.id.as_str(), l)))
+        .map(|(cid, leg)| {
+            let (_, _, fee) =
+                read_unlotted_mark(state, &unlotted_fill_key(cid, &leg.venue, leg.side));
+            fee
+        })
+        .sum()
+}
+
 /// Read a durable fill mark: `(counted_qty, counted_pnl, counted_fee)`,
 /// all cumulative. A missing or unparseable mark reads as zeroes — the
 /// leg is then treated as never counted.
@@ -2982,7 +3007,11 @@ pub async fn flatten_ticker_positions_with_type_impl(
             if let Some((usd, _, fee_basis)) =
                 close_flattened_spatial_lot(state, &sig, &family, close_status)
             {
-                accumulate_realized_profit(state, is_live, usd + fee_basis);
+                // Marked fills' exit fees sit inside `usd`'s exit-fee total
+                // but their leg PnL was already counted — add the marked
+                // fee share back so the increment is the uncounted rest.
+                let marked_fees = marked_family_fees(state, &family);
+                accumulate_realized_profit(state, is_live, usd + fee_basis + marked_fees);
             } else {
                 // Family is closed but no lot covered the exit fills (lotless
                 // signal, or a dead lot that can never match now). Sweep all
@@ -3153,7 +3182,8 @@ pub async fn flatten_ticker_positions_with_type_impl(
             out.signals_closed += 1;
             flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now, close_status);
             if let Some((usd, _, fee_basis)) = flatten_realized {
-                accumulate_realized_profit(state, is_live, usd + fee_basis);
+                let marked_fees = marked_family_fees(state, &family_now);
+                accumulate_realized_profit(state, is_live, usd + fee_basis + marked_fees);
             }
             if let Some(bot) = state.radar_bot.lock().clone() {
                 bot.forget_position(&sig.symbol, &venue_a, &venue_b);

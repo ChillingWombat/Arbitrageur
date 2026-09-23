@@ -592,8 +592,30 @@ fn resolve_flattened_parent(state: &AppEngineState, parent_id: &str) {
         Some("Residual exposure covered — flatten children resolved"),
     ) {
         tracing::warn!("reconcile: failed to close flattened parent {parent_id}: {e}");
+        return;
+    }
+    tracing::info!("reconcile: parent {parent_id} closed — all flatten children resolved");
+    // Realize the family's close fills — this path bypasses
+    // `flatten_ticker_positions_impl`, so without it the residual unwind's
+    // PnL and the entry's prediction resolution would drop entirely. A
+    // matching open lot closes through the cycle path (auto-compensation
+    // unwinds are adverse → StoppedOut); lotless/dead-lot families sweep
+    // per-leg with durable marks.
+    use arbitrageur_execution::virtual_ledger::CycleStatus;
+    if let Some((usd, _, fee_basis)) = crate::execution::close_flattened_spatial_lot(
+        state,
+        &parent,
+        &children,
+        CycleStatus::StoppedOut,
+    ) {
+        let marked_fees = crate::execution::marked_family_fees(state, &children);
+        crate::execution::accumulate_realized_profit(
+            state,
+            state.is_live(),
+            usd + fee_basis + marked_fees,
+        );
     } else {
-        tracing::info!("reconcile: parent {parent_id} closed — all flatten children resolved");
+        crate::execution::accumulate_unlotted_family_fills(state, &parent, &children, true);
     }
 }
 
