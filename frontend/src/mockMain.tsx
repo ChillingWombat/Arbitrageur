@@ -73,7 +73,7 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
     auto_exit_max_hold_secs: 86400, balance_stale_warn_secs: 300,
     configured_venues: ["hyperliquid", "lighter", "vanta", "binance", "okx", "decibel"],
     referral_lighter: "", referral_robinhood: "", sponsor_link: "",
-    version: "0.1.0", git_repo: "https://github.com/Dav1D1010/Arbitrageur",
+    version: "0.1.0", git_repo: "https://github.com/ChillingWombat/Arbitrageur",
     hyperliquid_wallet: "0xabc…def", hyperliquid_private_key: "",
     lighter_account_index: "281474976710654", lighter_api_key: "",
     vanta_account_id: "", vanta_orderly_key: "", vanta_orderly_secret: "",

@@ -1447,6 +1447,37 @@ PRAGMA user_version = 29;
 COMMIT;
 PRAGMA foreign_keys = ON;";
 
+/// v30 makes the virtual cycle ledger durable. Cycle lots were previously
+/// in-memory only — a restart lost every open lot, so post-restart flattens
+/// could not match a lot (no realized PnL, no prediction resolution, no
+/// counter accumulation) and strategy metrics forgot all history. The table
+/// mirrors `ArbitrageCycleLot`; closed lots are retained for metrics.
+const MIGRATION_V30_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE cycle_lots (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    venue_long TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_long) BETWEEN 1 AND 64),
+    venue_short TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_short) BETWEEN 1 AND 64),
+    entry_time TEXT NOT NULL,
+    entry_spread_bps REAL NOT NULL,
+    long_qty REAL NOT NULL CHECK(long_qty >= 0),
+    long_entry_price REAL NOT NULL CHECK(long_entry_price >= 0),
+    short_qty REAL NOT NULL CHECK(short_qty >= 0),
+    short_entry_price REAL NOT NULL CHECK(short_entry_price >= 0),
+    fees_paid_usd REAL NOT NULL DEFAULT 0 CHECK(fees_paid_usd >= 0),
+    status TEXT NOT NULL CHECK(status IN ('open', 'closed', 'stopped_out', 'timed_out')),
+    close_time TEXT,
+    close_spread_bps REAL,
+    realized_pnl_usd REAL,
+    realized_pnl_bps REAL
+);
+CREATE INDEX ix_cycle_lots_status ON cycle_lots(status);
+CREATE INDEX ix_cycle_lots_strategy_symbol ON cycle_lots(strategy_id, symbol);
+PRAGMA user_version = 30;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1810,6 +1841,7 @@ fn scheduled_exit_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduledExit> {
 mod accounts;
 mod autotune;
 mod config;
+mod cycle_lots;
 mod equity;
 mod exits;
 mod logs;
@@ -1885,7 +1917,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 29 {
+        if version > 30 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2058,6 +2090,12 @@ impl StateStore {
         }
         if version <= 28 {
             if let Err(err) = conn.execute_batch(MIGRATION_V29_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 29 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V30_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

@@ -710,11 +710,7 @@ pub async fn execute_triangle_arbitrage_impl(
         }
     }
 
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
+    let cycle = state.next_sim_step();
     let cycle_tag = format!(
         "tri-{}-{:08x}",
         Utc::now().timestamp_millis(),
@@ -816,11 +812,8 @@ pub async fn execute_triangle_arbitrage_impl(
         })
         .sum();
     let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
-    let total_f = {
-        let mut total_pnl = state.total_realized_profit.write();
-        *total_pnl += attempt_pnl;
-        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-    };
+    let total_f =
+        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
 
     let fee_total_f: f64 = fills
         .iter()

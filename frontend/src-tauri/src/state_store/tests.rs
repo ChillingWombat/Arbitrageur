@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 29);
+        assert_eq!(version, 30);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -732,7 +732,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 29);
+    assert_eq!(version, 30);
     store
         .record_signal_execution(&NewSignalExecution {
             id: "fund-1".to_string(),
@@ -1107,7 +1107,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 29);
+    assert_eq!(v, 30);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -1586,7 +1586,62 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 29);
+        assert_eq!(version, 30);
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_cycle_lots_persist_across_reopen() {
+    use arbitrageur_execution::virtual_ledger::{ArbitrageCycleLot, CycleStatus};
+    let (dir, file) = temp_store_path("cycle_lots_reopen");
+    {
+        let store = StateStore::open(&file).unwrap();
+        store
+            .upsert_cycle_lot(&ArbitrageCycleLot {
+                id: "spatial-9".into(),
+                strategy_id: "spatial_spread".into(),
+                symbol: "BTC-USDC".into(),
+                venue_long: "hyperliquid".into(),
+                venue_short: "lighter".into(),
+                entry_time: chrono::Utc::now(),
+                entry_spread_bps: 24.5,
+                long_qty: 0.1,
+                long_entry_price: 64_200.0,
+                short_qty: 0.1,
+                short_entry_price: 64_440.0,
+                fees_paid_usd: 0.5,
+                status: CycleStatus::Open,
+                close_time: None,
+                close_spread_bps: None,
+                realized_pnl_usd: None,
+                realized_pnl_bps: None,
+            })
+            .unwrap();
+    }
+    {
+        let reopened = StateStore::open(&file).unwrap();
+        let lots = reopened.load_cycle_lots().unwrap();
+        let lot = lots.get("spatial-9").expect("open lot survives reopen");
+        assert_eq!(lot.strategy_id, "spatial_spread");
+        assert_eq!(lot.status, CycleStatus::Open);
+        assert!((lot.long_entry_price - 64_200.0).abs() < 1e-9);
+
+        // Close-side upsert then reload: terminal state + realized PnL
+        // must persist — a restart mid-close must not lose the outcome.
+        let mut closed = lot.clone();
+        closed.status = CycleStatus::Closed;
+        closed.close_time = Some(chrono::Utc::now());
+        closed.fees_paid_usd = 1.25;
+        closed.realized_pnl_usd = Some(12.34);
+        closed.realized_pnl_bps = Some(1.9);
+        reopened.upsert_cycle_lot(&closed).unwrap();
+        let lots = reopened.load_cycle_lots().unwrap();
+        let lot = lots.get("spatial-9").expect("closed lot survives");
+        assert_eq!(lot.status, CycleStatus::Closed);
+        assert_eq!(lot.realized_pnl_usd, Some(12.34));
+        assert!((lot.fees_paid_usd - 1.25).abs() < 1e-9);
+        assert!(lot.close_time.is_some());
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -2114,7 +2169,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 29);
+    assert_eq!(v, 30);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2234,7 +2289,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 29);
+    assert_eq!(v10, 30);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -3134,7 +3189,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 29);
+    assert_eq!(v, 30);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",

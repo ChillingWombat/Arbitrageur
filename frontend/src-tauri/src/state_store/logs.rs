@@ -31,6 +31,16 @@ impl StateStore {
         Ok(())
     }
 
+    /// Total execution-log rows — the boot floor for `sim_step_counter`:
+    /// cycle ids (`spatial-{n}`, `funding-{n}`, `exec-*-{n}`) index attempts
+    /// monotonically, so a restart must resume above the durable id space or
+    /// `INSERT OR REPLACE` rows/lots collide with pre-restart history.
+    pub fn execution_log_count(&self) -> anyhow::Result<i64> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM execution_log", [], |r| r.get(0))?;
+        Ok(n)
+    }
+
     /// Newest-first execution-log rows (survives restarts — the monitor no
     /// longer starts empty).
     pub fn load_execution_logs(&self, limit: i64) -> anyhow::Result<Vec<ExecutionLogEntry>> {

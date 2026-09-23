@@ -931,22 +931,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .unwrap_or(0.0),
         _ => 0.0,
     };
-    let tot_f = {
-        let mut total_pnl = if is_live {
-            state.total_realized_profit_live.write()
-        } else {
-            state.total_realized_profit.write()
-        };
-        *total_pnl += Decimal::from_str_exact(&pnl_f.to_string()).unwrap_or(dec!(0));
-        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-    };
+    let tot_f = accumulate_realized_profit(state, is_live, pnl_f);
     let (attempt_pnl_f, total_f) = (pnl_f, tot_f);
 
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
+    let cycle = state.next_sim_step();
 
     // Partial-fill trim attribution: the coordinator trimmed the larger leg
     // down to min(fill_a, fill_b) via the unwind path on the excess only and
@@ -1025,19 +1013,33 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             let expected_capture_f = expected_net_usd;
 
             let cycle_id = format!("spatial-{}", cycle);
-            state.virtual_ledger.write().open_cycle(
-                cycle_id,
-                crate::attribution::ledger_strategy_id(strategy_id),
-                symbol.to_string(),
-                buy_venue.to_string(),
-                sell_venue.to_string(),
-                net_bps_f,
-                open_qty,
-                buy_px_f,
-                open_qty,
-                sell_px_f,
-                fee_f,
-            );
+            {
+                let mut ledger = state.virtual_ledger.write();
+                ledger.open_cycle(
+                    cycle_id.clone(),
+                    crate::attribution::ledger_strategy_id(strategy_id),
+                    symbol.to_string(),
+                    buy_venue.to_string(),
+                    sell_venue.to_string(),
+                    net_bps_f,
+                    open_qty,
+                    buy_px_f,
+                    open_qty,
+                    sell_px_f,
+                    fee_f,
+                );
+                // Durable lot (schema v30): without persistence a restart
+                // loses close-matching, realized PnL, and prediction
+                // resolution for this position. Fail-closed like the
+                // signal-execution persist — an unaccountable position
+                // must not be entered.
+                if let Some(lot) = ledger.lots.get(&cycle_id) {
+                    state
+                        .state_store
+                        .upsert_cycle_lot(lot)
+                        .map_err(|e| format!("Failed to persist cycle lot: {e}"))?;
+                }
+            }
 
             // Persist actual leg fills, then reconcile per-signal balance:
             // balanced only when THIS signal's own legs net to zero delta.
@@ -2168,29 +2170,51 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
 /// enough quantity (e.g. single-leg triangle residuals, which realize purely
 /// through their signal legs) — the caller keeps the 0.0 log convention
 /// there rather than inventing a number.
-/// Add a realized close's incremental cash outcome to the environment-scoped
-/// cumulative counter surfaced as "Net Profit" in the UI. Cycle-close PnL
-/// (the dominant component — convergence captures the spread) previously
-/// landed only on the lot + signal + log, leaving the headline counter at
-/// entry-attempt costs alone.
-///
-/// The increment is the close's marginal cash, not the lot's net PnL: entry
-/// fees were already debited by the entry-attempt accumulator write
-/// (`Success.realized_profit = -entry_fees`), and the lot's `close_cycle`
-/// net subtracts entry fees a second time inside `usd`. Adding back the
-/// entry-fee basis yields `leg_pnl - exit_fees` — exactly what the close
-/// contributes on top of the entry write.
-fn accumulate_realized_profit(state: &AppEngineState, is_live: bool, usd: f64) {
+/// Add realized cash to the environment-scoped cumulative counter surfaced
+/// as "Net Profit" in the UI, persist it under `pnl.total.{env}`, and return
+/// the new total. The counter is durable: without persistence a restart
+/// reset the headline figure to zero while the durable log/ledger kept the
+/// underlying events. A kv write failure is logged, never fatal — the
+/// in-memory counter still reflects this session's truth.
+pub(crate) fn accumulate_realized_profit(state: &AppEngineState, is_live: bool, usd: f64) -> f64 {
     if !usd.is_finite() {
-        return;
+        return if is_live {
+            state
+                .total_realized_profit_live
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        } else {
+            state
+                .total_realized_profit
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        };
     }
     let delta = Decimal::from_str_exact(&usd.to_string()).unwrap_or(dec!(0));
-    let mut total = if is_live {
-        state.total_realized_profit_live.write()
-    } else {
-        state.total_realized_profit.write()
+    let (key, persisted) = {
+        let mut total = if is_live {
+            state.total_realized_profit_live.write()
+        } else {
+            state.total_realized_profit.write()
+        };
+        *total += delta;
+        (
+            if is_live {
+                "pnl.total.live"
+            } else {
+                "pnl.total.testnet"
+            },
+            total.to_string(),
+        )
     };
-    *total += delta;
+    if let Err(e) = state.state_store.kv_set(key, &persisted) {
+        tracing::warn!("persist cumulative realized PnL failed: {e}");
+    }
+    persisted.parse::<f64>().unwrap_or(0.0)
 }
 
 /// Returns `(realized_usd, realized_bps, entry_debited)` for the closed lot.
@@ -2301,9 +2325,18 @@ fn close_flattened_spatial_lot(
                 exit_fees,
                 close_status,
             )
-            .and_then(|l| match (l.realized_pnl_usd, l.realized_pnl_bps) {
-                (Some(usd), Some(bps)) => Some((usd, bps, entry_debited)),
-                _ => None,
+            .and_then(|l| {
+                // Persist the closed lot (covers the pre-close fee refresh
+                // too). Best-effort: a store failure loses durable metrics
+                // but the in-memory close already resolved — warn, never
+                // unwind the flatten's accounting.
+                if let Err(e) = state.state_store.upsert_cycle_lot(l) {
+                    tracing::warn!("persist closed cycle lot {} failed: {e}", l.id);
+                }
+                match (l.realized_pnl_usd, l.realized_pnl_bps) {
+                    (Some(usd), Some(bps)) => Some((usd, bps, entry_debited)),
+                    _ => None,
+                }
             });
         // Calibration resolution: the ledger's realized net bps is the
         // authoritative outcome the entry forecast gets scored against.
@@ -2385,11 +2418,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         notes: Vec::new(),
     };
 
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
+    let cycle = state.next_sim_step();
 
     let opposite = |s: LegSide| match s {
         LegSide::Long => LegSide::Short,

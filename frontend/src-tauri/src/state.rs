@@ -465,7 +465,7 @@ fn default_app_version() -> String {
     "v1.2.0".into()
 }
 fn default_git_repo() -> String {
-    "https://github.com/Dav1D1010/Arbitrageur".into()
+    "https://github.com/ChillingWombat/Arbitrageur".into()
 }
 fn default_true() -> bool {
     true
@@ -1716,8 +1716,142 @@ impl AppEngineState {
         let initial_logs: Vec<ExecutionLogEntry> =
             state_store.load_execution_logs(500).unwrap_or_default();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
+        // The virtual cycle ledger is durable (schema v30): hydrate all lots
+        // so open lots resume close-matching/exposure accounting across a
+        // restart and closed lots keep strategy metrics continuous. A store
+        // failure starts empty rather than bricking startup.
         let virtual_ledger =
             RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());
+        if let Ok(lots) = state_store.load_cycle_lots() {
+            virtual_ledger.write().lots = lots;
+        }
+        // Boot reconcile between the durable signal ledger and durable lots.
+        // Two drift classes:
+        //  (a) Open signal with filled Long+Short legs but no lot — positions
+        //      opened before v30, or a crash between lot-open and its persist.
+        //      Reconstruct the lot from the signal's authoritative legs so the
+        //      eventual flatten can realize PnL + resolve predictions.
+        //  (b) Open lot with no open signal on its symbol/venues — the signal
+        //      closed while a crash window separated the two persists. Left
+        //      Open it would misbind a *future* cycle's exit fills (stale
+        //      entry prices → wrong PnL). Mark it Closed with unknown
+        //      realized fields — an honest gap, never a fabricated outcome.
+        {
+            use crate::state_store::LegSide;
+            let open_signals = state_store.list_open_signals().unwrap_or_default();
+            let mut ledger = virtual_ledger.write();
+            for sig in open_signals.iter().filter(|s| s.status.counts_as_open()) {
+                let venue_of = |side: LegSide| {
+                    sig.legs
+                        .iter()
+                        .find(|l| l.side == side)
+                        .and_then(|l| canonical_venue_id(&l.venue))
+                };
+                let leg_of = |side: LegSide| sig.legs.iter().find(|l| l.side == side);
+                let (Some(long_leg), Some(short_leg), Some(long_v), Some(short_v)) = (
+                    leg_of(LegSide::Long),
+                    leg_of(LegSide::Short),
+                    venue_of(LegSide::Long),
+                    venue_of(LegSide::Short),
+                ) else {
+                    continue;
+                };
+                let (Some(long_px), Some(short_px)) = (long_leg.fill_price, short_leg.fill_price)
+                else {
+                    continue;
+                };
+                let matched = long_leg.filled_qty.min(short_leg.filled_qty);
+                if !(matched > 0.0 && long_px > 0.0 && short_px > 0.0) {
+                    continue;
+                }
+                let want_strategy = crate::attribution::ledger_strategy_id(&sig.strategy_id);
+                let has_lot = ledger.lots.values().any(|lot| {
+                    lot.status == arbitrageur_execution::virtual_ledger::CycleStatus::Open
+                        && lot.symbol == sig.symbol
+                        && canonical_venue_id(&lot.venue_long) == Some(long_v)
+                        && canonical_venue_id(&lot.venue_short) == Some(short_v)
+                });
+                if has_lot {
+                    continue;
+                }
+                let entry_fees: f64 = sig
+                    .legs
+                    .iter()
+                    .map(|l| l.fee_usd)
+                    .filter(|f| f.is_finite() && *f >= 0.0)
+                    .sum();
+                let id = format!("rehydrated-{}", sig.id);
+                ledger.open_cycle(
+                    id.clone(),
+                    want_strategy,
+                    sig.symbol.clone(),
+                    long_v.to_string(),
+                    short_v.to_string(),
+                    0.0,
+                    matched,
+                    long_px,
+                    matched,
+                    short_px,
+                    entry_fees,
+                );
+                if let Some(lot) = ledger.lots.get(&id) {
+                    if let Err(e) = state_store.upsert_cycle_lot(lot) {
+                        tracing::warn!("persist rehydrated cycle lot {id} failed: {e}");
+                    }
+                }
+            }
+            // Direction (b): stale open lots whose symbol has no open signal.
+            let open_symbols: std::collections::HashSet<String> = open_signals
+                .iter()
+                .filter(|s| s.status.counts_as_open())
+                .map(|s| s.symbol.clone())
+                .collect();
+            let stale_ids: Vec<String> = ledger
+                .lots
+                .values()
+                .filter(|lot| {
+                    lot.status == arbitrageur_execution::virtual_ledger::CycleStatus::Open
+                        && !open_symbols.contains(&lot.symbol)
+                })
+                .map(|lot| lot.id.clone())
+                .collect();
+            for id in stale_ids {
+                if let Some(lot) = ledger.lots.get_mut(&id) {
+                    lot.status = arbitrageur_execution::virtual_ledger::CycleStatus::Closed;
+                    let snapshot = lot.clone();
+                    if let Err(e) = state_store.upsert_cycle_lot(&snapshot) {
+                        tracing::warn!("persist stale-closed cycle lot {id} failed: {e}");
+                    }
+                }
+            }
+        }
+        // Cumulative realized-PnL counters persist per environment so the
+        // header "Net Profit" survives a restart (previously session-scoped).
+        let load_pnl = |key: &str| {
+            state_store
+                .kv_get(key)
+                .ok()
+                .flatten()
+                .and_then(|v| Decimal::from_str_exact(&v).ok())
+                .unwrap_or(dec!(0))
+        };
+        let initial_pnl_testnet = load_pnl("pnl.total.testnet");
+        let initial_pnl_live = load_pnl("pnl.total.live");
+        // `sim_step_counter` feeds durable ids (`spatial-{n}` lots,
+        // `funding-{n}` lots, `exec-*-{n}` log rows) — resuming at 8 after a
+        // restart would collide with persisted ids and `INSERT OR REPLACE`
+        // would silently overwrite them. Resume from kv, floored above the
+        // durable log table so the very first post-v30 boot (kv absent)
+        // cannot collide either.
+        let initial_step = {
+            let persisted = state_store
+                .kv_get("engine.sim_step")
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse::<usize>().ok());
+            let log_floor = state_store.execution_log_count().unwrap_or(0) as usize + 8;
+            persisted.unwrap_or(8).max(log_floor)
+        };
         let strategy_params_map = load_strategy_params(&state_store);
         let ticker_configs_map = load_ticker_strategy_configs(&state_store);
 
@@ -1755,10 +1889,10 @@ impl AppEngineState {
             environment: RwLock::new(initial_env),
             last_risk_live_universe: RwLock::new(None),
             last_good_accounts: Mutex::new(std::collections::HashMap::new()),
-            total_realized_profit: RwLock::new(dec!(0)),
-            total_realized_profit_live: RwLock::new(dec!(0)),
+            total_realized_profit: RwLock::new(initial_pnl_testnet),
+            total_realized_profit_live: RwLock::new(initial_pnl_live),
             execution_logs: RwLock::new(initial_logs),
-            sim_step_counter: RwLock::new(8),
+            sim_step_counter: RwLock::new(initial_step),
             settings,
             strategy_configs: RwLock::new(ticker_configs_map),
             strategy_params: RwLock::new(strategy_params_map),
@@ -1791,6 +1925,27 @@ impl AppEngineState {
     pub fn ensure_market(&self, _symbol: &str) {
         // No-op: Real market data is pulled directly from configured live exchange APIs only.
         // No synthetic markets are ever seeded or fabricated.
+    }
+
+    /// Next durable cycle index. Persisted under `engine.sim_step` so
+    /// `spatial-{n}`/`funding-{n}` lot ids and `exec-*-{n}` log ids never
+    /// collide with pre-restart rows (a reset would silently overwrite
+    /// durable lots and audit logs via `INSERT OR REPLACE`). A kv write
+    /// failure degrades to in-memory monotonicity — still collision-safe
+    /// within this boot.
+    pub fn next_sim_step(&self) -> usize {
+        let next = {
+            let mut step = self.sim_step_counter.write();
+            *step += 1;
+            *step
+        };
+        if let Err(e) = self
+            .state_store
+            .kv_set("engine.sim_step", &next.to_string())
+        {
+            tracing::warn!("persist sim_step failed: {e}");
+        }
+        next
     }
 
     /// Synchronize credentials from the secure vault to exchange adapters in
