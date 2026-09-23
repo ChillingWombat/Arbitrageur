@@ -2794,6 +2794,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         .iter()
         .filter(|s| {
             !s.id.starts_with("flat-")
+                && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
                 && s.status.counts_as_open()
         })
@@ -3273,6 +3274,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         .into_iter()
         .filter(|s| {
             !s.id.starts_with("flat-")
+                && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
                 && s.status.counts_as_open()
         })
@@ -3834,10 +3836,12 @@ pub async fn check_spatial_convergence_impl(
         .list_signals(symbol, None)
         .map_err(|e| e.to_string())?;
     let mut out = Vec::new();
-    for sig in signals
-        .iter()
-        .filter(|s| s.strategy_id.eq_ignore_ascii_case(&sid) && s.status.counts_as_open())
-    {
+    for sig in signals.iter().filter(|s| {
+        s.strategy_id.eq_ignore_ascii_case(&sid)
+            && s.status.counts_as_open()
+            && !s.id.starts_with("flat-")
+            && !s.id.starts_with("trim-")
+    }) {
         let baseline = state
             .state_store
             .spatial_baseline_for_signal(&sig.id)

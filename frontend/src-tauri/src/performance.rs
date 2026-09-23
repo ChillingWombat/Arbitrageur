@@ -142,7 +142,10 @@ pub fn get_strategy_fill_pnl_impl(
     let mut closed = 0_usize;
     let mut open = 0_usize;
     let mut unattributed = 0_usize;
-    for root in signals.iter().filter(|s| !s.id.starts_with("flat-")) {
+    for root in signals
+        .iter()
+        .filter(|s| !s.id.starts_with("flat-") && !s.id.starts_with("trim-"))
+    {
         let owned = crate::attribution::attribute_strategy_id(&root.strategy_id) == want;
         let is_closed = root.status == crate::state_store::SignalStatus::Closed;
         if !owned {
