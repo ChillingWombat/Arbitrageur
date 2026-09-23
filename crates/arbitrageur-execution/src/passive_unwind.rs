@@ -223,16 +223,19 @@ pub fn calm_gate_ok(
     }
 }
 
-/// Build a reduce-only limit order at an explicit price.
+/// Build a reduce-only limit order at an explicit price. `reduce_only`
+/// comes from `ExchangeAdapter::supports_reduce_only` — spot instruments
+/// have no position model so the flag must stay unset there.
 pub fn build_limit_reduce_order(
     venue: VenueId,
     symbol: &str,
     side: Side,
     qty: Decimal,
     price: Decimal,
+    reduce_only: bool,
 ) -> OrderRequest {
     let mut order = OrderRequest::new_limit(venue, symbol, side, price, qty);
-    order.reduce_only = true;
+    order.reduce_only = reduce_only;
     order
 }
 
@@ -243,9 +246,10 @@ pub fn build_market_fallback_order(
     symbol: &str,
     side: Side,
     qty: Decimal,
+    reduce_only: bool,
 ) -> OrderRequest {
     let mut order = OrderRequest::new_market(venue, symbol, side, qty);
-    order.reduce_only = true;
+    order.reduce_only = reduce_only;
     order
 }
 
@@ -279,7 +283,14 @@ pub async fn attempt_limit_once(
     qty: Decimal,
     price: Decimal,
 ) -> anyhow::Result<(LimitAttempt, OrderResponse)> {
-    let order = build_limit_reduce_order(paper.venue_id(), symbol, side, qty, price);
+    let order = build_limit_reduce_order(
+        paper.venue_id(),
+        symbol,
+        side,
+        qty,
+        price,
+        paper.supports_reduce_only(symbol),
+    );
     let resp = paper.place_order(order).await?;
     Ok((classify_limit_fill(&resp), resp))
 }
@@ -323,7 +334,13 @@ async fn market_fallback(
     limit_tries: u32,
     limit_prices: Vec<Decimal>,
 ) -> anyhow::Result<PassiveReduceReport> {
-    let order = build_market_fallback_order(paper.venue_id(), symbol, side, qty);
+    let order = build_market_fallback_order(
+        paper.venue_id(),
+        symbol,
+        side,
+        qty,
+        paper.supports_reduce_only(symbol),
+    );
     let response = paper.place_order(order).await?;
     Ok(PassiveReduceReport {
         outcome: PassiveOutcome::MarketFallback { reason },
@@ -424,7 +441,13 @@ pub async fn execute_passive_reduce(
                 // reduce must not be left working. Either failure below
                 // still returns the partial limit fill — the Err contract
                 // reserves Err for "no fill record exists at all".
-                let mkt = build_market_fallback_order(paper.venue_id(), symbol, side, remaining);
+                let mkt = build_market_fallback_order(
+                    paper.venue_id(),
+                    symbol,
+                    side,
+                    remaining,
+                    paper.supports_reduce_only(symbol),
+                );
                 let mkt_resp = match paper.place_order(mkt).await {
                     Ok(r) => r,
                     Err(e) => {
@@ -571,8 +594,14 @@ pub async fn execute_passive_reduce_live(
         };
         tries += 1;
         limit_prices.push(price);
-        let order =
-            build_limit_reduce_order(venue.clone(), symbol, side, qty - filled_total, price);
+        let order = build_limit_reduce_order(
+            venue.clone(),
+            symbol,
+            side,
+            qty - filled_total,
+            price,
+            adapter.supports_reduce_only(symbol),
+        );
         let mut cur = match adapter.place_order(order).await {
             Ok(r) => r,
             Err(e) => {
@@ -737,6 +766,7 @@ async fn finish_live(
             symbol,
             side,
             remaining,
+            adapter.supports_reduce_only(symbol),
         ))
         .await
     {
@@ -1168,10 +1198,17 @@ mod tests {
             Side::Sell,
             dec!(1),
             dec!(100),
+            true,
         );
         assert!(o.reduce_only);
         assert_eq!(o.order_type, arbitrageur_core::types::OrderType::Limit);
-        let m = build_market_fallback_order(VenueId::new("test"), "BTC-USDC", Side::Sell, dec!(1));
+        let m = build_market_fallback_order(
+            VenueId::new("test"),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(1),
+            true,
+        );
         assert!(m.reduce_only);
         assert_eq!(m.order_type, arbitrageur_core::types::OrderType::Market);
     }

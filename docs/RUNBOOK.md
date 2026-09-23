@@ -137,8 +137,11 @@ Portfolio monitor (command `reconcile_orders_now`, returns a poll summary).
 
 ### 2.4 Live entry canary procedure
 
-Live strategy entries are **opt-in**: off by default, bounded, and only on
-the spatial two-leg path (triangle and funding live dispatch is not built).
+Live strategy entries are **opt-in**: off by default and bounded by the
+per-leg notional cap. The gate covers the spatial two-leg path, Spread
+Radar manual entries, funding carry/basis, and single-venue triangle
+cycles; every path reconciles through the same poll supervisor and
+residual auto-flatten.
 
 To run one minimal real-money entry:
 
@@ -147,7 +150,8 @@ To run one minimal real-money entry:
    entries**; set **Live max notional per leg** just above both venues'
    minimums (e.g. $15–25). Residual auto-flatten is unconditional (no
    toggle since 2026-09-22) — a mixed outcome always self-heals via
-   reduce-only flatten children.
+   flatten children (reduce-only where the venue supports the flag; spot
+   legs flatten via plain orders the venue itself bounds).
 3. Pick a symbol with **no open position on either venue** — the entry
    refuses if `fetch_account` shows one. Keep existing positions untouched:
    the system never sweeps account positions; it only manages signal legs

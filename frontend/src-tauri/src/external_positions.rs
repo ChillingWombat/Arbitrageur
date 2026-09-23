@@ -760,7 +760,7 @@ pub async fn close_external_position_impl(
                 px,
                 qty_dec,
             );
-            o.reduce_only = true;
+            o.reduce_only = adapter.supports_reduce_only(&live.symbol);
             o
         } else {
             let mut o = OrderRequest::new_market(
@@ -769,7 +769,7 @@ pub async fn close_external_position_impl(
                 close_side,
                 qty_dec,
             );
-            o.reduce_only = true;
+            o.reduce_only = adapter.supports_reduce_only(&live.symbol);
             o
         };
         // Tag the client order so venue-side fills reconcile to this flow.

@@ -757,6 +757,12 @@ impl ExchangeAdapter for CoinbaseAdapter {
         true
     }
 
+    fn supports_reduce_only(&self, _symbol: &str) -> bool {
+        // Spot-only venue: no position model — an oversell is rejected by
+        // the venue itself, which is the same guarantee reduce-only buys.
+        false
+    }
+
     fn supports_live_execution(&self) -> bool {
         true
     }

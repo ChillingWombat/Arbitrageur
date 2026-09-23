@@ -137,6 +137,15 @@ pub trait ExchangeAdapter: Send + Sync {
         Ok(qty)
     }
 
+    /// Whether the venue accepts `reduce_only` on an order for `symbol`.
+    /// Spot instruments have no position model — the venue itself refuses
+    /// an oversell, which is the same guarantee the flag buys on perps —
+    /// so the flag must stay unset rather than be rejected as unsupported.
+    /// Default: `true` (perp-style venues).
+    fn supports_reduce_only(&self, _symbol: &str) -> bool {
+        true
+    }
+
     /// Cancel an existing order.
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()>;
 

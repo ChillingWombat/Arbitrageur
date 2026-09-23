@@ -27,15 +27,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
-/// Strategies whose live dispatch is built: spatial two-leg only. Triangle
-/// and funding legs still refuse in live mode until a real dispatch exists.
-pub(crate) const LIVE_ENTRY_SPATIAL_ONLY: &str = "Live execution is currently implemented for the spatial two-leg path only; this strategy's live dispatch is not built. Use Testnet Trading.";
-
 /// Live strategy-entry gate. Live mode without `live_entry_enabled` stays
 /// read + risk-reducing closes. Entry is admitted only when the operator
 /// opted in, the vault is unlocked, and every leg's adapter both submits
-/// and polls orders (the reconciler requires `fetch_order`). The machinery
-/// is venue-proven for the spatial pair path; the opt-in remains the
+/// and polls orders (the reconciler requires `fetch_order`). Applies to
+/// spatial, funding, and triangle entries; the opt-in remains the
 /// operator accepting the residual one-sided-exposure risk.
 pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result<(), String> {
     if !state.settings.read().live_entry_enabled {
@@ -6466,17 +6462,22 @@ mod tests {
         state.set_environment(crate::state::TradingEnvironment::Live);
         let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
             .await
-            .expect_err("live funding must refuse without two-leg reconciliation");
-        // Test sims report credentialed+capable, so the refusal centers on
-        // the missing two-leg live dispatch, not per-leg blockers.
+            .expect_err("live funding must refuse without the operator opt-in");
         assert!(
-            err.contains("spatial-only") || err.contains("not built"),
-            "refusal must name the missing live-dispatch capability: {err}"
+            err.contains("live_entry_enabled"),
+            "refusal must name the opt-in gate: {err}"
         );
+        // Opted in but with a locked vault: the gate must still refuse —
+        // never a silent dispatch past a named blocker.
+        state.settings.write().live_entry_enabled = true;
+        let err = execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state)
+            .await
+            .expect_err("live funding must refuse while the vault is locked");
         assert!(
-            err.contains("Testnet"),
-            "refusal must point at testnet: {err}"
+            err.contains("vault") || err.contains("credentials") || err.contains("polling"),
+            "refusal must name the missing live capability: {err}"
         );
+        state.settings.write().live_entry_enabled = false;
         state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 

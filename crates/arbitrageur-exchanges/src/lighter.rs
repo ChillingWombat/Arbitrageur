@@ -715,6 +715,12 @@ impl ExchangeAdapter for LighterAdapter {
         true
     }
 
+    fn supports_reduce_only(&self, symbol: &str) -> bool {
+        // `-SPOT` markets have no position model; the venue refuses an
+        // oversell itself, so the flag must stay unset there.
+        !symbol.to_uppercase().ends_with("-SPOT")
+    }
+
     fn has_live_credentials(&self) -> bool {
         self.api_key_private_key
             .read()

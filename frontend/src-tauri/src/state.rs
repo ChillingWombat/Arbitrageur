@@ -591,10 +591,11 @@ pub struct EngineSettingsDto {
     /// takes min(strategy target, account max, venue max, this).
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
-    /// Opt-in: allow live strategy entries on the spatial two-leg path.
-    /// Reconciliation machinery (poll supervisor, residual auto-resolution,
-    /// bounded cancel retry) is implemented but not yet venue-proven —
-    /// this flag is the explicit operator decision to accept that risk.
+    /// Opt-in: allow live strategy entries (spatial, funding carry, and
+    /// triangle paths). Reconciliation machinery (poll supervisor, residual
+    /// auto-flatten, bounded cancel retry) covers every entry signal that
+    /// lands imbalanced — this flag is the explicit operator decision to
+    /// accept that residual one-sided-exposure risk.
     /// Off by default: live mode stays read + risk-reducing closes only.
     #[serde(default)]
     pub live_entry_enabled: bool,

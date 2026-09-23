@@ -2130,7 +2130,7 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
 
     let mut order =
         arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
-    order.reduce_only = true;
+    order.reduce_only = adapter.supports_reduce_only(symbol);
     let client_order_id = order.client_order_id.clone();
 
     let resp = adapter

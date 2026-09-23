@@ -2117,6 +2117,10 @@ impl ExchangeAdapter for EvmAmmAdapter {
     fn supports_live_execution(&self) -> bool {
         self.execution_supported()
     }
+    fn supports_reduce_only(&self, _symbol: &str) -> bool {
+        // Swaps have no position model — reduce-only is meaningless.
+        false
+    }
     fn live_order_submission_implemented(&self) -> bool {
         self.execution_supported()
     }
