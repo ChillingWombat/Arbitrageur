@@ -402,7 +402,7 @@ pub struct TickerMarketQuoteDto {
 /// profit floor. These are deliberately the *published standard-tier*
 /// taker rates, not discounted/VIP tiers: an understated fee lets a
 /// losing entry pass the hurdle, while an overstated fee only skips a
-/// marginal opportunity — the safe error direction. 2026-09-24 audit:
+/// marginal opportunity — the safe error direction. 2026-09-23 audit:
 /// the table previously assumed ~2bps for most venues while real
 /// standard-tier takers run 4–5bps on Binance/OKX/Kraken/Coinbase-class
 /// venues and 4.5bps on Hyperliquid.

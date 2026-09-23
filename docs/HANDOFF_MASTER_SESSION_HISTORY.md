@@ -2715,7 +2715,7 @@ Read-only survey of `~/.arbitrageur/state.sqlite3` (~750 MB) drove three real fi
 
 390+1 desktop tests, 213 frontend tests, tsc/clippy/fmt clean; release binary rebuilt and restarted (PID on `target/release/arbitrageur-desktop`).
 
-## Session 2026-09-24 — Configurator dead-knob audit
+## Session 2026-09-23 — Configurator dead-knob audit
 
 Traced every `StrategyParamsDto`/ticker-config field end-to-end (declaration → persistence → validation → UI → runtime consumer). Controls that persisted and validated but had zero runtime consumers now declare dormancy in place (the established "Saved but NOT YET ENFORCED" pattern), rather than implying enforcement:
 
@@ -2737,7 +2737,7 @@ Docs: SPEC.md entry 28 + `docs/PARAMETER_GUIDE.md` dormant-parameters table + pe
 - **Per-ticker Execution Mode wired** — `evaluate_pair` resolves the symbol's ticker-config `execution_mode` before the global `MonitorConfigDto.execution_mode` (both vocabularies normalize through `execution_mode_is_two_way`). The modal now loads the ticker's effective mode so an untouched save can't silently pin SINGLE_WAY over a global two_way. Regression test: `DOUBLE_WAY` override demotes a qualifying row to `triggered` on uncostable exits — fail-closed, never executable-on-faith.
 - Modal copy updated to state exactly what is enforced (open-pairs cap via ledger; per-ticker mode override) vs. what remains derived-only (per-step notional is still not an entry sizing input — capacity ladder sizes orders).
 
-## Session 2026-09-24 — Common wire-grid snap (leg desync eliminated)
+## Session 2026-09-23 — Common wire-grid snap (leg desync eliminated)
 
 Each adapter independently normalized the order quantity to its own wire grid inside `place_order` — Binance/Aster stepSize floor, Vanta base_tick floor, OKX/Kraken whole contracts, Decibel lot multiples, Hyperliquid szDecimals trunc, Lighter scale units, PopDEX wad, EVM-AMM token decimals, GRVT 1e9. A requested `0.0059` could fill `0.0059` on one leg and `0.005` on the other (naked residual by construction) or die on a strict venue's exact-multiple check after its sibling filled.
 
@@ -2746,7 +2746,7 @@ Each adapter independently normalized the order quantity to its own wire grid in
 - Depth/slippage checks run on the snapped quantity; snapping only ever shrinks an order. `signal_executions.legs.intended_qty` records the snapped value.
 - Tests: `common_wire_qty_snaps_to_the_finer_grid` (0.0059 → 0.005 across 4dp/3dp grids), `common_wire_qty_refuses_unsizable_and_irreconcilable`. Full suite: 395 desktop + 212 exchanges; clippy/fmt clean. SPEC.md entry 29.
 
-## Session 2026-09-24 — Fee honesty: enrichment poll + taker-tier calibration
+## Session 2026-09-23 — Fee honesty: enrichment poll + taker-tier calibration
 
 Two-sided fix after finding every recorded live fill carried `fee_usd = 0`:
 
