@@ -1348,8 +1348,11 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
     if let Some(gb) = max_gb {
         if gb.is_finite() && gb > 0.0 {
             let budget = (gb * 1024.0 * 1024.0 * 1024.0) as u64;
+            // Measure USED bytes, not allocated: deletes grow the freelist
+            // without shrinking page_count, so an allocated-size budget can
+            // never be satisfied and would drain the whole table.
             for _ in 0..1000 {
-                let size = match state.state_store.db_size_bytes() {
+                let size = match state.state_store.db_used_bytes() {
                     Ok(s) => s,
                     Err(_) => break,
                 };
@@ -1362,6 +1365,9 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
                     Err(_) => break,
                 }
             }
+            // Return freed pages to the OS — bounded per pass, converges
+            // over successive hourly runs toward the used size.
+            let _ = state.state_store.incremental_vacuum(50_000);
         }
     }
 }
@@ -5242,6 +5248,55 @@ mod tests {
                 "newest sample survives oldest-first eviction"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_retention_gb_budget_measures_used_not_allocated() {
+        // Regression: the GB cap used to compare the budget against the
+        // ALLOCATED file size (page_count), which deletes can never shrink —
+        // freed space lands on the freelist. The loop would drain the entire
+        // table chasing a size that never drops. The budget must bind against
+        // used bytes (page_count - freelist_count).
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        // Mids stay within 3x of the incumbent anchor — record_spread_samples
+        // drops wider deviations as symbol collisions, which would silently
+        // shrink the seeded row count.
+        for i in 0..500 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (500 - i) * 1_000,
+                &[("hyperliquid", 100.0 + (i % 10) as f64)],
+            );
+        }
+        // Free most rows directly so the freelist grows while page_count
+        // stays put — allocated > used is the precondition for the bug.
+        state
+            .state_store
+            .delete_spread_samples_before(now - 100 * 1_000)
+            .expect("bulk delete");
+        let remaining = state.state_store.spread_sample_count().unwrap();
+        assert_eq!(remaining, 100);
+        assert!(
+            state.state_store.db_size_bytes().unwrap() > state.state_store.db_used_bytes().unwrap(),
+            "fixture must produce freelist pages"
+        );
+        // Budget exactly at current used bytes → nothing left to evict.
+        // The old allocated-size check would have kept deleting to zero.
+        let used_gb =
+            state.state_store.db_used_bytes().unwrap() as f64 / (1024.0 * 1024.0 * 1024.0);
+        {
+            let mut s = state.settings.write();
+            s.spread_samples_max_days = None;
+            s.spread_samples_max_gb = Some(used_gb);
+        }
+        enforce_retention_pass(&state, now);
+        assert_eq!(
+            state.state_store.spread_sample_count().unwrap(),
+            remaining,
+            "used-size budget already satisfied — no rows should be evicted"
+        );
     }
 
     #[tokio::test]
