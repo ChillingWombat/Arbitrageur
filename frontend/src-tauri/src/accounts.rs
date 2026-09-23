@@ -8,6 +8,7 @@ use crate::commands::{
 use crate::state::{AppEngineState, VenueBalanceInfo};
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
+use arbitrageur_exchanges::evm_amm::{ADMITTED_EVM_AMM_VENUE_IDS, LIVE_EVM_AMM_VENUE_IDS};
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -665,6 +666,212 @@ pub fn upsert_account_impl(
     Ok(dto)
 }
 
+/* ---------------------------------------------------------------------- */
+/* Shared EVM wallet — one signer fans out to every EVM AMM venue          */
+/* ---------------------------------------------------------------------- */
+
+/// Summary returned by `save_evm_wallet`: the derived signer plus which
+/// venue accounts received the key vs. only the public address.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmWalletSaveDto {
+    /// EIP-55 checksum address derived from the submitted private key.
+    pub signer_address: String,
+    /// Swap-capable venues whose accounts now hold the private key.
+    pub keyed_venues: Vec<String>,
+    /// Market-data venues whose accounts hold only the wallet address.
+    pub address_only_venues: Vec<String>,
+    /// `{venue}-default` account ids created by this save. New rows are
+    /// disabled — a wallet save never admits a venue by itself.
+    pub created_accounts: Vec<String>,
+}
+
+/// The account a shared-wallet write targets for one AMM venue: the
+/// canonical `{venue}-default` profile when it exists, otherwise the
+/// venue's default (or first) live account, otherwise a freshly created
+/// disabled `{venue}-default`. EVM AMM venues have no public testnet, so
+/// their accounts always bind the live environment regardless of which
+/// mode the engine is currently running.
+fn evm_wallet_target_profile(
+    state: &AppEngineState,
+    venue: &str,
+) -> Result<(AccountProfile, bool), String> {
+    let pid = format!("{venue}-default");
+    if let Some(p) = state
+        .state_store
+        .get_account(&pid)
+        .map_err(|e| e.to_string())?
+    {
+        return if p.environment == "live" {
+            Ok((p, false))
+        } else {
+            Err(format!(
+                "account {pid} is bound to testnet — delete it before saving an EVM wallet"
+            ))
+        };
+    }
+    let live_accounts: Vec<AccountProfile> = state
+        .state_store
+        .list_accounts(Some(venue))
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .filter(|a| a.environment == "live")
+        .collect();
+    if let Some(p) = live_accounts.first() {
+        // list_accounts orders is_default first — the venue's credential-
+        // resolving account adopts the shared key without an id change.
+        return Ok((p.clone(), false));
+    }
+    let created = state
+        .state_store
+        .upsert_account(
+            &pid,
+            venue,
+            "EVM Wallet",
+            false, // disabled — admitting a venue stays a per-venue toggle
+            false,
+            "standard",
+            None,
+            Some("live"),
+        )
+        .map_err(|e| e.to_string())?;
+    Ok((created, true))
+}
+
+/// Save the shared EVM wallet: validates the key, derives its signer, then
+/// writes the credential record for every admitted AMM venue. Swap-capable
+/// venues (`LIVE_EVM_AMM_VENUE_IDS`) receive the private key; market-data
+/// venues receive only the public address — the key is never stored on a
+/// venue that cannot trade. A provided `wallet_address` is a cross-check
+/// only and must equal the derived signer (the same refusal the adapter
+/// applies). Enabled state, labels, tiers and RPC overrides are preserved;
+/// venues that gain an account row start disabled.
+///
+/// When a venue already resolves credentials from a different enabled
+/// default account, that account receives the same material too — a wallet
+/// save means every enabled AMM venue signs as this wallet immediately,
+/// not after a manual default-account shuffle.
+pub fn save_evm_wallet_impl(
+    private_key: &str,
+    wallet_address: Option<&str>,
+    state: &AppEngineState,
+) -> Result<EvmWalletSaveDto, String> {
+    let signer = derive_evm_signer_address_impl(private_key)?;
+    if let Some(w) = wallet_address.map(|w| w.trim()).filter(|w| !w.is_empty()) {
+        if !w.eq_ignore_ascii_case(&signer) {
+            return Err(format!(
+                "wallet address {w} does not match the private key's signer {signer} — refusing credentials"
+            ));
+        }
+    }
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before saving credentials.".into());
+    }
+
+    let mut keyed = Vec::new();
+    let mut address_only = Vec::new();
+    let mut created = Vec::new();
+    for vid in ADMITTED_EVM_AMM_VENUE_IDS {
+        let (profile, was_created) = evm_wallet_target_profile(state, vid)?;
+        if was_created {
+            created.push(profile.id.clone());
+        }
+        // Both the canonical target and the currently credential-resolving
+        // enabled default get the material when they differ.
+        let mut targets = vec![profile];
+        if let Ok(Some(default)) = state.state_store.default_account(vid, "live") {
+            if !targets.iter().any(|p| p.id == default.id) {
+                targets.push(default);
+            }
+        }
+        let has_key = LIVE_EVM_AMM_VENUE_IDS.contains(vid);
+        for p in &targets {
+            if !has_key {
+                // Merge semantics cannot clear a secret — strip wallet
+                // fields first so a stale key can never linger on a
+                // market-data venue, then write the address-only record.
+                let _ = vault.clear_profile_wallet_fields(&p.id);
+            }
+            let record = ExchangeCredentials {
+                venue: vid.to_string(),
+                profile_id: Some(p.id.clone()),
+                api_key: String::new(),
+                api_secret: String::new(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: Some(signer.clone()),
+                account_index: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: has_key.then(|| private_key.trim().to_string()),
+                base_url: None, // preserve any stored RPC override
+                enabled: p.enabled,
+            };
+            vault
+                .upsert_profile_credentials(&p.id, record)
+                .map_err(|e| e.to_string())?;
+        }
+        if has_key {
+            keyed.push(vid.to_string());
+        } else {
+            address_only.push(vid.to_string());
+        }
+    }
+    drop(vault);
+    state.sync_vault_credentials_to_adapters();
+    Ok(EvmWalletSaveDto {
+        signer_address: signer,
+        keyed_venues: keyed,
+        address_only_venues: address_only,
+        created_accounts: created,
+    })
+}
+
+/// Remove the shared wallet material (private key + wallet address) from
+/// every AMM venue's bound credential records — all accounts, not just the
+/// canonical default, in case the wallet was ever written to a different
+/// profile. Account rows, enabled flags and RPC endpoint overrides are
+/// preserved; venues keep market data but can no longer trade.
+pub fn clear_evm_wallet_impl(state: &AppEngineState) -> Result<u32, String> {
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked. Please unlock before clearing credentials.".into());
+    }
+    let mut cleared = 0u32;
+    for vid in ADMITTED_EVM_AMM_VENUE_IDS {
+        let accounts = state
+            .state_store
+            .list_accounts(Some(vid))
+            .map_err(|e| e.to_string())?;
+        for p in accounts.iter().filter(|a| a.environment == "live") {
+            if vault
+                .clear_profile_wallet_fields(&p.id)
+                .map_err(|e| e.to_string())?
+            {
+                cleared += 1;
+            }
+        }
+    }
+    drop(vault);
+    state.sync_vault_credentials_to_adapters();
+    Ok(cleared)
+}
+
+#[tauri::command]
+pub async fn save_evm_wallet(
+    private_key: String,
+    wallet_address: Option<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<EvmWalletSaveDto, String> {
+    save_evm_wallet_impl(&private_key, wallet_address.as_deref(), &state)
+}
+
+#[tauri::command]
+pub async fn clear_evm_wallet(state: State<'_, Arc<AppEngineState>>) -> Result<u32, String> {
+    clear_evm_wallet_impl(&state)
+}
+
 /// Delete an account profile and its bound credential record. Route
 /// references are checked before anything is removed so a foreign-key block
 /// can never destroy secrets; the vault must be unlocked so bound secrets
@@ -1246,8 +1453,8 @@ pub fn get_active_signer_address_impl(
         };
         return Ok(adapter.active_signer_address());
     }
-    // Long-tail DEX perps exist only on the live set — they have no public
-    // testnet, so testnet has no signer to introspect.
+    // Long-tail DEX perps and EVM AMMs exist only on the live set — they
+    // have no public testnet, so testnet has no signer to introspect.
     if is_live {
         if let Some(a) = state
             .live_dex_perps
@@ -1255,6 +1462,13 @@ pub fn get_active_signer_address_impl(
             .find(|a| a.venue_id_str().eq_ignore_ascii_case(&vid))
         {
             return Ok(a.active_signer_address());
+        }
+        if let Some(a) = state
+            .live_evm_amms
+            .iter()
+            .find(|a| a.spec_id() == vid)
+        {
+            return Ok(a.wallet_address_hex());
         }
     }
     Err(format!("no signer introspection for venue '{venue}'"))

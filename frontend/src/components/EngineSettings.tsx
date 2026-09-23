@@ -268,14 +268,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
-  // Canary run state (Safety → live entries)
-  const [canarySymbol, setCanarySymbol] = useState("ETH-USDC");
-  const [canaryBuyVenue, setCanaryBuyVenue] = useState("hyperliquid");
-  const [canarySellVenue, setCanarySellVenue] = useState("lighter");
-  const [canaryQty, setCanaryQty] = useState(0.005);
-  const [canaryLossBps, setCanaryLossBps] = useState(25);
-  const [canaryRunning, setCanaryRunning] = useState(false);
-  const [canaryResult, setCanaryResult] = useState<string | null>(null);
   const [staleWarnSecs, setStaleWarnSecs] = useState(300);
   // Networking & VPS
 
@@ -1803,59 +1795,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 Caps every strategy (Risk Control default 10x). Per-strategy targets in the configurators can only lower it — never exceed it. Applies live on save.
               </p>
             </div>
-
-            {tradingMode === "live" && (
-              <div className="rounded border border-red-300 bg-red-50 p-2.5 space-y-2">
-                <p className="text-[11px] font-bold text-red-700 tracking-wide">
-                  LIVE CANARY — one minimal two-leg entry
-                </p>
-                <div className="grid grid-cols-2 gap-2">
-                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canarySymbol}
-                    onChange={(e) => setCanarySymbol(e.target.value)} placeholder="symbol e.g. ETH-USDC" />
-                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" type="number" step="any" min="0"
-                    value={canaryQty} onChange={(e) => setCanaryQty(Number(e.target.value))} placeholder="qty per leg" />
-                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canaryBuyVenue}
-                    onChange={(e) => setCanaryBuyVenue(e.target.value)} placeholder="buy venue" />
-                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" value={canarySellVenue}
-                    onChange={(e) => setCanarySellVenue(e.target.value)} placeholder="sell venue" />
-                  <input className="rounded border border-slate-300 px-2 py-1 text-xs" type="number" min="0" max="50"
-                    value={canaryLossBps} onChange={(e) => setCanaryLossBps(Number(e.target.value))} placeholder="max accepted loss bps" />
-                </div>
-                <p className="text-[11px] text-slate-600 leading-snug">
-                  Submits ONE IOC pair on real venues with the profit hurdle
-                  relaxed down to the accepted loss above (spread+fees are the
-                  test cost, ≤ 50 bps). All other checks still apply: vault
-                  unlocked, margin, depth, delta-neutrality, ticker blocking,
-                  reconciliation. Pick a symbol with NO open position — a leg
-                  fill may stay open and need a manual close.
-                </p>
-                <button
-                  disabled={canaryRunning || loading}
-                  onClick={async () => {
-                    setCanaryRunning(true);
-                    setCanaryResult(null);
-                    try {
-                      const r = await api.executeSpatialArbitrage(
-                        canarySymbol.trim(), canaryBuyVenue.trim(), canarySellVenue.trim(),
-                        canaryQty, undefined, undefined, undefined, 1, 1, undefined,
-                        canaryLossBps,
-                      );
-                      setCanaryResult(r.execution_success ? `FILLED: ${r.message}` : `REFUSED: ${r.message}`);
-                    } catch (e) {
-                      setCanaryResult(`ERROR: ${e instanceof Error ? e.message : String(e)}`);
-                    } finally {
-                      setCanaryRunning(false);
-                    }
-                  }}
-                  className="w-full rounded bg-red-600 hover:bg-red-700 text-white text-xs font-bold py-1.5 transition disabled:opacity-50"
-                >
-                  {canaryRunning ? "Submitting real orders…" : "Run live canary entry"}
-                </button>
-                {canaryResult && (
-                  <p className="text-[11px] font-mono whitespace-pre-wrap bg-white rounded border border-slate-200 p-1.5 max-h-28 overflow-auto">{canaryResult}</p>
-                )}
-              </div>
-            )}
           </div>
         )}
 

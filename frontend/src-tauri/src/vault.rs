@@ -804,6 +804,39 @@ impl SecureVault {
         Ok(())
     }
 
+    /// Strip wallet material — `private_key` and `wallet_address` — from the
+    /// record bound to `profile_id`, preserving endpoint overrides, index
+    /// fields and the enabled flag. Used by the shared EVM-wallet commands so
+    /// a "forget wallet" removes signing ability without wiping per-venue RPC
+    /// endpoints or account rows. Requires an unlocked vault; Ok(false) when
+    /// no record exists or it already held no wallet material.
+    pub fn clear_profile_wallet_fields(&mut self, profile_id: &str) -> anyhow::Result<bool> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before clearing wallet credentials.");
+        }
+        let pid = normalize_profile_id(profile_id)?;
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+        let Some(existing) = data
+            .credentials
+            .iter_mut()
+            .find(|c| c.profile_id.as_deref() == Some(pid.as_str()))
+        else {
+            return Ok(false);
+        };
+        if existing.private_key.is_none() && existing.wallet_address.is_none() {
+            return Ok(false);
+        }
+        if let Some(mut private_key) = existing.private_key.take() {
+            private_key.zeroize();
+        }
+        if let Some(mut wallet_address) = existing.wallet_address.take() {
+            wallet_address.zeroize();
+        }
+        data.updated_at = Utc::now();
+        self.save_data(&data)?;
+        Ok(true)
+    }
+
     /// Update the enabled flag on every credential record for a lowercase
     /// venue ID (all bound accounts plus any legacy unbound record). Unknown
     /// venues are ignored, stored secrets are never touched, and the vault is
