@@ -5807,6 +5807,219 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    // secp256k1 key = 1 → the well-known 0x7E5F… derivation (Hardhat #0).
+    const EVM_WALLET_TEST_KEY: &str =
+        "0x0000000000000000000000000000000000000000000000000000000000000001";
+    const EVM_WALLET_TEST_ADDR: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
+    const EVM_WALLET_TEST_ADDR_CHECKSUM: &str = "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf";
+
+    #[tokio::test]
+    async fn test_save_evm_wallet_fans_out_keyed_vs_address_only() {
+        let (state, dir) = test_state_with_vault("evm-wallet");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
+        assert_eq!(res.signer_address.to_lowercase(), EVM_WALLET_TEST_ADDR);
+        assert_eq!(res.keyed_venues.len(), 6);
+        assert_eq!(res.address_only_venues.len(), 5);
+        assert_eq!(res.created_accounts.len(), 11);
+
+        let data = state.vault.write().get_data().expect("vault data").clone();
+        for vid in arbitrageur_exchanges::evm_amm::ADMITTED_EVM_AMM_VENUE_IDS {
+            let pid = format!("{vid}-default");
+            let acc = state
+                .state_store
+                .get_account(&pid)
+                .expect("account lookup")
+                .expect("default account exists");
+            assert!(!acc.enabled, "a wallet save must never admit a venue");
+            assert_eq!(acc.environment, "live");
+            let rec = data
+                .credentials
+                .iter()
+                .find(|c| c.profile_id.as_deref() == Some(pid.as_str()))
+                .expect("credential record");
+            assert_eq!(
+                rec.wallet_address.as_deref().map(|a| a.to_lowercase()),
+                Some(EVM_WALLET_TEST_ADDR.to_string())
+            );
+            if arbitrageur_exchanges::evm_amm::LIVE_EVM_AMM_VENUE_IDS.contains(vid) {
+                assert_eq!(
+                    rec.private_key.as_deref(),
+                    Some(EVM_WALLET_TEST_KEY),
+                    "{vid} is swap-capable and must hold the key"
+                );
+            } else {
+                assert!(
+                    rec.private_key.is_none(),
+                    "{vid} is market-data only — the key must never reach it"
+                );
+            }
+            assert!(!rec.enabled, "disabled profile => disabled record");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_save_evm_wallet_mismatch_and_locked_refuse() {
+        let (state, dir) = test_state_with_vault("evm-wallet-refuse");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        // Address/key mismatch refuses before any write.
+        let err = save_evm_wallet_impl(
+            EVM_WALLET_TEST_KEY,
+            Some("0x0000000000000000000000000000000000000001"),
+            &state,
+        )
+        .expect_err("mismatch must refuse");
+        assert!(err.contains("does not match"), "got: {err}");
+        assert!(state
+            .state_store
+            .get_account("uniswap-default")
+            .expect("lookup")
+            .is_none());
+
+        // Malformed key refuses too.
+        assert!(save_evm_wallet_impl("not-a-key", None, &state).is_err());
+
+        // Locked vault refuses and writes nothing.
+        lock_vault_impl(&state).expect("lock");
+        let err = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state)
+            .expect_err("locked vault must refuse");
+        assert!(err.to_lowercase().contains("locked"), "got: {err}");
+        assert!(state
+            .state_store
+            .get_account("uniswap-default")
+            .expect("lookup")
+            .is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_evm_wallet_enable_resolves_adapter_and_clear_strips() {
+        let (state, dir) = test_state_with_vault("evm-wallet-enable");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
+        // Nothing provisions while every venue account is disabled.
+        let uni = state
+            .live_evm_amms
+            .iter()
+            .find(|a| a.spec_id() == "uniswap")
+            .expect("uniswap adapter");
+        assert!(uni.wallet_address_hex().is_none());
+
+        // Enable Uniswap's wallet account + set an RPC override; the adapter
+        // must resolve the shared key without the key crossing IPC again.
+        upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: Some("uniswap-default".into()),
+                venue: "uniswap".into(),
+                label: "EVM Wallet".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    base_url: Some("https://example-rpc.invalid".into()),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("enable uniswap");
+        assert_eq!(
+            get_active_signer_address_impl("uniswap", &state).expect("signer"),
+            Some(EVM_WALLET_TEST_ADDR_CHECKSUM.to_string()),
+        );
+        assert!(state
+            .state_store
+            .has_enabled_account("uniswap", "live")
+            .unwrap());
+
+        // Clear strips wallet material but keeps enabled + RPC override.
+        let cleared = clear_evm_wallet_impl(&state).expect("clear");
+        assert_eq!(cleared, 11, "all 11 default records held wallet material");
+        let data = state.vault.write().get_data().expect("vault data").clone();
+        let rec = data
+            .credentials
+            .iter()
+            .find(|c| c.profile_id.as_deref() == Some("uniswap-default"))
+            .expect("record");
+        assert!(rec.private_key.is_none());
+        assert!(rec.wallet_address.is_none());
+        assert_eq!(rec.base_url.as_deref(), Some("https://example-rpc.invalid"));
+        assert!(rec.enabled, "clearing the wallet must not disable the venue");
+        assert!(uni.wallet_address_hex().is_none(), "adapter signer dropped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_save_evm_wallet_rekeys_enabled_default_account() {
+        // A venue whose enabled default is a legacy random-id account must
+        // adopt the shared wallet immediately — the resolved account and the
+        // canonical `{venue}-default` both receive the material.
+        let (state, dir) = test_state_with_vault("evm-wallet-rekey");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        let legacy_key =
+            "0x0000000000000000000000000000000000000000000000000000000000000002";
+        let legacy = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "uniswap".into(),
+                label: "Legacy".into(),
+                enabled: true,
+                make_default: true,
+                credentials: Some(AccountCredentialInput {
+                    private_key: Some(legacy_key.into()),
+                    ..AccountCredentialInput::default()
+                }),
+            },
+            &state,
+        )
+        .expect("legacy account");
+        let legacy_addr = derive_evm_signer_address_impl(legacy_key).expect("addr");
+        assert_eq!(
+            get_active_signer_address_impl("uniswap", &state).expect("signer"),
+            Some(legacy_addr)
+        );
+
+        let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save");
+        // The venue's resolving default adopts the shared key in place — no
+        // stray `{venue}-default` row is created alongside it.
+        let data = state.vault.write().get_data().expect("vault data").clone();
+        let rec = data
+            .credentials
+            .iter()
+            .find(|c| c.profile_id.as_deref() == Some(legacy.id.as_str()))
+            .expect("record for legacy account");
+        assert_eq!(rec.private_key.as_deref(), Some(EVM_WALLET_TEST_KEY));
+        assert_eq!(
+            rec.wallet_address.as_deref().map(|a| a.to_lowercase()),
+            Some(EVM_WALLET_TEST_ADDR.to_string())
+        );
+        assert!(state
+            .state_store
+            .get_account("uniswap-default")
+            .expect("lookup")
+            .is_none());
+        assert!(!res.created_accounts.iter().any(|id| id == "uniswap-default"));
+        assert_eq!(res.created_accounts.len(), 10, "other venues gain rows");
+        assert_eq!(
+            get_active_signer_address_impl("uniswap", &state).expect("signer"),
+            Some(res.signer_address.clone())
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[tokio::test]
     async fn test_get_account_signer_address_derives_without_secret() {
         let (state, dir) = test_state_with_vault("signer-addr");
