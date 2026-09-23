@@ -9,7 +9,7 @@ Use Paper Trading, collect venue-specific history, review AutoTune's held-out re
 1. **Start from executable friction, not gross spread.** Entry, exit, fees, slippage, funding, and quantity conversion all matter.
 2. **Unknown means blocked.** Missing depth, stale books, missing funding, provisional session data, or insufficient history must not be replaced with zero.
 3. **Size to the weaker leg.** Capacity is bounded by the shallower book and the smaller available margin pool.
-4. **Use leverage last.** First establish stable fills, reconciliation, and drawdown at 1x–2x in paper mode.
+4. **Use leverage last.** First establish stable fills, reconciliation, and drawdown at 1x–2x on venue testnets.
 5. **Do not infer live readiness from a backtest.** Venue order handling and restart reconciliation are separate release gates.
 6. **Treat annualized carry as a comparison, not a forecast.** Funding can change or invert before costs are recovered.
 
@@ -28,7 +28,7 @@ required gross BPS
   + target profit BPS
 ```
 
-Raise the target when realized paper slippage or failed/partial fills exceed the model. Lower it only when a held-out sample still has positive expected net capture after costs.
+Raise the target when realized testnet slippage or failed/partial fills exceed the model. Lower it only when a held-out sample still has positive expected net capture after costs.
 
 ### Sliding Window
 
@@ -83,11 +83,15 @@ Use expected USD and trailing outcome distributions alongside APR.
 
 ### Maximum slippage
 
-This bounds each leg's depth-walk slippage at dispatch. A tighter value rejects more opportunities; a wider value permits more adverse execution. Increase it only after paper fill evidence shows that the additional fills improve net expectancy.
+This bounds each leg's depth-walk slippage at dispatch. A tighter value rejects more opportunities; a wider value permits more adverse execution. Increase it only after testnet fill evidence shows that the additional fills improve net expectancy.
 
 ### Maximum entry spread
 
 This bounds the absolute execution-price gap between legs. It protects against entering a funding trade whose basis move can overwhelm expected carry. It is independent of the funding-rate hurdle and must be enforced at dispatch.
+
+### Spread-divergence ceiling (risk setting)
+
+`risk.cb_max_spread_bps` (default 250) is the plausibility ceiling on an entry's expected net spread after friction. A route whose net edge exceeds it is refused outright — an edge that large is a symbol collision or corrupt quote, not alpha (production observed SPX500 quoting ~147M bps across Hyperliquid/Vanta). The gate sits in the shared spatial entry path, so manual, monitor, candidates, and radar-bot entries all honor it. Raise it only with evidence of real dislocations beyond 2.5%.
 
 ### Basis controls
 
@@ -121,7 +125,7 @@ Before applying:
 - Apply selected rows only; do not change every parameter merely because one row is READY.
 - Preserve the audit ID for later outcome review.
 
-AutoTune does not yet learn from a complete join of quoted opportunities to realized paper fills/slippage. Treat recommendations as research assistance, not an autonomous mandate.
+AutoTune does not yet learn from a complete join of quoted opportunities to realized fills/slippage. Treat recommendations as research assistance, not an autonomous mandate.
 
 ## Current software defaults
 
@@ -145,7 +149,7 @@ These values initialize missing settings; they are not universal recommendations
 | Spot max slippage | 5 BPS |
 | Spot minimum net spread | 15 BPS |
 
-Review and reduce these values for the actual account before any paper run. New live strategy entries are disabled regardless of these settings.
+Review and reduce these values for the actual account before any testnet run. Live strategy entries are additionally opt-in gated (`live_entry_enabled`) with a per-leg notional cap.
 
 ## Why fixed risk presets are still gated
 
