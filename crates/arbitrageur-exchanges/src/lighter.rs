@@ -386,7 +386,7 @@ impl ExchangeAdapter for LighterAdapter {
                 min_order_size: dec!(0.01),
                 min_notional: dec!(10.0),
                 maker_fee_bps: dec!(0.0),
-                taker_fee_bps: dec!(2.0),
+                taker_fee_bps: dec!(1.5),
                 contract_size: dec!(1.0),
                 is_active: true,
             });
