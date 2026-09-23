@@ -189,7 +189,22 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
   }),
   get_radar_bot_config: () => ({ enabled: false, size_usd: 500, max_concurrent: 3 }),
   get_radar_bot_status: () => ({ running: false, open_positions: 0, executed_today: 0, pnl_today_usd: 0 }),
-  list_signal_executions: () => [],
+  list_signal_executions: () => [
+    {
+      id: "sig-ETH-7f3a", strategyId: "futures", symbol: "ETH-USD",
+      status: "imbalanced", routeId: "hyperliquid->lighter",
+      accountLongId: null, accountShortId: null,
+      expectedNetUsd: 4.2, feesUsd: 0.31,
+      note: "residual exposure persists after bounded auto-flatten attempts",
+      legs: [
+        { id: "l1", signalId: "sig-ETH-7f3a", accountId: null, venue: "hyperliquid", side: "long", symbol: "ETH", intendedQty: 0.5, filledQty: 0.5, fillPrice: 3421.4, feeUsd: 0.16, venueOrderId: "0x812fa", clientOrderId: "c-1", createdAt: new Date(now - 7200_000).toISOString(), updatedAt: new Date(now - 3600_000).toISOString() },
+        { id: "l2", signalId: "sig-ETH-7f3a", accountId: null, venue: "lighter", side: "short", symbol: "ETH", intendedQty: 0.5, filledQty: 0.2, fillPrice: 3422.1, feeUsd: 0.15, venueOrderId: "lg-99120", clientOrderId: "c-2", createdAt: new Date(now - 7200_000).toISOString(), updatedAt: new Date(now - 3600_000).toISOString() },
+      ],
+      createdAt: new Date(now - 7200_000).toISOString(),
+      updatedAt: new Date(now - 3600_000).toISOString(),
+      closedAt: null,
+    },
+  ],
   get_strategy_fill_pnl: () => ({ realized_usd: 0, fees_usd: 0, trades: 0 }),
   get_exempted_tickers: () => [],
   get_matrix_baselines: (a) => ({
