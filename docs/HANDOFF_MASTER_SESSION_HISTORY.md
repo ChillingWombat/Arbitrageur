@@ -2803,3 +2803,11 @@ The triangle auto-deploy loop (2.5s poll) had the same autonomous-live hole as f
 Ledger analytics on `~/.arbitrageur/state.sqlite3`: 64 signal executions (48 failed / 16 closed). All 48 failures predate today's fixes and split into two confirmed classes — 47× "residual flatten never dispatched" (the 09-22 leg-desync/retry incident cluster: ETH-USDC every ~10s for 10 min) and 1× bad-key test. 6/7 closed entries show `hyperliquid long filled_qty=0` at entry — submit-ack blindness (fixed via durable order-id polling). No unresolved signals linger; no post-fix entries exist to measure yet. Funding-rate samples (278k rows): Lighter mean +0.017%/8h with ±1.5% tails, HL +0.024%/8h — the 10% APR min-carry default is well inside observed carry; AI-USDC averages 0.45%/8h on Lighter (persistent small-cap carry).
 
 Exit-path audit: all strategies have supervised exits — futures 5s convergence loop (`check_spatial_convergence_impl`), radar bot `evaluate_exit` ticks, funding `supervise_funding_exits`, unconditional reconciler residual flatten; all route through `flatten_ticker_positions_impl` (pause-exempt, live requires unlocked vault — fail-closed). RUNBOOK preamble updated to the current opt-in/canary truth.
+
+## Session 2026-09-23 — Environment transitions refuse open positions
+
+`transition_environment` refused a flip only while working-order legs awaited reconciliation — a `balanced` open position survived, and every flatten/close resolves `get_adapter` under the *new* env: a testnet hedge flattened after a live flip would dispatch real orders to the wrong endpoints. The gate now refuses the transition naming every `counts_as_open` signal; the operator flattens first. Test `test_env_switch_refused_with_open_position` pins the block + the post-close next-gate refusal. SPEC.md entry 35; desktop 404 tests.
+
+## Session 2026-09-23 — Funding exit supervisor dispatch coverage
+
+`supervise_funding_exits_flattens_decayed_carry` + `supervise_funding_exits_holds_fresh_carry` pin the end-to-end exit guarantee through the real `flatten_ticker_positions_impl` path (sims close the legs; signal transitions balanced→closed). Desktop 403 tests.
