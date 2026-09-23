@@ -159,7 +159,7 @@ impl StateStore {
         )?;
         conn.execute(
             "DELETE FROM spread_samples WHERE id IN (
-                 SELECT id FROM spread_samples ORDER BY ts_ms DESC, id DESC LIMIT -1 OFFSET ?1
+                 SELECT id FROM spread_samples ORDER BY id DESC LIMIT -1 OFFSET ?1
              )",
             [max_rows],
         )?;
@@ -256,7 +256,7 @@ impl StateStore {
         conn.execute(
             "DELETE FROM venue_volume_samples WHERE rowid IN (
                  SELECT rowid FROM venue_volume_samples
-                 ORDER BY ts_ms DESC, rowid DESC LIMIT -1 OFFSET ?1
+                 ORDER BY rowid DESC LIMIT -1 OFFSET ?1
              )",
             [max_rows],
         )?;
