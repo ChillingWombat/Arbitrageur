@@ -2850,19 +2850,30 @@ pub async fn flatten_ticker_positions_with_type_impl(
         Ok(total)
     };
     // Quantity already dispatched but not yet filled: the unfilled remainder
-    // of each open child's legs. An incomplete child is marked Unresolved by
-    // this same pass even while its orders still work, so any non-terminal
-    // status can carry in-flight qty — suppress re-dispatch of it or a second
+    // of each open close-child's legs — across ALL families, not just this
+    // signal's: two roots sharing a venue+symbol+side close against the same
+    // venue position, so a sibling family's in-flight order must suppress
+    // this dispatch too. An incomplete child is marked Unresolved by this
+    // same pass even while its orders still work, so any non-terminal status
+    // can carry in-flight qty — suppress re-dispatch of it or a second
     // flatten would double-submit. Suppression is time-bounded: past the
     // reconciler's 15-min working-order deadline (cancels exhausted), the
     // order is presumed dead and the venue position re-read bounds the
     // residual — holding pending forever would strand it.
-    let child_pending_on = |family: &[crate::state_store::SignalExecution],
+    let mut open_children: Vec<crate::state_store::SignalExecution> = all_signals
+        .iter()
+        .filter(|s| {
+            (s.id.starts_with("flat-") || s.id.starts_with("trim-")) && s.status.counts_as_open()
+        })
+        .cloned()
+        .collect();
+    let child_pending_on = |children: &[crate::state_store::SignalExecution],
                             canonical: &str,
-                            side: LegSide|
+                            side: LegSide,
+                            symbol: &str|
      -> Result<Decimal, String> {
         let mut total = dec!(0);
-        for child in family {
+        for child in children {
             if !child.status.counts_as_open() {
                 continue;
             }
@@ -2877,7 +2888,9 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 continue;
             }
             for cl in &child.legs {
-                if cl.side == side && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
+                if cl.side == side
+                    && cl.symbol.eq_ignore_ascii_case(symbol)
+                    && crate::state::canonical_venue_id(&cl.venue) == Some(canonical)
                 {
                     let pending = ledger_qty_to_dec(cl.intended_qty, "child leg intent")?
                         - ledger_qty_to_dec(cl.filled_qty, "child leg fill")?;
@@ -3002,7 +3015,12 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 Some(p) => {
                     // Subtract qty already in flight on open children — a
                     // re-click while a close order works must not resubmit it.
-                    let pending = child_pending_on(&family, canonical, opposite(leg.side))?;
+                    let pending = child_pending_on(
+                        &open_children,
+                        canonical,
+                        opposite(leg.side),
+                        &leg.symbol,
+                    )?;
                     let dispatchable = (residual - pending).max(dec!(0));
                     let basis = dispatchable.min(p.quantity);
                     // Leftover sweep: when the residual exceeds the closable
@@ -3129,6 +3147,12 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 legs: child_legs,
             })
             .map_err(|e| format!("Failed to persist flatten signal record: {e}"))?;
+        // A child created this pass isn't in the `all_signals` snapshot —
+        // join it to the pending set so a later root sharing venue+side sees
+        // its in-flight qty.
+        if let Ok(Some(child)) = state.state_store.get_signal(&close_id) {
+            open_children.push(child);
+        }
 
         let mut leg_desc = Vec::new();
         for t in &targets {
