@@ -300,15 +300,24 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         }
     }
 
-    // Authoritative grid-cap gate. The frontend derives max_units per ticker
-    // (step = min(mult x venue min-lot, maxStepUsd / price); max steps from
-    // total paper equity x pct) and threads it through position_step/max_units.
-    // The backend holds no venue min-lot table so it cannot re-derive the cap;
-    // it enforces the caller-supplied cap strictly instead: an entry whose step
-    // exceeds the cap, or a ticker already at the cap, is rejected here before
-    // any orderbook work. Callers that pass max_units=None (monitor path) skip
-    // this gate.
-    if let Some(max) = max_units {
+    // Authoritative grid-cap gate. Effective cap = caller-supplied max_units,
+    // else the ticker config's persisted max_accumulated_units (the modal's
+    // Execution & Sizing section) when present. Open units are derived from
+    // the durable signal ledger — matched (balanced) pairs on the symbol —
+    // never a cached counter, so restarts and partial histories cannot drift
+    // the cap. An entry whose declared step exceeds the cap, or a ticker
+    // already holding `cap` open pairs, is rejected before any orderbook
+    // work. in_flight/imbalanced/unresolved signals don't count here — the
+    // durable blocking gate below hard-refuses those symbols outright.
+    let configured_max = max_units.or_else(|| {
+        state
+            .strategy_configs
+            .read()
+            .get(symbol)
+            .map(|c| c.max_accumulated_units)
+            .filter(|m| *m >= 1)
+    });
+    if let Some(max) = configured_max {
         if max < 1 {
             return Err("max_units must be at least 1".into());
         }
@@ -322,15 +331,13 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 ));
             }
         }
-        let current = state
-            .strategy_configs
-            .read()
-            .get(symbol)
-            .map(|c| c.current_accumulated_units)
-            .unwrap_or(0);
-        if current >= max {
+        let open_units = state
+            .state_store
+            .open_balanced_signal_count(symbol)
+            .map_err(|e| e.to_string())?;
+        if open_units >= i64::from(max) {
             return Err(format!(
-                "Grid cap reached for {symbol}: {current}/{max} accumulated units — entry rejected"
+                "Grid cap reached for {symbol}: {open_units}/{max} open pairs — entry rejected"
             ));
         }
     }

@@ -546,6 +546,22 @@ impl StateStore {
         Ok(!self.blocking_signals(symbol)?.is_empty())
     }
 
+    /// Count of matched open pairs on a symbol — signals whose legs both
+    /// filled and remain open (`balanced`). This is the grid ladder's
+    /// accumulated-unit count: derived from the durable ledger, so it is
+    /// exact after restarts and can never drift from venue truth the way a
+    /// cached counter can. in_flight/imbalanced/unresolved signals are not
+    /// units — they hard-block via `blocking_signals` instead.
+    pub fn open_balanced_signal_count(&self, symbol: &str) -> anyhow::Result<i64> {
+        let symbol = normalize_symbol(symbol)?;
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM signal_executions WHERE symbol = ?1 AND status = 'balanced'",
+            [&symbol],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Signed net delta of one signal's filled legs (long +, short −).
     /// Delta ≈ 0 means the signal hedged itself; anything else is residual
     /// directional exposure belonging to that signal alone.

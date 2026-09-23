@@ -42,7 +42,7 @@ Raise the target when realized testnet slippage or failed/partial fills exceed t
 
 ### Step size and ticker equity cap
 
-**Dormant — grid ladder not yet live.** These knobs derive a per-step notional stored on the ticker config (`unit_size`, `max_accumulated_units`), but production entries size from the book-depth capacity ladder and fills never increment `current_accumulated_units`, so the grid cap cannot trip. Only explicit `position_step`/`max_units` callers (the live canary) hit the gate. The design intent remains:
+**Partially live (2026-09-24).** The derived `max_accumulated_units` (max steps) persists on the ticker config and now caps concurrently-open matched pairs for that symbol — counted from the durable signal ledger (`balanced` rows), exact after restarts. Entry quantity still comes from the book-depth capacity ladder; `stepSizeMult`/`maxStepUsd` derive the stored step notional but are not yet a sizing input.
 
 - Reduce `maxStepUsd` before increasing the number of opportunities monitored.
 - Keep the ticker equity cap small enough that one unresolved pair cannot dominate the portfolio.
@@ -50,7 +50,7 @@ Raise the target when realized testnet slippage or failed/partial fills exceed t
 
 ### Execution mode
 
-**Per-ticker value dormant.** The Ticker Configurator's Single/Two-Way toggle is saved per ticker but the live unwind gate reads the global Radar Configurator → Execution Mode (`one_way`/`two_way`).
+**Live per-ticker override (2026-09-24).** The Ticker Configurator's Single/Two-Way toggle persists on the ticker config and overrides the global Radar Configurator → Execution Mode (`one_way`/`two_way`) for that symbol's exit costing; tickers without a saved config follow the global policy. The strategy-params mirror of the same field remains unconsumed.
 
 - **Single-Way:** One directional divergence at a time. This is the safer default while validating a pair.
 - **Double-Way:** Requires independent evidence that both directional rows mean-revert after all costs. Do not enable merely because the historical mid spread crossed zero.
@@ -128,8 +128,9 @@ These fields persist, validate, and round-trip through the UI, but no live runti
 | `prediction_liq_trim_pct` | persisted, not rendered | Dormant — no prediction supervisor |
 | `triangle_max_slippage_bps` | Triangle → Cycle Guardrails | Dormant — the cycle path consumes no slippage limit |
 | `spot_trade_size_usd` / `spot_min_net_spread_bps` / `spot_max_slippage_bps` | Spot → Spatial | Dormant — spot scan and execute are both stubbed |
-| `execution_mode` (per-ticker) | Ticker Configurator → Signal Quality | Dormant — the unwind gate reads Radar Configurator `execution_mode` |
-| `step_size_mult` / `max_step_usd` / `max_ticker_equity_pct` | Ticker Configurator → Execution & Sizing | Dormant — grid ladder unwired; entries size from the capacity ladder |
+| `execution_mode` (per-ticker) | Ticker Configurator → Signal Quality | **Live** — overrides global unwind mode per symbol; strategy-params mirror remains dormant |
+| `max_accumulated_units` (derived) | Ticker Configurator → Execution & Sizing | **Live** — caps open matched pairs per symbol via ledger count |
+| `step_size_mult` / `max_step_usd` / `max_ticker_equity_pct` | Ticker Configurator → Execution & Sizing | Partial — derive the persisted cap; not yet a sizing input (capacity ladder sizes entries) |
 | `funding_holding_days` | persisted, not rendered | Dormant — no consumer (default 14 flows nowhere) |
 | `window_percentile` / `sliding_window*` | Ticker Configurator → Signal Quality | Display + autotune input only — not a live entry filter |
 | `hsm_url` / `hmac_token` | Engine Settings | Reserved — remote-HSM integration stub by design |
@@ -160,9 +161,9 @@ These values initialize missing settings; they are not universal recommendations
 | Target profit | 1 BPS | Live — entry net-spread floor |
 | Window percentile | 50 | Display + autotune only |
 | Sliding window | Manual, 24 hours | Display + autotune only |
-| Step-size multiplier | 10 | Dormant (grid unwired) |
-| Maximum step | $2,500 | Dormant (grid unwired) |
-| Maximum ticker equity | 20% | Dormant (grid unwired) |
+| Step-size multiplier | 10 | Partial — derives persisted cap |
+| Maximum step | $2,500 | Partial — derives persisted cap |
+| Maximum ticker equity | 20% | Live — derives the open-pairs cap |
 | Target leverage | 5x | Live — effective-leverage resolution |
 | Futures max slippage | 15 BPS | Live — dispatch VWAP gate |
 | Funding trade size | $25,000 per leg | Live — scan sizing arg |

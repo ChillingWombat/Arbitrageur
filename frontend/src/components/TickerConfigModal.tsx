@@ -417,7 +417,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       api
         .getTickerStrategyConfig(tickerSymbol)
         .then((cfg) => {
-          if (cfg) setCurrentAccumulatedUnits(Number(cfg.currentAccumulatedUnits ?? 0));
+          if (cfg) {
+            setCurrentAccumulatedUnits(Number(cfg.currentAccumulatedUnits ?? 0));
+            // The ticker config's execution mode is the value the live
+            // unwind gate enforces for this symbol — display it over the
+            // strategy-record default so an untouched save writes back the
+            // mode that already governs instead of silently pinning.
+            const m = (cfg as { execution_mode?: string; executionMode?: string }).execution_mode
+              ?? (cfg as { executionMode?: string }).executionMode;
+            if (m === "SINGLE_WAY" || m === "DOUBLE_WAY") setExecutionMode(m);
+          }
         })
         .catch((err) => {
           console.warn("Failed to load ticker grid state in modal:", err);
@@ -993,10 +1002,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-2 shadow-2xs transition hover:border-slate-300">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold font-sans text-slate-800">Execution Mode</span>
-          <InfoTooltip text="Two-Way: enter on divergence and auto-unwind when the spread converges to zero. Single-Way: entry only — inventory held until manual exit. NOTE: this per-ticker value is saved but not yet consumed — the live unwind gate reads the global Radar Configurator → Execution Mode instead." />
+          <InfoTooltip text="Two-Way: enter on divergence and auto-unwind when the spread converges to zero. Single-Way: entry only — inventory held until manual exit. Enforced live: the value saved here overrides the global Radar Configurator → Execution Mode for THIS symbol; tickers without a saved config follow the global policy." />
         </div>
         <p className="text-[11px] font-sans text-muted leading-normal">
-          Saved per ticker but NOT YET ENFORCED — the live unwind gate reads Radar Configurator → Execution Mode.
+          Enforced — overrides the global unwind mode for this ticker once saved.
         </p>
         <div className="grid grid-cols-2 gap-2 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
           <button
@@ -1037,7 +1046,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       </div>
 
       <div className="p-3.5 bg-surface-raised border border-surface-border rounded-lg space-y-1.5 text-xs font-sans text-slate-500 leading-relaxed">
-        <p><strong className="text-slate-700">Grid ladder not yet live</strong> — these bounds derive a per-step notional stored on this ticker's config, but live entries currently size from the book-depth capacity ladder and fills never increment the accumulated-units counter, so the grid cap does not gate production entries yet.</p>
+        <p><strong className="text-slate-700">Open-pairs cap enforced</strong> — the derived max-steps value saves with this ticker's config and caps how many matched pairs may stay open on this symbol (counted from the durable signal ledger, restart-safe). Entry quantity itself still comes from the book-depth capacity ladder — per-step notional is not yet a sizing input.</p>
       </div>
 
       <SettingRow
