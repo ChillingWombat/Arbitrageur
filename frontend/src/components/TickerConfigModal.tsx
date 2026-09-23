@@ -935,7 +935,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-semibold font-sans text-slate-800">Sliding Window</span>
-            <InfoTooltip text="Trailing duration for the mean-spread baseline and percentile trigger. Auto derives the window per ticker from mean-reversion half-life; manual duration stays as the explicit fallback." />
+            <InfoTooltip text="Trailing duration for the mean-spread baseline and percentile shown in this modal. Auto derives the window per ticker from mean-reversion half-life; manual duration stays as the explicit fallback. The monitor's own qualification window (Radar Configurator) governs live scanning." />
           </div>
           <SwitchToggle
             size="sm"
@@ -974,8 +974,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Window Percentile"
-        description="Strictly filters entries to spreads at or above this percentile of rolling window"
-        tooltip="Strictly filters entries to spreads at or above this percentile of the rolling sliding window."
+        description="Percentile shown in the baseline preview above · saved per ticker but NOT an entry filter — the live gate is Target Profit net of friction"
+        tooltip="Parameterizes the baseline snapshot this modal displays. The live entry gate does not consult a spread percentile — it requires expected net spread ≥ Target Profit after route friction."
       >
         <select
           value={windowPercentile}
@@ -993,8 +993,11 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-2 shadow-2xs transition hover:border-slate-300">
         <div className="flex items-center gap-1.5">
           <span className="text-xs font-semibold font-sans text-slate-800">Execution Mode</span>
-          <InfoTooltip text="Two-Way: enter on divergence and auto-unwind when the spread converges to zero. Single-Way: entry only — inventory held until manual exit." />
+          <InfoTooltip text="Two-Way: enter on divergence and auto-unwind when the spread converges to zero. Single-Way: entry only — inventory held until manual exit. NOTE: this per-ticker value is saved but not yet consumed — the live unwind gate reads the global Radar Configurator → Execution Mode instead." />
         </div>
+        <p className="text-[11px] font-sans text-muted leading-normal">
+          Saved per ticker but NOT YET ENFORCED — the live unwind gate reads Radar Configurator → Execution Mode.
+        </p>
         <div className="grid grid-cols-2 gap-2 bg-surface-raised p-1 rounded-lg border border-surface-border text-xs">
           <button
             type="button"
@@ -1031,6 +1034,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution & Sizing</h3>
         <p className="text-[11px] font-sans text-muted mt-0.5">Step size, lot bounds, and capital allocation</p>
+      </div>
+
+      <div className="p-3.5 bg-surface-raised border border-surface-border rounded-lg space-y-1.5 text-xs font-sans text-slate-500 leading-relaxed">
+        <p><strong className="text-slate-700">Grid ladder not yet live</strong> — these bounds derive a per-step notional stored on this ticker's config, but live entries currently size from the book-depth capacity ladder and fills never increment the accumulated-units counter, so the grid cap does not gate production entries yet.</p>
       </div>
 
       <SettingRow
@@ -1225,8 +1232,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Auto-Exit Spread"
-        description="Exit early when inter-venue spread drops below this % · empty = off"
-        tooltip="Automatically unwinds position if the price spread closes faster than the holding horizon."
+        description="Saved but NOT YET ENFORCED — no live position supervisor consumes this threshold yet. Planned: exit early when inter-venue spread drops below this % · empty = off"
+        tooltip="Planned behavior: automatically unwind the position if the price spread closes faster than the holding horizon. Currently stored only — funding exits are operator-driven."
       >
         <NumberInput
           value={fundingAutoExitSpreadPct}
@@ -1253,8 +1260,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Auto-Rebalance to Neutral"
-        description="Trims the overweight leg back to neutral when the pair drifts"
-        tooltip="Reduces the overweight leg back to neutral when execution lot mismatches or partial fills cause delta exposure."
+        description="Saved but NOT YET ENFORCED — no live position supervisor consumes this flag yet. Planned: trim the overweight leg back to neutral when the pair drifts"
+        tooltip="Planned behavior: reduce the overweight leg back to neutral when execution lot mismatches or partial fills cause delta exposure. Currently stored only — the residual-flatten supervisor already covers unmatched fills."
       >
         <SwitchToggle
           size="sm"
@@ -1266,8 +1273,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Rotation Threshold"
-        description="Rotate only when net-of-friction APR improvement exceeds this · empty = off"
-        tooltip="Minimum APR improvement required over the current position before switching to a higher-yielding pair."
+        description="Saved but NOT YET ENFORCED — no rotation supervisor exists yet. Planned: rotate only when net-of-friction APR improvement exceeds this · empty = off"
+        tooltip="Planned behavior: minimum APR improvement required over the current position before switching to a higher-yielding pair. Currently stored only — funding positions are not auto-rotated."
       >
         <NumberInput
           value={fundingRotationThresholdBps}
@@ -1287,6 +1294,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Spatial Spot Parameters</h3>
         <p className="text-[11px] font-sans text-muted mt-0.5">Capital per flash cycle, net spread hurdles, and slippage</p>
+      </div>
+
+      <div className="p-3.5 bg-surface-raised border border-surface-border rounded-lg space-y-1.5 text-xs font-sans text-slate-500 leading-relaxed">
+        <p><strong className="text-slate-700">Spot strategy disabled</strong> — scanning returns no rows and execution is hard-refused until authentic spot order submission and reconciliation are implemented. The values below are saved for that future path and currently change nothing.</p>
       </div>
 
       <SettingRow
@@ -1419,8 +1430,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Max Leg Slippage"
-        description="Orderbook depth tolerance limit for each leg of the triangle"
-        tooltip="Individual leg VWAP slippage ceiling. If any single leg slips beyond this tolerance, the cycle is aborted."
+        description="Saved but NOT YET ENFORCED — the triangle cycle path does not consume a slippage limit yet. Planned: orderbook depth tolerance limit for each leg"
+        tooltip="Planned behavior: individual leg VWAP slippage ceiling — if any single leg slips beyond this tolerance, the cycle aborts. Currently stored only."
       >
         <NumberInput
           value={triangleMaxSlippageBps}
