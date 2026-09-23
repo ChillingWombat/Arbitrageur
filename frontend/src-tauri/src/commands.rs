@@ -6786,6 +6786,21 @@ mod tests {
         );
         assert_eq!(funding[0].legs.len(), 2);
         assert!(funding[0].status.counts_as_open());
+        // The entry must open a funding_rate ledger lot — without it the
+        // flatten path can never realize PnL or resolve the signal's
+        // recorded predictions.
+        {
+            let ledger = state.virtual_ledger.read();
+            let lots: Vec<_> = ledger
+                .lots
+                .values()
+                .filter(|l| {
+                    l.strategy_id == "funding_rate"
+                        && l.status == arbitrageur_execution::virtual_ledger::CycleStatus::Open
+                })
+                .collect();
+            assert_eq!(lots.len(), 1, "funding entry must open one ledger lot");
+        }
     }
 
     #[tokio::test]
