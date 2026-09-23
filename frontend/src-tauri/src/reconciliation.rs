@@ -332,7 +332,37 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                         .state_store
                         .apply_leg_order_state(&exec.id, leg.side, filled, price, fee)
                     {
-                        Ok(()) => summary.advanced += 1,
+                        Ok(()) => {
+                            summary.advanced += 1;
+                            // A late/grown fill on a `trim-{parent}-*` child:
+                            // shrink the open lot for the new increment —
+                            // delta-idempotent via the durable per-leg mark,
+                            // so repeat polls recount nothing. No open lot →
+                            // the unlotted family sweep covers it instead.
+                            if let Some(parent_id) = exec
+                                .id
+                                .strip_prefix("trim-")
+                                .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
+                            {
+                                if let Ok(Some(parent)) = state.state_store.get_signal(&parent_id) {
+                                    use crate::state_store::LegSide;
+                                    let venue_of = |side: LegSide| {
+                                        parent
+                                            .legs
+                                            .iter()
+                                            .find(|l| l.side == side)
+                                            .map(|l| l.venue.clone())
+                                    };
+                                    if let (Some(lv), Some(sv)) =
+                                        (venue_of(LegSide::Long), venue_of(LegSide::Short))
+                                    {
+                                        let _ = crate::execution::realize_liq_trim(
+                                            state, &parent, &exec.id, &lv, &sv,
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         Err(e) => {
                             tracing::error!(
                                 "reconcile: failed to persist order state for {} leg {}: {e}",
@@ -384,10 +414,12 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
         let Some((strategy_id, leg_count, age)) = signal_meta.get(signal_id) else {
             continue;
         };
-        // Close-type signals: `external` closes plus `flat-{parent}-*`
-        // flatten children — both exist to reduce exposure, so an empty
-        // terminal leg is never a clean "Failed".
-        let is_close_signal = strategy_id == "external" || signal_id.starts_with("flat-");
+        // Close-type signals: `external` closes plus `flat-{parent}-*` /
+        // `trim-{parent}-*` children — all exist to reduce exposure, so an
+        // empty terminal leg is never a clean "Failed".
+        let is_close_signal = strategy_id == "external"
+            || signal_id.starts_with("flat-")
+            || signal_id.starts_with("trim-");
         let (new_status, note): (Option<SignalStatus>, Option<String>) = derive_signal_status(
             polls,
             *leg_count,

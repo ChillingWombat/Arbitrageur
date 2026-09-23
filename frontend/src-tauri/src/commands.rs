@@ -9241,6 +9241,127 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_boot_reconcile_rebuild_shrinks_for_trimmed_signal() {
+        // A mid-hold trim physically reduced the position before a crash
+        // lost the lot row: the rebuilt lot must carry the residual qty
+        // (entry − child closing fills) or the eventual flatten's fills
+        // could never cover it.
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_retrim_{}", rand::random::<u64>()));
+        let path = dir.join("state.sqlite3");
+        let store = std::sync::Arc::new(crate::state_store::StateStore::open(&path).unwrap());
+        {
+            let _state = AppEngineState::new_inner_for_test(store.clone());
+            store
+                .record_signal_execution(&crate::state_store::NewSignalExecution {
+                    id: "sig-trimmed".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                    ],
+                })
+                .expect("record");
+            for (side, px) in [
+                (crate::state_store::LegSide::Long, 64_200.0),
+                (crate::state_store::LegSide::Short, 64_440.0),
+            ] {
+                store
+                    .apply_leg_fill("sig-trimmed", side, 0.1, px, 0.5, None)
+                    .expect("fill");
+            }
+            store
+                .update_signal_status(
+                    "sig-trimmed",
+                    crate::state_store::SignalStatus::Balanced,
+                    None,
+                )
+                .expect("balanced");
+            // Trim child already Closed on the crash boundary — its fills
+            // still count toward the residual.
+            store
+                .record_signal_execution(&crate::state_store::NewSignalExecution {
+                    id: "trim-sig-trimmed-00ff".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.04,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.04,
+                            intended_price: None,
+                        },
+                    ],
+                })
+                .expect("record trim");
+            for (side, px) in [
+                (crate::state_store::LegSide::Short, 64_300.0),
+                (crate::state_store::LegSide::Long, 64_400.0),
+            ] {
+                store
+                    .apply_leg_fill("trim-sig-trimmed-00ff", side, 0.04, px, 0.1, None)
+                    .expect("trim fill");
+            }
+            store
+                .update_signal_status(
+                    "trim-sig-trimmed-00ff",
+                    crate::state_store::SignalStatus::Closed,
+                    None,
+                )
+                .expect("trim closed");
+            assert!(crate::state_store::is_flatten_child_id(
+                "trim-sig-trimmed-00ff",
+                "sig-trimmed"
+            ));
+        }
+        let state2 = AppEngineState::new_inner_for_test(store);
+        let ledger = state2.virtual_ledger.read();
+        let lot = ledger
+            .lots
+            .values()
+            .find(|l| l.symbol == "BTC-USDC")
+            .expect("rehydrated lot exists");
+        assert!((lot.long_qty - 0.06).abs() < 1e-9, "long {}", lot.long_qty);
+        assert!(
+            (lot.short_qty - 0.06).abs() < 1e-9,
+            "short {}",
+            lot.short_qty
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_liq_trim_realizes_partial_then_final_close_matches() {
         use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
 
@@ -9391,7 +9512,53 @@ mod tests {
             .unwrap();
         assert!((counter - 54.6).abs() < 1e-9, "counter {counter}");
 
-        // Final flatten covers only the remaining 0.6. The family slice
+        // Late fill growth (order polling advances the cumulative qty from
+        // 0.4 to 0.5): a second realization must count only the 0.1
+        // increment — the durable mark tracks counted qty/pnl/fee.
+        state
+            .state_store
+            .apply_leg_fill(
+                "trim-sig-trim-a1",
+                LegSide::Short,
+                0.5,
+                64_300.0,
+                0.25,
+                None,
+            )
+            .expect("grown long-side fill");
+        state
+            .state_store
+            .apply_leg_fill("trim-sig-trim-a1", LegSide::Long, 0.5, 64_400.0, 0.25, None)
+            .expect("grown short-side fill");
+        let realized2 = crate::execution::realize_liq_trim(
+            &state,
+            &sig,
+            "trim-sig-trim-a1",
+            "hyperliquid",
+            "lighter",
+        )
+        .expect("second realization");
+        // Long: 100*0.1 - 0.05 = 9.95; Short: 40*0.1 - 0.05 = 3.95.
+        assert!((realized2 - 13.9).abs() < 1e-9, "realized2 {realized2}");
+        {
+            let ledger = state.virtual_ledger.read();
+            let lot = ledger.lots.get("spatial-trim-1").unwrap();
+            assert!((lot.long_qty - 0.5).abs() < 1e-9, "long {}", lot.long_qty);
+            assert!(
+                (lot.short_qty - 0.5).abs() < 1e-9,
+                "short {}",
+                lot.short_qty
+            );
+        }
+        let counter = state
+            .total_realized_profit
+            .read()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        assert!((counter - 68.5).abs() < 1e-9, "counter {counter}");
+
+        // Final flatten covers only the remaining 0.5. The family slice
         // deliberately includes the trim child: the close aggregation must
         // exclude `trim-` fills or it would over-fill the shrunken lot.
         state
@@ -9409,7 +9576,7 @@ mod tests {
                         venue: "hyperliquid".into(),
                         side: LegSide::Short,
                         symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.6,
+                        intended_qty: 0.5,
                         intended_price: None,
                     },
                     NewSignalLeg {
@@ -9417,7 +9584,7 @@ mod tests {
                         venue: "lighter".into(),
                         side: LegSide::Long,
                         symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.6,
+                        intended_qty: 0.5,
                         intended_price: None,
                     },
                 ],
@@ -9425,11 +9592,18 @@ mod tests {
             .expect("record flat");
         state
             .state_store
-            .apply_leg_fill("flat-sig-trim-b2", LegSide::Short, 0.6, 64_350.0, 0.3, None)
+            .apply_leg_fill(
+                "flat-sig-trim-b2",
+                LegSide::Short,
+                0.5,
+                64_350.0,
+                0.25,
+                None,
+            )
             .expect("flat long-side fill");
         state
             .state_store
-            .apply_leg_fill("flat-sig-trim-b2", LegSide::Long, 0.6, 64_420.0, 0.3, None)
+            .apply_leg_fill("flat-sig-trim-b2", LegSide::Long, 0.5, 64_420.0, 0.25, None)
             .expect("flat short-side fill");
 
         let family: Vec<_> = state
@@ -9448,20 +9622,20 @@ mod tests {
         )
         .expect("lot matches reduced qty");
         let (usd, _bps, entry_debited) = closed;
-        // Remaining leg PnL: (64350-64200)*0.6 + (64440-64420)*0.6 = 90+12 = 102
-        // usd = 102 - entry fees 1.0 - exit fees 0.6 = 100.4
-        assert!((usd - 100.4).abs() < 1e-9, "usd {usd}");
+        // Remaining leg PnL: (64350-64200)*0.5 + (64440-64420)*0.5 = 75+10 = 85
+        // usd = 85 - entry fees 1.0 - exit fees 0.5 = 83.5
+        assert!((usd - 83.5).abs() < 1e-9, "usd {usd}");
         assert!((entry_debited - 1.0).abs() < 1e-9);
         crate::execution::accumulate_realized_profit(&state, false, usd + entry_debited);
 
-        // Economic truth: leg PnL 130+28 = 158, fees 1.0+0.4+0.6 = 2.0 → 156.0.
+        // Economic truth: leg PnL 125+30 = 155, fees 1.0+0.5+0.5 = 2.0 → 153.0.
         let counter = state
             .total_realized_profit
             .read()
             .to_string()
             .parse::<f64>()
             .unwrap();
-        assert!((counter - 156.0).abs() < 1e-9, "counter {counter}");
+        assert!((counter - 153.0).abs() < 1e-9, "counter {counter}");
         let lot = state
             .state_store
             .load_cycle_lots()
@@ -9474,12 +9648,12 @@ mod tests {
             arbitrageur_execution::virtual_ledger::CycleStatus::Closed
         );
         // The lot's durable outcome is the WHOLE cycle — the close path
-        // folded the trim's 55.6 back in for metrics/prediction resolution
-        // even though the counter only took the close-only 101.4 increment.
+        // folded the trims' 69.5 back in for metrics/prediction resolution
+        // even though the counter only took the close-only 84.5 increment.
         let lot_usd = lot.realized_pnl_usd.expect("realized usd");
-        assert!((lot_usd - 156.0).abs() < 1e-9, "lot usd {lot_usd}");
-        // bps on original notional: 156 / ((64200*1 + 64440*1)/2) * 1e4.
-        let want_bps = 156.0 / 64_320.0 * 10_000.0;
+        assert!((lot_usd - 153.0).abs() < 1e-9, "lot usd {lot_usd}");
+        // bps on original notional: 153 / ((64200*1 + 64440*1)/2) * 1e4.
+        let want_bps = 153.0 / 64_320.0 * 10_000.0;
         let lot_bps = lot.realized_pnl_bps.expect("realized bps");
         assert!((lot_bps - want_bps).abs() < 1e-6, "lot bps {lot_bps}");
     }

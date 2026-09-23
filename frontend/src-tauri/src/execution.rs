@@ -2277,21 +2277,50 @@ pub(crate) fn realize_liq_trim(
     };
 
     let mut realized = 0.0;
+    // Delta semantics: a leg's fill can grow across invocations (partial
+    // fills enriched by order polling), so the durable mark tracks the
+    // counted cumulative qty/pnl/fee — only the uncounted increment shrinks
+    // the lot and reaches the counter.
+    let realize_leg =
+        |q: f64, px: f64, fee: f64, entry_px: f64, side: LegSide, venue: &str| -> (f64, f64) {
+            let mark = unlotted_fill_key(close_id, venue, side);
+            let (q_done, pnl_done, fee_done) = read_unlotted_mark(state, &mark);
+            let delta_q = q - q_done;
+            if delta_q <= 0.0 {
+                return (0.0, 0.0);
+            }
+            let delta_fee = (fee - fee_done).max(0.0);
+            // Price the increment at the leg's cumulative average fill —
+            // per-fill px history isn't retained; partial fills on one order
+            // cluster near the limit so the VWAP-mix error is bounded.
+            let side_sign = match side {
+                LegSide::Short => 1.0,
+                LegSide::Long => -1.0,
+            };
+            let leg_pnl = side_sign * (px - entry_px) * delta_q - delta_fee;
+            let cum_pnl = pnl_done + leg_pnl;
+            let _ = state
+                .state_store
+                .kv_set(&mark, &format!("{q}|{cum_pnl}|{fee}"));
+            (leg_pnl, delta_q)
+        };
     if let Some((q, px, fee)) = long_fill {
-        let leg_pnl = (px - lot.long_entry_price) * q - fee;
+        let (leg_pnl, delta_q) =
+            realize_leg(q, px, fee, lot.long_entry_price, LegSide::Short, long_venue);
         realized += leg_pnl;
-        lot.long_qty = (lot.long_qty - q).max(0.0);
-        // Durable per-leg mark keeps the unlotted family sweep from
-        // recounting this fill if the lot later dies mid-family-close.
-        let mark = unlotted_fill_key(close_id, long_venue, LegSide::Short);
-        let _ = state.state_store.kv_set(&mark, &leg_pnl.to_string());
+        lot.long_qty = (lot.long_qty - delta_q).max(0.0);
     }
     if let Some((q, px, fee)) = short_fill {
-        let leg_pnl = (lot.short_entry_price - px) * q - fee;
+        let (leg_pnl, delta_q) = realize_leg(
+            q,
+            px,
+            fee,
+            lot.short_entry_price,
+            LegSide::Long,
+            short_venue,
+        );
         realized += leg_pnl;
-        lot.short_qty = (lot.short_qty - q).max(0.0);
-        let mark = unlotted_fill_key(close_id, short_venue, LegSide::Long);
-        let _ = state.state_store.kv_set(&mark, &leg_pnl.to_string());
+        lot.short_qty = (lot.short_qty - delta_q).max(0.0);
     }
     let lot_id = lot.id.clone();
     let snapshot = lot.clone();
@@ -2326,6 +2355,25 @@ pub(crate) fn realize_liq_trim(
 fn unlotted_fill_key(child_id: &str, venue: &str, side: crate::state_store::LegSide) -> String {
     let canon = crate::state::canonical_venue_id(venue).unwrap_or(venue);
     format!("unlotted.fill.{child_id}.{canon}.{}", side.as_str())
+}
+
+/// Read a durable fill mark: `(counted_qty, counted_pnl, counted_fee)`,
+/// all cumulative. A missing or unparseable mark reads as zeroes — the
+/// leg is then treated as never counted.
+fn read_unlotted_mark(state: &AppEngineState, key: &str) -> (f64, f64, f64) {
+    state
+        .state_store
+        .kv_get(key)
+        .ok()
+        .flatten()
+        .and_then(|v| {
+            let mut it = v.split('|');
+            let q: f64 = it.next()?.parse().ok()?;
+            let p: f64 = it.next()?.parse().ok()?;
+            let f: f64 = it.next()?.parse().ok()?;
+            Some((q, p, f))
+        })
+        .unwrap_or((0.0, 0.0, 0.0))
 }
 
 /// Accumulate realized PnL for family children whose fills will never pass
@@ -2392,13 +2440,13 @@ pub(crate) fn accumulate_unlotted_family_fills(
                 continue;
             }
             let mark = unlotted_fill_key(&child.id, &leg.venue, leg.side);
-            match state.state_store.kv_get(&mark) {
-                Ok(Some(_)) => continue,
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("unlotted mark read failed for {}: {e}", child.id);
-                    continue;
-                }
+            // Delta semantics: a leg's fill can grow across passes, so the
+            // mark tracks the counted cumulative qty/pnl/fee — only the
+            // uncounted increment is realized now.
+            let (q_done, pnl_done, fee_done) = read_unlotted_mark(state, &mark);
+            let delta_q = q - q_done;
+            if delta_q <= 0.0 {
+                continue;
             }
             let entry_px = sig
                 .legs
@@ -2409,14 +2457,18 @@ pub(crate) fn accumulate_unlotted_family_fills(
             let Some(entry_px) = entry_px else {
                 continue;
             };
+            let delta_fee = (fee - fee_done).max(0.0);
             let leg_pnl = match leg.side {
-                LegSide::Short => (px - entry_px) * q,
-                LegSide::Long => (entry_px - px) * q,
-            } - fee;
+                LegSide::Short => (px - entry_px) * delta_q,
+                LegSide::Long => (entry_px - px) * delta_q,
+            } - delta_fee;
             // Mark first: if the accumulate below were reordered after a
             // crash, a counted-but-unmarked leg would double-count on the
             // next pass — worse than one orphaned leg.
-            if let Err(e) = state.state_store.kv_set(&mark, &leg_pnl.to_string()) {
+            if let Err(e) = state
+                .state_store
+                .kv_set(&mark, &format!("{q}|{}|{fee}", pnl_done + leg_pnl))
+            {
                 tracing::warn!("unlotted mark write failed for {}: {e}", child.id);
                 continue;
             }
@@ -2425,6 +2477,57 @@ pub(crate) fn accumulate_unlotted_family_fills(
     }
     if realized != 0.0 {
         accumulate_realized_profit(state, state.is_live(), realized);
+        // Running per-signal total so the family-close pass can resolve
+        // entry predictions with the whole unwind outcome, not just the
+        // last pass's slice.
+        let tkey = format!("unlotted.total.{}", sig.id);
+        let prior: f64 = state
+            .state_store
+            .kv_get(&tkey)
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.0);
+        let _ = state
+            .state_store
+            .kv_set(&tkey, &(prior + realized).to_string());
+    }
+    if family_closed {
+        // The family can accrue no further fills — resolve the entry
+        // forecast with the total realized bps on the original entry
+        // notional. No marks → nothing was ever priced → leave the
+        // prediction unresolved rather than fabricate a 0 outcome.
+        if let Ok(Some(total_raw)) = state
+            .state_store
+            .kv_get(&format!("unlotted.total.{}", sig.id))
+        {
+            if let Ok(total) = total_raw.parse::<f64>() {
+                // Average filled-leg notional — the `close_cycle`
+                // convention (leg-notional sum / leg count). For a 1-leg
+                // residual that is just the single leg's notional.
+                let (notional_sum, leg_count) =
+                    sig.legs.iter().fold((0.0_f64, 0u32), |acc, root| {
+                        if root.fill_price.unwrap_or(0.0) > 0.0 && root.filled_qty > 0.0 {
+                            (
+                                acc.0 + root.fill_price.unwrap_or(0.0) * root.filled_qty,
+                                acc.1 + 1,
+                            )
+                        } else {
+                            acc
+                        }
+                    });
+                let orig_notional = notional_sum / f64::from(leg_count.max(1));
+                if orig_notional > 0.0 {
+                    let bps = (total / orig_notional) * 10_000.0;
+                    if let Err(e) = state.state_store.resolve_signal_predictions(&sig.id, bps) {
+                        tracing::warn!(
+                            "resolve unlotted signal predictions failed for {}: {e}",
+                            sig.id
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
