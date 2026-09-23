@@ -1710,15 +1710,30 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         let mut vault = state.vault.write();
         vault.is_initialized() && !vault.is_unlocked() && !vault.is_auto_locked()
     };
+    // The locked pause is a steady state, not an event — warn at most once
+    // per 5 min instead of per venue per poll. Read failures keep per-call
+    // visibility since each is a distinct anomaly.
+    let locked_warn_due = || {
+        let mut t = state.risk_locked_warn_at.lock();
+        match *t {
+            Some(prev) if prev.elapsed() < std::time::Duration::from_secs(300) => false,
+            _ => {
+                *t = Some(std::time::Instant::now());
+                true
+            }
+        }
+    };
     for (vid, _name, adapter) in state.get_venues() {
         match live_account_or_cached(state, vid, &adapter).await {
             Ok((acc, stale_age)) => {
                 if let Some(age) = stale_age {
                     if manual_locked {
-                        tracing::warn!(
-                            "risk overview: {vid} read paused (vault locked), showing last-known figures ({}s old)",
-                            age / 1000
-                        );
+                        if locked_warn_due() {
+                            tracing::warn!(
+                                "risk overview: reads paused (vault locked), showing last-known figures ({}s old for {vid})",
+                                age / 1000
+                            );
+                        }
                     } else {
                         tracing::warn!(
                             "risk overview: {vid} read failed, using last-known figures ({}s old)",
@@ -1730,9 +1745,11 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             }
             Err(e) => {
                 if manual_locked {
-                    tracing::warn!(
-                        "risk overview: {vid} read paused (vault locked, no cached figures)"
-                    );
+                    if locked_warn_due() {
+                        tracing::warn!(
+                            "risk overview: reads paused (vault locked, no cached figures)"
+                        );
+                    }
                 } else {
                     tracing::warn!("risk overview: account read failed for {vid} (no cache): {e}");
                 }

@@ -1243,6 +1243,9 @@ pub struct AppEngineState {
     /// Last liquidation-trim dispatch per signal id — cooldown so the 5s
     /// supervisor does not bleed a pair step-by-step within one minute.
     pub liq_trim_at: Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Throttles the vault-locked risk-overview pause warnings — one per
+    /// 5 min while locked instead of one per venue per poll cycle.
+    pub risk_locked_warn_at: Mutex<Option<std::time::Instant>>,
     /// Last margin-snapshot write per venue (epoch ms). Bounds the snapshot
     /// cadence: fills and heartbeats record at most one row per venue per
     /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`.
@@ -1939,6 +1942,7 @@ impl AppEngineState {
             fee_enrich_done: Mutex::new(std::collections::HashSet::new()),
             sample_prune_at: Mutex::new(0),
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
+            risk_locked_warn_at: Mutex::new(None),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),
