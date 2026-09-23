@@ -445,6 +445,85 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             }
         }
     }
+
+    // Fee enrichment: fills that landed inside the submit acknowledgement
+    // recorded `fee_usd = 0` because venue submit responses never report
+    // fees — realized P&L then overstates the round trip by the actual
+    // taker fee. Poll each unpriced filled leg exactly once per process
+    // (bounded by `fee_enrich_done`); a venue reporting 0 is truthful.
+    if let Ok(unpriced) = state.state_store.list_fee_unaccounted_legs(7 * 24 * 3600) {
+        for (exec, leg) in unpriced {
+            let key = format!("{}:{}", exec.id, leg.side.as_str());
+            {
+                let mut done = state.fee_enrich_done.lock();
+                if !done.insert(key) {
+                    continue;
+                }
+            }
+            let Some(order_id) = leg
+                .venue_order_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let Some(adapter) = state.get_adapter(&leg.venue) else {
+                continue;
+            };
+            if !adapter.has_live_credentials() {
+                continue;
+            }
+            let Ok(resp) = adapter
+                .fetch_order(&leg.symbol, order_id, leg.client_order_id.as_deref())
+                .await
+            else {
+                continue;
+            };
+            if resp.order_id != order_id
+                || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
+                || !resp.symbol.eq_ignore_ascii_case(&leg.symbol)
+            {
+                tracing::warn!(
+                    "reconcile fee-enrich: {} order {} identity mismatch — skipping",
+                    leg.venue,
+                    order_id
+                );
+                continue;
+            }
+            let fee = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+            if fee <= 0.0 {
+                continue;
+            }
+            if !matches!(
+                resp.fee_currency.to_ascii_uppercase().as_str(),
+                "USD" | "USDT" | "USDC"
+            ) {
+                tracing::warn!(
+                    "reconcile fee-enrich: {} order {} reports fee {} {} — non-USD-stable currency unaccounted",
+                    leg.venue,
+                    order_id,
+                    fee,
+                    resp.fee_currency
+                );
+                continue;
+            }
+            let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+            let price = resp
+                .avg_fill_price
+                .and_then(|p| p.to_string().parse::<f64>().ok());
+            if let Err(e) = state
+                .state_store
+                .apply_leg_order_state(&exec.id, leg.side, filled, price, fee)
+            {
+                tracing::warn!(
+                    "reconcile fee-enrich: persist {} leg {} failed: {e}",
+                    exec.id,
+                    leg.id
+                );
+            }
+        }
+    }
     summary
 }
 

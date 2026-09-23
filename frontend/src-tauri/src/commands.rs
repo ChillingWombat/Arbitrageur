@@ -398,18 +398,38 @@ pub struct TickerMarketQuoteDto {
     pub base_price: f64,
 }
 
+/// Assumed taker fee per venue (standard/base tier) used by the entry
+/// profit floor. These are deliberately the *published standard-tier*
+/// taker rates, not discounted/VIP tiers: an understated fee lets a
+/// losing entry pass the hurdle, while an overstated fee only skips a
+/// marginal opportunity — the safe error direction. 2026-09-24 audit:
+/// the table previously assumed ~2bps for most venues while real
+/// standard-tier takers run 4–5bps on Binance/OKX/Kraken/Coinbase-class
+/// venues and 4.5bps on Hyperliquid.
 pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
     match vid.to_lowercase().as_str() {
-        "hyperliquid" => dec!(2.0),
+        "hyperliquid" => dec!(4.5),
         "lighter" => dec!(1.5),
-        "vanta" => dec!(3.0),
-        "robinhood" => dec!(2.5),
-        "arcus" => dec!(1.5),
-        "aster" => dec!(3.5),
+        "vanta" => dec!(4.0),
+        "robinhood" => dec!(4.0),
+        "arcus" => dec!(4.0),
+        "aster" => dec!(4.0),
+        "binance" => dec!(5.0),
+        "okx" => dec!(5.0),
+        "kraken" => dec!(5.0),
+        "coinbase" => dec!(5.0),
+        "decibel" => dec!(5.0),
         "popdex" => dec!(10.0),
         "polymarket" => dec!(0.0),
         "kalshi" => dec!(10.0),
-        _ => dec!(2.0),
+        // DexPerp family — mirrors each venue's spec-published taker.
+        "pacifica" => dec!(2.0),
+        "standx" => dec!(2.0),
+        "ondoperps" => dec!(3.0),
+        "grvt" => dec!(5.0),
+        "derive" => dec!(2.0),
+        "aevo" => dec!(2.0),
+        _ => dec!(4.0),
     }
 }
 
@@ -4890,7 +4910,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64440.0), dec!(64445.0));
 
         let res = execute_spatial_arbitrage_impl(
             "BTC-USDC",
@@ -4910,7 +4930,7 @@ mod tests {
         assert_eq!(res.trade_type, "Spatial Arb");
         assert_eq!(res.direction, "Divergence Entry");
         // Caller-supplied trigger spread is not trusted; the returned spread is
-        // the calculated net BPS (~20.6) which must clear the 15 BPS hurdle
+        // the calculated net BPS which must clear the 15 BPS hurdle
         assert!(res.spread_bps > 15.0);
         assert!(res.spread_bps < 30.0);
         // Opening a paper position realizes only fee outflow
@@ -6461,8 +6481,8 @@ mod tests {
         assert_eq!(carry.long_market_type, "perpetual");
         assert_eq!(carry.short_market_type, "perpetual");
         assert!(
-            (carry.round_trip_fee_bps - 7.0).abs() < 1e-9,
-            "carry fee must be 2*(1.5+2.0), got {}",
+            (carry.round_trip_fee_bps - 12.0).abs() < 1e-9,
+            "carry fee must be 2*(1.5+4.5), got {}",
             carry.round_trip_fee_bps
         );
         let basis = opps
@@ -6703,8 +6723,8 @@ mod tests {
             })
             .expect("seeded basis opp");
         assert!(
-            (carry.round_trip_fee_bps - 2.0 * (1.5 + 2.0)).abs() < 1e-9,
-            "carry fee {}, want 7.0",
+            (carry.round_trip_fee_bps - 2.0 * (1.5 + 4.5)).abs() < 1e-9,
+            "carry fee {}, want 12.0",
             carry.round_trip_fee_bps
         );
         assert!(
@@ -7246,7 +7266,7 @@ mod tests {
         let (state, _dir) = test_state_with_vault("fee-tier");
         assert_eq!(effective_venue_fee_bps(&state, "lighter"), 1.5);
         assert_eq!(effective_venue_fee_bps(&state, "LIGHTER"), 1.5);
-        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 2.0);
+        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 4.5);
 
         upsert_account_impl(
             AccountUpsertInput {
@@ -7264,7 +7284,7 @@ mod tests {
         )
         .expect("create account");
         assert_eq!(effective_venue_fee_bps(&state, "lighter"), 2.0);
-        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 2.0);
+        assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 4.5);
     }
 
     #[tokio::test]
@@ -7307,8 +7327,8 @@ mod tests {
         assert!(opp.slippage_ok);
         assert!(opp.depth_ok);
         assert!(opp.is_executable);
-        assert!((opp.fee_bps - 3.5).abs() < 1e-9);
-        assert!((opp.round_trip_commission_bps - 7.0).abs() < 1e-9);
+        assert!((opp.fee_bps - 6.0).abs() < 1e-9);
+        assert!((opp.round_trip_commission_bps - 12.0).abs() < 1e-9);
         assert!((opp.required_gross_bps - (opp.expected_friction_bps + 1.0)).abs() < 1e-9);
         assert!(
             (opp.net_spread_bps - (opp.gross_spread_bps - opp.expected_friction_bps)).abs() < 1e-9
@@ -12532,7 +12552,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64440.0), dec!(64445.0));
 
         execute_spatial_arbitrage_impl(
             "BTC-USDC",
@@ -12628,7 +12648,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64440.0), dec!(64445.0));
         execute_spatial_arbitrage_impl(
             "BTC-USDC",
             "hyperliquid",
@@ -12645,7 +12665,7 @@ mod tests {
         .await
         .expect("spatial open");
 
-        // Adverse excursion: live edge ~10 bps vs ~20 entry -> stopped.
+        // Adverse excursion: live edge ~9 bps net vs ~22 entry -> stopped.
         seed_test_book(
             &state,
             "hyperliquid",
@@ -12653,7 +12673,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64275.0), dec!(64280.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64350.0), dec!(64355.0));
         let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
             .await
             .expect("stop check");

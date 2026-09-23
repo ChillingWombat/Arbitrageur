@@ -409,6 +409,50 @@ impl StateStore {
         Ok(out)
     }
 
+    /// Terminal legs that filled with no recorded venue fee. Fills landing
+    /// inside the submit acknowledgement carry `fee_usd = 0` because venue
+    /// submit responses never report fees — the reconciler polls each once
+    /// per process so the ledger reflects the real taker cost instead of a
+    /// phantom zero. Bounded to recent legs: the poll list refreshes on
+    /// every pass, and very old legs are not worth a venue round-trip.
+    pub fn list_fee_unaccounted_legs(
+        &self,
+        since_secs: i64,
+    ) -> anyhow::Result<Vec<(SignalExecution, SignalLeg)>> {
+        let cutoff = (Utc::now() - chrono::Duration::seconds(since_secs)).to_rfc3339();
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT l.id FROM signal_legs l
+             WHERE l.filled_qty > 0 AND l.fee_usd <= 0
+               AND l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
+               AND l.venue_order_id NOT LIKE 'sim-%'
+               AND l.created_at > ?1",
+        )?;
+        let leg_ids: Vec<String> = stmt
+            .query_map([cutoff], |r| r.get::<_, String>(0))?
+            .collect::<Result<_, _>>()?;
+        drop(stmt);
+        drop(conn);
+        let mut out = Vec::with_capacity(leg_ids.len());
+        for leg_id in leg_ids {
+            let conn = self.conn.lock();
+            let legs = conn.query_row(
+                "SELECT signal_id FROM signal_legs WHERE id = ?1",
+                [&leg_id],
+                |r| r.get::<_, String>(0),
+            );
+            drop(conn);
+            let Ok(signal_id) = legs else { continue };
+            if let Some(exec) = self.get_signal(&signal_id)? {
+                let leg = exec.legs.iter().find(|l| l.id == leg_id).cloned();
+                if let Some(leg) = leg {
+                    out.push((exec, leg));
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Apply an authoritative venue order-state snapshot to a leg.
     /// `filled_qty` and `fee_usd` are cumulative venue values — they only
     /// ever advance (a venue response reporting less than the recorded fill
