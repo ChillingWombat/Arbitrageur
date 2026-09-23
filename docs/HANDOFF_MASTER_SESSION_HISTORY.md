@@ -2687,3 +2687,30 @@ Read-only survey of `~/.arbitrageur/state.sqlite3` (~750 MB) drove three real fi
 - `account_equity_events` retains ~19k noise rows from pre-deadband/sim eras — analytics should filter to `{env}-` accounts post-2026-09-22.
 - `execution_log.latency_us` 3.2s confirms the entry-verify path is slow but correct; no sequential-leg window exists (legs join concurrently).
 - Auto-exec `evaluate_entry_gates` has no upper edge bound of its own; the inner-entry ceiling is the authoritative guard (dispatch-level reject is recorded as a skip).
+
+## Session 2026-09-23 (cont.) — UI polish + residual hardening sweep (commits 151b474…4c36db5)
+
+### UI craft floor pass (151b474)
+
+- Muted/secondary text raised to slate-500-class contrast (≥4.5:1 on white) across the app; `text-warn`/`text-profit`/`text-loss`/`text-accent` shifted to strong variants where used as small text.
+- LiveMatrix: `Δ —` badge suppressed when baseline economics aren't ready (was noisy placeholder in every empty cell).
+- TickerExplorer: 3px accent border-left removed (impeccable floor: no thick colored borders on list items).
+- Browser surfaces themed: selection, scrollbar, caret, focus-visible rings for `[role=button]`, `prefers-reduced-motion` honored.
+- Dev-only mock IPC harness (`frontend/mock.html` + `mockMain.tsx`) — real `<App/>` renders in a plain browser with fixture data for design review; no production-path changes.
+- PortfolioMonitor hardened against malformed IPC payload shape (was a white-screen risk).
+
+### Operator-visibility + reconciliation hardening
+
+- **Global attention banner (8fee998)** — `unresolved`/`imbalanced` signal executions previously alerted only inside the Spread Radar tab; an operator on the main Spatial view saw nothing but a cell tooltip. App-level poll + persistent loss-dim banner on every tab with a "Review in Spread Radar" jump.
+- **Stale signal rehydrate (65ad669)** — `monitor_signals` rows loaded every persisted pair into runtime `pairs`, and `prune_monitor_signals` keeps every `pairs` key: a tombstone (SPX500 'triggered' at 147M bps) resurrected as still-active on every boot and escaped the universe prune forever. Rows unsampled >24h now skip rehydrate; the next watchlist prune deletes them. Live `triggered`/`ready` must be re-earned from fresh books — same fail-closed rule as order reconciliation.
+- **EVM-AMM wire grid (bfd98f9)** — `dec_to_u256` rejected any sub-wei fraction, so an f64-noise residual-close qty stranded the leg (same failure class as the Lighter incident). Fractions within ~1e-13 relative snap to the integer base-unit grid; genuine sub-wei dust still bails. Adapter wire-scale sweep complete: Lighter/Decibel/Kraken/OKX epsilon-tolerant, Aster/Binance/Vanta floor-to-grid (sweep machinery heals the residual), Popdex wad-truncates (safe), dex_perps `.round()` (safe), Coinbase raw-but-fail-closed.
+- **Unwind/trim P&L attribution (4c36db5)** — two paths dropped real realized P&L into a `_ => 0.0` arm: `Leg{AB}FailedUnwound` (round-trip cost recorded only in a Debug note) and `PartialPairKept` (coordinator's true trim P&L discarded). Both accumulators and `execution_log.net_profit` now receive the true figure via `unwind_round_trip_pnl`; missing avg prices degrade to fee-only.
+
+### Signal autopsy + funnel analytics
+
+- 48/62 futures `signal_executions` failed — 47 are the incident's never-dispatched residual children (fixed); 1 BothFailed on a credential format. The 14 closed include the fully-paired canary (round-trip ≈ −$0.0006 at 0.005 size) and the HL-reject/Lighter-fill naked-short episodes — all flattened at ≈breakeven; HL-side reject was the wire-format bug already shipped.
+- Qualification funnel: 1952 pairs reached `triggered`, 71 reached `ready` (3.6%); ready rows show median edge 12bps vs triggered median 19.3bps — the statistical gates, not raw edge, do the selecting. `p_win` in `monitor_signal_events` is the reversion estimate, not the directional gate value — ready rows with `p_win`<0.5 are consistent, not a gate bug.
+
+### Verification
+
+390+1 desktop tests, 213 frontend tests, tsc/clippy/fmt clean; release binary rebuilt and restarted (PID on `target/release/arbitrageur-desktop`).
