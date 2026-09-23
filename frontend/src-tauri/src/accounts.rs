@@ -106,6 +106,22 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
     "kalshi",
 ];
 
+/// Open signals that would lose venue authentication if `venue`'s
+/// credentials were deleted — live mode only (testnet strands are
+/// recoverable by re-adding the key; a live position cannot wait).
+fn open_signals_on_venue(venue: &str, state: &AppEngineState) -> Vec<String> {
+    let Ok(signals) = state.state_store.list_signals(None, None) else {
+        return Vec::new();
+    };
+    signals
+        .iter()
+        .filter(|s| {
+            s.status.counts_as_open() && s.legs.iter().any(|l| l.venue.eq_ignore_ascii_case(venue))
+        })
+        .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+        .collect()
+}
+
 pub fn delete_exchange_credentials_impl(
     venue: &str,
     state: &AppEngineState,
@@ -116,6 +132,16 @@ pub fn delete_exchange_credentials_impl(
             "Credential deletion is not supported for venue '{}'",
             venue
         ));
+    }
+    if state.is_live() {
+        let open = open_signals_on_venue(&normalized, state);
+        if !open.is_empty() {
+            return Err(format!(
+                "Cannot delete {normalized} credentials while {} live position(s) use that venue ({}). Flatten them first.",
+                open.len(),
+                open.join(", ")
+            ));
+        }
     }
     let mut vault = state.vault.write();
     if !vault.is_unlocked() {
@@ -520,6 +546,30 @@ pub fn upsert_account_impl(
             {
                 return Err("account venue is immutable once created".into());
             }
+            // Disabling an account with an open live leg strands exit
+            // supervision — its adapter drops out of `get_venues`, so
+            // closes can no longer authenticate or even resolve.
+            if !input.enabled && state.is_live() {
+                if let Ok(signals) = state.state_store.list_signals(None, None) {
+                    let open: Vec<String> = signals
+                        .iter()
+                        .filter(|s| {
+                            s.status.counts_as_open()
+                                && s.legs
+                                    .iter()
+                                    .any(|l| l.account_id.as_deref() == Some(id.as_str()))
+                        })
+                        .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                        .collect();
+                    if !open.is_empty() {
+                        return Err(format!(
+                            "Cannot disable account {id} while {} live position(s) route through it ({}). Flatten them first.",
+                            open.len(),
+                            open.join(", ")
+                        ));
+                    }
+                }
+            }
             state
                 .state_store
                 .upsert_account(
@@ -683,6 +733,30 @@ pub fn delete_account_credentials_impl(
         .is_some();
     if !exists {
         return Err(format!("Unknown account '{account_id}'"));
+    }
+    // Removing this account's credentials while one of its legs is still
+    // open strands live exit supervision — the account's orders can no
+    // longer authenticate. Same gate as the venue-wide delete above.
+    if state.is_live() {
+        if let Ok(signals) = state.state_store.list_signals(None, None) {
+            let open: Vec<String> = signals
+                .iter()
+                .filter(|s| {
+                    s.status.counts_as_open()
+                        && s.legs
+                            .iter()
+                            .any(|l| l.account_id.as_deref() == Some(account_id))
+                })
+                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                .collect();
+            if !open.is_empty() {
+                return Err(format!(
+                    "Cannot remove account {account_id} credentials while {} live position(s) route through it ({}). Flatten them first.",
+                    open.len(),
+                    open.join(", ")
+                ));
+            }
+        }
     }
     let res = {
         let mut vault = state.vault.write();
