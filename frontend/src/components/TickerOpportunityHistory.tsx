@@ -40,7 +40,7 @@ const statusChip = (s: string | null) => {
   if (s == null) return <span className="text-slate-300">—</span>;
   const cls = STATUS_STYLE[s] ?? "bg-slate-100 text-slate-600 border-slate-200";
   return (
-    <span className={`px-1.5 py-0.2 rounded-md text-[10px] font-bold border ${cls}`}>{s}</span>
+    <span className={`px-1.5 py-px rounded-md text-[10px] font-bold border ${cls}`}>{s}</span>
   );
 };
 

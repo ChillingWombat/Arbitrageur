@@ -1025,7 +1025,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           />
           {isLive && bot.entriesAllowed && (
             <span
-              className="text-xs font-mono text-amber-400 max-w-56"
+              className="text-xs font-mono text-amber-700 max-w-56"
               title="Autonomous entries stay testnet-only in live mode — use manual Execute"
             >
               Live: auto-carry off, manual only

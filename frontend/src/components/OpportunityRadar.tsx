@@ -989,7 +989,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             {r.symbol}
             {held && (
               <span
-                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
+                className="ml-1.5 px-1.5 py-px rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
                 title="Bot-managed convergence position open on this pair"
               >
                 bot
@@ -1005,7 +1005,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             </span>
             {!isLiveCapableRoute(r.buyVenue, r.sellVenue, venueCaps) && (
               <span
-                className="ml-1.5 px-1.5 py-0.2 rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
+                className="ml-1.5 px-1.5 py-px rounded-full border border-surface-border bg-surface-raised text-slate-500 text-[10px] font-mono"
                 title="Route involves a read-only venue — no order submission"
               >
                 READ-ONLY
