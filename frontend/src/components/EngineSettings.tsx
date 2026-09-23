@@ -1813,12 +1813,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 className="mt-0.5 accent-red-600" />
               <label htmlFor="live-entry-enabled" className="text-xs text-slate-700 leading-snug">
                 <span className="font-bold text-red-700">Enable live strategy entries.</span>{" "}
-                Permits REAL-money two-leg spatial entries while Trading Mode
-                is Live. Every leg is refused above the notional cap below —
-                caps are never clamped. Order status is reconciled via
-                authoritative venue polling, residual auto-flatten and cancel
-                retry run continuously, and a partially-filled entry unwinds
-                the filled leg automatically. Residual risk remains: a venue
+                Permits REAL-money strategy entries — spatial pairs, Spread
+                Radar manual entries, funding carry/basis, and single-venue
+                triangle cycles — while Trading Mode is Live. Every leg is
+                refused above the notional cap below — caps are never
+                clamped. Order status is reconciled via authoritative venue
+                polling, residual auto-flatten and cancel retry run
+                continuously, and a partially-filled entry unwinds the
+                filled leg automatically. Residual risk remains: a venue
                 outage at the wrong moment can still leave one-sided
                 exposure you must close manually. Keep the cap small.
               </label>

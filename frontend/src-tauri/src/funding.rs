@@ -1728,9 +1728,7 @@ pub async fn execute_funding_carry_impl(
             route_id: None,
             // The scan's cost-adjusted projection (carry − fees − spread
             // over the hold estimate) is the honest entry expectation.
-            expected_net_usd: opp
-                .expected_return_usd
-                .filter(|v| v.is_finite()),
+            expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
             note: Some(format!("{carry_note}; {path}")),
             legs: vec![
                 NewSignalLeg {
