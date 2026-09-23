@@ -2,7 +2,7 @@
 
 This guide explains how to set parameters without treating software defaults as profitable recommendations. Arbitrageur does not ship Conservative/Balanced/Aggressive trading presets yet because the repository does not contain a sufficiently broad, reviewed outcome corpus from which to derive them honestly.
 
-Use Paper Trading, collect venue-specific history, review AutoTune's held-out results, and change one risk dimension at a time.
+Use Testnet mode, collect venue-specific history, review AutoTune's held-out results, and change one risk dimension at a time.
 
 ## General rules
 
@@ -38,17 +38,19 @@ Raise the target when realized testnet slippage or failed/partial fills exceed t
 
 ### Window Percentile
 
-A higher percentile waits for rarer, wider deviations and usually lowers trade frequency. A lower percentile increases frequency and sensitivity to noise. Validate it together with the target and friction model rather than in isolation.
+**Saved + display only.** The percentile parameterizes the baseline snapshot the Ticker Configurator renders — the live entry gate does not consult a spread percentile; it requires expected net ≥ Target Profit after route friction. The monitor's own qualification window (Radar Configurator) governs live scanning.
 
 ### Step size and ticker equity cap
 
-The engine derives a base-unit step from venue lot sizes, price, `stepSizeMult`, and `maxStepUsd`, then caps total ticker exposure by `maxTickerEquityPct`.
+**Dormant — grid ladder not yet live.** These knobs derive a per-step notional stored on the ticker config (`unit_size`, `max_accumulated_units`), but production entries size from the book-depth capacity ladder and fills never increment `current_accumulated_units`, so the grid cap cannot trip. Only explicit `position_step`/`max_units` callers (the live canary) hit the gate. The design intent remains:
 
 - Reduce `maxStepUsd` before increasing the number of opportunities monitored.
 - Keep the ticker equity cap small enough that one unresolved pair cannot dominate the portfolio.
 - If either venue cannot fill one step inside the slippage/depth guards, the step is too large regardless of account equity.
 
 ### Execution mode
+
+**Per-ticker value dormant.** The Ticker Configurator's Single/Two-Way toggle is saved per ticker but the live unwind gate reads the global Radar Configurator → Execution Mode (`one_way`/`two_way`).
 
 - **Single-Way:** One directional divergence at a time. This is the safer default while validating a pair.
 - **Double-Way:** Requires independent evidence that both directional rows mean-revert after all costs. Do not enable merely because the historical mid spread crossed zero.
@@ -112,6 +114,28 @@ A triangle is executable only when all three exact markets exist on the same ven
 
 Integrated spot-arbitrage and prediction execution are disabled. Their configurator fields are research/schema placeholders and must not be interpreted as active risk controls.
 
+## Dormant parameters (saved but not enforced)
+
+These fields persist, validate, and round-trip through the UI, but no live runtime path consumes them yet. The UI marks each one "NOT YET ENFORCED" where it is rendered; treat every one as inert until wired:
+
+| Field | Surface | Status |
+|---|---|---|
+| `funding_auto_rebalance` | Funding → Risk & Rebalance | Dormant — no rebalance supervisor exists |
+| `funding_rotation_threshold_bps` | Funding → Risk & Rebalance | Dormant — no rotation supervisor exists (`rotation_improves` is library-only) |
+| `funding_auto_exit_spread_pct` | Funding → Execution & Slippage | Dormant — funding exits are operator-driven |
+| `funding_liq_trim_pct` | Funding → Risk & Rebalance | Dormant — liquidation-trim watcher is futures-only |
+| `spot_liq_trim_pct` | Spot → Risk & Safety | Dormant — same watcher is futures-only |
+| `prediction_liq_trim_pct` | persisted, not rendered | Dormant — no prediction supervisor |
+| `triangle_max_slippage_bps` | Triangle → Cycle Guardrails | Dormant — the cycle path consumes no slippage limit |
+| `spot_trade_size_usd` / `spot_min_net_spread_bps` / `spot_max_slippage_bps` | Spot → Spatial | Dormant — spot scan and execute are both stubbed |
+| `execution_mode` (per-ticker) | Ticker Configurator → Signal Quality | Dormant — the unwind gate reads Radar Configurator `execution_mode` |
+| `step_size_mult` / `max_step_usd` / `max_ticker_equity_pct` | Ticker Configurator → Execution & Sizing | Dormant — grid ladder unwired; entries size from the capacity ladder |
+| `funding_holding_days` | persisted, not rendered | Dormant — no consumer (default 14 flows nowhere) |
+| `window_percentile` / `sliding_window*` | Ticker Configurator → Signal Quality | Display + autotune input only — not a live entry filter |
+| `hsm_url` / `hmac_token` | Engine Settings | Reserved — remote-HSM integration stub by design |
+| `fast_warmup_enabled` | persisted | Reserved — no consumer by design |
+| `robinhood_rpc_url` | persisted | Reserved — no consumer by design |
+
 ## AutoTune
 
 AutoTune uses a chronological fit/validation split and applies only rows marked `READY`. `HELD` means the current manual value remains authoritative.
@@ -131,23 +155,30 @@ AutoTune does not yet learn from a complete join of quoted opportunities to real
 
 These values initialize missing settings; they are not universal recommendations:
 
-| Field | Default |
-|---|---:|
-| Target profit | 1 BPS |
-| Window percentile | 50 |
-| Sliding window | Manual, 24 hours |
-| Step-size multiplier | 10 |
-| Maximum step | $2,500 |
-| Maximum ticker equity | 20% |
-| Target leverage | 5x |
-| Futures max slippage | 15 BPS |
-| Funding trade size | $25,000 per leg |
-| Funding minimum APR | 8% |
-| Funding max slippage | 15 BPS |
-| Funding max entry spread | 50 BPS |
-| Spot trade size | $1,000 |
-| Spot max slippage | 5 BPS |
-| Spot minimum net spread | 15 BPS |
+| Field | Default | Consumed? |
+|---|---:|---|
+| Target profit | 1 BPS | Live — entry net-spread floor |
+| Window percentile | 50 | Display + autotune only |
+| Sliding window | Manual, 24 hours | Display + autotune only |
+| Step-size multiplier | 10 | Dormant (grid unwired) |
+| Maximum step | $2,500 | Dormant (grid unwired) |
+| Maximum ticker equity | 20% | Dormant (grid unwired) |
+| Target leverage | 5x | Live — effective-leverage resolution |
+| Futures max slippage | 15 BPS | Live — dispatch VWAP gate |
+| Funding trade size | $25,000 per leg | Live — scan sizing arg |
+| Funding minimum APR | 8% | Live — scan hurdle |
+| Funding max slippage | 15 BPS | Live — dispatch VWAP gate |
+| Funding max entry spread | 50 BPS | Live — dispatch gate |
+| Funding auto-exit spread | off | Dormant |
+| Funding rotation threshold | off | Dormant |
+| Funding auto-rebalance | off | Dormant |
+| Funding holding days | 14 | Dormant (no consumer) |
+| Spot trade size | $1,000 | Dormant (strategy stubbed) |
+| Spot max slippage | 5 BPS | Dormant (strategy stubbed) |
+| Spot minimum net spread | 15 BPS | Dormant (strategy stubbed) |
+| Triangle trade size | — | Live — cycle sizing |
+| Triangle min profit | — | Live — cycle hurdle |
+| Triangle max leg slippage | 5 BPS | Dormant |
 
 Review and reduce these values for the actual account before any testnet run. Live strategy entries are additionally opt-in gated (`live_entry_enabled`) with a per-leg notional cap.
 

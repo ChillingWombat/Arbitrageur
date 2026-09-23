@@ -2714,3 +2714,18 @@ Read-only survey of `~/.arbitrageur/state.sqlite3` (~750 MB) drove three real fi
 ### Verification
 
 390+1 desktop tests, 213 frontend tests, tsc/clippy/fmt clean; release binary rebuilt and restarted (PID on `target/release/arbitrageur-desktop`).
+
+## Session 2026-09-24 — Configurator dead-knob audit
+
+Traced every `StrategyParamsDto`/ticker-config field end-to-end (declaration → persistence → validation → UI → runtime consumer). Controls that persisted and validated but had zero runtime consumers now declare dormancy in place (the established "Saved but NOT YET ENFORCED" pattern), rather than implying enforcement:
+
+- **Funding risk controls**: `funding_auto_rebalance`, `funding_rotation_threshold_bps`, `funding_auto_exit_spread_pct` — dormant; `rotation_improves`/`rebalance_to_neutral` exist only as `arbitrageur-strategy` library helpers with no production call site.
+- **Per-ticker Execution Mode**: `StrategyParamsDto.execution_mode` / `TickerStrategyConfigDto.execution_mode` dead — the live unwind-costing gate reads `MonitorConfigDto.execution_mode` (Radar Configurator, `one_way`/`two_way`). Modal now labels the per-ticker value dormant.
+- **Grid ladder (Execution & Sizing)**: `step_size_mult`/`max_step_usd`/`max_ticker_equity_pct` derive `unit_size`/`max_accumulated_units` persisted to ticker configs, but `current_accumulated_units` is never written by fills and monitor rows never carry `position_step`/`max_units` — the execution.rs grid-cap gate only fires for explicit stepped callers (the canary). Section carries a "grid ladder not yet live" notice.
+- **Window Percentile / Sliding Window**: copy claimed "strictly filters entries" — the live gate is `expected_net_bps ≥ target_profit_bps`; these parameterize the modal's baseline display + autotune candidates. Copy corrected.
+- **Triangle Max Leg Slippage**: `triangle_max_slippage_bps` dead — the `"triangle"` arm of `strategy_slippage_bps` is unreachable (only "futures"/"funding" queried). Marked dormant.
+- **Spot sections**: `scan_spot_opportunities_impl` returns empty + `execute_spot_arbitrage_impl` hard-refuses — spot config surface carries a strategy-disabled notice matching the prediction parity precedent.
+- **Invisible dead fields** (persisted, never rendered, no consumer): `funding_holding_days`, `prediction_liq_trim_pct` — left for forward-compat.
+- **Verified live (not dead)**: `target_profit_bps`, `user_target_leverage`, `futures/funding_max_slippage_bps`, `funding_min_apr_pct`/`funding_trade_size_usd`/`funding_max_entry_spread_bps`/`funding_enable_basis`/`funding_min_basis_bps`, `auto_min_volume_usd`/`auto_min_price_usd`, `futures_liq_trim_pct`, `futures/funding/spot_passive_unwind` (via `passive_cfg_for`), `triangle_trade_size_usd`/`triangle_min_profit_bps`, `cb_max_spread_divergence_bps`, `popdex_network`, `auto_exit_max_hold_secs`.
+
+Docs: SPEC.md entry 28 + `docs/PARAMETER_GUIDE.md` dormant-parameters table + per-knob corrections (window percentile display-only, execution-mode per-ticker dormancy, grid-ladder caveat, stale "Paper Trading" → Testnet).
