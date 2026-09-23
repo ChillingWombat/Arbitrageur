@@ -23,7 +23,9 @@ interface FundingRadarProps {
   symbol?: string | null;
   tradeSize: number;
   minAprPct?: number;
-  onExecuteCarry?: (opp: FundingOpportunityDto) => Promise<void>;
+  onExecuteCarry?: (opp: FundingOpportunityDto, auto?: boolean) => Promise<void>;
+  /** Live environment — autonomous entries are testnet-only, manual stays gated. */
+  isLive?: boolean;
   loading: boolean;
   executionLogs?: ExecutionLogEntry[];
   onOpenConfig?: (symbol: string, strategy?: string) => void;
@@ -838,6 +840,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   tradeSize,
   minAprPct = 8.0,
   onExecuteCarry,
+  isLive = false,
   executionLogs = [],
   onOpenConfig,
   isPaused = false,
@@ -936,12 +939,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // re-banner every 8s while live strategy entries are disabled backend-wide.
   // Manual clicks always surface the backend reason inline (never throw to
   // the error boundary — an expected fail-closed rejection is not a crash).
-  const handleExecute = async (opp: FundingOpportunityDto, opts?: { silent?: boolean }) => {
+  const handleExecute = async (opp: FundingOpportunityDto, opts?: { silent?: boolean; auto?: boolean }) => {
     if (!onExecuteCarry) return;
     if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") return;
     setExecutingId(opp.id);
     try {
-      await onExecuteCarry(opp);
+      await onExecuteCarry(opp, opts?.auto);
       setLastExecuted(opp.id);
       setTimeout(() => setLastExecuted(null), 3000);
     } catch (err: unknown) {
@@ -953,9 +956,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     }
   };
 
-  // Automated Execution Loop across all monitored tickers when user enables Auto Carry
+  // Automated Execution Loop across all monitored tickers when user enables Auto Carry.
+  // Autonomous entries are testnet-only — in live mode the loop stays off and the
+  // backend refuses auto=true dispatches (manual Execute stays live-gated).
   useEffect(() => {
-    if (!bot.entriesAllowed || executingId || !opportunities.length || isPaused) return;
+    if (!bot.entriesAllowed || executingId || !opportunities.length || isPaused || isLive) return;
 
     const now = Date.now();
     if (now - lastAutoCarryExecRef.current < 8000) return; // 8s cooldown
@@ -964,9 +969,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     const topOpp = opportunities.find((o) => o.net_apr_pct >= minAprPct);
     if (topOpp) {
       lastAutoCarryExecRef.current = now;
-      void handleExecute(topOpp, { silent: true });
+      void handleExecute(topOpp, { silent: true, auto: true });
     }
-  }, [bot.entriesAllowed, executingId, opportunities, isPaused, minAprPct]);
+  }, [bot.entriesAllowed, executingId, opportunities, isPaused, minAprPct, isLive]);
 
   return (
     <div className="p-4 pr-5 space-y-4 overflow-y-auto h-full">
@@ -1018,6 +1023,14 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             onReduceOnly={bot.reduceOnly}
             onStop={() => void bot.stop()}
           />
+          {isLive && bot.entriesAllowed && (
+            <span
+              className="text-xs font-mono text-amber-400 max-w-56"
+              title="Autonomous entries stay testnet-only in live mode — use manual Execute"
+            >
+              Live: auto-carry off, manual only
+            </span>
+          )}
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
