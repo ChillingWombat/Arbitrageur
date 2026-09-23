@@ -26,6 +26,8 @@ interface TriangularArbitrageProps {
   executionLogs: ExecutionLogEntry[];
   onRefreshAll: () => Promise<void>;
   isPaused?: boolean;
+  /** Live environment — autonomous entries are testnet-only, manual stays gated. */
+  isLive?: boolean;
   hasApiConnectivity?: boolean;
   onOpenConfig?: (symbol: string, strategy?: string) => void;
   params?: StrategyParamsDto;
@@ -213,6 +215,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   executionLogs: _executionLogs,
   onRefreshAll,
   isPaused = false,
+  isLive = false,
   hasApiConnectivity = false,
   onOpenConfig,
   params,
@@ -314,9 +317,10 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     void deployCycle(selectedOpp);
   };
 
-  // Automated Execution Bot Loop
+  // Automated Execution Bot Loop — autonomous entries are testnet-only; in
+  // live mode the loop stays off and the backend refuses auto dispatches.
   useEffect(() => {
-    if (!bot.entriesAllowed || isPaused) return;
+    if (!bot.entriesAllowed || isPaused || isLive) return;
 
     const interval = setInterval(async () => {
       const now = Date.now();
@@ -333,6 +337,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             trade_size_usd: tradeSizeUsd,
             min_profit_bps: minProfitBps,
             net_spread_bps: viableOpp.net_spread_bps,
+            auto: true,
           });
           await onRefreshAll();
           await loadTriangleOpps();
@@ -343,7 +348,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     }, 2500);
 
     return () => clearInterval(interval);
-  }, [bot.entriesAllowed, isPaused, opportunities, minProfitBps, tradeSizeUsd]);
+  }, [bot.entriesAllowed, isPaused, isLive, opportunities, minProfitBps, tradeSizeUsd]);
 
   const activeOpp = selectedOpp || opportunities[0] || null;
 
@@ -409,6 +414,14 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             onReduceOnly={bot.reduceOnly}
             onStop={() => void bot.stop()}
           />
+          {isLive && bot.entriesAllowed && (
+            <span
+              className="text-xs font-mono text-amber-400 max-w-56"
+              title="Autonomous entries stay testnet-only in live mode — use manual Deploy"
+            >
+              Live: auto off, manual only
+            </span>
+          )}
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}

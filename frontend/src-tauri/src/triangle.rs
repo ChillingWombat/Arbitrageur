@@ -62,6 +62,10 @@ pub struct TriangleExecutionParams {
     pub min_profit_bps: f64,
     #[serde(default)]
     pub net_spread_bps: Option<f64>,
+    /// Autonomous bot dispatch — autonomous entries stay testnet-only; live
+    /// entries must come from the operator-directed Execute path.
+    #[serde(default)]
+    pub auto: bool,
 }
 
 /// Paper-dust tolerance for the triangle entry guard: f64/Decimal ledger
@@ -527,6 +531,15 @@ pub async fn execute_triangle_arbitrage_impl(
     }
     if !params.min_profit_bps.is_finite() || params.min_profit_bps < 0.0 {
         return Err("min_profit_bps must be finite and nonnegative".into());
+    }
+    // Autonomous entries stay testnet-only in live mode — the
+    // live_entry_enabled opt-in covers operator-directed entries (same
+    // policy as the radar bot's evaluate_entry_gates hard-block and the
+    // funding auto flag).
+    if params.auto && state.is_live() {
+        return Err(
+            "autonomous triangle entries are testnet-only — run a manual Execute for live".into(),
+        );
     }
 
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {

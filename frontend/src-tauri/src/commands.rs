@@ -12526,6 +12526,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_triangle_auto_entry_testnet_only_in_live() {
+        // Autonomous entries stay testnet-only in live mode regardless of
+        // the opt-in — the same policy as radar/funding autonomous paths.
+        let state = lighter_only_state();
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        state.settings.write().live_entry_enabled = true;
+        let err = execute_triangle_arbitrage_impl(
+            TriangleExecutionParams {
+                id: "lighter-TRI-BTC-ETH-USDC".into(),
+                venue: "lighter".into(),
+                path: "USDC → BTC → ETH → USDC".into(),
+                trade_size_usd: 100.0,
+                min_profit_bps: 1.0,
+                net_spread_bps: None,
+                auto: true,
+            },
+            &state,
+        )
+        .await
+        .expect_err("autonomous live triangle entry must refuse");
+        assert!(
+            err.contains("testnet-only") || err.contains("manual"),
+            "refusal must name the autonomous-entry policy: {err}"
+        );
+        state.settings.write().live_entry_enabled = false;
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
+    }
+
+    #[tokio::test]
     async fn test_execute_triangle_success_records_legs_and_blocks_reentry() {
         let state = lighter_only_state();
         seed_triangle_books(&state);
@@ -12544,6 +12573,7 @@ mod tests {
                 trade_size_usd: 1000.0,
                 min_profit_bps: 1.0,
                 net_spread_bps: None,
+                auto: false,
             },
             &state,
         )
@@ -12583,6 +12613,7 @@ mod tests {
                 trade_size_usd: 1000.0,
                 min_profit_bps: 1.0,
                 net_spread_bps: None,
+                auto: false,
             },
             &state,
         )
@@ -12628,6 +12659,7 @@ mod tests {
             trade_size_usd: size,
             min_profit_bps: hurdle,
             net_spread_bps: Some(99999.0),
+            auto: false,
         };
 
         // Unknown opportunity id (caller-supplied spread is never trusted).

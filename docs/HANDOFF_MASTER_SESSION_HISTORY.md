@@ -2790,3 +2790,10 @@ Enabling live funding through `live_entry_enabled` also armed the Funding Radar 
 - **Policy unified**: autonomous entries are testnet behavior in both strategies; live entries are operator-directed. `execute_funding_carry` IPC + `execute_funding_carry_impl` take `auto` (IPC optional → false). `auto && live` refuses before any gate work, naming the policy.
 - **Frontend**: `executeFundingCarry(…, auto)` threads the flag; the loop marks its dispatches `auto: true`, skips entirely under `isLive` (defense in depth), and shows a "Live: auto-carry off, manual only" hint so a running bot never implies armed autonomous entries. `isLive` sourced from `SystemStatusDto.is_live_mode`.
 - Test `test_funding_carry_auto_entry_testnet_only_in_live` pins the live-auto refusal. Desktop 400 tests, frontend suite, clippy/fmt clean. SPEC.md entry 34; CAPABILITIES funding rows + footnote.
+
+## Session 2026-09-23 — Triangle autonomous loop testnet-only (follow-up)
+
+The triangle auto-deploy loop (2.5s poll) had the same autonomous-live hole as funding: `params.auto` added to `TriangleExecutionParams` (serde default false); `auto && live` refuses before gate work. Frontend loop marks `auto: true`, skips under `isLive`, and shows a "Live: auto off, manual only" hint. Manual Deploy stays live-gated.
+
+- Audited every autonomous entry path: Radar bot (GateContext live-block), Funding Auto Carry (`auto`), Triangle auto (`params.auto`), Spot/Prediction loops (backend hard-disabled — cannot dispatch in any mode), LiveMatrix/TickerExplorer (no autonomous dispatch).
+- Test `test_triangle_auto_entry_testnet_only_in_live` pins the refusal. Desktop 401 tests; CAPABILITIES triangle row updated.
