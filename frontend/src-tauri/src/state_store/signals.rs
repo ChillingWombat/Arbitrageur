@@ -560,6 +560,32 @@ impl StateStore {
         Ok(out)
     }
 
+    /// Signals whose fills still count as open exposure (`counts_as_open`):
+    /// in-flight, balanced, imbalanced, unresolved — everything not closed
+    /// or failed. Boot reconciliation and lifecycle gates use this to avoid
+    /// hydrating closed history.
+    pub fn list_open_signals(&self) -> anyhow::Result<Vec<SignalExecution>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+                    account_short_id, expected_net_usd, fees_usd, note,
+                    created_at, updated_at, closed_at
+             FROM signal_executions
+             WHERE status IN ('in_flight','balanced','imbalanced','unresolved')
+             ORDER BY created_at DESC, id",
+        )?;
+        let rows = stmt
+            .query_map([], signal_exec_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut out = Vec::with_capacity(rows.len());
+        for mut e in rows {
+            e.legs = Self::legs_for(&conn, &e.id)?;
+            out.push(e);
+        }
+        Ok(out)
+    }
+
     /// Signals that block new orders on a symbol: in-flight, imbalanced, or
     /// unresolved legs must reconcile before another candidate may dispatch.
     pub fn blocking_signals(&self, symbol: &str) -> anyhow::Result<Vec<SignalExecution>> {

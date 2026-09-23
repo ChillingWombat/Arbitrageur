@@ -9038,6 +9038,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ledger_lots_and_pnl_counter_survive_restart() {
+        // Durable cycle lots + cumulative counters (schema v30): a restart
+        // mid-position must restore the open lot (close-matching, exposure)
+        // and the Net Profit headline; sim_step resumes above durable ids.
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_ledger_{}", rand::random::<u64>()));
+        let path = dir.join("state.sqlite3");
+        let store = std::sync::Arc::new(crate::state_store::StateStore::open(&path).unwrap());
+        {
+            let state = AppEngineState::new_inner_for_test(store.clone());
+            // The lot needs a matching open signal or boot reconcile marks
+            // it stale-Closed (crash-window between signal-close and
+            // lot-close persists).
+            store
+                .record_signal_execution(&crate::state_store::NewSignalExecution {
+                    id: "sig-open".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                    ],
+                })
+                .expect("record");
+            store
+                .apply_leg_fill(
+                    "sig-open",
+                    crate::state_store::LegSide::Long,
+                    0.1,
+                    64_200.0,
+                    0.5,
+                    None,
+                )
+                .expect("long fill");
+            store
+                .apply_leg_fill(
+                    "sig-open",
+                    crate::state_store::LegSide::Short,
+                    0.1,
+                    64_440.0,
+                    0.5,
+                    None,
+                )
+                .expect("short fill");
+            store
+                .update_signal_status("sig-open", crate::state_store::SignalStatus::Balanced, None)
+                .expect("balanced");
+            {
+                let mut ledger = state.virtual_ledger.write();
+                ledger.open_cycle(
+                    "spatial-9".into(),
+                    "spatial_spread".into(),
+                    "BTC-USDC".into(),
+                    "hyperliquid".into(),
+                    "lighter".into(),
+                    20.0,
+                    0.1,
+                    64_200.0,
+                    0.1,
+                    64_440.0,
+                    0.5,
+                );
+                let lot = ledger.lots.get("spatial-9").unwrap().clone();
+                state.state_store.upsert_cycle_lot(&lot).unwrap();
+            }
+            crate::execution::accumulate_realized_profit(&state, false, 12.5);
+            crate::execution::accumulate_realized_profit(&state, true, 3.25);
+            assert_eq!(state.next_sim_step(), 9);
+        }
+        let state2 = AppEngineState::new_inner_for_test(store);
+        {
+            let ledger = state2.virtual_ledger.read();
+            let lot = ledger.lots.get("spatial-9").expect("open lot hydrates");
+            assert_eq!(
+                lot.status,
+                arbitrageur_execution::virtual_ledger::CycleStatus::Open
+            );
+            assert_eq!(lot.symbol, "BTC-USDC");
+        }
+        let tn = state2
+            .total_realized_profit
+            .read()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        let lv = state2
+            .total_realized_profit_live
+            .read()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        assert!((tn - 12.5).abs() < 1e-9);
+        assert!((lv - 3.25).abs() < 1e-9);
+        // The counter resumed from kv (9), not 8 — no id collision with the
+        // hydrated spatial-9 class of durable ids.
+        assert_eq!(state2.next_sim_step(), 10);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn test_boot_reconcile_rebuilds_lot_for_lotless_open_signal() {
+        // A position opened before cycle lots were durable (or a crash
+        // between lot-open and persist) leaves an open two-leg signal with
+        // no lot. Boot reconcile must reconstruct it so the eventual flatten
+        // can realize PnL and resolve predictions.
+        let dir = std::env::temp_dir().join(format!("arbitrageur_rehyd_{}", rand::random::<u64>()));
+        let path = dir.join("state.sqlite3");
+        let store = std::sync::Arc::new(crate::state_store::StateStore::open(&path).unwrap());
+        {
+            let state = AppEngineState::new_inner_for_test(store.clone());
+            store
+                .record_signal_execution(&crate::state_store::NewSignalExecution {
+                    id: "sig-pre-v30".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                    ],
+                })
+                .expect("record");
+            store
+                .apply_leg_fill(
+                    "sig-pre-v30",
+                    crate::state_store::LegSide::Long,
+                    0.1,
+                    64_200.0,
+                    0.5,
+                    None,
+                )
+                .expect("long fill");
+            store
+                .apply_leg_fill(
+                    "sig-pre-v30",
+                    crate::state_store::LegSide::Short,
+                    0.1,
+                    64_440.0,
+                    0.5,
+                    None,
+                )
+                .expect("short fill");
+            store
+                .update_signal_status(
+                    "sig-pre-v30",
+                    crate::state_store::SignalStatus::Balanced,
+                    None,
+                )
+                .expect("balanced");
+            assert!(state.virtual_ledger.read().lots.is_empty());
+        }
+        // Boot over the same store must rebuild a lot for the lotless pair.
+        let state2 = AppEngineState::new_inner_for_test(store);
+        let ledger = state2.virtual_ledger.read();
+        let lot = ledger
+            .lots
+            .values()
+            .find(|l| l.symbol == "BTC-USDC")
+            .expect("rehydrated lot exists");
+        assert_eq!(
+            lot.status,
+            arbitrageur_execution::virtual_ledger::CycleStatus::Open
+        );
+        assert!(lot.id.starts_with("rehydrated-"));
+        assert!((lot.long_entry_price - 64_200.0).abs() < 1e-9);
+        assert!((lot.short_entry_price - 64_440.0).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_save_strategy_params_persists_to_state_store() {
         let state = AppEngineState::new();
         let params = StrategyParamsDto {

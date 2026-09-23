@@ -16,7 +16,7 @@ version = "0.1.0"
 edition = "2021"
 authors = ["David"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/Dav1D1010/Arbitrageur"
+repository = "https://github.com/ChillingWombat/Arbitrageur"
 
 [workspace.dependencies]
 tokio = { version = "1.38", features = ["full"] }

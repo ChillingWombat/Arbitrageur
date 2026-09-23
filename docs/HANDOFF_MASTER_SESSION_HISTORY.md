@@ -210,11 +210,11 @@ DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 XDG_RUNTIME_DIR=/run/user/1000 \
 
 ## 6. Open Items & Backlog for Future Sessions
 
-0. **Adaptive Dislocation Analytics & Auto-Calibrated Parameters** *(spec published — [GitHub Issue #3](https://github.com/Dav1D1010/Arbitrageur/issues/3), label `ready-for-agent`)*:
+0. **Adaptive Dislocation Analytics & Auto-Calibrated Parameters** *(spec published — [GitHub Issue #3](https://github.com/ChillingWombat/Arbitrageur/issues/3), label `ready-for-agent`)*:
    - Persist venue mid/dislocation samples in SQLite WAL; compute deviation series + analytics in `arbitrageur-math` (not the frontend); chart windows default to the bot's trailing window and extend to days via rollups.
    - Seasonality (hour-of-day, day-of-week), per-pair mean/half-life, regime-shift detection; parameter recommendations (hurdle, window, units, leverage) validated out-of-sample via existing WFO module; opt-in auto-tune modes; curated default presets for distribution.
    - Data-first mandate: accumulate our own corpus and analyze patterns before offering auto-tune to external users.
-1. **WebSocket Orderbook Streaming Integration** *(spec published — [GitHub Issue #4](https://github.com/Dav1D1010/Arbitrageur/issues/4), label `ready-for-agent`)*:
+1. **WebSocket Orderbook Streaming Integration** *(spec published — [GitHub Issue #4](https://github.com/ChillingWombat/Arbitrageur/issues/4), label `ready-for-agent`)*:
    - Hyperliquid already features direct REST/WS endpoints.
    - Wire persistent WebSockets for Lighter zkDEX, Vanta (Orderly), and Robinhood EVM to achieve continuous sub-10ms quote updates. Robinhood has no CLOB API — spec routes it to honestly-attributed on-chain pool quotes; Vanta/Robinhood now fail closed until feeds land (post-sweep they contribute zero orderbook data).
 2. **Triangular Backend Migration**:
@@ -862,14 +862,14 @@ overhaul pass committed as `23d4aed`).
 - Crate dirs `crates/arbitrageur-*`, component `ArbitrageurLogo`,
   Tauri `productName` + identifier `com.arbitrageur.desktop`, binaries
   `arbitrageur` (CLI) and `arbitrageur-desktop` (Tauri), repo URLs now
-  `github.com/Dav1D1010/Arbitrageur`, deploy samples, specs, pixi tasks.
+  `github.com/ChillingWombat/Arbitrageur`, deploy samples, specs, pixi tasks.
 - Project root moved to `/mnt/Data/Projects/Arbitrageur`; local launcher
   files recreated; `.cargo` sysroot path follows the move.
 - Verification: `cargo check --workspace` clean, `tsc` clean, frontend
   suite green, dev server `HTTP:200` from the new path. Stale Tauri dep
   cache cleared (`cargo clean -p tauri`) after the move.
 - TODO (owner): rename the GitHub repo to `Arbitrageur`, then
-  `git remote set-url origin https://github.com/Dav1D1010/Arbitrageur.git`;
+  `git remote set-url origin https://github.com/ChillingWombat/Arbitrageur.git`;
   rebuild the release binary (`target/release/arbitrageur-desktop` does not
   exist yet — the `Arbitrageur` launcher symlink points at it); `keychain.toml`
   is gitignored and unaffected.
@@ -877,7 +877,7 @@ overhaul pass committed as `23d4aed`).
 ## 23. Session Handoff — 2026-09-18 (Remote Switch + Desktop Rebuild)
 
 - GitHub repo renamed to `Arbitrageur` by owner; remote switched to
-  `https://github.com/Dav1D1010/Arbitrageur.git` (verified HEAD matches).
+  `https://github.com/ChillingWombat/Arbitrageur.git` (verified HEAD matches).
 - Rebuilt `target/release/arbitrageur-desktop` (27MB). The folder move had
   orphaned Tauri build-script caches referencing the old absolute path;
   cleared 27 stale `target/release/build/tauri*` dirs and rebuilt clean.
@@ -2841,3 +2841,7 @@ Regression: `test_retention_gb_budget_measures_used_not_allocated` (budget betwe
 ## Session 2026-09-23 — Cycle-close PnL reaches the cumulative Net Profit counter
 
 The header "Net Profit" counter (`total_realized_profit[_live]` → `SystemStatusDto.total_realized_pnl`) only ever saw entry-attempt writes (entry fees, trim/unwind round-trips); `close_flattened_spatial_lot` fed the lot + signal + log but never the counter — every converged cycle's spread capture was invisible in the headline figure. Both close sites in `flatten_ticker_positions_with_type_impl` now accumulate via `accumulate_realized_profit`. Subtlety: the increment is `realized_usd + entry_debited`, not `realized_usd` — `close_cycle` nets `leg_pnl − entry_fees − exit_fees` while the entry attempt already debited `-entry_fees`, so raw lot PnL would double-count. `entry_debited` is the lot's pre-refresh `fees_paid_usd` (the exact figure `open_cycle` stored from the same fills the accumulator debited); the helper returns it as a third tuple element. Counter converges to the lot's true net whether or not fee enrichment landed pre-close. The converged-cycle test asserts `total_realized_profit == lot.realized_pnl_usd` exactly. SPEC.md entry 41; desktop 408 tests.
+
+## Session 2026-09-23 — Durable cycle ledger + counters (schema v30)
+
+(a) `virtual_ledger` was in-memory only — restart lost every lot: post-restart flattens found nothing to close (no realized PnL, no prediction resolution) and metrics forgot history. New `cycle_lots` table (v30) mirrors `ArbitrageCycleLot`; `open_cycle` sites persist fail-closed, `close_flattened_spatial_lot` upserts on close (covers the pre-close fee refresh). (b) `total_realized_profit[_live]` reset to 0 on boot; now persisted under `pnl.total.{env}` via `accumulate_realized_profit`, the single write path all sites funnel through (also fixed triangle writing the testnet counter unconditionally). (c) `sim_step_counter` resumed at 8 — `spatial-{n}`/`funding-{n}` lot ids and `exec-*-{n}` log ids would collide with persisted rows via INSERT OR REPLACE; now kv-persisted and boot-floored above `execution_log` count+8. (d) Boot reconcile: lotless open two-leg signals (pre-v30 positions) get `rehydrated-{signal}` lots rebuilt from leg fills; open lots with no open signal mark stale-Closed (unknown outcome, never misbound to a future cycle's fills). Tests: reopen roundtrip pins lot/counter/step; `test_boot_reconcile_rebuilds_lot_for_lotless_open_signal`. SPEC.md entry 42; desktop 411 tests.

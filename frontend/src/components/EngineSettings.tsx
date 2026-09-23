@@ -355,7 +355,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Referrals, About & Links
   const [sponsorLink, setSponsorLink] = useState("https://buymeacoffee.com/dav1d1010");
   const [version, setVersion] = useState("v1.2.0");
-  const [gitRepo, setGitRepo] = useState("https://github.com/Dav1D1010/Arbitrageur");
+  const [gitRepo, setGitRepo] = useState("https://github.com/ChillingWombat/Arbitrageur");
 
   // UI state
   const [activeTab, setActiveTab] = useState<SettingsTab>("execution");
@@ -635,7 +635,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
 
         setSponsorLink(s.sponsor_link || "https://buymeacoffee.com/dav1d1010");
         setVersion(s.version || "v1.2.0");
-        setGitRepo(s.git_repo || "https://github.com/Dav1D1010/Arbitrageur");
+        setGitRepo(s.git_repo || "https://github.com/ChillingWombat/Arbitrageur");
 
         if (systemStatus?.active_venues && systemStatus.active_venues.length > 0) {
           setLiveVenues(systemStatus.active_venues);

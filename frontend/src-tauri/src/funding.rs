@@ -1698,11 +1698,7 @@ pub async fn execute_funding_carry_impl(
         }
     }
 
-    let cycle = {
-        let mut step = state.sim_step_counter.write();
-        *step += 1;
-        *step
-    };
+    let cycle = state.next_sim_step();
     let cycle_tag = format!(
         "fund-{}-{:08x}",
         Utc::now().timestamp_millis(),
@@ -1855,15 +1851,8 @@ pub async fn execute_funding_carry_impl(
             .unwrap_or(0.0),
         _ => 0.0,
     };
-    let total_f = {
-        let mut total_pnl = if state.is_live() {
-            state.total_realized_profit_live.write()
-        } else {
-            state.total_realized_profit.write()
-        };
-        *total_pnl += Decimal::from_str_exact(&attempt_pnl_f.to_string()).unwrap_or(dec!(0));
-        total_pnl.to_string().parse::<f64>().unwrap_or(0.0)
-    };
+    let total_f =
+        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
 
     let net_bps = opp.net_rate_8h_pct * 100.0;
 
@@ -1951,19 +1940,29 @@ pub async fn execute_funding_carry_impl(
             // realize PnL and resolve this signal's entry predictions —
             // without it close_flattened_spatial_lot finds no funding_rate
             // lot and every funding prediction stays unresolved forever.
-            state.virtual_ledger.write().open_cycle(
-                format!("funding-{cycle}"),
-                crate::attribution::ledger_strategy_id(FUNDING_STRATEGY_ID),
-                root_symbol.clone(),
-                long_canon.to_string(),
-                short_canon.to_string(),
-                net_bps,
-                open_qty,
-                long_px_f,
-                open_qty,
-                short_px_f,
-                fee_f,
-            );
+            let funding_cycle_id = format!("funding-{cycle}");
+            {
+                let mut ledger = state.virtual_ledger.write();
+                ledger.open_cycle(
+                    funding_cycle_id.clone(),
+                    crate::attribution::ledger_strategy_id(FUNDING_STRATEGY_ID),
+                    root_symbol.clone(),
+                    long_canon.to_string(),
+                    short_canon.to_string(),
+                    net_bps,
+                    open_qty,
+                    long_px_f,
+                    open_qty,
+                    short_px_f,
+                    fee_f,
+                );
+                if let Some(lot) = ledger.lots.get(&funding_cycle_id) {
+                    state
+                        .state_store
+                        .upsert_cycle_lot(lot)
+                        .map_err(|e| format!("Failed to persist cycle lot: {e}"))?;
+                }
+            }
 
             record_execution_log(state, ExecutionLogEntry {
                 id: format!("exec-funding-{cycle}"),
