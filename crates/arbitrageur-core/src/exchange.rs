@@ -124,6 +124,19 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Submit a single order.
     async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse>;
 
+    /// The base-unit quantity this venue would actually trade for `qty`
+    /// after its own wire-grid normalization — the largest grid-aligned
+    /// quantity `<= qty` (lot step, contract size, size decimals, wad
+    /// precision). Each adapter independently normalizes inside
+    /// `place_order`, so an un-snapped quantity can fill different sizes
+    /// on the two legs of a hedged entry — a naked residual by
+    /// construction. Two-leg entries snap to the finer common grid via
+    /// this method and refuse when the grids are irreconcilable.
+    /// Default: `qty` unchanged (venues that pass quantity through raw).
+    async fn wire_base_qty(&self, _symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        Ok(qty)
+    }
+
     /// Cancel an existing order.
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()>;
 

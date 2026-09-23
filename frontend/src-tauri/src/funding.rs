@@ -1528,6 +1528,15 @@ pub async fn execute_funding_carry_impl(
         .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "funding carry quantity is not positive".to_string())?;
+    // Delta-neutral means identical base quantity on both legs — snap onto
+    // the finer common wire grid so per-venue lot/contract normalization
+    // cannot desync the hedge.
+    let qty =
+        crate::execution::common_wire_qty(&root_symbol, qty, &long_adapter, &short_adapter).await?;
+    let qty_f64: f64 = qty
+        .to_string()
+        .parse()
+        .map_err(|_| "snapped funding quantity is not finite".to_string())?;
 
     let max_slippage_bps = strategy_slippage_bps(state, "funding");
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)

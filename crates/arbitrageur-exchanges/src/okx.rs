@@ -1043,6 +1043,16 @@ impl ExchangeAdapter for OkxAdapter {
         Ok(resp)
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let inst_id = Self::to_venue_symbol(symbol)?;
+        let ct_val = self.contract_face_value(&inst_id).await?;
+        let wire = (qty / ct_val).floor() * ct_val;
+        if wire <= dec!(0) {
+            anyhow::bail!("OKX {inst_id} quantity {qty} is below one contract (ctVal {ct_val})");
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot cancel live order on OKX: API credentials are not configured or vault is locked");

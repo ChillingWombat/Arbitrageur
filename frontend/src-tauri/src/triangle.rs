@@ -691,6 +691,7 @@ pub async fn execute_triangle_arbitrage_impl(
     let started = std::time::Instant::now();
 
     let mut fills: Vec<(usize, arbitrageur_core::order::OrderResponse)> = Vec::new();
+    let mut submitted_qty: Vec<f64> = Vec::new();
     let mut leg_error: Option<String> = None;
     for (idx, ((sym, order_side), qty_f)) in plan
         .leg_symbols
@@ -714,6 +715,27 @@ pub async fn execute_triangle_arbitrage_impl(
                 break;
             }
         };
+        // Snap each leg onto the venue's wire grid before dispatch: a fill
+        // floored by the adapter would otherwise read as a partial fill and
+        // flatten the whole cycle on a representability artifact.
+        let qty = match adapter.wire_base_qty(sym, qty).await {
+            Ok(w) if w > dec!(0) => w,
+            Ok(_) => {
+                leg_error = Some(format!(
+                    "leg {} on {sym} snaps to zero on the venue wire grid",
+                    idx + 1
+                ));
+                break;
+            }
+            Err(e) => {
+                leg_error = Some(format!(
+                    "leg {} on {sym} not representable on the venue wire grid: {e}",
+                    idx + 1
+                ));
+                break;
+            }
+        };
+        submitted_qty.push(qty.to_string().parse::<f64>().unwrap_or(0.0));
         let order = arbitrageur_core::order::OrderRequest::new_market(
             adapter.venue_id(),
             sym,
@@ -785,7 +807,7 @@ pub async fn execute_triangle_arbitrage_impl(
         // quantity; a partial failed leg falls back to its actual fill (any
         // conversion dust is covered by the epsilon in the entry guard).
         let qty_f64 = if resp.filled_qty == resp.original_qty {
-            eval.order_qty[*idx]
+            submitted_qty[*idx]
         } else {
             resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0)
         };

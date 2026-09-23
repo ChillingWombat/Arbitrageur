@@ -936,6 +936,18 @@ impl ExchangeAdapter for BinanceAdapter {
         Self::parse_order_response(&v, &order)
     }
 
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let venue_symbol = Self::to_venue_symbol(symbol)?;
+        let (_tick, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
+        let wire = binance_wire_qty(qty, step_size);
+        if wire <= dec!(0) || wire < min_qty {
+            anyhow::bail!(
+                "Binance {venue_symbol} quantity {qty} below lot floor (step {step_size}, min {min_qty})"
+            );
+        }
+        Ok(wire)
+    }
+
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot cancel live order on Binance: API credentials are not configured or vault is locked");
