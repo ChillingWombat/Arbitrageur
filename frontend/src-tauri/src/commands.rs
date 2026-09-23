@@ -13233,7 +13233,7 @@ mod tests {
         assert!(checks[0].unwound);
         // A convergence exit is a target hit, not a stop — the lot records
         // the honest terminal status for outcome segmentation.
-        {
+        let lot_realized = {
             let ledger = state.virtual_ledger.read();
             let lot = ledger
                 .lots
@@ -13244,7 +13244,25 @@ mod tests {
                 lot.status,
                 arbitrageur_execution::virtual_ledger::CycleStatus::Closed
             );
-        }
+            lot.realized_pnl_usd
+                .expect("converged lot has realized PnL")
+        };
+        // The headline "Net Profit" counter must converge to the lot's true
+        // realized PnL: the entry attempt debited -entry_fees and the close
+        // adds `realized + entry_debited`, netting to `realized` exactly.
+        // Regression: close outcomes previously reached the lot/log only,
+        // leaving the counter at entry-attempt costs alone.
+        let total_f = state
+            .total_realized_profit
+            .read()
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(f64::NAN);
+        assert!(
+            (total_f - lot_realized).abs() < 1e-6,
+            "cumulative counter {total_f} must equal lot realized {lot_realized}"
+        );
+        assert!(lot_realized > 0.0, "converged cycle should realize a gain");
 
         // Slot freed: the pair can be re-entered (books still overlap enough
         // for the economics gate? re-seed the wide edge first).

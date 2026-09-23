@@ -2168,12 +2168,42 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
 /// enough quantity (e.g. single-leg triangle residuals, which realize purely
 /// through their signal legs) — the caller keeps the 0.0 log convention
 /// there rather than inventing a number.
+/// Add a realized close's incremental cash outcome to the environment-scoped
+/// cumulative counter surfaced as "Net Profit" in the UI. Cycle-close PnL
+/// (the dominant component — convergence captures the spread) previously
+/// landed only on the lot + signal + log, leaving the headline counter at
+/// entry-attempt costs alone.
+///
+/// The increment is the close's marginal cash, not the lot's net PnL: entry
+/// fees were already debited by the entry-attempt accumulator write
+/// (`Success.realized_profit = -entry_fees`), and the lot's `close_cycle`
+/// net subtracts entry fees a second time inside `usd`. Adding back the
+/// entry-fee basis yields `leg_pnl - exit_fees` — exactly what the close
+/// contributes on top of the entry write.
+fn accumulate_realized_profit(state: &AppEngineState, is_live: bool, usd: f64) {
+    if !usd.is_finite() {
+        return;
+    }
+    let delta = Decimal::from_str_exact(&usd.to_string()).unwrap_or(dec!(0));
+    let mut total = if is_live {
+        state.total_realized_profit_live.write()
+    } else {
+        state.total_realized_profit.write()
+    };
+    *total += delta;
+}
+
+/// Returns `(realized_usd, realized_bps, entry_debited)` for the closed lot.
+/// `entry_debited` is the entry-fee figure the entry attempt already wrote to
+/// the cumulative realized counter (the lot's pre-refresh open basis) — the
+/// close's counter increment is `realized_usd + entry_debited` so the counter
+/// converges to the lot's true net regardless of when fee enrichment landed.
 fn close_flattened_spatial_lot(
     state: &AppEngineState,
     sig: &crate::state_store::SignalExecution,
     family: &[crate::state_store::SignalExecution],
     close_status: CycleStatus,
-) -> Option<(f64, f64)> {
+) -> Option<(f64, f64, f64)> {
     use crate::state_store::LegSide;
 
     let venue_of = |side: LegSide| {
@@ -2252,6 +2282,12 @@ fn close_flattened_spatial_lot(
             .filter(|f| f.is_finite() && *f >= 0.0)
             .sum();
         let mut ledger = state.virtual_ledger.write();
+        // The entry-fee figure the entry attempt already debited from the
+        // cumulative counter — the lot's open-time basis (response-time fees).
+        // Captured before the enrichment refresh below overwrites it; callers
+        // add it back to the close's net so the counter's final state equals
+        // the lot's true realized PnL regardless of when fee data landed.
+        let entry_debited = ledger.lots.get(&id).map(|l| l.fees_paid_usd).unwrap_or(0.0);
         if entry_fees > 0.0 {
             if let Some(lot) = ledger.lots.get_mut(&id) {
                 lot.fees_paid_usd = entry_fees;
@@ -2266,13 +2302,13 @@ fn close_flattened_spatial_lot(
                 close_status,
             )
             .and_then(|l| match (l.realized_pnl_usd, l.realized_pnl_bps) {
-                (Some(usd), Some(bps)) => Some((usd, bps)),
+                (Some(usd), Some(bps)) => Some((usd, bps, entry_debited)),
                 _ => None,
             });
         // Calibration resolution: the ledger's realized net bps is the
         // authoritative outcome the entry forecast gets scored against.
         // Non-fatal — a prediction left unresolved is uncounted, not wrong.
-        if let Some((_, bps)) = realized {
+        if let Some((_, bps, _)) = realized {
             if let Err(e) = state.state_store.resolve_signal_predictions(&sig.id, bps) {
                 tracing::warn!("resolve signal predictions failed for {}: {e}", sig.id);
             }
@@ -2564,7 +2600,11 @@ pub async fn flatten_ticker_positions_with_type_impl(
         if targets.is_empty() {
             close_family(&format!("flatten {}: no residual venue position", sig.id))?;
             out.signals_closed += 1;
-            close_flattened_spatial_lot(state, &sig, &family, close_status);
+            if let Some((usd, _, fee_basis)) =
+                close_flattened_spatial_lot(state, &sig, &family, close_status)
+            {
+                accumulate_realized_profit(state, is_live, usd + fee_basis);
+            }
             continue;
         }
 
@@ -2716,7 +2756,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         // Realized PnL comes from the attributed ledger lot when the exit
         // fills cover it; single-leg residuals (e.g. triangle legs) realize
         // purely through their signal legs and keep the 0.0 log convention.
-        let mut flatten_realized: Option<(f64, f64)> = None;
+        let mut flatten_realized: Option<(f64, f64, f64)> = None;
         let (venue_a, venue_b) = (
             sig.legs
                 .first()
@@ -2728,6 +2768,9 @@ pub async fn flatten_ticker_positions_with_type_impl(
             close_family(&note)?;
             out.signals_closed += 1;
             flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now, close_status);
+            if let Some((usd, _, fee_basis)) = flatten_realized {
+                accumulate_realized_profit(state, is_live, usd + fee_basis);
+            }
             if let Some(bot) = state.radar_bot.lock().clone() {
                 bot.forget_position(&sig.symbol, &venue_a, &venue_b);
                 let _ = state
@@ -2763,7 +2806,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 success: fully_flat,
                 gross_profit: 0.0,
                 fees: 0.0,
-                net_profit: flatten_realized.map(|(usd, _)| usd).unwrap_or(0.0),
+                net_profit: flatten_realized.map(|(usd, _, _)| usd).unwrap_or(0.0),
                 latency_us: 0,
                 note: if fully_flat {
                     format!("Emergency flatten closed signal {}", sig.id)
