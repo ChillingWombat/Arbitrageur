@@ -1449,7 +1449,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
           role="alert"
         >
           <div className="text-xs font-mono font-bold text-loss">
-            {attentionSignals.length} signal{attentionSignals.length === 1 ? "" : "s"} need
+            {attentionSignals.length} signal{attentionSignals.length === 1 ? " needs" : "s need"}{" "}
             operator review — exposure may be open
           </div>
           {attentionSignals.slice(0, 5).map((s) => (

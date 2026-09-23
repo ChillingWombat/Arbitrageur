@@ -16,7 +16,7 @@ import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api, withTimeoutFallback } from "./services/api";
 import { scheduleVaultLock } from "./services/vaultLock";
-import { Lock, Unlock, ShieldCheck } from "lucide-react";
+import { Lock, Unlock, ShieldCheck, AlertTriangle } from "lucide-react";
 import type {
   SystemStatusDto,
   VenueOrderBookDto,
@@ -36,6 +36,7 @@ import type {
   TickerPositionState,
   OpenPositionDto,
   VaultStatus,
+  SignalExecutionDto,
 } from "./types";
 
 import {
@@ -134,6 +135,10 @@ export const App: React.FC = () => {
   }, [totalEquityUsd]);
   const [tickerPositionState, setTickerPositionState] = useState<TickerPositionState | null>(null);
   const [openPositions, setOpenPositions] = useState<OpenPositionDto[]>([]);
+  // Reconciler-escalated signals — each may hold residual venue exposure and
+  // must stay visible on every tab, not only where the acknowledge control
+  // lives (Spread Radar).
+  const [attentionSignals, setAttentionSignals] = useState<SignalExecutionDto[]>([]);
   const [selectedPositionKey, setSelectedPositionKey] = useState<string | null>(null);
   const [enabledTickers, setEnabledTickers] = useState<Set<string>>(() => new Set());
   const [isPaused, setIsPaused] = useState(false);
@@ -389,7 +394,7 @@ export const App: React.FC = () => {
 
       // Every leg races a timeout into its empty fallback, so one stalled
       // venue can never stick the whole refresh (or a configurator save).
-      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions, balances] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions, balances, signals] = await Promise.all([
         withTimeoutFallback(api.getSystemStatus(), null),
         withTimeoutFallback(api.getEngineSettings(), null),
         withTimeoutFallback(
@@ -429,6 +434,7 @@ export const App: React.FC = () => {
         ),
         withTimeoutFallback(api.getOpenPositions(), []),
         withTimeoutFallback(api.getVenueBalances(), []),
+        withTimeoutFallback(api.listSignalExecutions(), [] as SignalExecutionDto[]),
       ]);
 
       setSystemStatus(status);
@@ -449,6 +455,9 @@ export const App: React.FC = () => {
       setTriangleOpps(triangle);
       setTickerPositionState(tickerPos);
       setOpenPositions(positions);
+      setAttentionSignals(
+        signals.filter((s) => s.status === "unresolved" || s.status === "imbalanced")
+      );
       setTotalEquityUsd(resolveTotalVenueEquity(balances));
 
       if (configs && configs.length > 0) {
@@ -900,6 +909,36 @@ export const App: React.FC = () => {
             </button>
           </div>
         )}
+
+      {/* Reconciler attention banner — escalated or imbalanced signals may
+          still carry venue exposure, so the alert lives on every tab. The
+          acknowledge/flatten controls stay on Spread Radar. */}
+      {attentionSignals.length > 0 && (
+        <div
+          role="alert"
+          className="shrink-0 px-4 py-2 flex items-center justify-between border-b bg-loss-dim border-loss-border"
+        >
+          <div className="flex items-center space-x-2.5 min-w-0">
+            <AlertTriangle className="w-4 h-4 text-loss shrink-0" />
+            <span className="text-[11px] font-mono text-loss truncate">
+              {attentionSignals.length} signal{attentionSignals.length === 1 ? " needs" : "s need"}{" "}
+              operator review — residual exposure may be open (
+              {attentionSignals
+                .slice(0, 4)
+                .map((s) => `${s.symbol} ${s.status}`)
+                .join(", ")}
+              {attentionSignals.length > 4 ? ", …" : ""})
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleSelectTab("radar")}
+            className="px-2.5 py-1 text-[11px] font-mono font-bold rounded border border-loss-border text-loss hover:bg-loss/10 transition shrink-0 cursor-pointer"
+          >
+            Review in Spread Radar
+          </button>
+        </div>
+      )}
 
       {/* Main Workspace Body */}
       <div className="relative flex flex-1 overflow-hidden">
