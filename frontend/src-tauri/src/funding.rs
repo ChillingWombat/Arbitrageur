@@ -1947,6 +1947,24 @@ pub async fn execute_funding_carry_impl(
                 .update_signal_status(&signal_id, signal_status, None)
                 .map_err(|e| e.to_string())?;
 
+            // Open the attributed ledger lot so the eventual flatten can
+            // realize PnL and resolve this signal's entry predictions —
+            // without it close_flattened_spatial_lot finds no funding_rate
+            // lot and every funding prediction stays unresolved forever.
+            state.virtual_ledger.write().open_cycle(
+                format!("funding-{cycle}"),
+                crate::attribution::ledger_strategy_id(FUNDING_STRATEGY_ID),
+                root_symbol.clone(),
+                long_canon.to_string(),
+                short_canon.to_string(),
+                net_bps,
+                open_qty,
+                long_px_f,
+                open_qty,
+                short_px_f,
+                fee_f,
+            );
+
             record_execution_log(state, ExecutionLogEntry {
                 id: format!("exec-funding-{cycle}"),
                 timestamp: Utc::now().to_rfc3339(),

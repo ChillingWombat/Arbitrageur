@@ -2240,9 +2240,24 @@ fn close_flattened_spatial_lot(
             .map(|l| l.id.clone())
     };
     if let Some(id) = lot_id {
-        let realized = state
-            .virtual_ledger
-            .write()
+        // Refresh entry fees from the signal's authoritative legs before
+        // closing: submit-ack fills record fee_usd=0 and the fee-enrichment
+        // pass lands the real venue fee later — the lot's stored
+        // fees_paid_usd would otherwise stay at the stale 0 and overstate
+        // realized PnL by exactly the entry fee.
+        let entry_fees: f64 = sig
+            .legs
+            .iter()
+            .map(|l| l.fee_usd)
+            .filter(|f| f.is_finite() && *f >= 0.0)
+            .sum();
+        let mut ledger = state.virtual_ledger.write();
+        if entry_fees > 0.0 {
+            if let Some(lot) = ledger.lots.get_mut(&id) {
+                lot.fees_paid_usd = entry_fees;
+            }
+        }
+        let realized = ledger
             .close_cycle(
                 &id,
                 long_exit.px_qty / long_exit.qty,
